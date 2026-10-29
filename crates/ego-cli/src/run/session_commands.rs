@@ -39,7 +39,7 @@ use crate::cli::{
 use crate::output::{Diagnostics, Stderr, Stdout, note};
 use crate::session;
 
-/// `ego ls`: the catalogue, printed (`CLI.md` §4.6).
+/// Print the session catalogue for `ego ls`.
 ///
 /// A `RunTermination` like everything else, so one exit-code table answers for
 /// the whole binary: a store that cannot be listed is `Failed` (exit 1) and a
@@ -626,13 +626,10 @@ fn listed(args: &crate::cli::LsArgs, out: &Stdout) -> Result<(), RunTermination>
     };
 
     match args.output {
-        // §4.6's single object. Rendered even when there is nothing to list:
-        // a script that gets no output cannot tell an empty store from a
-        // command that failed to run.
+        // Emit the catalogue object even when empty, so scripts can distinguish an empty store
+        // from missing output.
         Output::Json => render(out, &crate::catalogue::Listing::of(&metas), "the listing")?,
-        // One session per line, which is what §4.2's spelling means for a
-        // list: the unit of a catalogue is a session, as the unit of a run is
-        // an event.
+        // JSONL catalogue output emits one session per line.
         Output::Jsonl => {
             for meta in &metas {
                 render(out, &crate::catalogue::Row::of(meta), "a session")?;

@@ -1,7 +1,6 @@
 //! Strict configuration and the trust gate.
 //!
-//! See `ARCHITECTURE.md` and `plans/m0a-contracts.md` Step 12. Resolution is a
-//! pure function over injected sources — no file I/O lives in core.
+//! Pure configuration resolution over injected sources; core performs no file I/O.
 
 mod discovery;
 mod error;

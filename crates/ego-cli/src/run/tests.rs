@@ -1026,9 +1026,7 @@ fn the_indicator_is_always_taken_down_however_the_run_ended() {
     }
 }
 
-/// §4.5, applied to the out-of-band channel. A JSON document with an OSC in
-/// it is not JSON, and the gate is what prevents that rather than a rule
-/// each call site remembers.
+/// Out-of-band JSON must remain free of OSC controls; enforce that at the output gate.
 #[test]
 fn a_machine_readable_run_announces_nothing_at_all() {
     let out = Stdout::new(CancelToken::new());
@@ -3672,11 +3670,11 @@ impl FailureReceiptOutput {
 
 // Catches: a failed turn hides its cause or advertises a question that blocks submit.
 #[test]
-fn regression_case_unrun_tools_keep_failure_receipt_and_host_signal() {
+fn recorded_unrun_tools_keep_failure_receipt_and_host_signal() {
     for fixture in [
-        include_str!("../../tests/fixtures/615-unrun-exec.jsonl"),
-        include_str!("../../tests/fixtures/615-unrun-write.jsonl"),
-        include_str!("../../tests/fixtures/615-unrun-exec-without-reasoning.jsonl"),
+        include_str!("../../tests/fixtures/unrun-exec.jsonl"),
+        include_str!("../../tests/fixtures/unrun-write.jsonl"),
+        include_str!("../../tests/fixtures/unrun-exec-without-reasoning.jsonl"),
     ] {
         let events: Vec<DomainEvent> = fixture
             .lines()

@@ -1,37 +1,9 @@
 //! What turns `provider/model` into a [`ResolvedModel`], as a choice the row
 //! makes rather than a branch the caller writes.
-//!
-//! `docs/guides/providers.md` §4
-//! names the line this replaces: `crates/ego-cli/src/model.rs` asked
-//! `if slug.provider == catalogue::OLLAMA` and called one of two functions.
-//! That branch is the same mistake the wire seam was built to remove, one
-//! layer up — a caller that must know which providers are daemons in order to
-//! resolve any of them — and it fails in the ordinary way: the second daemon
-//! is a second arm, written by whoever adds it, in a crate that should not
-//! have needed touching.
-//!
-//! # Two sources of model facts
-//!
-//! [`Supplied`] reads what an operator wrote down; [`OllamaDaemon`] asks the
-//! daemon. `2026-08-21-what-a-model-resolves-to.md` is the argument for why
-//! those are genuinely different kinds of answer rather than two paths to one:
-//! a hosted model's ceilings and prices are facts nobody can discover, and a
-//! local model's are facts nobody can write down.
-//!
-//! # A name, or the thing itself
-//!
-//! The ADR specifies `resolver: ResolverId` discharged through a registry when
-//! the table is built, and that is right *for the world where a row can be
-//! written in a configuration file* — a file can hold a name and cannot hold a
-//! trait object. This build has no such file: rows are constructed in Rust by
-//! [`ProviderRow`](crate::provider::ProviderRow)'s own constructors, which can
-//! name the thing directly. So the field is spelled the way `wire` already is,
-//! for the reason given there: a resolver is code, every value of it is a unit
-//! struct with no state, and there are exactly as many as this crate compiles.
-//!
-//! The id and its registry land with the file that needs them. Nothing here
-//! has to be undone to add them — a registry maps a name onto exactly these
-//! values — which is why this is not the deferral `AGENTS.md` forbids.
+//! Provider rows select resolvers; callers do not branch on daemon identity.
+//! [`Supplied`] reads configured facts and [`OllamaDaemon`] discovers facts.
+//! Rows are constructed in Rust and can hold stateless resolver values
+//! directly, without a configuration-name registry.
 
 use std::fmt;
 use std::sync::Arc;
@@ -68,24 +40,9 @@ pub struct Resolution<'a> {
     /// property of this value (`http.rs`), so a resolver cannot reach the
     /// network the run refused.
     pub http: &'a Arc<dyn Http>,
-    /// The credential this run resolved for [`row`](Self::row), for a resolver
-    /// whose endpoint authenticates.
-    ///
-    /// **Borrowed, and that is what keeps §6 true.** The rule §6 states is not
-    /// "one holder" but *one read*: the check that refuses a missing key and
-    /// the header that goes on the wire must be the same read, or they can
-    /// disagree about whether a key exists. A resolver that called
-    /// `std::env::var` itself would be a second read — of a variable that may
-    /// have been rotated since the first — and would put a credential lookup
-    /// back inside a library that `AGENTS.md` says does not own the process
-    /// environment.
-    ///
-    /// So it arrives as a borrow of the value the caller already resolved. It
-    /// is reachable for the length of one resolution and cannot outlive it,
-    /// which is the property that matters: a
-    /// [`ResolvedModel`](crate::catalogue::ResolvedModel) is `Clone` and
-    /// `Debug` and travels to the budget gate and the ledger, and nothing here
-    /// may put this into one.
+    /// Borrow the credential already resolved by the caller. The missing-key check and request
+    /// header must use one read, not separate environment lookups that can disagree after
+    /// rotation. Keep secrets out of cloneable, debug-visible resolved model metadata.
     pub credential: &'a ResolvedCredential,
 }
 

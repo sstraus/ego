@@ -1,13 +1,8 @@
 //! The profiles the conformance suite is parameterised over.
 //!
-//! `docs/guides/providers.md` §9:
-//! the suite runs **per provider**, not per code path, and every profile gets
-//! its own fixtures even where several select the same adapter. That is what
-//! makes the fixtures non-redundant rather than copies of one test — a fixture
-//! is evidence about a provider's bytes, not about ego's code — and it is why
-//! this table exists at all: `tests/conformance.rs` and
-//! `crates/ego-cli/tests/smoke.rs` must agree, item for item, about what a
-//! profile *is*. One reads the fixtures the other writes.
+//! Each provider profile owns its fixtures even when mappings are shared.
+//! `tests/conformance.rs` reads the recordings that
+//! `crates/ego-cli/tests/smoke.rs` writes; both must agree on profile identity.
 
 // Each integration test compiles this module separately, so an item only one
 // binary needs is dead code in the other.
@@ -80,18 +75,9 @@ pub struct Profile {
     /// Subscription settlement is flat-plan quota even when the wire reports
     /// cost telemetry, so a smoke must not turn it back into currency.
     pub subscription: bool,
-    /// Where in this provider's error body the sentence it wants read lives.
-    ///
-    /// A path and not a shared parser, because the envelope is **not** shared:
-    /// OpenAI and OpenRouter wrap it as `{"error": {"message": …}}` and xAI
-    /// publishes the flatter `{"code": …, "error": "…"}`. Check 3 asks whether
-    /// what the provider said survives into the `AiEvent::Error`, and it can
-    /// only ask that if it knows which bytes the provider said.
-    ///
-    /// This is deliberately in the *test* table and not on the row. A feature
-    /// bit on a row that a decoder consults is the per-provider branch under a
-    /// new name, and §9 forbids it. The mapping recognizes both typed shapes
-    /// and keeps only their diagnostic fields, not the surrounding body.
+    /// The test table identifies each provider's diagnostic field. Production decoding
+    /// recognizes supported error shapes uniformly and retains only diagnostic fields, not
+    /// whole bodies or provider-specific feature switches.
     pub error_message_at: &'static [&'static str],
     /// The reasoning level this provider's canonical request asks for.
     ///
@@ -158,16 +144,8 @@ pub const OLLAMA: Profile = Profile {
 /// `crates/ego-cli/tests/smoke.rs` is where that gap closes, on a machine that
 /// has a key and asks for it by name.
 ///
-/// **The gap above is stated, and the row ships anyway.**
-/// `2026-09-03-public-provider-wires-require-live-promotion.md` made the
-/// missing recording binding and `ProviderRow::openai_at` carried
-/// `Promotion::PendingLiveEvidence`;
-/// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` amends that
-/// and the row is `Selectable`. Nothing about this profile changed — the
-/// fixtures below prove checks one to four against the published Responses
-/// contract, nothing proves check five, and nothing pretends to. What changed
-/// is that a check this repository cannot make no longer withholds the row
-/// from operators who can.
+/// The public OpenAI row is selectable. Its fixtures exercise the published
+/// Responses contract offline; they do not prove live acceptance.
 pub const OPENAI: Profile = Profile {
     id: "openai",
     thinking: ThinkingLevel::Off,
@@ -182,36 +160,11 @@ pub const OPENAI: Profile = Profile {
 };
 
 /// xAI: schema-derived, and a **candidate** rather than a member.
-///
-/// `2026-08-21-grok-as-a-provider.md`. It is on the family's mapping from its
-/// published schema and its row is not in the table
-/// `crates/ego-cli/src/model.rs` builds, so `--model xai/…` does not resolve
-/// (§9: a candidate is not runnable). These fixtures are what it has instead
-/// of a live recording.
-///
-/// **Its error fixture is the weakest evidence in this directory, and that is
-/// stated rather than hidden.** xAI publishes no error-body schema at all — a
-/// fact checked against `docs.x.ai`, not assumed — so `error/404.json` is the
-/// flat `{"code", "error"}` shape its error-code documentation and its users
-/// describe, and not something derived from a specification. It is the first
-/// thing a live smoke should overwrite.
-/// OpenRouter: schema-derived, selectable, and still lacking live acceptance.
-///
-/// The ADR's §7 left an open question about conformance check 1 here that xAI
-/// does not raise: whether `usage.cost` needs `usage: {include: true}` in the
-/// request body, which the family's projection does not send. OpenRouter's own
-/// documentation now answers it — "the `usage: { include: true }` and
-/// `stream_options: { include_usage: true }` parameters are deprecated and
-/// have no effect. Full usage details are now always included automatically" —
-/// so the projection is compatible and, incidentally, so is the
-/// `stream_options` it *does* send. That is a reading of a document, which is
-/// what `VendorSchemaDerived` means; it is not a recording. The later
-/// subscription-login decision nevertheless makes the row selectable and its
-/// opt-in smoke keeps that live gap explicit.
-///
-/// The model carries a slash on purpose. `CLI.md` spells `--model` as `P/M`
-/// and OpenRouter's ids are themselves `vendor/model`, so this profile is the
-/// one that would notice a split on the last separator rather than the first.
+/// The candidate xAI API-key fixtures are not live acceptance evidence.
+/// Its error body has no published schema and is weaker than schema-derived
+/// fixtures. OpenRouter reports full usage automatically; its shared usage
+/// flag is inert there. The OpenRouter model id deliberately contains a slash
+/// to check that `P/M` splits on the first separator, not the last.
 pub const OPENROUTER: Profile = Profile {
     id: "openrouter",
     thinking: ThinkingLevel::Off,
@@ -227,19 +180,10 @@ pub const OPENROUTER: Profile = Profile {
 
 /// Anthropic: schema-derived, selectable, and the first profile that is not on
 /// the family's mapping.
-///
-/// The other four differ from each other in a base, a resolver, a credential
-/// and an error envelope, and agree on every request field. This one shares no
-/// request field with them: system is a parameter rather than a role, a tool
-/// result is a block rather than a message, the ceiling is `max_tokens` beside
-/// a `thinking` object, and the stream has no `[DONE]`. That is what makes it
-/// evidence for the ADR's claim rather than a fifth copy of one test — the
-/// suite's seven checks are written about *provider behaviour*, so a profile
-/// on a second wire format is the first real test of whether they were.
-///
-/// Its error envelope is the family's nesting by coincidence, not by descent:
-/// Anthropic publishes `{"type":"error","error":{"type":…,"message":…}}`, and
-/// only the path the check reads is shared.
+/// Anthropic differs in system-message placement, tool-result blocks,
+/// `max_tokens`, thinking configuration and stream termination. This profile
+/// checks that conformance assertions describe behavior rather than one wire
+/// shape. Its nested error envelope shares only the path the check reads.
 pub const ANTHROPIC: Profile = Profile {
     id: "anthropic",
     thinking: ThinkingLevel::Off,
@@ -253,17 +197,9 @@ pub const ANTHROPIC: Profile = Profile {
     error_message_at: NESTED,
 };
 
-/// Gemini: schema-derived, a candidate, and the third wire format.
-///
-/// Two mappings could be a special case; three is a seam. This one shares no
-/// request field with either of the others — a conversation is a list of
-/// *steps* with no role on them, the terminal signal is an interaction
-/// `status` rather than any finish reason, and streaming is requested through
-/// the body and `Accept` header.
-///
-/// It is also the only row that cannot offer every level ego names:
-/// `thinking_level` has no `off`, so `ThinkingLevel::Off` is refused at the
-/// mapping. That is the cost `docs/14` §3.6 accepted in writing.
+/// Gemini's request is a sequence of steps, completion is an interaction status, and streaming
+/// uses its body and Accept header. Its thinking mapping refuses `Off` rather than silently
+/// enabling reasoning.
 pub const GEMINI: Profile = Profile {
     id: "gemini",
     thinking: ThinkingLevel::Minimal,

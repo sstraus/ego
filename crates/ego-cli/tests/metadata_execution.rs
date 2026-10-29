@@ -1,4 +1,4 @@
-//! contract for `/name` non-interactive execution (regression case).
+//! contract for `/name` non-interactive execution.
 
 mod support;
 

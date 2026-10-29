@@ -95,7 +95,7 @@ The skill body is not part of hook configuration.
     assert_eq!(entries[0].invocation(), invocation);
 }
 
-mod regression_case {
+mod skills {
     use super::*;
 
     #[test]
@@ -667,7 +667,7 @@ fn bundled_context_skill_does_not_hide_a_collision() {
     assert!(captured.descriptor("context-management").is_none());
 }
 
-mod regression_case {
+mod skill_roots {
     use super::*;
     use crate::capability_roots::discover_capability_roots;
 
@@ -786,7 +786,7 @@ mod regression_case {
     }
 }
 
-mod regression_case {
+mod managed_roots {
     use super::*;
     use crate::capability_roots::{discover_capability_roots, register_external_skill_roots};
 
@@ -859,7 +859,7 @@ mod regression_case {
 }
 
 #[cfg(unix)]
-mod regression_case {
+mod symlink_roots {
     use super::*;
     use crate::capability_roots::CapabilityRoot;
     use std::os::unix::fs::symlink;

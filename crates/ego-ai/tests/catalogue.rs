@@ -1,15 +1,9 @@
 //! What `--model P/M` resolves to, and what it refuses to invent.
 //!
-//! See `docs/guides/providers.md` and
-//! `plans/m0b-vertical-slice.md` Step 13.5.
-//!
-//! The daemon is a stub that replays what a real Ollama 0.32.14 answered.
-//! That is deliberate and not a shortcut: the interesting cases here are a
-//! model that is *not* installed, a daemon that answers with the field
-//! missing, and a cold model that has to be loaded before it can be observed
-//! — and a developer's live daemon cannot be made to be in three states at
-//! once. The transcripts it replays were captured from the real thing; the
-//! measurement they encode is recorded in the ADR.
+
+//! The stub replays recorded Ollama responses for installed, absent, cold
+//! and incomplete models. A single live daemon cannot reliably occupy all
+//! those states during one deterministic test run.
 
 use std::collections::BTreeSet;
 
@@ -65,12 +59,8 @@ fn local_row() -> ProviderRow {
     ProviderRow::ollama(Url::parse("http://localhost:11434/v1/chat/completions").unwrap())
 }
 
-/// A hosted row these tests can actually resolve.
-///
-/// `anthropic` and not `openai`: since story `regression` the public OpenAI row
-/// is unselectable pending live evidence, and `resolve` refuses it before a
-/// resolver is chosen. Every test here is about catalogue mechanics rather
-/// than about one vendor, so it uses a row the gate lets through.
+/// Use a selectable Anthropic fixture row so catalogue tests exercise resolution mechanics
+/// rather than a provider's live-acceptance gate.
 fn hosted_row() -> ProviderRow {
     ProviderRow::anthropic_default()
 }
@@ -155,27 +145,15 @@ fn a_reference_that_names_no_provider_is_refused_rather_than_defaulted() {
 
 // --- hosted: supplied, or refused ---
 
-/// The fixture quote as an operator supplied it: `models.toml` is the only
-/// place a hosted rate can come from in this build, and it is the first of
-/// §5's three consults.
+/// Operator-supplied fixture quote: `models.toml` rates take priority over a third-party table.
 fn hosted_rates() -> ResolvedRates {
     operator_rates(hosted_quote())
 }
 
 #[test]
 fn a_hosted_model_with_no_supplied_capabilities_is_refused_by_name() {
-    // What this refusal is now about, after
-    // `docs/guides/providers.md` §1: the model's
-    // *shape*, not its price. A hosted provider publishes no capability
-    // endpoint, so nothing here can discover the context window or the
-    // output ceiling, and a request built against a guessed window is a
-    // request the provider rejects.
-    //
-    // The price is deliberately no longer part of it. §1 removed the refusal
-    // for want of a rate — a run with no ceiling needs no rate, and refusing
-    // it would be ego imposing a ceiling of its own. The test below
-    // (`a_hosted_row_with_capabilities_and_no_rates_resolves`) is the other
-    // half of that pair.
+    // Refuse missing model capabilities, not missing prices. A run without a money ceiling
+    // needs no rate, but still needs supported context and output bounds.
     let catalogue = Catalogue::new([hosted_row()]);
     let slug = ModelSlug::parse("anthropic/claude-opus-5").unwrap();
 
@@ -228,9 +206,7 @@ fn a_supplied_hosted_model_resolves_to_exactly_what_was_supplied() {
     );
 }
 
-/// The other half of the narrowed refusal: capabilities and no rates is a
-/// legal, resolvable hosted row. §1 — a run with no ceiling needs no rate, so
-/// refusing this would be ego imposing a ceiling nobody asked for.
+/// Capabilities without rates remain resolvable when no money ceiling requires a quote.
 #[test]
 fn a_hosted_row_with_capabilities_and_no_rates_resolves() {
     let catalogue = Catalogue::new([hosted_row()]).with_hosted(
@@ -627,15 +603,9 @@ fn an_unmetered_local_model_needs_no_output_ceiling_to_bound_zero_spend() {
 
 // --- the two rows nobody charges per token ---
 //
-// These two tests replace a pair that pinned the *all-zero `PricingQuote`*:
-// that every category was `Some(Amount::ZERO)` and never `None`, and that
-// the quote's `PricingRevision` named the policy. That subject no longer
-// exists — `docs/guides/providers.md` §4 removed
-// the all-zero quote precisely because "zero per token" and "no per-token
-// price at all" were sharing one spelling. What survives is the property the
-// pair was really defending, which is that a row nobody charges per token
-// still bounds cleanly and is still attributable; both are asserted below
-// against the shape that replaced it.
+// Unmetered rows have no per-token price quote. They must still bound
+// correctly and attribute zero spend to their metering policy, not a
+// fabricated all-zero price list.
 
 #[test]
 fn a_row_with_no_per_token_price_carries_no_rates_at_all_rather_than_zeroed_ones() {
@@ -766,11 +736,8 @@ fn subscription_admission_does_not_require_a_context_reservation() {
     );
 }
 
-/// A provider-reported row names the decoder that will settle it, and takes
-/// its rates from the same slot every other currency row does. The pairing is
-/// the ADR's §1 invariant — a stated cost arrives after the tokens are spent,
-/// so it can never bound them — and the two halves being separately supplied
-/// is what makes that inability visible in the types.
+/// Reported cost arrives after tokens are spent and cannot bound them.
+/// The row supplies its decoder and optional ceiling rates separately.
 #[test]
 fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
     let decoder = XaiUsdTicks::new("2026-08-21");
@@ -804,10 +771,8 @@ fn a_provider_reported_row_still_carries_the_table_that_bounds_it() {
     assert_eq!(resolved.metering, metering);
 }
 
-/// And the case §1 made legal: the same row with no rates at all. It settles
-/// exactly, from the invoice figure, and simply has no bound to offer. A
-/// `ProviderReported` settlement is the one arrangement where that is a
-/// genuinely complete accounting rather than a gap.
+/// A provider-reported invoice can settle exactly without rates, while supplying no
+/// pre-generation bound.
 #[test]
 fn a_provider_reported_row_with_no_rates_is_not_an_error() {
     let decoder = XaiUsdTicks::new("2026-08-21");
@@ -839,11 +804,8 @@ fn a_provider_reported_row_with_no_rates_is_not_an_error() {
 
 // --- the row decides what resolves it ---
 //
-// `docs/guides/providers.md` §4.
-// `crates/ego-cli/src/model.rs` used to ask `if slug.provider == OLLAMA` and
-// call one of two functions, so a second daemon meant a second arm in a crate
-// that should not have needed touching. These four are what make that branch
-// unnecessary rather than merely absent.
+// The row selects its resolver, so callers need no provider-name branch
+// to distinguish supplied hosted facts from daemon discovery.
 
 /// A hosted slug resolves without opening a socket.
 ///

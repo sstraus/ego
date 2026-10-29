@@ -1,8 +1,5 @@
-//! contract for M4 S8: inspection surfaces and executable agent files.
-//!
-//! These tests exercise the process boundary. The catalogue shown by an
-//! inspection command must be the immutable snapshot used by invocation, and
-//! reload must publish a complete replacement rather than mutate a live view.
+//! Process contract for inspection surfaces and executable agent files. Inspection and
+//! invocation use the same immutable catalogue; reload publishes a complete replacement.
 
 use serde_json::Value;
 

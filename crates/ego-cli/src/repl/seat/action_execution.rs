@@ -427,7 +427,9 @@ pub(super) fn surface_line(
         };
         // Hold only the isolated PTY child at the real suspended-read boundary.
         #[cfg(test)]
-        if asked_for_image.load(Ordering::Relaxed) && std::env::var_os("EGO_REGRESSION_HOLD").is_some() {
+        if asked_for_image.load(Ordering::Relaxed)
+            && std::env::var_os("EGO_IMAGE_TEST_HOLD").is_some()
+        {
             std::fs::write("paste-inspected", "ready").unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             while !Path::new("paste-release").exists() {

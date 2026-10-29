@@ -1,19 +1,10 @@
 //! The `anthropic-messages` wire format: `POST /messages`, streamed.
 //!
-//! Anthropic's own shape, and no one else's.
-//! `docs/guides/providers.md` §4
-//! allows a provider to differ from a family in exactly three places — a model
-//! fact, a transport fact, or another mapping — and this differs in the
-//! request's *shape* and the stream's *event model*, which is neither of the
-//! first two. So it is the third, and this file is it.
+//! Anthropic's request shape and stream event model require a dedicated
+//! mapping, not a provider flag in another API's mapping.
 //!
-//! Every field name and enum spelling below was read from the published
-//! Messages API reference on 2026-08-22, not recalled. What that is worth is
-//! `[D]+[S]` in `docs/guides/providers.md` §0's evidence classes: no
-//! `ANTHROPIC_API_KEY` exists in this repository, so nothing here has been
-//! observed against a live server, and the row this mapping serves is a
-//! **candidate** — built, tested offline, and absent from the table
-//! `crates/ego-cli/src/model.rs` assembles.
+//! Field names and enum spellings follow the published Messages API.
+//! Offline fixtures establish encoding and decoding, not live acceptance.
 //!
 //! # The three structural differences, and why none of them is a flag
 //!
@@ -137,11 +128,9 @@ pub const DIALECT: &str = "anthropic-messages";
 
 /// A `GenRequest` this format cannot express without lying about it.
 ///
-/// Every variant is a case where the alternative would be to drop something
-/// the caller asked for, or invent something they did not, and send the
-/// request anyway. `docs/guides/providers.md` I5 is about exactly that: a
-/// silent mistranslation is worse than a refusal because nothing downstream
-/// can tell it happened.
+/// Each error prevents silently dropping requested behavior or inventing
+/// behavior before sending. Downstream code cannot detect a mistranslation
+/// that already occurred in the request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
     AudioNotSupported,
@@ -1365,11 +1354,9 @@ fn classify_error(kind: &str) -> ErrorKind {
 /// streaming mapping: what a *response* means is `AttemptStream`'s contract
 /// and not this format's, and only what a *frame* means belongs here.
 ///
-/// `cost` is accepted and unused, and that is the row's claim rather than an
-/// omission here: Anthropic reports tokens and never a monetary figure
-/// (`docs/guides/providers.md` §2.2, from a recorded fixture), so its
-/// row carries `cost: None` and conformance check 5 fails if that ever stops
-/// matching what its transcripts hold.
+/// Anthropic's row derives cost from token rates, not a reported monetary
+/// figure. `cost` is accepted but unused here; conformance fixtures check
+/// that this agrees with the row's declared cost behavior.
 pub fn decode(
     response: Result<HttpResponse, HttpError>,
     cost: Option<Arc<dyn ProviderCost>>,

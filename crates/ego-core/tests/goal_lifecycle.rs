@@ -1,4 +1,4 @@
-//! contract for the durable goal reducer (regression case).
+//! contract for the durable goal reducer.
 
 use ego_core::ceiling::Ceilings;
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};

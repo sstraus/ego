@@ -1,8 +1,5 @@
-//! contract for the typed skill operation and authority epoch (M4 S6).
-//!
-//! These tests deliberately cross the existing blob, session-journal, turn,
-//! permit, child, and hook seams. They do not define a second skill parser,
-//! authority object, or effect runner.
+//! Typed skill operation and authority-epoch contract across real blob, journal, turn, permit,
+//! child, and hook seams. No second parser or authority path.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};

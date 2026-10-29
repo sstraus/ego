@@ -1,4 +1,4 @@
-//! Critic regressions for regression case: actual filesystem aliases of control paths.
+//! Critic regressions for actual filesystem aliases of control paths.
 
 #![cfg(unix)]
 
@@ -12,7 +12,7 @@ struct Repository(PathBuf);
 
 impl Repository {
     fn new() -> Self {
-        let root = std::env::temp_dir().join(format!("ego-regression-{}", uuid::Uuid::now_v7()));
+        let root = std::env::temp_dir().join(format!("ego-critic-HNG-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&root).unwrap();
         let output = std::process::Command::new("git")
             .args(["init", "--quiet"])
@@ -55,7 +55,7 @@ fn remembered(call: &PreparedCall, workspace: &Path) -> Ruleset {
     rules
 }
 
-// Catches: APFS returns the stored .GIT/.Git spelling after canonicalization,
+// Catches: APFS returns the stored.GIT/.Git spelling after canonicalization,
 // allowing remembered workspace writes to modify the same Git control directory.
 #[cfg(target_os = "macos")]
 #[test]
@@ -105,7 +105,7 @@ fn policy_control_case_aliases_cannot_gain_allow_authority_on_apfs() {
 }
 
 // Catches: checking the symlink's ordinary name rather than the canonical
-// target lets a remembered write reach .git/config through an alias.
+// target lets a remembered write reach.git/config through an alias.
 #[cfg(unix)]
 #[test]
 fn policy_control_symlink_and_dot_components_resolve_to_uncovered_git_config() {

@@ -1,8 +1,6 @@
 //! The turn loop: what a turn writes down, and what it does when something
 //! goes wrong.
 //!
-//! See `docs/architecture.md` and
-//! `plans/m0b-vertical-slice.md` Step 10.
 
 use std::cell::RefCell;
 use std::collections::{BTreeSet, VecDeque};
@@ -245,9 +243,9 @@ mod turn {
 
     // Catches: a process killed after GenerationStarted permanently blocks fresh turns.
     #[test]
-    fn regression_case_resume_accepts_next_turn_without_replaying_interrupted_attempt() {
+    fn crash_resume_accepts_next_turn_without_replaying_interrupted_attempt() {
         let start: DomainEvent =
-            serde_json::from_str(include_str!("fixtures/regression_case_start.json")).unwrap();
+            serde_json::from_str(include_str!("fixtures/crash_start.json")).unwrap();
         let old = match start.kind {
             EventKind::GenerationStarted { attempt, .. } => attempt,
             _ => unreachable!(),
@@ -274,9 +272,9 @@ mod turn {
 
     // Catches: recovery replaces usage already observed before the crash with zero.
     #[test]
-    fn regression_case_preserves_partial_usage_and_does_not_repeat_notice_on_reopen() {
+    fn crash_preserves_partial_usage_and_does_not_repeat_notice_on_reopen() {
         let start: DomainEvent =
-            serde_json::from_str(include_str!("fixtures/regression_case_start.json")).unwrap();
+            serde_json::from_str(include_str!("fixtures/crash_start.json")).unwrap();
         let attempt = match start.kind {
             EventKind::GenerationStarted { attempt, .. } => attempt,
             _ => unreachable!(),
@@ -322,9 +320,9 @@ mod turn {
 
     // Catches: a failed recovery append dispatches a new request before durable settlement.
     #[test]
-    fn regression_case_failed_settlement_keeps_attempt_live_and_sends_nothing() {
+    fn crash_failed_settlement_keeps_attempt_live_and_sends_nothing() {
         let start: DomainEvent =
-            serde_json::from_str(include_str!("fixtures/regression_case_start.json")).unwrap();
+            serde_json::from_str(include_str!("fixtures/crash_start.json")).unwrap();
         let state = SessionState::replay([start]);
         let fx = Fixture::new(vec![]);
         fx.store.fail_at(3);
@@ -359,7 +357,7 @@ mod turn {
 
     // Catches: constructing a sibling turn coordinator interrupts a still-live request.
     #[test]
-    fn regression_case_shared_journal_does_not_interrupt_current_process_attempts() {
+    fn crash_shared_journal_does_not_interrupt_current_process_attempts() {
         let fx = Fixture::new(vec![]);
         let mut journal = Journal::new(
             SessionId::new(),
@@ -2235,9 +2233,8 @@ mod turn {
             });
         }
 
-        /// Rules an operator wrote, so a call can be settled at §6 step 3 —
-        /// by a rule with an ID and a layer — rather than at step 5 by the
-        /// mode. `Project` because that is the layer an operator edits.
+        /// Operator rules settle before mode approval. Preserve the matched rule ID and source
+        /// layer for attribution.
         fn with_rules(mut self, allow: &[&str], deny: &[&str]) -> Self {
             let load = |raws: &[&str]| {
                 raws.iter()
@@ -2363,9 +2360,7 @@ mod turn {
         }
     }
 
-    /// The fixture quote as the run resolved it: operator-supplied, which is
-    /// the only source `models.toml` has and the first of the three §5
-    /// consults.
+    /// Operator-supplied fixture rates take priority over third-party lookup.
     fn rates() -> ResolvedRates {
         ResolvedRates {
             quote: quote(),
@@ -3460,7 +3455,7 @@ mod turn {
     #[test]
     fn failed_tool_diagnostic_does_not_leak_known_secret_to_model_or_log() {
         // Catches: execution or preparation error-to-result conversion bypasses disclosure masking.
-        const SECRET: &str = "example-regression-token";
+        const SECRET: &str = "critic-auth-token-NKO";
         struct DiagnosticTool {
             fail_prepare: bool,
         }
@@ -5576,11 +5571,7 @@ mod turn {
     /// A call nobody in this run can answer ends the run, and says so in the
     /// words of a question rather than a refusal.
     ///
-    /// `CLI.md` §4.4 gives both endings exit 3, which is exactly why the text
-    /// has to differ. "Denied by r1:…" tells an operator which line of their
-    /// config to go and look at; "no rule covers write /ws/note.txt" tells
-    /// them there is no line to look at and they have to write one. A loop
-    /// that collapsed the two would leave the commonest case reading like a
+    /// A loop that collapsed the two would leave the commonest case reading like a
     /// refusal somebody configured on purpose.
     #[test]
     fn a_call_nobody_can_answer_stops_the_run_and_reads_as_a_question() {
@@ -5609,12 +5600,8 @@ mod turn {
             .find(|item| item.kind == ItemKind::ToolCall)
             .expect("the tool call became an item");
         assert_eq!(call.ok, Some(false));
-        // "does not approve ... on its own" and not "no rule covers": both are
-        // true, and the second is the reason the run stopped. The rules did
-        // not cover it, so it went to the mode at §6 step 5, and the mode
-        // declined too. The last party to decline is the one whose reason an
-        // operator can act on — it is what tells them `--yolo` and `--allow`
-        // are both available, where "no rule covers" names only the second.
+        // Report the final unsettled authority: both missing coverage and mode refusal matter,
+        // but the last decision tells operators which remedy is available.
         let result = tool_result_text(call);
         assert!(
             result.contains("needs permission") && result.contains("does not approve"),
@@ -5920,13 +5907,8 @@ mod turn {
         ]
     }
 
-    /// §7: *every decision is appended, asked or not.*
-    ///
-    /// This is the case the audit event exists for. Nobody was asked, nothing
-    /// stopped, the file was read — and the log still says which rule, in
-    /// which layer, let it happen. Before §7 the only trace was a successful
-    /// `ToolCallCompleted`, which records that a read happened and not that
-    /// anybody authorised it.
+    /// Audit automatic permission decisions too. A successful tool result records what
+    /// happened, not which rule and layer authorized it.
     #[test]
     fn a_call_the_rules_allow_records_the_rule_that_allowed_it() {
         let fx = Fixture::new(reading("/ws/notes.md"))
@@ -5955,9 +5937,7 @@ mod turn {
         );
     }
 
-    /// The same event, from the other end of §6: no rule matched, so the mode
-    /// answered at step 5. `by` says so, and it names the mode rather than
-    /// inventing a rule ID for a decision no rule made.
+    /// When no rule covers a call, record the answering mode instead of inventing a rule ID.
     #[test]
     fn a_call_only_the_mode_allows_names_the_mode_and_not_a_rule() {
         let fx = Fixture::new(reading("/ws/notes.md")).with_read_tool();
@@ -5978,10 +5958,8 @@ mod turn {
         );
     }
 
-    /// A refusal at §6 step 0. The boundary is nobody's rule — no `--allow`
-    /// widens it and no layer carries it — so the authority has no ID to
-    /// record, and recording one would send an operator looking for a line of
-    /// config that does not exist.
+    /// A workspace-boundary refusal has no rule ID: no configured allow or mode widens that
+    /// boundary.
     #[test]
     fn a_refusal_at_the_boundary_records_an_authority_with_no_rule_to_revoke() {
         let fx = Fixture::new(reading("/etc/passwd")).with_read_tool();
@@ -7086,29 +7064,10 @@ mod turn {
     }
 
     /// Two calls in one generation claiming the same provider id.
-    ///
-    /// See the tool-use-history ADR §6. Nothing rejected this before: the
-    /// openai decoder's `settle_identity` compares an incoming id only with
-    /// the id held at the *same* index, and the loop mints a fresh `ItemId`
-    /// per call while `SessionState` keys on `ItemId`, so two items carried
-    /// one `call_id` without complaint. It surfaced two generations later as
-    /// a **panic** — `Conversation::new` returning `DuplicateCallId` into an
-    /// `expect` whose stated reason was about unanswered calls — by which
-    /// point both tools had already run.
-    ///
-    /// So the assertion that matters is not the exit code, it is
-    /// **`executions == 0`**. A check that merely stopped the panic would
-    /// leave the double effect, which is survivable only while every tool is
-    /// read-only.
-    /// The loop's half of `POTENTIALS.md` P22, and the only place it can be
-    /// proved: a hand-built log can assert what a *rebuild* does with a
-    /// parent edge, but only a run can assert that the loop writes one. The
-    /// history is rebuilt from the state the run produced, exactly as the
-    /// next generation would rebuild it.
-    ///
-    /// Without the edge this is five turns: use, answer, use, answer — a
-    /// conversation in which the model saw `/ws/a`'s contents before asking
-    /// for `/ws/b`, which is not what it did.
+    /// Duplicate provider call IDs must be rejected before either tool runs.
+    /// Stopping only a later history-rebuild panic would leave duplicate effects;
+    /// assert zero executions. Rebuild the produced state to check parent edges
+    /// as the next generation will see them.
     #[test]
     fn two_calls_from_one_generation_rebuild_as_the_turn_the_model_took() {
         let fx = Fixture::new(vec![
@@ -7262,9 +7221,7 @@ mod turn {
         );
     }
 
-    /// The one classification that changes where the run lands. `CLI.md:215`
-    /// tells a script to retry on exit 4; a request that will be wrong again
-    /// is precisely what it must not retry, so an `Invalid` is exit 2.
+    /// The one classification that changes where the run lands.
     #[test]
     fn a_provider_error_the_request_caused_exits_as_usage_and_not_as_provider() {
         let fx = Fixture::new(vec![vec![
@@ -7281,7 +7238,7 @@ mod turn {
         assert!(!ok);
     }
 
-    /// regression case — catches: a previous turn's error is reused, or a clean
+    /// catches: a previous turn's error is reused, or a clean
     /// turn retains the preceding Usage failure.
     #[test]
     fn usage_cause_is_current_and_cleared_after_a_clean_turn() {
@@ -7987,8 +7944,8 @@ mod turn {
 
     #[test]
     fn an_event_reaches_the_sink_before_the_turn_that_produced_it_ends() {
-        // `CLI.md` §4.2: "one event per line, **live**". The turn below never
-        // ends, so anything the sink holds got there while it was running.
+        // The turn remains active while the sink observes its events, proving publication
+        // is live rather than batched at completion.
         let fx = Fixture::new(Vec::new());
         let generator = Arc::new(StallingGenerator {
             events: Mutex::new(vec![AiEvent::TextDelta {
@@ -8040,9 +7997,7 @@ mod turn {
 
     #[test]
     fn a_turn_announces_itself_before_it_says_anything_else() {
-        // `turn.started` has no `EventKind`, so before the sink existed
-        // nothing in the workspace could emit it and §4.2's envelope was
-        // missing a level.
+        // The harness emits turn-start information; no reducer `EventKind` represents it.
         let fx = Fixture::new(vec![vec![
             AiEvent::TextDelta {
                 text: "hello".to_string(),
@@ -8117,10 +8072,9 @@ mod turn {
 
     // --- how this generation is metered, said out loud ---
     //
-    // `docs/architecture.md` §6. Three of the
-    // four arrangements make a monetary `--budget` inert, and an operator who
-    // set one has to be told that before the run rather than inferring it
-    // from a limit that never fired.
+    // Several metering arrangements make monetary `--budget` ineffective.
+    // An operator who set it must be told before the run, not infer it from
+    // a limit that never fires.
 
     fn metering_events(fx: &Fixture) -> Vec<PublicEvent> {
         fx.sink
@@ -8191,14 +8145,8 @@ mod turn {
         );
     }
 
-    /// The token ceiling, at the boundary §9 puts it on: between two
-    /// generations of the *same* turn, not between turns.
-    ///
-    /// The tool call is what makes the distinction observable. A turn that
-    /// calls a tool generates twice; a ceiling checked only between turns
-    /// would let the second generation run and stop the run afterwards,
-    /// having spent the tokens it was there to stop. Here the first
-    /// generation's usage crosses the ceiling and the second never happens.
+    /// Check token ceilings between generations in the same turn. A tool call causes a second
+    /// generation, so checking only between turns would spend beyond the bound before stopping.
     #[test]
     fn a_token_ceiling_stops_the_next_generation_of_the_turn_it_is_in() {
         let script = || {
@@ -8248,10 +8196,8 @@ mod turn {
         assert_eq!(uncapped.generator.calls().len(), 2);
     }
 
-    /// It binds a subscription row exactly as it binds a metered one. That is
-    /// §9's second property: the token ceiling needs no rates, no fetch and
-    /// no network, so it is the one instrument that works on the two
-    /// arrangements a monetary ceiling cannot touch.
+    /// Token ceilings also bind subscription rows because they require no rates or monetary
+    /// metering.
     #[test]
     fn a_token_ceiling_binds_a_row_no_money_ceiling_could() {
         let fx = Fixture::new(vec![vec![
@@ -8301,13 +8247,8 @@ mod turn {
         );
     }
 
-    /// The ordinary case, end to end: nobody configured a ceiling, so the
-    /// run says so and runs anyway.
-    ///
-    /// This is §1's whole claim reduced to something falsifiable. The turn
-    /// has no rates at all — the state that used to be a refusal — and it
-    /// completes, publishing `ceiling: none` and `rates: none` rather than a
-    /// limit that is not there or a provenance for figures nobody has.
+    /// An unbounded run with no rates completes and reports no ceiling and no rate provenance,
+    /// not an invented limit or source.
     #[test]
     fn a_run_with_no_ceiling_and_no_rates_completes_and_says_so() {
         let fx = Fixture::new(vec![vec![
@@ -8350,13 +8291,9 @@ mod turn {
         );
     }
 
-    /// The three arrangements a monetary budget cannot bind, each said in its
-    /// own words. Without this the variants would be constructible and
-    /// invisible — an operator running a subscription model under `--budget
-    /// $5` would see a limit that silently never applies. §10 says that
-    /// outright: the ceiling on a flat-fee row is announced `inapplicable`,
-    /// naming the limit that will never fire and the metering that defeats
-    /// it.
+    /// Announce when monetary limits cannot bind a metering arrangement, including the
+    /// requested limit and the reason it is inapplicable. Never present a subscription limit as
+    /// an enforceable cap.
     #[test]
     fn each_metering_is_announced_as_the_thing_it_actually_is() {
         use ego_core::public::{CeilingEffect, MeteringKind};
@@ -10861,7 +10798,7 @@ mod turn {
             assert_eq!(state.context.window, Some(FALLBACK_WINDOW));
         }
 
-        /// regression case: one logical generation owns an ordered, delivery-safe
+        /// one logical generation owns an ordered, delivery-safe
         /// retry/fallback plan. Every wire journey is fresh, but all four
         /// attempts remain attributable to the same generation.
         /// Attack on the runtime identity: rendered once from the primary, a
@@ -11340,26 +11277,24 @@ mod turn {
             block_on(turn.run("are you there?")).expect("the store accepted every append")
         }
 
-        // Recorded events, not invented provider fixtures: regression case retained the live JSONL slices.
-        fn regression_case_attempts() -> Vec<(&'static str, Vec<AiEvent>)> {
+        // Recorded events, not invented provider fixtures: retained the live JSONL slices.
+        fn recorded_attempts() -> Vec<(&'static str, Vec<AiEvent>)> {
             [
                 (
                     "exec",
-                    include_str!("../../ego-cli/tests/fixtures/615-unrun-exec.jsonl"),
+                    include_str!("../../ego-cli/tests/fixtures/unrun-exec.jsonl"),
                 ),
                 (
-                    "swift-live-617",
-                    include_str!("../../ego-cli/tests/fixtures/617-unrun-swift.jsonl"),
+                    "swift-live-HOX",
+                    include_str!("../../ego-cli/tests/fixtures/unrun-swift.jsonl"),
                 ),
                 (
                     "write",
-                    include_str!("../../ego-cli/tests/fixtures/615-unrun-write.jsonl"),
+                    include_str!("../../ego-cli/tests/fixtures/unrun-write.jsonl"),
                 ),
                 (
                     "exec-without-reasoning",
-                    include_str!(
-                        "../../ego-cli/tests/fixtures/615-unrun-exec-without-reasoning.jsonl"
-                    ),
+                    include_str!("../../ego-cli/tests/fixtures/unrun-exec-without-reasoning.jsonl"),
                 ),
             ]
             .into_iter()
@@ -11400,9 +11335,9 @@ mod turn {
 
         // Catches: opaque reasoning and parsed-but-unrun tools suppress safe recovery or remain open.
         #[test]
-        fn regression_case_unrun_attempts_retry_once_and_close_tools() {
+        fn recorded_unrun_attempts_retry_once_and_close_tools() {
             let mut failed = Vec::new();
-            for (name, events) in regression_case_attempts() {
+            for (name, events) in recorded_attempts() {
                 let trace = GenerationTrace::default();
                 let source = Arc::new(
                     ScriptedGenerationSource::new([
@@ -11494,7 +11429,7 @@ mod turn {
                     (6, None, true, 1),
                 ] {
                     let trace = GenerationTrace::default();
-                    let mut recorded = regression_case_attempts().remove(0).1;
+                    let mut recorded = recorded_attempts().remove(0).1;
                     if opaque_only {
                         recorded.retain(|event| !matches!(event, AiEvent::ToolCall { .. }));
                     }
@@ -11564,7 +11499,7 @@ mod turn {
         #[test]
         fn recovered_unrun_attempt_dispatches_only_the_successful_tool_once() {
             let trace = GenerationTrace::default();
-            let mut scripts = vec![regression_case_attempts().remove(0).1];
+            let mut scripts = vec![recorded_attempts().remove(0).1];
             scripts.extend(writing("/ws/recovered.txt", "one effect"));
             let source = Arc::new(
                 ScriptedGenerationSource::new(scripts.into_iter().map(|events| {
@@ -11762,7 +11697,7 @@ mod turn {
             );
         }
 
-        /// regression case — catches: every Usage failure is replaced by a capability summary.
+        /// catches: every Usage failure is replaced by a capability summary.
         #[test]
         fn provider_http_400_usage_keeps_the_journal_cause() {
             const CAUSE: &str =
@@ -11802,7 +11737,7 @@ mod turn {
             );
         }
 
-        /// regression case — catches: an Invalid reply's raw journal body bypasses
+        /// catches: an Invalid reply's raw journal body bypasses
         /// the provider's host-safe cause and reaches CLI stderr / ACP.
         #[test]
         fn usage_http_error_does_not_publish_the_unparsed_body_to_hosts() {
@@ -11938,7 +11873,7 @@ mod turn {
         /// regression — catches: the interactive retry budget settles
         /// known failure before a provider that recovers after 63 seconds.
         #[test]
-        fn regression_case_recovers_after_the_interactive_retry_budget() {
+        fn outage_recovers_after_the_interactive_retry_budget() {
             let trace = GenerationTrace::default();
             // Seven failures consume the initial attempt plus six retries.
             // RecordedPause advances the backoff without wall-clock sleeps;
@@ -12022,7 +11957,7 @@ mod turn {
         /// regression — catches: a recovery wait starts an extra paid
         /// request after the monotonic horizon has expired.
         #[test]
-        fn regression_case_recovery_horizon_stops_without_another_attempt() {
+        fn outage_recovery_horizon_stops_without_another_attempt() {
             let trace = GenerationTrace::default();
             let source = Arc::new(
                 ScriptedGenerationSource::new((0..8).map(|_| {
@@ -12058,7 +11993,7 @@ mod turn {
         /// regression — catches: recovery bypasses cancellation or
         /// replays already observed model output.
         #[test]
-        fn regression_case_recovery_preserves_cancel_and_output_safety() {
+        fn outage_recovery_preserves_cancel_and_output_safety() {
             for output in [false, true] {
                 let trace = GenerationTrace::default();
                 let mut events = overloaded(None);
@@ -12114,7 +12049,7 @@ mod turn {
         /// regression — catches: force-retry cancels the turn or leaves
         /// the provider waiting until its backoff timer expires.
         #[test]
-        fn regression_case_force_retry_releases_backoff_without_cancelling() {
+        fn outage_force_retry_releases_backoff_without_cancelling() {
             let trace = GenerationTrace::default();
             let source = Arc::new(
                 ScriptedGenerationSource::new([
@@ -12348,7 +12283,7 @@ mod turn {
             );
         }
 
-        /// regression case: fallback preflight may remove only opaque reasoning
+        /// fallback preflight may remove only opaque reasoning
         /// state, and must make both the removal and a skipped candidate
         /// visible without exposing the state blob.
         #[test]
@@ -12560,7 +12495,7 @@ mod turn {
             );
         }
 
-        /// regression case: accounting names definitely-unsent missing usage as
+        /// accounting names definitely-unsent missing usage as
         /// known zero, while possible delivery remains unknown. A reopened
         /// journal interrupts inherited attempts before accepting a new prompt.
         #[test]
@@ -14222,7 +14157,7 @@ mod turn {
     mod task_tool {
         use super::*;
 
-        const TASK_SECRET: &str = "regression_case-unique";
+        const TASK_SECRET: &str = "task-secret-NKO-unique";
 
         fn call(id: &str, name: &str, args: serde_json::Value) -> AiEvent {
             AiEvent::ToolCall {
@@ -15440,7 +15375,7 @@ fn retry_jitter_stays_bounded_and_never_shortens_provider_wait() {
 /// regression — catches: long outages keep retrying at the old 60s
 /// ceiling instead of progressing to a jittered two-minute backoff.
 #[test]
-fn regression_case_progressive_backoff_reaches_two_minutes() {
+fn outage_progressive_backoff_reaches_two_minutes() {
     use ego_core::turn::retry_delay_with_jitter;
     use std::time::Duration;
     for (attempt, upper, lower) in [(7, 64, 48), (8, 120, 90), (1000, 120, 90)] {

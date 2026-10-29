@@ -2,9 +2,8 @@
 
 use super::*;
 
-/// The clap definition. Kept separate from [`Args`] so that the shape the
-/// rest of the binary reads is the shape §4.5 describes — a mutually
-/// exclusive group is one field — rather than clap's flat set of options.
+/// Separate clap's flat options from resolved `Args`, whose mutually exclusive session choices
+/// are one field.
 #[derive(Debug, Parser)]
 #[command(
     name = "ego",
@@ -330,7 +329,7 @@ pub(super) struct Shape {
 /// process that serves runs and not to the protocol it happens to speak:
 /// `ego a2a` is the same question and flattens the same two lines.
 ///
-/// `docs/architecture.md`
+
 #[derive(Debug, ClapArgs)]
 pub(super) struct Ceiling {
     /// The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included.

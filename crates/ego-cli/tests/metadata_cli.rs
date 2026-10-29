@@ -1,4 +1,4 @@
-//! contract for non-interactive regression case resume metadata grammar.
+//! contract for non-interactive resume metadata grammar.
 
 use ego_cli::cli::{Invocation, parse};
 

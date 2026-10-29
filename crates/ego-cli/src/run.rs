@@ -168,7 +168,7 @@ use execution::{ActivatedRun, MaterializedRun, ScopedInvocation, execute};
 mod driver_runtime;
 use driver_runtime::{DriverExecution, drive_execution};
 
-/// The result of a run, rendered for `--output json` (`CLI.md` §4.1).
+/// The run result rendered for JSON completion output.
 pub fn report(ended: &Ended) -> Report {
     let mut report = Report::of(
         ended.session,

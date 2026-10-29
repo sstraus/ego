@@ -13,7 +13,7 @@ use ego_core::run::RunRoot;
 
 mod support;
 
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/trust");
 
 /// A workspace that says it holds something, and records being asked.
 #[derive(Debug, Default)]

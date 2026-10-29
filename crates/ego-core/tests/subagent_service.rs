@@ -1,9 +1,6 @@
-//! contract for M4 S2: isolated child runs over the rooted controller.
-//!
-//! This suite builds the ordinary `RunController` with test-owned adapters
-//! and injects only the narrow durable parent/child journal port. It must not
-//! pass through a fixture service, crash counters, an in-memory event
-//! projection, or an externally supplied child result.
+//! Isolated child runs through the ordinary rooted controller with test-owned adapters and only
+//! the narrow parent/child journal port injected. Do not substitute a fixture service or
+//! externally supplied child result.
 
 use std::collections::BTreeMap;
 use std::ops::Deref;

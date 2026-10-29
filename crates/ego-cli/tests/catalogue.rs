@@ -4,7 +4,6 @@
 //! Resolve tests use real persisted session logs. Formatting and ordering use
 //! literal metadata so their expected policy remains independent of the store.
 //!
-//! `docs/architecture.md`.
 
 use std::path::{Path, PathBuf};
 
@@ -82,9 +81,8 @@ fn here() -> &'static Path {
 
 // --- which sessions belong here ---
 
-/// The default is this workspace, which is `CLI.md` §2 line 39. A session
-/// created somewhere else is not this workspace's business, and the comparison
-/// is on the root the header recorded rather than on anything derived.
+/// Catalogue defaults to the current workspace and compares canonical roots recorded in
+/// session headers.
 #[test]
 fn a_listing_holds_only_the_sessions_of_this_workspace() {
     let all = vec![
@@ -239,9 +237,8 @@ fn a_store_that_cannot_be_listed_says_so() {
 
 // --- what a listing says ---
 
-/// §4.6: an object with a `sessions` key carrying its own `v`, not a bare
-/// array — an array has nowhere to put a version, and a consumer that cannot
-/// see the version cannot be told the shape changed.
+/// Catalogue output is a separately versioned object with a `sessions` key, not an unversioned
+/// bare array.
 #[test]
 fn the_json_listing_is_an_object_that_carries_its_own_version() {
     let listing = catalogue::Listing::of(&[meta(1, "/ws", 9_000)]);

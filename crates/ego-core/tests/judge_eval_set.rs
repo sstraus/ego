@@ -1,5 +1,5 @@
 //! Shape of the versioned v3 sandbox-judge evaluation set. The paid model
-//! score belongs to regression case; these checks keep the offline set honest.
+//! These checks cover offline set integrity, not live judge quality.
 
 use serde_json::Value;
 use std::collections::HashSet;

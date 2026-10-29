@@ -1348,9 +1348,8 @@ impl Seat {
 
     /// Build the applicable editor and, for a terminal, its only output port.
     ///
-    /// Bracketed paste is not a nicety: without it a pasted stack trace
-    /// submits its first line as a whole prompt, which is the failure that
-    /// makes pasting one impossible. `CLI.md` §6.1.
+    /// Bracketed paste is not a nicety: without it a pasted stack trace submits its first
+    /// line as a whole prompt, which is the failure that makes pasting one impossible.
     pub fn new(cancel: CancelToken) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
         Self::with_keyboard(cancel, &ego_core::config::UiLayer::default())
     }
@@ -2213,7 +2212,7 @@ impl crate::run::InteractiveSeat for Seat {
 
     fn pasteboard_kind(&self) -> Result<crate::run::PasteboardKind, String> {
         #[cfg(test)]
-        if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
+        if std::env::var_os("EGO_IMAGE_TEST_PTY_CHILD").is_some() {
             return Ok(crate::run::PasteboardKind::Image);
         }
         super::clipboard::kind()
@@ -2924,7 +2923,7 @@ thread_local! {
 
 #[cfg(test)]
 pub(super) fn hold_permission_printer() {
-    if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_none() {
+    if std::env::var_os("EGO_HELD_PERMISSION_PTY_CHILD").is_none() {
         return;
     }
     HELD_PRINTER.with(|slot| {
@@ -2932,7 +2931,7 @@ pub(super) fn hold_permission_printer() {
         let sender = slot.as_ref().expect("real live printer");
         assert_eq!(sender.capacity(), Some(1));
         sender
-            .try_send("regression_case-ROW\n".to_owned())
+            .try_send("HELD-EXM-ROW\n".to_owned())
             .expect("empty modal printer");
     });
     std::fs::write("printer-held", "bounded(1) full").unwrap();
@@ -2940,7 +2939,7 @@ pub(super) fn hold_permission_printer() {
 
 #[cfg(test)]
 pub(super) fn await_permission_printer_release() {
-    if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
+    if std::env::var_os("EGO_HELD_PERMISSION_PTY_CHILD").is_some() {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !Path::new("printer-release").exists() {
             assert!(Instant::now() < deadline, "PTY printer release deadline");

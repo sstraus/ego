@@ -4279,7 +4279,7 @@ fn macos_exec_paths_default_python_catches_runtime_root_widening_writes() {
 // Catches raw inherited credentials reaching model-visible output and durable evidence.
 #[test]
 fn known_secret_env_printed_by_child_is_masked_before_evidence_and_context() {
-    const TOKEN: &str = "ego-known-credential-274-unique";
+    const TOKEN: &str = "ego-known-credential-NKO-unique";
     if std::env::var("EGO_MASKING_CHILD_CASE").as_deref() != Ok("1") {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -4883,7 +4883,7 @@ fn workspace_mcp_read_root_denial_names_effective_remedy() {
 #[cfg(target_os = "macos")]
 #[test]
 fn workspace_path_lookup_finds_tools_without_granting_execution() {
-    const CHILD: &str = "EGO_REGRESSION_LOOKUP_CHILD";
+    const CHILD: &str = "EGO_LOOKUP_TEST_LOOKUP_CHILD";
     if let Some(root) = std::env::var_os(CHILD) {
         let root = std::path::PathBuf::from(root);
         let workspace = root.join("workspace");
@@ -4921,7 +4921,13 @@ fn workspace_path_lookup_finds_tools_without_granting_execution() {
             "{message}"
         );
         assert!(!message.contains("command not found"), "{message}");
-        assert!(execute(&run, spec("cat \"$EGO_REGRESSION_LOOKUP_CHILD/tools/private\"")).is_err());
+        assert!(
+            execute(
+                &run,
+                spec("cat \"$EGO_LOOKUP_TEST_LOOKUP_CHILD/tools/private\"")
+            )
+            .is_err()
+        );
         return;
     }
     let outer = tempfile::tempdir().unwrap();

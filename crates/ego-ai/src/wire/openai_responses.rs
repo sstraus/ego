@@ -1,44 +1,9 @@
 //! OpenAI's public Responses API: `POST /v1/responses`, streamed, unstored.
-//!
-//! Deliberately a third Responses mapping rather than a branch in either
-//! existing one, because
-//! `docs/guides/providers.md`
-//! says so and gives the reason: "Private Codex Responses differs in endpoint,
-//! identity, headers, and request/stream behavior; it is not evidence for
-//! public OpenAI." [`openai_codex_responses`](super::openai_codex_responses)
-//! speaks ChatGPT's private backend and carries its identity;
-//! [`xai_responses`](super::xai_responses) speaks xAI's. All three decode
-//! overlapping slices of the same *event vocabulary*, which is a shared shape
-//! and not a shared contract — the distinction
-//! `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` exists to keep.
-//!
-//! # What the evidence for this file actually is
-//!
-//! Derived field by field from OpenAI's published Responses reference, the
-//! reasoning guide and the streaming guide, read **2026-09-07**. It is vendor
-//! schema evidence and **not a live server recording**, which is why the
-//! `openai` row is not promoted (`ProviderRow::openai_at`): this repository
-//! holds no OpenAI key, so conformance check five has never been made for
-//! these bytes. `crates/ego-cli/tests/smoke.rs` is where that closes, on a
-//! machine that has a key and names the provider.
-//!
-//! # Two facts worth stating because they look like omissions
-//!
-//! **`store: false` on every request.** The Responses API defaults `store` to
-//! `true`, which would leave a copy of every prompt and completion in
-//! OpenAI's retention. A harness that governs what leaves a machine does not
-//! opt into that silently, and the ADR names retention as part of the contract
-//! this mapping follows.
-//!
-//! **No per-model effort list here.** The vendor's accepted `reasoning.effort`
-//! values differ per model — gpt-6-astra rejects `none` with a 400 while
-//! gpt-5.6 accepts six levels — so a list written into this file would be
-//! wrong for some model the day it was written. Every [`ThinkingLevel`] has an
-//! OpenAI spelling, so this mapping projects all seven and lets
-//! `ModelCapabilities::reasoning_efforts` refuse the wrong one *before* a
-//! request is built, naming both sides. That is where per-model facts belong
-//! and it is already checked; duplicating a guess here would be the second
-//! answer to a question the catalogue answers.
+//! The public Responses mapping is separate from Codex and xAI mappings.
+//! Published-schema fixtures are offline evidence, not live acceptance.
+//! Every request sets `store: false` to avoid implicit server retention.
+//! Per-model reasoning effort support belongs in `ModelCapabilities`; this
+//! mapping projects spellings only after capability checks admit them.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

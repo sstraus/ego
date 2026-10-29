@@ -25,7 +25,7 @@ fn setup() -> (Places, Stub) {
         "model='ollama/qwen3'\nthinking='off'\nsandbox='off'\n[profile.host]\nmodel='ollama/qwen3'\nthinking='off'\nsandbox='off'\n").unwrap();
     std::fs::write(
         places.workspace_path().join("AGENTS.md"),
-        "REGRESSION-MARKER\n",
+        "HOST-TRUSTED-INSTRUCTIONS-OUR\n",
     )
     .unwrap();
     let stub = Stub::start(Plan {
@@ -70,7 +70,7 @@ fn selected_profile_attestation_loads_instructions_without_elicitation() {
             .last()
             .unwrap()
             .to_string()
-            .contains("REGRESSION-MARKER")
+            .contains("HOST-TRUSTED-INSTRUCTIONS-OUR")
     );
     host.finish();
 }
@@ -118,7 +118,7 @@ fn unprofiled_attestation_is_ignored_and_the_form_is_used() {
             .last()
             .unwrap()
             .to_string()
-            .contains("REGRESSION-MARKER")
+            .contains("HOST-TRUSTED-INSTRUCTIONS-OUR")
     );
     host.finish();
 }

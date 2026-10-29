@@ -1,4 +1,4 @@
-//! process-boundary contract for regression case first-run model onboarding.
+//! process-boundary contract for first-run model onboarding.
 //!
 //! These cases deliberately use only the public `ego` executable and the
 //! existing loopback harness. Provider key values are synthetic and every

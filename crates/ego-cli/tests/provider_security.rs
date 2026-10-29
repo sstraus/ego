@@ -67,7 +67,7 @@ fn deprecated_xai_api_key_selection_is_unavailable_before_credential_or_network(
     ));
 }
 
-/// regression case: what the ACP host is handed for a pre-turn catalogue refusal.
+/// what the ACP host is handed for a pre-turn catalogue refusal.
 ///
 /// `error.data` is the field a host puts in front of a human, and it carries
 /// `error.to_string()` of whatever failed — so before this story a provider

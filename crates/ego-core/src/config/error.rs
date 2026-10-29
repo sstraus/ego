@@ -1,5 +1,4 @@
-//! Config errors. Invalid config is never skipped silently
-//! (`CLI.md` §4.5): unknown keys are hard errors, named by key and source.
+//! Configuration errors with source attribution.
 
 use super::Source;
 
@@ -11,9 +10,6 @@ pub enum ConfigError {
     /// value type, ...); `message` is `toml`'s own diagnostic.
     Invalid { source: Source, message: String },
     /// `active_profile` named a profile that no eligible layer defines.
-    /// Missing from *one* layer is normal; missing from all of them is a
-    /// materially different configuration and must not run silently
-    /// (`CLI.md` §4.5).
     UnknownProfile { name: String },
 }
 

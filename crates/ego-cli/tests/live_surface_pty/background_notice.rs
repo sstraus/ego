@@ -46,8 +46,8 @@ fn background_notice_multiline_command_shows_only_first_line() {
 }
 
 fn notice_contract(notice: &str, width: u16, busy: bool) {
-    let (first, gate) = gated_paced_line("regression_case-RUNNING");
-    let mut completions = vec![Reply::Sse(text("regression_case-RECEIVED"))];
+    let (first, gate) = gated_paced_line("NOTICE-SHR-RUNNING");
+    let mut completions = vec![Reply::Sse(text("NOTICE-SHR-RECEIVED"))];
     if busy {
         completions.insert(0, first);
     }
@@ -74,7 +74,7 @@ fn notice_contract(notice: &str, width: u16, busy: bool) {
     if busy {
         input.write_all(b"start gated turn\r").unwrap();
         input.flush().unwrap();
-        until(&reader, &mut output, b"regression_case-RUNNING");
+        until(&reader, &mut output, b"NOTICE-SHR-RUNNING");
     }
     let start = output.len();
     // TUIC submits completion notices through the same Ctrl+U/text/CR transport.
@@ -92,7 +92,7 @@ fn notice_contract(notice: &str, width: u16, busy: bool) {
         drain_until_quiet(&reader, &mut output);
         gate.release();
     }
-    until_normalized(&reader, &mut output, start, "regression_case-RECEIVED");
+    until_normalized(&reader, &mut output, start, "NOTICE-SHR-RECEIVED");
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
     let rows = screen_rows(&output, 24, width);
@@ -100,7 +100,7 @@ fn notice_contract(notice: &str, width: u16, busy: bool) {
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
-    println!("regression_case PTY CAPTURE width={width}:\n{capture}");
+    println!("NOTICE-SHR PTY CAPTURE width={width}:\n{capture}");
     assert_eq!(
         count_exact_strings(&stub.generations()[usize::from(busy)]["messages"], notice),
         1

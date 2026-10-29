@@ -105,15 +105,15 @@ fn unknown_slash_is_local_and_leading_space_sends_a_literal_path() {
 #[test]
 fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
     let arguments = serde_json::json!({
-        "argv": ["/bin/sh", "-c", "printf ready > ready; printf REGRESSION-MARKER-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
+        "argv": ["/bin/sh", "-c", "printf ready > ready; printf TASK-KWU-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
         "timeout_ms": 60000
     });
-    let (reply, gate) = gated_paced_line("regression_case-HELD\n");
+    let (reply, gate) = gated_paced_line("MUTATION-KWU-HELD\n");
     let mut session = modal_session_with(vec![
-        Reply::Sse(tool_call("regression_case", "exec", &arguments.to_string())),
+        Reply::Sse(tool_call("exec-KWU", "exec", &arguments.to_string())),
         Reply::Sse(text(TOOL_TURN_DONE)),
         reply,
-        Reply::Sse(text("regression_case-SETTLED")),
+        Reply::Sse(text("MUTATION-KWU-SETTLED")),
     ]);
     session.press(b"start a long exec\r");
     session.wait("[d] details");
@@ -134,7 +134,7 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
     let original = std::fs::read(&config_path).unwrap_or_default();
 
     session.press(b"hold the next turn\r");
-    session.wait("regression_case-HELD");
+    session.wait("MUTATION-KWU-HELD");
     session.press(format!("/tasks cancel {id}\r").as_bytes());
     let mutation_start = session.mark;
     session.press(b"/config set model \"ollama/deferred-model\"\r");
@@ -142,7 +142,7 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
     // preceding mutations, but the provider still cannot complete the turn.
     session.press(format!("/tasks {id}\r").as_bytes());
     session.wait("running");
-    session.wait("REGRESSION-MARKER-OUTPUT");
+    session.wait("TASK-KWU-OUTPUT");
     assert_eq!(std::fs::read(&config_path).unwrap_or_default(), original);
     let held = normalized(&session.output[mutation_start..]);
     assert!(!held.contains("Saved model ="), "{held}");
@@ -155,7 +155,7 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
     until_prompt_after_reply(
         &session.reader,
         &mut session.output,
-        b"regression_case-SETTLED",
+        b"MUTATION-KWU-SETTLED",
     );
     let receipts = normalized(&session.output[mutation_start..]);
     assert_eq!(receipts.matches("Saved model =").count(), 1, "{receipts}");
@@ -178,7 +178,7 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
     );
     let history = generations.last().expect("settlement generation")["messages"].to_string();
     assert!(
-        history.contains("cancelled") && history.contains("REGRESSION-MARKER-OUTPUT"),
+        history.contains("cancelled") && history.contains("TASK-KWU-OUTPUT"),
         "cancellation lost its outcome or output: {history}"
     );
     let config: toml::Value = toml::from_str(&config).expect("saved config");
@@ -189,10 +189,10 @@ fn task_cancel_and_config_set_wait_for_the_held_turn_to_finish() {
 // telling the user that it is accepted but still waiting for the active turn.
 #[test]
 fn busy_config_write_reports_pending_before_the_turn_finishes() {
-    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-HELD\n");
+    let (reply, gate) = gated_paced_line("CONFIG-RECEIPT-KWU-HELD\n");
     let mut session = modal_session_with(vec![reply]);
     session.press(b"hold this turn\r");
-    session.wait("REGRESSION-MARKER-HELD");
+    session.wait("CONFIG-RECEIPT-KWU-HELD");
     let start = session.output.len();
     session.press(b"/config set model \"ollama/pending-model\"\r");
     // An immediate inspection proves that the preceding write was consumed.

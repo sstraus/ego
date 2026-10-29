@@ -2,11 +2,8 @@
 //!
 //! # Why this is a third mapping
 //!
-//! `docs/guides/providers.md` §4
-//! allows a provider to differ in exactly three places. Gemini's Interactions
-//! API differs in the request's *shape* and the stream's *event model*, like
-//! Anthropic — but it differs from Anthropic too, which is the point of having
-//! it: two mappings could be a special case, three is a seam.
+//! Gemini Interactions differs from both Chat Completions and Anthropic in
+//! request shape and event model. These tests exercise its mapping directly.
 //!
 //! The structural differences, each asserted below rather than argued in prose:
 //!
@@ -23,10 +20,9 @@
 //!
 //! # What the goldens are, and what they are worth
 //!
-//! Hand-assembled from Google's stable v1 Interactions reference, audited by
-//! exact Terra on 2026-09-04 — `[D]`, never `[R]`. No entitled Gemini key
-//! exists in this repository, so nothing here has been observed against a live
-//! server. The ignored opt-in smoke is what would upgrade it.
+//! Synthetic fixtures assembled from the stable Interactions specification.
+//! They pin the mapping contract, not live-server acceptance. The ignored
+//! opt-in smoke test is separate evidence.
 //!
 //! Fields this mapping ignores are present in the transcripts on purpose
 //! (`service_tier`, `object`, `created`, `input_tokens_by_modality`,
@@ -90,11 +86,8 @@ fn body_of(req: &GenRequest) -> serde_json::Value {
 
 // --- the request ---
 
-/// The system prompt is a top-level **string**, and no step carries it.
-///
-/// A string and not an object: `CreateModelInteractionParam.system_instruction`
-/// is `str` (docs/14 §3.8, [S]). Asserting only that it is set would pass a
-/// mapping that also left a system turn in `input`.
+/// The system instruction is a top-level string, not a conversation step. Assert that no system
+/// role remains in `input`.
 #[test]
 fn the_system_prompt_is_a_top_level_string_and_not_a_step() {
     let body = body_of(&wide_request());
@@ -175,13 +168,8 @@ fn a_system_turn_that_is_not_text_is_refused_before_request_construction() {
     );
 }
 
-/// A conversation is steps, not roles — and the assistant's turn is a
-/// *request-side* `model_output` step.
-///
-/// This is the difference that no amount of reading the response shape would
-/// have settled: `model_output` is in `CreateModelInteractionParam`'s own
-/// input union, so replaying a prior answer is the documented ABI rather than
-/// the response shape assumed to travel back (docs/14 §3.8).
+/// Replay a prior assistant answer as a request-side `model_output` step, not a response object
+/// copied into input.
 #[test]
 fn a_prior_answer_replays_as_a_model_output_step() {
     let req = GenRequest {
@@ -240,12 +228,8 @@ fn an_image_is_inline_base64_content_with_its_mime_type() {
     assert_eq!(body_of(&req), expected);
 }
 
-/// A tool call replays with its arguments as an **object**, and its result as
-/// a `function_result` step carrying the flag that says it failed.
-///
-/// `arguments` is `Dict[str, Any]` here and a JSON *string* on
-/// chat-completions ([S], docs/14 §3.8). "Arguments are a string" was the
-/// family's fact, never a shared one.
+/// Replay function arguments as an object and the failed result as a `function_result` step.
+/// Chat Completions uses a JSON string instead; that is not a shared wire fact.
 #[test]
 fn a_tool_call_and_its_result_are_two_steps_and_the_arguments_are_an_object() {
     let req = GenRequest {
@@ -488,12 +472,8 @@ fn a_thinking_level_this_api_spells_is_sent_verbatim() {
     }
 }
 
-/// `Off` has no spelling here, so it is refused and the refusal names the four
-/// that work.
-///
-/// The cost `docs/14` §3.6 accepted with its eyes open. Omitting the field
-/// does not substitute: Gemini models think by default, so an omission would
-/// bill a caller for reasoning they switched off.
+/// Refuse `Off` and name the supported thinking levels. Omitting the field would select default
+/// reasoning rather than disable it.
 #[test]
 fn off_is_refused_because_this_api_cannot_switch_thinking_off() {
     let refusal = request_body(&GenRequest {
@@ -932,12 +912,8 @@ fn a_transcript_decodes_the_same_at_every_chunk_boundary() {
     }
 }
 
-/// `step.stop` restates the running total, and restating is not spending.
-///
-/// docs/14 §3.3 names this trap outright: "Emitting the running total as an
-/// `AiEvent::Usage` on each step multiplies the bill by the number of steps."
-/// The golden carries a `usage` on a `step.stop` *and* on
-/// `interaction.completed` so a decoder that reported both would fail here.
+/// A running total on `step.stop` is restated at completion, not spent again. The fixture
+/// contains both so summing them would fail.
 #[test]
 fn a_running_total_restated_on_a_step_is_not_a_second_charge() {
     let usages: Vec<Usage> = decode_whole(TEXT_TRANSCRIPT.as_bytes())
@@ -954,12 +930,8 @@ fn a_running_total_restated_on_a_step_is_not_a_second_charge() {
     }
 }
 
-/// Thought tokens are a separate summand, and tool-use tokens are input.
-///
-/// docs/14 §3.3 checks the arithmetic against Google's own example:
-/// `11 + 90 + 245 + 0 = 346 = total_tokens`. So `total_thought_tokens` is
-/// **not** a subset of `total_output_tokens`, and an adapter that treated it
-/// as one would under-report every reasoning turn.
+/// Thought tokens and output tokens are separate summands; tool-use tokens count as input.
+/// Treating thoughts as an output subset would under-report usage.
 #[test]
 fn thought_tokens_add_to_output_and_tool_use_tokens_add_to_input() {
     let usage = decode_whole(TOOL_TRANSCRIPT.as_bytes())
@@ -1083,9 +1055,8 @@ fn an_unknown_status_fails_closed_and_names_itself() {
     assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
 }
 
-/// An in-band `error` event ends the generation with what the provider said.
-///
-/// `code` is a string slug here, not a number ([D], docs/14 §3.5).
+/// An in-band error ends generation with the provider's diagnostic. Its `code` is a string
+/// slug, not a number.
 #[test]
 fn an_error_event_ends_the_generation_with_what_the_provider_said() {
     let transcript = "event: error\ndata: {\"error\":{\"message\":\"Deadline expired before \
@@ -1156,14 +1127,9 @@ async fn a_refused_request_relays_the_sentence_the_provider_wrote() {
 /// Gemini is a selectable provider, and that is a decision rather than a
 /// consequence of the count.
 ///
-/// This asserted the negative until
-/// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`. The old
-/// reasoning was that regression case promotes the row only after an opt-in
-/// sanitized live recording, and that the mapping being complete with
-/// deterministic fixtures "is exactly the state that makes promoting it look
-/// harmless". The ADR answers that: no recording exists for `openai` either,
-/// and a row absent from this array is worse off than a refused one, because
-/// it produces "unknown provider" instead of a reason.
+/// Gemini's implemented mapping belongs in the inventory. Omitting it would
+/// report unknown provider instead of the actual credential or availability
+/// state. Offline fixtures do not establish live acceptance.
 ///
 /// Still asserted by name rather than left to `FINAL_PROFILE_COUNT`, and for
 /// the reason the original test gave: the count is a constant, so a row that

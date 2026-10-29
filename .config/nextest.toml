@@ -10,7 +10,7 @@ threads-required = 'num-test-threads'
 # process-heavy tests; contention can consume the window before the script runs.
 # Reserve the budget, not a longer timeout: cancellation assertions stay intact.
 [[profile.default.overrides]]
-filter = 'test(=run::executor::regression_case_tests::cancelled_readmission_does_not_complete_measurement)'
+filter = 'test(=run::executor::defaults_tests::cancelled_readmission_does_not_complete_measurement)'
 threads-required = 'num-test-threads'
 
 [test-groups]

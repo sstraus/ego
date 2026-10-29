@@ -65,10 +65,9 @@ sha2 = "0.10.9"
 shell-words = "1.1.1"
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25"
-# `signal` for the SIGINT/SIGTERM half of `CLI.md` §4.3, `time` for
-# `--timeout`. `rt-multi-thread` and not `rt`: a generation and a signal
-# handler have to make progress at the same time.
-# `sync` for the mutex `ego acp` serialises turns with — see `acp.rs`.
+# `signal` handles SIGINT/SIGTERM, `time` handles deadlines, and `sync` supports ACP turn
+# serialization. The multi-thread runtime lets generations and signal handling progress
+# independently.
 tokio = { version = "1", features = [
     "macros",
     "rt-multi-thread",
@@ -101,12 +100,8 @@ url = "2.5.8"
 # mints remain `SessionId::new`'s v7.
 uuid = { version = "1.24.1", features = ["v4", "v5"] }
 yaml-rust2.workspace = true
-# The reading half of the terminal surface. `default-features = false` drops
-# `helix`, the only default: this build binds Emacs keys, and an edit mode
-# nobody selects is a keymap that can still shadow one we chose. Notably
-# `system_clipboard` is *not* a default either, so plain `Ctrl+V` arrives
-# unbound and there is no binding to displace — see
-# `docs/architecture.md` §3.
+# Disable the default `helix` keymap because this build uses Emacs keys.
+# `system_clipboard` is not a default, so plain `Ctrl+V` is initially unbound.
 reedline = { path = "../../vendor/reedline", version = "0.51.0", default-features = false, features = ["external_printer", "idle_callback"] }
 unicode-width = "0.2.2"
 unicode-segmentation = "1.13.3"

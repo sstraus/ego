@@ -1,8 +1,5 @@
-//! contract for M4 S4: one typed hook catalogue and durable runner.
-//!
-//! Core receives already projected, source-bound hook values. YAML envelope
-//! extraction belongs to the CLI boundary and is covered by its crate-private
-//! projection test; this suite never feeds raw skill YAML to core.
+//! Typed hook catalogue and durable runner contract. Core receives projected source-bound
+//! values; CLI owns skill YAML extraction and its projection tests.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};

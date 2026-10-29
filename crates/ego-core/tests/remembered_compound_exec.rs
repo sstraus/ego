@@ -1,4 +1,4 @@
-//! Regression protection for regression case: remembered program rules, not shell scripts.
+//! Regression protection for remembered program rules, not shell scripts.
 use std::ffi::OsString;
 use std::path::Path;
 

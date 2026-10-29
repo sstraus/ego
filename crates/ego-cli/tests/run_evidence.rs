@@ -1,4 +1,4 @@
-//! contract for regression case: every CLI composition root shares evidence admission.
+//! Every CLI composition root shares evidence admission.
 //!
 //! The composition signatures below deliberately name the production seams.
 //! Once implemented, the companion effect fixtures will drive these same

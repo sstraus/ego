@@ -37,7 +37,7 @@ impl Write for LateCursorReply {
 }
 
 fn width_fixture(late_reply: bool) {
-    let command = format!("printf '%s' {}", "regression_case-".repeat(20));
+    let command = format!("printf '%s' {}", "live-width-OGW-".repeat(20));
     let args = serde_json::json!({"argv": ["/bin/sh", "-c", command]}).to_string();
     let mut completions = Vec::new();
     for index in 0..3 {
@@ -46,7 +46,7 @@ fn width_fixture(late_reply: bool) {
             "exec",
             &args,
         )));
-        completions.push(Reply::Sse(text(&format!("REGRESSION-MARKER-DONE-{index}"))));
+        completions.push(Reply::Sse(text(&format!("WIDTH-OGW-DONE-{index}"))));
     }
     let stub = Stub::start(Plan {
         completions,
@@ -121,7 +121,7 @@ fn width_fixture(late_reply: bool) {
             &reader,
             &mut output,
             start,
-            &format!("REGRESSION-MARKER-DONE-{index}"),
+            &format!("WIDTH-OGW-DONE-{index}"),
         );
         until_mcp_composer_is_idle(&reader, &mut output);
         drain_until_quiet(&reader, &mut output);

@@ -69,13 +69,9 @@ where
                 // Serialized, so a numeric `41` and a string `"41"` stay
                 // two different requests exactly as JSON-RPC says they are.
                 let command = responder.command();
-                // Derived, not copied: this value is written into the
-                // durable run transaction, so serializing the request into
-                // it would persist the prompt a second time -- and, once a
-                // block can carry image bytes, would write those bytes into
-                // the event stream that
-                // `docs/decisions/2026-08-29-images-are-session-blobs-
-                // before-they-are-wire-parts.md` keeps them out of.
+                // Derive the digest instead of serializing the request. The digest is persisted
+                // in the run transaction; copying the request would duplicate prompt text and
+                // put inline image bytes in the event log.
                 let digest = match RequestDigest::of(&request) {
                     Ok(digest) => digest,
                     Err(error) => {

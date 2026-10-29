@@ -1,4 +1,4 @@
-//! contracts for regression case's shared CLI session surfaces.
+//! contracts for shared CLI session surfaces.
 
 use ego_cli::catalogue::Listing;
 use ego_cli::repl::actions::{ActionId, ActionRegistry, Availability};

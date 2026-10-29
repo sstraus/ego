@@ -1,7 +1,6 @@
 //! `edit`: exact text replacement through the guarded seam.
 //!
-//! The first tool in the tree that needs **two** authorities for one call. See
-//! `docs/architecture.md`.
+//! Editing requires both read and write authority for the same file.
 
 use ego_core::permit::{
     Change, GuardedIo, LineChange, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,

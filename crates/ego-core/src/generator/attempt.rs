@@ -1,6 +1,6 @@
 //! Generation attempts: what a retry keeps, and whether it may retry at all.
 //!
-//! See `docs/architecture.md`.
+
 //!
 //! A *generation* is one logical request plan. An *attempt* is one journey to
 //! the wire, with its own admission and settlement.
@@ -8,11 +8,9 @@
 //! reaching the provider again, while usage, cost, evidence and settlement
 //! remain attributable to each distinct wire journey.
 //!
-//! `DeliveryCertainty` lives here rather than in `ego-ai`, even though
-//! `ego-ai` is what observes it (`ARCHITECTURE.md` §3.1). It has to: it is
-//! carried by a `DomainEvent`, and `ego-core` cannot depend on `ego-ai`
-//! without inverting the crate DAG. The same split already applies to
-//! `Usage` — core owns the type, the provider layer produces the values.
+//! It has to: it is carried by a `DomainEvent`, and `ego-core` cannot depend on `ego-ai`
+//! without inverting the crate DAG. The same split already applies to `Usage` — core owns
+//! the type, the provider layer produces the values.
 //!
 //! ## Who owns the authorisation, and why it is not the provider
 //!
@@ -21,13 +19,9 @@
 //! consuming it at `generate` left nobody to reconcile, and borrowing it
 //! left the token reusable for a second generation.
 //!
-//! `plans/m0b-vertical-slice.md` originally sketched
-//! `generate(req, attempt) -> BoxStream<AiEvent>`, with the attempt moved in
-//! and never returned. That does not work, and the reason is worth stating
-//! so it is not re-proposed: [`BudgetGate::reconcile`] needs
-//! `&mut BudgetGate`, a `Generator` has none and cannot obtain one, and
-//! `Drop` cannot acquire one either. An attempt that goes in and never comes
-//! out can never be settled by anybody — the same ownership hole, relocated.
+//! Budget reconciliation needs the admitting gate's mutable access. Generators and
+//! destructors cannot settle a reservation independently; the attempt owner must return
+//! it explicitly.
 //!
 //! So the attempt rides *inside* the stream. [`AttemptStream`] owns both the
 //! attempt and the provider's stream and is itself a `Stream<Item =
@@ -104,8 +98,7 @@ impl AttemptRef {
     }
 }
 
-/// Whether a request may have reached the provider (`docs/architecture.md` §2.4,
-/// `ARCHITECTURE.md` §3.1).
+/// Whether a request may have reached the provider.
 ///
 /// Ordered deliberately: `DefinitelyUnsent` is the *more* certain state, and
 /// certainty is only ever lost. The derived `Ord` puts `DefinitelyUnsent`
@@ -175,12 +168,8 @@ pub enum UsageReport {
 /// and may still have reported usage — and a parallel enum would duplicate
 /// `StopReason`'s variants only to answer a different question.
 ///
-/// Durable, and safe to decode without a guard: every [`StopReason`] is
-/// terminal since `Pending` was removed
-/// (`docs/architecture.md`), so there is no
-/// non-terminal value for a decoded outcome to hold. This type used to reject
-/// one in its constructor and refuse to derive `Deserialize` because of it;
-/// deleting the variant deleted both guards rather than adding a third.
+/// Every [`StopReason`] is terminal. A decoded outcome therefore cannot
+/// contain a non-terminal stop value and needs no separate validation guard.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outcome {
     stop: StopReason,
@@ -232,10 +221,8 @@ impl Outcome {
 pub struct GenerationAttempt {
     attempt: AttemptRef,
     metering: Metering,
-    /// The rates captured for actual settlement, when any were resolved. Carried
-    /// beside the metering rather than inside it for the reason
-    /// `2026-08-21-a-run-with-no-ceiling.md` §3 gives: the arrangement and
-    /// our knowledge of its prices are different facts.
+    /// Captured rates for actual settlement, if resolved. They stay beside
+    /// metering because the billing arrangement and knowledge of prices differ.
     rates: Option<PricingQuote>,
     /// Taken by [`AttemptStream::settle`]. While it is `Some`, this attempt
     /// still needs settlement, which is exactly what [`Drop`] reports on.
@@ -333,8 +320,7 @@ impl Drop for GenerationAttempt {
 /// the same figure, and two spellings of it are two places for it to
 /// disagree.
 ///
-/// The three cases, and why each is not the other
-/// (`docs/architecture.md` §5):
+/// The three distinct cases:
 ///
 /// - **Quote settlement** prices the observed usage. No usage frame means no
 ///   quantity to price, so the cost is unknown and the gate charges its

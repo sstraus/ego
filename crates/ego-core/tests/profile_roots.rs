@@ -1,4 +1,4 @@
-//! regression case: a profile may open extra canonical roots to the run, and only an
+//! a profile may open extra canonical roots to the run, and only an
 //! operator-owned layer may say so.
 
 use ego_core::config::{ConfigError, ConfigLayer, Mode, Ruleset, Source, Sourced, Trust, resolve};

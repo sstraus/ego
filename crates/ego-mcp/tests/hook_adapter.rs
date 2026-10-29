@@ -1,8 +1,5 @@
-//! contract for the MCP hook adapter (M4 S5).
-//!
-//! Dispatch consumes one immutable captured registry generation and the
-//! ordinary MCP operation path. The capture below is admitted through the
-//! real registry controller; the operation result comes from its factory.
+//! MCP hook adapter contract. Dispatch consumes an immutable admitted registry generation and
+//! the ordinary operation path; results come from its factory.
 
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};

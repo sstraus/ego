@@ -36,14 +36,9 @@
 //!
 //! # What was done about it
 //!
-//! For a while the consequence was only recorded: `GenRequest::max_output_tokens`
-//! did not bind on this row, and the remedy was named as a mapping decision
-//! above this layer. `docs/decisions/`
-//! `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8 makes it, and
-//! makes it the blunt way: a member that fails a conformance check is not a
-//! member. So the Ollama row names `wire::ollama`, which shares the family's
-//! request projection and its whole decoder and sends the ceiling in the field
-//! measured above. Nothing is handed a flag; the profile picks a mapping.
+//! The Ollama row selects `wire::ollama`, which shares projection and decoding
+//! with the family but writes the measured ceiling field. No provider flag
+//! is passed through shared code.
 //!
 //! A **third** recording establishes that, and it is the one that matters:
 //! `ollama_ceiling_adapted.*` is the exact body
@@ -173,11 +168,8 @@ async fn ollama_honours_max_tokens_and_ignores_max_completion_tokens() {
 /// comment: the field the **Ollama profile** sends is the field the daemon
 /// reads.
 ///
-/// This test used to assert the opposite, and it was right to: until the row
-/// could name a mapping, `ego` sent `max_completion_tokens` and the daemon
-/// threw it away. `docs/decisions/`
-/// `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8 closed that, and
-/// this is the same guard pointed at the same seam from the other side.
+/// The request must send the ceiling field the daemon honors, not a similar
+/// field that it silently discards.
 ///
 /// It goes through `ProviderRow::ollama_default()` plus its explicit mapping rather than calling
 /// `wire::ollama::request_body` directly, because the claim under test is

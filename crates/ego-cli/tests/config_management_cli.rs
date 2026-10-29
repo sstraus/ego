@@ -1,4 +1,4 @@
-//! contract for regression case's final `ego config` management surface.
+//! contract for final `ego config` management surface.
 //!
 //! These tests deliberately exercise the installed binary as separate
 //! processes. The atomic crash and concurrency contract is covered by the

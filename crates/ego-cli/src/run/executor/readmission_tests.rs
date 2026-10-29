@@ -1,5 +1,5 @@
 //! Re-admission against the real session writer and executor.
-use super::regression_case_tests::{catalogue, run_child};
+use super::defaults_tests::{catalogue, run_child};
 use ego_core::event::id::ItemId;
 use ego_core::generator::capabilities::ModelCapabilities;
 use ego_core::permit::{HumanApprover, PermissionDecision, PermissionRequest};
@@ -40,7 +40,7 @@ impl HumanApprover for HeldHuman {
 // Catches: overlapping real continuations append decisions from competing stale Journals.
 #[test]
 fn overlapping_readmission_permissions_keep_the_session_event_sequence_unique() {
-    if std::env::var("EGO_REGRESSION_CHILD").as_deref() != Ok("overlapping_readmission") {
+    if std::env::var("EGO_DEFAULTS_CHILD").as_deref() != Ok("overlapping_readmission") {
         run_child("overlapping_readmission", Some("off"));
         return;
     }
@@ -234,7 +234,7 @@ fn overlapping_readmission_permissions_keep_the_session_event_sequence_unique() 
 // so a retried request fails with a store error while the admitted turn holds the writer.
 #[test]
 fn retried_continuation_replays_while_the_admitted_turn_holds_the_session_writer() {
-    if std::env::var("EGO_REGRESSION_CHILD").as_deref() != Ok("retried_continuation") {
+    if std::env::var("EGO_DEFAULTS_CHILD").as_deref() != Ok("retried_continuation") {
         run_child("retried_continuation", Some("off"));
         return;
     }

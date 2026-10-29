@@ -14,12 +14,8 @@
 //! continuation that lost its column, a table that grew a cell past the right
 //! edge. All three are obvious in a transcript and invisible in a `contains`.
 //!
-//! **They prove no bytes reach a terminal.** Like `ego-ai`'s wire goldens, this
-//! is a fixture, not an observation: it says what this code produces, not what
-//! iTerm2 draws. What iTerm2 draws is the ADR's matrix
-//! (`docs/architecture.md` §4),
-//! which is evidence from those terminals' own sources. These goldens hold the
-//! renderer to the shape that matrix says is safe.
+//! These goldens prove renderer output bytes, not what a particular terminal
+//! draws. They do not establish emulator capability support.
 //!
 //! **Regenerating them is the last resort, not the first.** A diff here means
 //! the rendering changed. Read the diff, decide whether the new rendering is
@@ -156,10 +152,8 @@ fn code_lines() -> Vec<String> {
     out
 }
 
-/// §2 of the ADR, on the whole document rather than on one span: the piped form
-/// is a *different* rendering, not the coloured one with escapes stripped. So
-/// it carries no escape, and no trailing padding either — a file of ragged
-/// blanks is what stripping would have produced.
+/// Piped output is a distinct plain rendering, not escaped terminal output
+/// with color stripped. It contains neither escapes nor trailing padding.
 #[test]
 fn a_file_gets_no_escapes_and_no_ragged_blanks() {
     for width in WIDTHS {

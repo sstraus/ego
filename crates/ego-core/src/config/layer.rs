@@ -1,5 +1,4 @@
-//! The config schema. Every layer is `deny_unknown_fields`
-//! (`CLI.md` §4.5) — an unrecognised key is a hard error, not a silent skip.
+//! The per-layer configuration schema.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
@@ -33,7 +32,7 @@ impl std::fmt::Display for ModelRef {
     }
 }
 
-/// Permission mode — `ARCHITECTURE.md` §3.4 axis 1.
+/// Layer values before precedence resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -122,9 +121,8 @@ where
 /// config path and the frontmatter path from disagreeing about what one string
 /// means.
 ///
-/// So a rule that is not a rule is a config error with a file and a line, and a
-/// rule this build cannot enforce is refused by name at the same moment —
-/// `2026-08-21-a-rule-that-means-exactly-one-thing.md` §6a.
+/// Invalid rules are configuration errors with a file and line. Rules this
+/// build cannot enforce are refused by name during the same load.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermCfg {
@@ -208,8 +206,7 @@ pub enum Network {
     Off,
 }
 
-/// The overrides a `[profile.NAME]` table may apply on top of the layer that
-/// defines it (`CLI.md` §7, `--profile NAME`).
+/// Instruction content selected by the resolved posture.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileLayer {
@@ -987,16 +984,12 @@ pub struct ConfigLayer {
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
     ///
-    /// `CLI.md:296-299` promises an administrator this key on
-    /// `/etc/ego/config.toml` and calls the system layer "the only source of
-    /// ceilings". This layer is `deny_unknown_fields`, so until the key
-    /// existed the promise could not be kept by anybody: writing it produced
-    /// `ConfigError::UnknownKey`.
+    /// This layer is `deny_unknown_fields`, so until the key existed the promise could
+    /// not be kept by anybody: writing it produced `ConfigError::UnknownKey`.
     pub budget: Option<Budget>,
     /// Mirrors `--bare`: forces `Posture::Bare` even in a trusted workspace.
     pub bare: Option<bool>,
-    /// `[profile.NAME]` sections, selected with `--profile NAME` /
-    /// `EGO_PROFILE` (`CLI.md` §7). Keyed by profile name.
+    /// Keyed by profile name.
     #[serde(default)]
     pub profile: HashMap<String, ProfileLayer>,
     /// Provider login commands and non-secret identity-header overlays.
@@ -1158,7 +1151,7 @@ impl ConfigLayer {
 }
 
 /// `toml`'s `deny_unknown_fields` diagnostic reads
-/// `unknown field \`key\`, expected ...` or
+/// `unknown field \`key\`, expected...` or
 /// `unknown field \`key\`, there are no fields` regardless of nesting depth
 /// (a nested table's unknown field is reported by leaf name only, e.g.
 /// `permissions.bogus` and `profile.ci.bogus` both surface as `bogus`).

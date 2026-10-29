@@ -1,11 +1,9 @@
 //! The vocabulary a traversal is expressed in: what to walk, what it may
 //! cost, and what comes back.
 //!
-//! See `docs/architecture.md`.
-//! `glob` and `grep` both walk a subtree, and the difference between them is
-//! not *how* they walk it but what they are allowed to learn — names, or the
-//! lines that matched. Both shapes are described here so the guarded seam can
-//! enforce that difference rather than trust a tool to respect it.
+//! Glob and grep both walk subtrees but learn different things: names or
+//! matching lines. Describe both shapes so guarded execution enforces
+//! the difference rather than trusting tool behavior.
 
 use std::path::PathBuf;
 

@@ -1,4 +1,4 @@
-//! contract for regression case: manifest model projection follows main evidence.
+//! Manifest model projection follows main evidence.
 
 use std::time::Duration;
 
@@ -64,7 +64,7 @@ fn admission(
         GenerationTarget::new("provider", ModelRef(model.to_owned()), model),
         capabilities(),
         PricingEvidence::Unpriced {
-            source: "regression_case-fixture".to_owned(),
+            source: "usage-JZZ-fixture".to_owned(),
             reason: "subscription".to_owned(),
         },
     )

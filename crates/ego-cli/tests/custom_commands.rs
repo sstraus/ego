@@ -210,7 +210,7 @@ fn custom_commands_project_review_sends_real_git_diff_after_trust() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
-    ego.file("tracked.txt", "REGRESSION-MARKER-REAL-DIFF\n");
+    ego.file("tracked.txt", "AFTER-PPI-REAL-DIFF\n");
     let result = places
         .ego(&stub)
         .conversing()
@@ -219,7 +219,7 @@ fn custom_commands_project_review_sends_real_git_diff_after_trust() {
     assert_eq!(result.code, Some(0), "{}", result.stderr);
     let request = stub.generations()[0].to_string();
     assert!(request.contains("Review foo"), "{request}");
-    assert!(request.contains("+REGRESSION-MARKER-REAL-DIFF"), "{request}");
+    assert!(request.contains("+AFTER-PPI-REAL-DIFF"), "{request}");
 }
 
 // Catches: core slash interception executes bracketed-paste data as a command.

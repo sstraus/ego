@@ -1,12 +1,8 @@
 //! Path patterns: canonicalisation and matching.
 //!
-//! `docs/architecture.md` §5.
-//! Two constructs and one meaning each — `*` within a segment, `**` across
-//! whole segments — defined here rather than inherited from a glob crate,
-//! because the two things that differ between glob libraries are exactly
-//! those two, and a permission boundary that changes meaning on a
-//! `cargo update` is not a boundary. A library may implement these rules; it
-//! may not define them.
+//! `*` matches within one segment; `**` spans whole segments. These
+//! permission semantics are defined here, not inherited from a glob
+//! library whose update could change authority.
 
 use std::fmt;
 use std::path::{Component, Path};
@@ -26,7 +22,7 @@ pub enum Segment {
 
 /// A canonicalised path pattern: the AST, not the text it was written as.
 ///
-/// `read( ./src//lib.rs )` and `read(src/lib.rs)` produce the same value
+/// `read(./src//lib.rs )` and `read(src/lib.rs)` produce the same value
 /// here, and therefore the same [`RuleId`](super::RuleId).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathPattern {
@@ -48,10 +44,8 @@ impl PathPattern {
         &self.segments
     }
 
-    /// Canonicalise the text between a head's parentheses.
-    ///
-    /// The whole of §5's path list happens here, so that no caller has to
-    /// remember any of it and no second spelling can survive into an AST.
+    /// Canonicalize path-pattern text in one place so equivalent spellings cannot survive into
+    /// different AST identities.
     pub fn parse(raw: &str) -> Result<Self, RuleParseError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {

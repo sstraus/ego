@@ -1,7 +1,6 @@
 //! Which session this run writes to, and where.
 //!
-//! `CLI.md` §3's durable session choices plus the store the turn loop is
-//! handed. The recognized `--ephemeral` spelling is refused before a
+//! The recognized `--ephemeral` spelling is refused before a
 //! [`SessionChoice`](crate::cli::SessionChoice) exists.
 
 use std::path::PathBuf;
@@ -141,11 +140,9 @@ pub(crate) fn open_candidate<'a>(
 
 /// A store on disk at `root`, creating sessions on behalf of `workspace`.
 ///
-/// `workspace` must be the value `run::workspace` produced — it is already
-/// through `std::fs::canonicalize`, which is what makes a session reached
-/// through a symlink, or through `/var` rather than `/private/var`, compare
-/// equal to itself. Resolving it a second time here would be the second
-/// canonicaliser `AGENTS.md`'s reuse-first rule exists to prevent.
+/// `workspace` must already be canonicalized by `run::workspace`. This keeps
+/// symlink aliases and `/var` versus `/private/var` equal without a second
+/// canonicalization path here.
 pub fn jsonl(root: PathBuf, workspace: PathBuf) -> JsonlStore {
     let store = JsonlStore::new(root, workspace, Box::new(OsIo));
     match crate::config::ego_home() {

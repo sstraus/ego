@@ -1,14 +1,10 @@
 //! ACP v1 session config options: the host's picker for the generation
 //! controls and the run's confinement.
 //!
-//! `docs/architecture.md` §2 selects `session/set_config_option` and its
-//! model-category options as the projection for model and config control.
-//! The dedicated `providers/list|set|disable` methods are not served: they
-//! are gated behind the schema's `unstable_llm_providers` draft feature,
-//! which the pinned SDK does not expose and therefore cannot route, and
-//! `providers/set` would let a connected host rewrite the base URL every
-//! generation egresses to. §3's rule — a pinned dependency or compiled
-//! feature is not an advertised capability — settles it.
+//! Model and config control use `session/set_config_option` and model-category
+//! options. The dedicated `providers/list|set|disable` methods are not served:
+//! the pinned SDK does not expose their `unstable_llm_providers` draft feature.
+//! A connected host cannot rewrite the provider base URL through this surface.
 //!
 //! Everything here is a projection. The available list published by
 //! [`SessionControlState`] is the entire offer, and an incoming value is

@@ -31,9 +31,9 @@ async fn ctrl_v_then_enter_never_enters_literal_next() {
 }
 
 async fn scenario(name: &str, assertion: u8) {
-    if std::env::var_os("EGO_REGRESSION_PTY_CHILD").is_some() {
+    if std::env::var_os("EGO_IMAGE_TEST_PTY_CHILD").is_some() {
         let arguments: Vec<String> =
-            serde_json::from_str(&std::env::var("EGO_REGRESSION_ARGS").unwrap()).unwrap();
+            serde_json::from_str(&std::env::var("EGO_IMAGE_TEST_ARGS").unwrap()).unwrap();
         let crate::cli::Invocation::Interactive(args) = crate::cli::parse(arguments).unwrap()
         else {
             panic!("interactive fixture")
@@ -67,13 +67,13 @@ async fn scenario(name: &str, assertion: u8) {
     let mut command = ego.pty_command_with_program(std::env::current_exe().unwrap());
     command.get_argv_mut().truncate(1);
     command.args(["--exact", &format!("{PREFIX}{name}"), "--nocapture"]);
-    command.env("EGO_REGRESSION_PTY_CHILD", "1");
+    command.env("EGO_IMAGE_TEST_PTY_CHILD", "1");
     command.env("RUST_MIN_STACK", "16777216");
     if assertion == 2 {
-        command.env("EGO_REGRESSION_HOLD", "1");
+        command.env("EGO_IMAGE_TEST_HOLD", "1");
     }
     command.env(
-        "EGO_REGRESSION_ARGS",
+        "EGO_IMAGE_TEST_ARGS",
         serde_json::to_string(&[
             "ego",
             "--model",

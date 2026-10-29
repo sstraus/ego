@@ -121,8 +121,7 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
-/// Where an [`Envelope`](super::domain::Envelope)'s observation time comes
-/// from (`docs/architecture.md` §2).
+/// The observation-time source for an [`Envelope`](super::domain::Envelope).
 ///
 /// A port rather than a `Timestamp::now()`, for the reason this whole type
 /// exists: a timestamp that reads the system clock from inside the domain
@@ -130,12 +129,9 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// inject. `ego-core` does not read the system clock, the same way it does
 /// not open files — `ego-tools` owns the implementation that does.
 ///
-/// Returns a wall-clock `Timestamp`, not a `std::time::Instant`.
-/// `ARCHITECTURE.md` §3.3 sketched `Env::clock() -> Instant`, which cannot
-/// produce this value at all: an `Instant` is an opaque monotonic
-/// measurement with no epoch, and this is UTC milliseconds since one.
-/// `Instant` stays right for what it is good at — elapsed time and deadlines
-/// — and that is a different method for a different caller.
+/// Returns a wall-clock `Timestamp`, not a `std::time::Instant`. `Instant` stays right
+/// for what it is good at — elapsed time and deadlines — and that is a different method
+/// for a different caller.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Timestamp;
 

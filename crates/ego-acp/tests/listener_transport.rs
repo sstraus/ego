@@ -164,7 +164,7 @@ async fn initialize_local(
         InitializingClient {
             initialized,
             ready: Arc::new(Notify::new()),
-            client_name: "ego-regression case".to_owned(),
+            client_name: "ego-listener-test-test".to_owned(),
         }
         .connect_to(transport),
     )
@@ -462,7 +462,7 @@ async fn authenticated_websocket_initialize_uses_the_sdk_client() {
         initialize_websocket(
             &server.address,
             Arc::clone(&initialized),
-            "ego-regression case-test".to_owned(),
+            "ego-listener-test-websocket-test".to_owned(),
         ),
     )
     .await

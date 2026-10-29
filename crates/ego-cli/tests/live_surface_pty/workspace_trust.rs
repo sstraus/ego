@@ -5,11 +5,11 @@ use super::*;
 #[test]
 fn managed_pty_explicit_trust_delivers_initial_prompt_once() {
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("REGRESSION-MARKER-ANSWER"))],
+        completions: vec![Reply::Sse(text("TRUST-ROR-ANSWER"))],
         ..Plan::default()
     });
     let places = support::Places::new();
-    places.file("AGENTS.md", "# REGRESSION-MARKER-PROJECT-INSTRUCTIONS\n");
+    places.file("AGENTS.md", "# TRUST-ROR-PROJECT-INSTRUCTIONS\n");
     let ego = places.ego(&stub).conversing().args([
         "--model",
         "ollama/qwen3",
@@ -17,7 +17,7 @@ fn managed_pty_explicit_trust_delivers_initial_prompt_once() {
         "off",
         "--yolo",
         "--trust-workspace",
-        "REGRESSION-MARKER-INITIAL-TASK",
+        "TRUST-ROR-INITIAL-TASK",
     ]);
     assert!(!ego.home_path().join("trust.json").exists());
     let pair = NativePtySystem::default()
@@ -34,13 +34,13 @@ fn managed_pty_explicit_trust_delivers_initial_prompt_once() {
     let (reader, reader_join) = stream(pair.master.try_clone_reader().expect("reader"), dsr);
     let mut output = Vec::new();
     let deadline = Instant::now() + PROGRESS_DEADLINE;
-    while !normalized(&output).contains("REGRESSION-MARKER-ANSWER") {
+    while !normalized(&output).contains("TRUST-ROR-ANSWER") {
         match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(chunk) => output.extend(chunk),
             Err(_) => break,
         }
     }
-    let answered = normalized(&output).contains("REGRESSION-MARKER-ANSWER");
+    let answered = normalized(&output).contains("TRUST-ROR-ANSWER");
     if answered {
         until_prompt_from(&reader, &mut output, 0);
         input.write_all(b"/quit\r").expect("quit");
@@ -63,13 +63,13 @@ fn managed_pty_explicit_trust_delivers_initial_prompt_once() {
     let generations = stub.generations();
     assert_eq!(generations.len(), 1, "initial task must run once");
     assert_eq!(
-        count_exact_strings(&generations[0]["messages"], "REGRESSION-MARKER-INITIAL-TASK"),
+        count_exact_strings(&generations[0]["messages"], "TRUST-ROR-INITIAL-TASK"),
         1
     );
     assert!(
         generations[0]["messages"]
             .to_string()
-            .contains("REGRESSION-MARKER-PROJECT-INSTRUCTIONS")
+            .contains("TRUST-ROR-PROJECT-INSTRUCTIONS")
     );
     assert!(
         ego.home_path().join("trust.json").exists(),

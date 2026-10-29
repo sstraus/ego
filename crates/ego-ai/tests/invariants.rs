@@ -1,11 +1,8 @@
 //! The two invariants of the provider seam, proved from outside it.
 //!
-//! `docs/guides/providers.md` §5
-//! states three, and each has a *necessary* condition and a *sufficient* one.
-//! The necessary one — that the near side names no provider and no protocol —
-//! is a grep, and it lives in `crates/ego-core/tests/near_side.rs` because the
-//! source it reads is that crate's. This file is the sufficient one: **a
-//! stranger can do it from outside.**
+//! Core source checks enforce the necessary provider-neutral boundary in
+//! `crates/ego-core/tests/near_side.rs`. These tests exercise the complementary
+//! condition: an external caller can supply a provider or protocol adapter.
 //!
 //! Outside is what makes these evidence rather than decoration. An integration
 //! test in `ego-ai` reaches only public API, and `ego-ai` depends on `ego-core`
@@ -929,7 +926,7 @@ impl ego_core::turn::RetryPause for NoRetryPause {
     }
 }
 
-// regression case: real HTTP framing and body truncation, with no external provider.
+// real HTTP framing and body truncation, with no external provider.
 const CODEX_TEXT: &str = include_str!("goldens/profile/openai-codex/stream/text.sse");
 const CODEX_TOOL: &str = include_str!("goldens/profile/openai-codex/stream/tool_calls.sse");
 
@@ -1259,7 +1256,7 @@ async fn fast_contract_catches_missing_wire_tier_and_unmultiplied_turn_cost() {
         );
     }
 }
-// regression case: completed Codex sockets must not survive a human wait.
+// completed Codex sockets must not survive a human wait.
 #[derive(Default)]
 struct QuestionSocketState {
     now: std::sync::atomic::AtomicU64,

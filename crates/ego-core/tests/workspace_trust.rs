@@ -1,11 +1,8 @@
-//! contract for regression case: a remembered trust answer, and what it is an
+//! contract for a remembered trust answer, and what it is an
 //! answer about.
 //!
-//! Everything here is pure. Which paths get probed and how the ledger reaches
-//! `$EGO_HOME` belong to the binary; what an inventory *is*, when two of them
-//! are the same, and whether a stored answer still applies are decisions, and
-//! decisions live in core. See
-//! `docs/architecture.md`.
+//! Core owns pure inventory identity and stored-answer validity. The binary
+//! owns path probing and persistence under `$EGO_HOME`.
 
 use ego_core::config::{
     ExecutableDeclaration, ExecutableSurface, ProgramEvidence, Trust, TrustInventory, TrustLedger,

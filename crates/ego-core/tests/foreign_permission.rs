@@ -1,4 +1,4 @@
-//! contract for regression case guarded HTTP and one-child duplex authority.
+//! contract for guarded HTTP and one-child duplex authority.
 
 use std::ffi::OsString;
 use std::net::{IpAddr, Ipv6Addr};

@@ -1,4 +1,4 @@
-//! contract for the inbound MCP regression case `compact` tool.
+//! contract for the inbound MCP `compact` tool.
 
 #![allow(dead_code)]
 
@@ -61,7 +61,7 @@ fn call_named(name: &str, arguments: Value) -> McpServerToolCall {
     McpServerToolCall::new(
         name.to_owned(),
         arguments.as_object().expect("compact object").clone(),
-        Some("compact-068".to_owned()),
+        Some("compact-NHC".to_owned()),
     )
     .expect("compact call envelope")
 }

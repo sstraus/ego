@@ -1,12 +1,9 @@
 //! What "and similar" means, as four checks a provider either passes or does
 //! not.
 //!
-//! `docs/guides/providers.md` §9.
-//! The rule it encodes is operator's: **no compatibility declared by commercial
-//! similarity.** A vendor's `openai-compatible` badge is not evidence, a URL
-//! ending in `/v1/chat/completions` is not evidence, and neither is a
-//! another client shipping the provider on that adapter. Membership means passing
-//! these, and nothing else.
+//! Commercial similarity is not compatibility evidence. Each provider
+//! profile must pass these checks even when it shares an API-shaped URL
+//! or mapping with another provider.
 //!
 //! # Parameterised over providers, not over code paths
 //!

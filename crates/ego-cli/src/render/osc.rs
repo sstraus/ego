@@ -1,11 +1,8 @@
 //! The out-of-band half: what ego tells the host that is not text on a screen.
 //!
-//! `docs/architecture.md` §4 sets
-//! the rule: an unknown OSC is discarded by every emulator in the matrix, so
-//! the risk of emitting one is not garbage on screen — it is a capability
-//! claimed and never delivered. Every sequence here appears in that matrix,
-//! and the two that are not universal ([`Osc::notify`], [`Osc::tuic`]) are
-//! chosen by [`OscProfile`] rather than emitted hopefully.
+//! Emit optional OSC sequences only for the selected [`OscProfile`].
+//! Unsupported notifications or TUIC sequences would claim functionality
+//! without delivering it.
 //!
 //! ## Why every dynamic payload is sanitised
 //!
@@ -161,10 +158,8 @@ impl Osc {
     }
 
     /// A desktop notification, spelled the way this host understands.
-    ///
-    /// Not both spellings: Ghostty supports 9 *and* 777, so emitting both
-    /// notifies twice. The ADR's matrix is what decides, and it decides here
-    /// rather than at the call site.
+    /// Emit one notification spelling. Ghostty supports both 9 and 777; sending
+    /// both would notify twice.
     pub fn notify(&self, title: &str, body: &str) -> String {
         match self.profile {
             OscProfile::None => String::new(),
@@ -460,9 +455,7 @@ mod tests {
         assert_eq!(hostile.notify("εgo", "done"), "\x1b]9;εgo: done\x07");
     }
 
-    /// A percentage above 100 is a budget computed from a figure that grew.
-    /// Clamped rather than asserted: the ADR's failure semantics say a
-    /// rendering defect must not be able to take a run with it.
+    /// Clamp percentages above 100. Rendering a budget that grew must not panic.
     #[test]
     fn a_percentage_over_a_hundred_is_clamped_not_panicked() {
         assert_eq!(standard().progress(Progress::At(240)), "\x1b]9;4;1;100\x07");

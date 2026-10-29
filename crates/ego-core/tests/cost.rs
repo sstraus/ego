@@ -1,7 +1,7 @@
 //! The accounting contract: exact decimal money, the `Known`/`Unknown` cost
 //! delta, and the rules that fold deltas into a cumulative session total.
 //!
-//! See `ARCHITECTURE.md` §3.1 and the mdkb decision `ego-acp-usage-verdict`.
+//! Exact cost arithmetic and settlement contracts.
 //!
 //! What these tests are really defending is a single claim: **a cumulative
 //! cost is either exactly right or explicitly unknown, and never quietly
@@ -278,11 +278,8 @@ mod cost {
     /// `Known(0)`, because reporting `Unknown` would poison the session
     /// total for no reason.
     ///
-    /// And the zero is attributed to the *policy* that produced it, not to a
-    /// price list: there is no table saying "zero per token" here, and
-    /// spelling one would be the confusion
-    /// `docs/architecture.md` §4 exists to
-    /// prevent.
+    /// Attribute zero unmetered spend to its policy, not a nonexistent
+    /// per-token price list.
     #[test]
     fn a_free_generation_is_known_zero_not_unknown() {
         let policy = MeteringRevision("local-unmetered".to_string());

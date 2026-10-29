@@ -1,4 +1,4 @@
-//! regression case contract for typed, atomic managed configuration mutations.
+//! contract for typed, atomic managed configuration mutations.
 
 use std::io;
 use std::path::{Path, PathBuf};

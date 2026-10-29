@@ -1,11 +1,7 @@
 //! One diagnosis, two renderings, and nothing changed by looking.
 //!
-//! The contract these hold is
-//! `docs/architecture.md`,
-//! and its testing section names exactly what has to be shown: identical
-//! semantic snapshots from both surfaces, deterministic order, exit folding,
-//! partial section failure, every redaction path, and proof that observing
-//! writes nothing.
+//! Check identical semantic snapshots across surfaces, deterministic order,
+//! exit folding, partial failures, redaction, and observation without writes.
 //!
 //! These are functions over an explicit workspace and an explicit `EGO_HOME`,
 //! not forks of a binary. Doctor's whole job is to be a pure reading of state,
@@ -308,7 +304,7 @@ fn the_acp_section_publishes_what_a_host_would_actually_read() {
         .and_then(serde_json::Value::as_object)
         .expect("this build advertises _ego extensions");
 
-    // regression case's defect, made local: TUICommander could not reach
+    // defect, made local: TUICommander could not reach
     // `_ego/pause` because it expected two entries where ego publishes one,
     // and no ego surface said which. This is the surface that says it.
     for name in extensions.keys() {

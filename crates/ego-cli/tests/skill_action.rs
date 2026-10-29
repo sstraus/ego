@@ -1,4 +1,4 @@
-//! Historical regression case wire assertions retained at the process-test target.
+//! Historical wire assertions retained at the process-test target.
 //!
 //! The registry-owned behavioural coverage moved into the crate unit tests so
 //! it can bind the crate-private `SkillCatalogueView` owner. This target keeps

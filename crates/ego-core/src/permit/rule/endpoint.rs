@@ -1,19 +1,6 @@
-//! `net(...)` patterns: a parsed authority, never a URL.
-//!
-//! `docs/architecture.md` §5.
-//! `POTENTIALS.md` P19 records that `http://2130706433/` and
-//! `http://127.0.0.1/` are the same destination spelled two ways, and that
-//! comparing host strings does not know it. The grammar closes that at the
-//! front door: a pattern is a host and an optional port, both normalised at
-//! parse time, and the confusing spellings are either normalised to one form
-//! or made unspellable.
-//!
-//! **This half is only worth anything if the destination is the resolved
-//! destination.** §5 requires matching to classify what the transport
-//! resolved rather than the URL text. Nothing in `ego-core` opens a socket,
-//! so the classifier lives here and the transport becomes its caller; until
-//! something calls it, a `net` rule parses, canonicalises and gets an ID, and
-//! matches no call — because no call carries an endpoint.
+//! Parse network rules as normalized authorities, not URL text. Match the destination the
+//! transport resolved. Invalid numeric address spellings must not become names; core performs
+//! no socket I/O.
 
 use std::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -204,17 +191,9 @@ fn parse_host(host: &str, bad: &dyn Fn(&str) -> RuleParseError) -> Result<Host, 
     if let Some(ip) = legacy_ipv4(host) {
         return Ok(Host::Ip(IpAddr::V4(ip)));
     }
-    // A host that *looks* like an address and is not one is refused, never
-    // demoted to a name. `256.1.1.1` has an octet out of range: falling
-    // through would store it as `Host::Name("256.1.1.1")`, a rule that can
-    // never match anything, while the operator believes they named an
-    // address. That is §2's worst failure mode — a boundary that reads
-    // correctly and is not there — reached by a typo rather than by design.
-    //
-    // It is also what the transport does. WHATWG requires that a host whose
-    // last label is numeric parse as IPv4 or the URL be invalid, so `url`
-    // refuses `http://256.1.1.1/` outright. Agreeing here is the whole of
-    // P19: two subsystems that classify one string differently is the hole.
+    // Refuse invalid numeric hosts rather than demoting them to names that cannot match. Keep
+    // grammar classification aligned with WHATWG transport parsing through endpoint-agreement
+    // tests.
     if ends_in_a_number(host) {
         return Err(bad(
             "the last label is a number, so this is an address — and it is \

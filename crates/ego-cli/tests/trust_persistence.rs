@@ -1,9 +1,8 @@
-//! contract for regression case: the trust question is asked when there is
+//! contract for the trust question is asked when there is
 //! something to trust, and only until it has been answered.
 //!
-//! Driven through a real pseudo-terminal because the question only exists
-//! where a human seat does. See
-//! `docs/architecture.md`.
+//! Use a real pseudo-terminal because the question exists only when a
+//! human seat is available.
 
 mod support;
 

@@ -1,10 +1,5 @@
-//! Everything that reaches a terminal or a pipe: the three `--output` modes
-//! of `CLI.md` §4, and the rule that stdout is protocol-clean.
-//!
-//! §4.5: "stdout is protocol-clean in json/jsonl/acp modes, all diagnostics on
-//! stderr". That is enforced here by there being exactly one type that can
-//! write to stdout at all — [`Stdout`] — and by the diagnostic path
-//! ([`note`]) not being able to reach it.
+//! Terminal and pipe output share one stdout owner, `Stdout`. Diagnostics use `note` and cannot
+//! write protocol stdout. Structured output must contain no terminal controls.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, IsTerminal, Write};
@@ -519,9 +514,8 @@ pub(crate) fn background_exec_notice(snapshot: &ego_core::permit::DetachedExecSn
 
 /// The live view of a run: one `PublicEvent` per line, as it happens.
 ///
-/// `CLI.md` §4.2 says *live*, and the only way a sink can be live is to write
-/// on `publish` — which is what this does, flushing every line, so a consumer
-/// reading a pipe sees an event before the turn that produced it has ended.
+/// Publish and flush each JSONL event immediately so consumers observe it before the turn
+/// ends.
 pub struct JsonlSink<'a> {
     out: &'a Stdout,
 }
@@ -723,14 +717,9 @@ impl<'a> TextSink<'a> {
     /// What an operator has to be told about the ceiling they asked for, and
     /// `None` when the flag does exactly what its spelling says.
     ///
-    /// Two of [`CeilingEffect`]'s three values are a flag that behaves
-    /// differently from how it reads, and `CLI.md` §5 spells `--budget` as a
-    /// **hard cap**: `Inapplicable` is not a cap at all, and a clamped `Binds`
-    /// caps at a figure nobody typed. Both are already on
-    /// [`PublicEvent::MeteringSelected`] for `--output json/jsonl`; this is the
-    /// same fact for the operator who did not ask for a machine-readable
-    /// stream, and without it the default mode is exactly the "silently vacuous
-    /// flag" that event's own doc says is not acceptable.
+    /// Tell text-mode operators when a monetary ceiling is inapplicable or clamped.
+    /// Machine-readable `MeteringSelected` events alone do not inform a reader of default
+    /// terminal output.
     ///
     /// Money is rendered `{amount}{currency}` — the spelling `--budget` itself
     /// accepts — so the figure quoted back can be retyped.
@@ -1076,11 +1065,8 @@ impl EventSink for TextSink<'_> {
                     }
                 }
             }
-            // Deliberately **not** gated on `quiet`. `-q` is presentation —
-            // CLI.md §1.3 pairs it with `--no-color` and calls it "quiet
-            // progress" — and a guarantee the operator asked for and did not
-            // get is not progress. Suppressing it would put the flag's silence
-            // back exactly where this arm removes it from.
+            // Do not suppress unmet-guarantee warnings with `quiet`; these are policy
+            // facts, not progress output.
             PublicEvent::CostAnomaly {
                 model,
                 estimated_upper_bound,
@@ -1167,23 +1153,16 @@ impl EventSink for TextSink<'_> {
     }
 }
 
-/// The occupancy half of §4.1's result, present only when something reported
-/// it. An absent key says "nobody has told us"; a zero would say the context
-/// is empty.
+/// Last reported context occupancy. An absent value means unknown, not an empty context.
 #[derive(Debug, Serialize)]
 pub struct ContextReport {
     pub used_tokens: u64,
     pub provenance: OccupancyProvenance,
 }
 
-/// The single object `--output json` writes at completion (`CLI.md` §4.1).
-///
-/// `ok` and `exit_reason` are both read off one [`RunTermination`], so they
-/// cannot disagree — §4.2's "one error field" rule, and the Claude
-/// `subtype:"success"` + `is_error:true` contradiction it was written against.
-/// `usage` and `cost` are `SessionState`'s own values, serialised rather than
-/// rebuilt: the four priced categories and the `unstarted|known|unknown` state
-/// are contracts core already owns.
+/// The single JSON completion object. Derive `ok` and `exit_reason` from one `RunTermination`
+/// so they cannot contradict each other. Serialize usage and cost from the core session state
+/// rather than rebuilding their vocabulary.
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub v: u32,
@@ -1197,27 +1176,12 @@ pub struct Report {
     /// server was admitted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp_errors: Vec<String>,
-    /// The action a permission-refused run was denied. §4.4 requires it: a
-    /// script handed exit 3 and no subject has been told nothing.
+    /// The denied action, so a script receiving exit 3 can identify the permission it needs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denied: Option<String>,
-    /// Who refused it, when somebody did.
-    ///
-    /// Beside [`denied`](Self::denied) rather than replacing it: the action
-    /// and the authority are two facts, and folding one into the other would
-    /// break every consumer of a documented §4.4 field for no gain.
-    ///
-    /// Absent means **nobody answered** — §6's evaluation order was exhausted
-    /// — which is unambiguous alongside `exit_reason: "permission"`. That is
-    /// the one place [`DeniedBy`](ego_core::run::DeniedBy)'s explicit `Nobody`
-    /// arm becomes an `Option`, and the one place the `Option` earns its keep.
-    ///
-    /// A new key and no version bump. §4.2 already ratifies presence as this
-    /// format's detection mechanism — error arrays "present only when
-    /// non-empty — a CI gate is a presence check" — so a key that appears only
-    /// on exit 3 is additive under a rule that was written down rather than
-    /// under one asserted here. See
-    /// `docs/architecture.md` §4.
+    /// The authority that refused, separate from the denied action. Absence means nobody
+    /// answered, not an unnamed refusal. This optional field is detected by presence and
+    /// appears only for policy refusal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denied_by: Option<Authority>,
     pub turns: usize,
@@ -1312,20 +1276,8 @@ impl Report {
     }
 }
 
-/// The one arm of §4.1's denial mapping the binary cannot reach.
-///
-/// `DeniedBy::Nobody` needs a call the mode declines to auto-approve, and
-/// `ModeApprover` declines only mutating operations (`approver.rs`: "a read
-/// inside the workspace that stopped the run to ask would be the prompt
-/// fatigue `ARCHITECTURE.md:238` counts as a security bug"). This build's
-/// `builtins()` are `read`, `glob` and `grep` — every one of them
-/// non-mutating — so no argv reaches it, and a test that spawned `ego` could
-/// not produce one. It arrives with the write tool.
-///
-/// That is exactly why the arm is asserted here rather than left to the
-/// process tests: a mapping nothing exercises is an assumption with a match
-/// arm's syntax, and the change that first exercises it — the write tool — is
-/// the one that must not discover it was wrong.
+/// Exercise the unanswered-permission completion mapping with synthetic data, without executing
+/// a mutating tool.
 #[cfg(test)]
 mod tests {
     use ego_core::event::id::SessionId;
@@ -1340,7 +1292,7 @@ mod tests {
             termination,
             serde_json::Value::String(String::new()),
         );
-        serde_json::to_value(report).expect("§4.1's object serialises")
+        serde_json::to_value(report).expect("the completion object serializes")
     }
 
     // Catches: resume's stderr adapter emits LF without CR while the seat owns raw mode.
@@ -1460,7 +1412,7 @@ mod tests {
             action: "edit may not write /ws/x".to_string(),
             by: DeniedBy::Nobody,
         });
-        let object = object.as_object().expect("§4.1 publishes an object");
+        let object = object.as_object().expect("completion publishes an object");
 
         assert!(
             !object.contains_key("goal"),
@@ -1468,10 +1420,7 @@ mod tests {
         );
         assert_eq!(object["exit_reason"], "permission");
         assert_eq!(object["denied"], "edit may not write /ws/x");
-        // Absent, not null. §4.2 ratifies presence as this format's detection
-        // mechanism — error arrays "present only when non-empty — a CI gate is
-        // a presence check" — and a null would be a value every consumer has
-        // to special-case in order to learn the same thing.
+        // Omit absent errors rather than emitting null, preserving presence-based detection.
         assert!(
             !object.contains_key("denied_by"),
             "nobody decided, so there is no authority to name"

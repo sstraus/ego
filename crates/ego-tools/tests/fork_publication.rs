@@ -1,4 +1,4 @@
-//! contract for regression case's generalized atomic fork publication.
+//! contract for generalized atomic fork publication.
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};

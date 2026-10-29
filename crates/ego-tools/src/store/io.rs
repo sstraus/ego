@@ -3,7 +3,7 @@
 //!
 //! Named `StoreIo` rather than `Fs` deliberately: `ego_core::permit::Fs`
 //! already names a different seam (permit-checked read/write over
-//! canonical paths, regression case). This one is unchecked — nothing here
+//! canonical paths, ). This one is unchecked — nothing here
 //! consults a `Permit` — and it is shaped around session-store durability,
 //! not tool sandboxing: fsync is its own operation, distinct from writing,
 //! so a caller (or a test) can observe exactly when durability was
@@ -132,13 +132,8 @@ fn open_for_sync(path: &Path) -> io::Result<fs::File> {
 /// The scratch path [`StoreIo::replace_atomic`] writes before renaming it
 /// onto `path`.
 ///
-/// Public, and part of the `StoreIo` contract rather than `OsIo`'s private
-/// business, for one reason: crash recovery has to be able to *find* a
-/// scratch file left behind by a crash between the write and the rename
-/// (`plans/m0a-contracts.md` Step 6's "torn manifest tmp" kill point). A
-/// caller cannot clean up a file whose name only the implementation knows,
-/// so the name is derived here, once, and every `StoreIo` implementation
-/// must use it.
+/// A caller cannot clean up a file whose name only the implementation knows, so the name
+/// is derived here, once, and every `StoreIo` implementation must use it.
 ///
 /// The suffix is *appended* (`manifest.json` → `manifest.json.tmp`) rather
 /// than substituted via `Path::with_extension`, which would replace the
@@ -316,9 +311,8 @@ pub trait StoreIo: Send + Sync {
     /// `path` does not exist yet.
     fn append_line(&self, path: &Path, line: &[u8]) -> io::Result<()>;
 
-    /// Force `path`'s buffered writes to stable storage. Kept distinct from
-    /// [`StoreIo::append_line`] so the fsync policy (`ARCHITECTURE.md` §5)
-    /// is observable as its own event, not inferred from write counts.
+    /// Force buffered writes for `path` to stable storage as an observable operation,
+    /// separate from append.
     fn fsync(&self, path: &Path) -> io::Result<()>;
 
     /// Read the whole file at `path`, or `None` if it does not exist.
@@ -371,12 +365,7 @@ pub trait StoreIo: Send + Sync {
         Ok(Some(content[start..].to_vec()))
     }
 
-    /// Whether `path` exists. A distinct operation from [`StoreIo::read`] so
-    /// a caller that only needs to know "does this log exist yet" is not
-    /// forced to pull the whole file into memory to answer a boolean —
-    /// `JsonlStore::append` is exactly that caller, and a session's log can
-    /// grow to the hundreds of megabytes `ARCHITECTURE.md` §5 expects
-    /// snapshots to bound.
+    /// Test path existence without reading whole files into memory.
     fn exists(&self, path: &Path) -> io::Result<bool>;
 
     /// Atomically and *durably* replace `path`'s contents with `bytes`: a
@@ -412,12 +401,7 @@ pub trait StoreIo: Send + Sync {
         ))
     }
 
-    /// Shorten the file at `path` to `len` bytes, discarding everything
-    /// past it. Used by tail repair to drop a torn final line
-    /// (`plans/m0a-contracts.md` Step 6); a whole-file rewrite through
-    /// [`StoreIo::replace_atomic`] would be correct but would copy an
-    /// entire session log — up to the hundreds of megabytes
-    /// `ARCHITECTURE.md` §5 expects — to remove a few trailing bytes.
+    /// Shorten a file to `len` for torn-tail repair without copying the entire log.
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()>;
 
     /// Delete the file at `path`, succeeding if it is already gone. Used to
@@ -870,12 +854,8 @@ impl StoreIo for OsIo {
 /// test that reads back in-process, and the whole reason it is wrong
 /// anywhere else.
 ///
-/// `JsonlStore`'s crash-recovery contract (`ARCHITECTURE.md` §5) is a
-/// durability claim, and this type does not honour it — which is why it sits
-/// behind the `test-support` feature rather than merely carrying this
-/// warning. A doc comment is advice; a feature gate is a guarantee. No
-/// non-test build enables it, so outside a test this type does not exist to
-/// be misused. See the feature's own comment in `crates/ego-tools/Cargo.toml`.
+/// Test-only I/O elides durability barriers but retains actual filesystem operations. It
+/// must never claim crash durability or enable durable publication without barriers.
 #[cfg(feature = "test-support")]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct NonDurableOsIo;

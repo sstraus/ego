@@ -1,4 +1,4 @@
-//! contract for regression case: a sanitized export is a producer-only bundle.
+//! A sanitized export is a producer-only bundle.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -650,12 +650,9 @@ fn same_attempt_ref_across_invocations_is_rejected_without_bundle_or_source_muta
 
 /// The redaction gate is *field*-exhaustive, not just variant-exhaustive.
 ///
-/// `docs/architecture.md`
-/// claims "exhaustive matching is the gate that makes a future event field
-/// fail compilation instead of leaking by default". A rest pattern silently
-/// weakens that to a *variant* gate: `EventKind::Error { kind, .. }` keeps
-/// compiling when a third field is added, and a sensitive one would then be
-/// dropped without ever being classified or counted.
+/// Exhaustive field matching makes new durable fields require explicit
+/// export classification. Rest patterns would compile silently when a
+/// sensitive field is added, weakening that protection to variants alone.
 ///
 /// The compiler cannot state this rule, so the source does. Reading the file
 /// is the whole test — it costs no fixture and no bundle, and it fails the

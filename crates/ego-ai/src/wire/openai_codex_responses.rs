@@ -1,9 +1,8 @@
 //! The `openai-codex-responses` wire format: `POST /codex/responses`, streamed.
 //!
-//! ChatGPT/Codex subscription backend, not Platform `api.openai.com`. Pi names
-//! this shape separately from `openai-responses` (`docs/guides/providers.md`
-//! §4.1). The body is Responses (`input`, `instructions`, `reasoning.effort`);
-//! the path and identity headers are Codex's.
+//! The ChatGPT/Codex subscription backend, not Platform `api.openai.com`.
+//! The body uses Responses fields (`input`, `instructions`, `reasoning.effort`);
+//! the path and identity headers belong to the Codex backend.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

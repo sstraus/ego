@@ -1284,28 +1284,9 @@ async fn image_data_that_is_not_base64_is_refused() {
     connection.finish().await;
 }
 
-/// The digest a prompt is admitted under is derived from the request, never a
-/// copy of it.
-///
-/// `RequestDigest` names an identity used to recognise a retry, and it is
-/// written into the durable run transaction (`RunCommand::CommandAdmitted`),
-/// which the session store serialises to its JSONL. `ego-mcp` builds it by
-/// hashing (`run_server.rs` `request_digest`) and `ego-core`'s subagent service
-/// builds a bounded `child:<invocation>:<sha256>`; this connection is the one
-/// that handed the controller the serialized request body itself, so every ACP
-/// prompt was persisted twice — once as `prompt`, once again inside `digest`.
-///
-/// Text made that a size defect. It stops being only that as soon as a block
-/// can carry bytes: `docs/decisions/2026-08-29-images-are-session-blobs-before-
-/// they-are-wire-parts.md` rules that durable prompt records carry a `BlobRef`,
-/// a media type and dimensions and "never carry bytes", and a digest that is a
-/// verbatim copy of the request would write base64 image data straight into the
-/// event stream, outside the blob lifecycle that is supposed to own it. So this
-/// is a prerequisite for accepting images, not a tidy-up beside it.
-///
-/// The assertion is about *derivation*, not about a particular hash: a bounded
-/// value that does not contain the prompt it identifies. Pinning the exact
-/// spelling here would make it a change-detector.
+/// The admitted request digest must be derived, bounded, and contain no prompt copy. The
+/// durable run transaction persists it, so a serialized request would duplicate text and bypass
+/// the blob lifecycle for inline image bytes. This tests derivation, not one hash spelling.
 #[tokio::test]
 async fn a_prompt_is_admitted_under_a_derived_digest_and_not_its_own_body() {
     const MARKER: &str = "MARKER-THAT-MUST-NOT-BE-COPIED-INTO-THE-DIGEST";
@@ -1386,11 +1367,9 @@ async fn a_prompt_for_an_unopened_session_is_refused() {
 /// A second prompt for a session whose turn is still running is refused, and
 /// no second turn starts.
 ///
-/// `docs/architecture.md`
-/// §3. The refusal is not politeness: the registry holds one `CancelToken` per
-/// session, so admitting a second turn would replace the running turn's token
-/// with the queued turn's and leave the running one unreachable by
-/// `session/cancel` — the defect §1 describes.
+/// The registry holds one `CancelToken` per session. Admitting another turn
+/// would replace the running turn's token and make it unreachable through
+/// `session/cancel`.
 ///
 /// Both halves are asserted. A build that answered the second prompt with an
 /// error *and* ran the turn anyway would satisfy the first assertion alone.
@@ -1627,12 +1606,8 @@ async fn a_prompt_redelivered_after_a_later_turn_replays_instead_of_running_agai
     connection.finish().await;
 }
 
-/// `session/cancel` reaches the turn that is running.
-///
-/// The other half of §3, and the one the admission rule exists to keep true: a
-/// host's cancel names a session, and the session's answer must be the turn
-/// that is actually spending money — not a token left over from a prompt that
-/// arrived later.
+/// `session/cancel` must reach the turn spending money, not a cancellation token displaced by a
+/// later prompt.
 #[tokio::test]
 async fn cancel_reaches_the_turn_that_is_running() {
     let host = PromptExecutor::blocking();

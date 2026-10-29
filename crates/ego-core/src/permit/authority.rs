@@ -1,9 +1,8 @@
 //! Who decided, recorded so an audit can answer "what did this run do
 //! without asking me".
 //!
-//! `docs/architecture.md` §7. The arms are
-//! the ones with producers in this build, including the judge and human seats
-//! at §6 steps 6 and 7.
+//! Attribution includes rules, mode, boundary and external judge or human
+//! parties that can produce decisions in this build.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,11 +13,8 @@ use crate::generator::attempt::AttemptRef;
 
 /// One rule that contributed to a decision, and where it came from.
 ///
-/// The same `{ id, from, also }` shape
-/// `docs/architecture.md` gave
-/// `PolicyDenied::Denied`, deliberately: "who said so" is one vocabulary, and
-/// two that must agree about the same fact is the duplication the reuse rule
-/// exists to prevent.
+/// Share the `{ id, from, also }` shape with `PolicyDenied::Denied` so rule
+/// identity and provenance use one vocabulary.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuleAuthority {
     /// The rule, by the ID `ego rules revoke` takes.
@@ -46,44 +42,29 @@ impl RuleAuthority {
     }
 }
 
-/// What let a call through, or stopped it.
-///
-/// **`Rules` is a list, and that is not over-generality.** A denial has one
-/// authority because §6 step 1 stops at the first matching deny. An allow has
-/// as many as the call has ops, because nothing stops early when the answer
-/// is yes: `classify` mints only once *every* op has found a covering rule,
-/// and those can be different rules. Recording one rule of three would be a
-/// false record, and a false attribution is worse than an absent one — it
-/// survives review looking like a fact.
-///
-/// There is no `SystemCeiling` arm. A system deny is a rule that matched, and
-/// `Source::System` is already on that rule's own attribution. One fact,
-/// recorded once.
+/// Authority that admitted or refused a call. Deny stops at its first matching rule; allow can
+/// require different rules for different operations. Preserve every contributing rule's
+/// attribution. System origin already lives on the rule and needs no duplicate variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "by", rename_all = "snake_case")]
 pub enum Authority {
     /// Every rule that covered an op of this call. Non-empty.
     Rules { rules: Vec<RuleAuthority> },
-    /// The mode decided, at §6 step 2 (the floor) or step 5 (the ceiling).
+    /// Mode authority, at its read-only floor or final approval decision.
     Mode { mode: Mode },
     /// A party at the [`Approver`](super::Approver) port decided, and it was
     /// not the mode.
     ///
-    /// **This arm is what makes the permission ports more than names for
-    /// `ModeApprover`.** A non-mode verdict carries who gave it. So
-    /// an `Authority` with only `Rules`, `Mode` and `Boundary` would leave
-    /// every non-mode approver with nothing true to say: it would have to
-    /// claim the mode decided, which is the false attribution
-    /// `2026-08-21-a-deny-that-names-who-can-lift-it.md` exists to stop.
+    /// A non-mode approver must name the party that decided. Attributing its
+    /// verdict to mode would misstate which authority can change the outcome.
     ///
     /// It intentionally names the role rather than a person. This build has no
     /// identity source for the operator at the terminal; inventing one would
     /// turn a constant into audit data. Interactive allow and deny decisions
     /// are the production writers of this arm.
     Party,
-    /// The workspace boundary, at §6 step 0. Not a rule: nobody wrote it,
-    /// `--allow` cannot widen it and no mode lifts it, so there is no ID to
-    /// record and nothing to revoke.
+    /// Workspace boundary, not a revocable rule. Neither mode nor an allow can widen it, so it
+    /// has no rule ID.
     Boundary,
     /// The run's session-bound evidence store intrinsically admitted one
     /// exact evidence reference.

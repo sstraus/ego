@@ -1,65 +1,17 @@
-# The bootstrap model catalogue, compiled into the binary: startup defaults and
-# tombstones here, capability rows in `models.generated.toml`.
+# Builtin model defaults and tombstones; generated capabilities live in `models.generated.toml`.
 #
-# Read `crates/ego-cli/src/facts.rs` first: this file is the *lowest* of three
-# layers. `/etc/ego/models.toml` overrides it and `$EGO_HOME/models.toml`
-# overrides both, per slug. Nothing here is authority over what an operator
-# states; it exists so that a machine with an API key and no files can run.
+# System and user model files override this weakest layer per slug. Builtin capabilities contain
+# published facts, not prices or invented unknown values. `policy.toml` and
+# `scripts/catalogue.py` select current generations; retired builtin rows retain tombstones.
 #
-# ## What may be written here
+# Supplied providers enumerate configured rows. Discovery providers obtain their own catalogues.
+# OpenRouter stays dynamic rather than carrying an arbitrary builtin subset.
 #
-# Capability rows are not written here. `models.generated.toml` holds them, one per
-# current model, generated from the pinned models.dev snapshot and `policy.toml` by
-# `scripts/catalogue.py`. operator decision 2026-10-11: the builtin
-# catalogue lists only current model generations (see `policy.toml` for what that
-# means per provider). A model of an older generation is not listed; an operator
-# states it in `/etc/ego/models.toml` or `$EGO_HOME/models.toml`, and a row ego
-# listed before and no longer lists gets a tombstone below.
-#
-# **No prices.** A rate written from memory is a number the budget gate would
-# trust and nothing could check, and
-# `docs/architecture.md` §1 forbids it.
-# models.dev states a literal 0 for the coding plans, so the snapshot omits every
-# price. A run with a money ceiling and no operator rates therefore still refuses
-# with `NoPricingQuote`, which is the correct answer: unknown price is not free
-# price.
-#
-# A fact nobody published stays absent. `max_tools` is omitted rather than
-# guessed, `image_input = "unknown"` fails closed rather than inventing a
-# media-type list. `docs/decisions/2026-08-25-...` §provenance: "Missing
-# numeric or reasoning facts remain `None` or `ReasoningEffortSupport::
-# Unknown`; zero, a maximum, or `Any` is never used as a presentation default."
-#
-# ## Which providers appear
-#
-# Rows exist for `openai`, `openai-codex`, `anthropic`, `gemini`, `github-copilot`,
-# `xai-oauth` and `minimax-oauth`: their resolvers (`Supplied`, `SubscriptionSupplied`)
-# list only supplied rows, so a provider with no row lists nothing. `ollama` and
-# `kimi-coding` discover their models from the provider, so a row here would be a
-# second answer to a question the provider already answers. `nous` has no public
-# catalogue and stays operator-supplied.
-#
-# `gemini` is selectable under the published-contract decision in
-# `docs/architecture.md`.
-# `docs/architecture.md` records the current capability,
-# replay, and default-thinking evidence used by its built-in row.
-#
-# `openrouter` appears with no rows: it proxies hundreds of models from dozens of
-# vendors, changing weekly, so any handful chosen here would be arbitrary and
-# stale. operator decision 2026-10-11: OpenRouter stays dynamic and is not listed
-# here.
-#
-# ## Revision
-#
-# `BUILTIN_CATALOGUE_REVISION` in `facts.rs` must equal the date below, and a
-# test holds that. The revision is what a retirement error names, so a stale
-# constant would send an operator to the wrong catalogue.
-#
+# `BUILTIN_CATALOGUE_REVISION` in `facts.rs` must equal the revision below.
 # revision = 2026-10-15
 
-# First-run policy refreshed on 2026-09-29 for gpt-6.1-sol, released that day;
-# availability is still observed.
-# See docs/architecture.md.
+# First-run policy refreshed for gpt-6.1-sol on 2026-09-29.
+# Availability is still checked at runtime.
 [default_model]
 openai = "openai/gpt-6.1-sol"
 openai-codex = "openai-codex/gpt-6.1-sol"

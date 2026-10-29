@@ -1,7 +1,6 @@
-//! Default requests use ego identity rather than another application identity.
-//! Operator-supplied headers are separate from published OAuth client IDs.
-//! These tests check headers only; client IDs and protocol fields retain their
-//! provider-defined values. See `docs/guides/providers.md`.
+//! Default requests use ego identity rather than another application's.
+//! Operator headers are separate from published OAuth client IDs. These tests
+//! check headers; client IDs and protocol fields retain provider-defined values.
 
 use ego_ai::http::{HttpError, HttpResponse};
 use ego_ai::oauth::{BuiltInFlow, provider_auth};
@@ -159,7 +158,7 @@ fn no_request_a_default_row_builds_names_another_vendors_client() {
         "a default provider row is presenting somebody else's client identity.\n\
          ego ships its own identity only; a vendor that gates on its own client \
          is an operator's `[auth.<provider>.headers]` decision, not a built-in \
-         (`docs/guides/providers.md` §7.8).\n\n{}",
+         (`docs/guides/providers.md`).\n\n{}",
         all.join("\n")
     );
 }
@@ -310,13 +309,9 @@ async fn a_vendor_refusing_egos_identity_is_quoted_and_answered_with_the_recipe(
 }
 
 /// What ego does send where a vendor's wire contract needs an identity.
-///
-/// The removal is not "send nothing": `originator` and `openai-beta` are facts
-/// about the Codex backend's contract and `anthropic-beta: oauth-2025-04-20` is
-/// what makes a `sk-ant-oat` credential presentable as a Bearer at all. They
-/// stay, they carry ego's own name where they carry a name, and the amended ADR
-/// §3 lists each with its source. Pinned here so that "remove the disguise"
-/// cannot quietly become "remove the contract".
+/// Protocol fields stay even when client impersonation is removed:
+/// `originator`, `openai-beta` and the Anthropic OAuth beta header are part
+/// of their backend contracts. Identity cleanup must not remove those fields.
 #[test]
 fn ego_names_itself_where_a_vendor_contract_wants_an_identity() {
     let codex = ProviderRow::openai_codex_default();

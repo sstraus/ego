@@ -11,7 +11,7 @@ fn workspace_git_global_ignore_is_readable_without_opening_its_directory() {
     let git = root.join("home/.config/git");
     std::fs::create_dir_all(&git).unwrap();
     let ignore = git.join("ignore");
-    std::fs::write(&ignore, "REGRESSION-MARKER").unwrap();
+    std::fs::write(&ignore, "GIT-IGNORE-ALI").unwrap();
     let other = git.join("not-config");
     std::fs::write(&other, "PRIVATE-NEIGHBOR").unwrap();
     let config = root.join("home/.gitconfig");
@@ -28,7 +28,7 @@ fn workspace_git_global_ignore_is_readable_without_opening_its_directory() {
         assert!(
             read.content
                 .iter()
-                .any(|block| block.text.contains("REGRESSION-MARKER"))
+                .any(|block| block.text.contains("GIT-IGNORE-ALI"))
         );
         execute(
             policy.clone(),
@@ -61,7 +61,7 @@ fn pnpm_11_live_exec_uses_the_installed_engine_under_adaptive() {
     std::fs::create_dir(&workspace).unwrap();
     std::fs::write(
         workspace.join("package.json"),
-        r#"{"name":"regression_case-live","private":true,"packageManager":"pnpm@11.15.1"}"#,
+        r#"{"name":"sandbox-ALI-live","private":true,"packageManager":"pnpm@11.15.1"}"#,
     )
     .unwrap();
     let policy = admit_confinement(
@@ -97,7 +97,7 @@ fn workspace_git_ignore_directory_does_not_become_a_runtime_root() {
     let ignore = root.join("home/.config/git/ignore");
     std::fs::create_dir_all(&ignore).unwrap();
     let secret = ignore.join("private");
-    std::fs::write(&secret, "REGRESSION-MARKER").unwrap();
+    std::fs::write(&secret, "DIRECTORY-NEIGHBOR-ALI").unwrap();
     let policy = admit_confinement(
         Confinement::Workspace,
         false,
@@ -227,7 +227,7 @@ fn pnpm_11_live_dead_selector_lock_matches_unsandboxed_behavior() {
     std::fs::create_dir(&workspace).unwrap();
     std::fs::write(
         workspace.join("package.json"),
-        r#"{"name":"regression_case-stale-lock","private":true,"packageManager":"pnpm@11.15.1"}"#,
+        r#"{"name":"sandbox-ALI-stale-lock","private":true,"packageManager":"pnpm@11.15.1"}"#,
     )
     .unwrap();
     let home = std::env::var_os("PNPM_HOME")

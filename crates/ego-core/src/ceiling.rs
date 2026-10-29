@@ -1,26 +1,9 @@
 //! What a ceiling is written as, and what a resolved one holds.
 //!
-//! `docs/architecture.md` §§4 and 8.
-//!
-//! ## Why the grammar lives here and not on the flag
-//!
-//! `--budget 2.5$` and a config file's `budget = "2.5$"` are the same ceiling
-//! written in two places, and §4 makes the config key real: an administrator's
-//! `/etc/ego/config.toml` is the *only* source of non-relaxable ceilings, so
-//! the key has to parse the same thing the flag does. Two parsers would drift,
-//! and the direction they would drift in is the dangerous one — a spelling the
-//! flag accepts and the system layer rejects is a ceiling an administrator
-//! believes they set.
-//!
-//! So there is one [`Budget::from_str`], in the crate that owns neither
-//! surface, and both call it.
-//!
-//! ## Why a ceiling is refused rather than guessed
-//!
-//! A bare number names no unit, and "budget 400" is either four hundred
-//! dollars or four hundred tokens depending on who wrote it. There is no
-//! reading of that which is safe to pick silently: one of the two is off by
-//! whatever the model charges per token.
+
+//! CLI and config budgets share `Budget::from_str` so administrator ceilings and requested
+//! limits cannot interpret the same spelling differently. Refuse bare numbers without units
+//! rather than guessing money versus tokens.
 
 use std::fmt;
 use std::str::FromStr;
@@ -63,8 +46,7 @@ impl FromStr for Budget {
             why,
         };
 
-        // `2.5$` and `$2.5`: both are things people type, and `CLI.md:128`
-        // publishes the first.
+        // A hard budget ceiling over either tokens or currency.
         if let Some(digits) = trimmed
             .strip_suffix('$')
             .or_else(|| trimmed.strip_prefix('$'))
@@ -168,10 +150,7 @@ impl std::error::Error for BudgetSpecError {}
 /// The ceilings a run is actually subject to, after every layer has had its
 /// say.
 ///
-/// Both fields, independently, because §4's clamp is per-field: an
-/// administrator who caps money must not be escaped by a user who names a
-/// token ceiling instead, and the reverse. `None` is the ordinary case —
-/// `CLI.md:296-299` says ego imposes no ceiling of its own.
+/// No ceiling is imposed unless explicitly configured.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ceilings {
     pub money: Option<Money>,
@@ -179,19 +158,9 @@ pub struct Ceilings {
 }
 
 impl Ceilings {
-    /// Whether anything here needs rates to enforce, and therefore whether
-    /// §5's rate sources are consulted at all.
-    ///
-    /// Only the money ceiling does. §9's token ceiling is checked against
-    /// token counts the session already has, so a run bounded only in tokens
-    /// looks up no price — which is exactly why §9 calls it the ceiling an
-    /// air-gapped operator should reach for.
-    ///
-    /// §5 is emphatic that this is a *gate* and not an optimisation: with no
-    /// money ceiling, no rate source is consulted, so an ordinary run
-    /// contacts nobody but the model provider. That is a privacy property,
-    /// and it has to be true before there is a third-party fetch to leak
-    /// through rather than after.
+    /// Only monetary ceilings need rates. Token limits use measured session counts. Gate
+    /// pricing access before consulting any source so token-only and unbounded runs do not
+    /// contact third-party pricing services.
     pub fn needs_rates(&self) -> bool {
         self.money.is_some()
     }
@@ -211,21 +180,9 @@ impl Ceilings {
         }
     }
 
-    /// Reduce these ceilings to `ceiling` where `ceiling` is stricter,
-    /// reporting each reduction.
-    ///
-    /// `CLI.md:311` — "system ceilings binding everyone" — so the operation
-    /// is `min` and not "the administrator wins outright": an operator who
-    /// asked for *less* than the administrator's cap keeps their own figure.
-    ///
-    /// A money ceiling in a currency the administrator's is not in cannot be
-    /// compared, and is therefore replaced outright rather than let through.
-    /// Converting would need a rate, and a rate would make the administrator's
-    /// cap depend on a table they did not write.
-    ///
-    /// Returns what was reduced, because §4 requires the clamp be **stated,
-    /// not silent** — otherwise `--budget 20$` reads as binding at $20 when
-    /// it binds at $5.
+    /// Clamp requested ceilings to system limits and report reductions. A different currency
+    /// cannot be compared safely, so the administrator's currency cap replaces it without an
+    /// invented exchange rate.
     pub fn clamp(&mut self, ceiling: &Ceilings) -> Clamped {
         let mut clamped = Clamped::default();
 

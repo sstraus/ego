@@ -1,11 +1,9 @@
 //! Fetching the litellm table: once, conditionally, and never storing
 //! something that is not a table.
 //!
-//! `docs/guides/providers.md` §6 puts the fetch in
-//! this crate, because it owns `Http`, and §7 settles what the run does when it
-//! fails. What is tested here is only the exchange — whether the cache is
-//! *consulted* is `Metering::ceiling_needs_rates`, one layer up, and whether
-//! the network is reachable at all is the transport policy, one layer down.
+//! This crate owns the HTTP exchange. `Metering::ceiling_needs_rates`
+//! decides whether to consult rates; transport policy decides whether
+//! network access is permitted.
 
 mod support;
 
@@ -98,12 +96,8 @@ async fn a_conditional_request_that_is_answered_with_a_body_is_a_new_table() {
     assert_eq!(upstream_version, "\"newer\"");
 }
 
-/// Bytes that are not a table never reach the cache.
-///
-/// The realistic failure is not a corrupted download but an interception: a
-/// captive portal, a proxy's rate-limit page, an HTML error served with a 200.
-/// §6 stores one file per fetch named by its content hash, so admitting one of
-/// these would put a permanent, hash-named non-table in `$EGO_HOME/pricing/`.
+/// Reject non-table bytes before caching. A captive portal or HTML error served with status 200
+/// must not become a permanent hash-named pricing artifact.
 #[tokio::test]
 async fn a_two_hundred_that_is_not_a_table_is_refused_before_it_can_be_stored() {
     let (http, _) = transport(vec![
@@ -117,17 +111,9 @@ async fn a_two_hundred_that_is_not_a_table_is_refused_before_it_can_be_stored() 
 }
 
 /// A table that identifies itself with nothing cannot supply a revision.
-///
-/// §6 requires the `PricingRevision` to name "the source, the upstream version
-/// and the content hash". The content hash is ours and the source is a
-/// constant; the middle term exists only if the server states one. A
-/// `litellm@unknown#<hash>` revision would be the silently-vacuous shape this
-/// ADR refuses everywhere else — attributable to bytes, and to no artefact
-/// anyone can go and look at.
-///
-/// It fires only behind something that strips validators, since GitHub always
-/// sends one. That operator is told which header is missing, and `models.toml`
-/// remains open to them — §5 ranks it above this table anyway.
+/// A revision requires source, upstream validator and content hash. Missing
+/// validators must cause a named refusal, not an invented `unknown` version.
+/// Operator-supplied rates remain the higher-priority alternative.
 #[tokio::test]
 async fn a_response_with_no_validator_cannot_be_pinned_and_is_refused() {
     let (http, _) = transport(vec![Answer::from((200, TABLE))]);
@@ -141,8 +127,8 @@ async fn a_response_with_no_validator_cannot_be_pinned_and_is_refused() {
     assert_eq!(header, "etag");
 }
 
-/// A non-2xx that is not a 304 is the network failure §7 gives exit 4 to, and
-/// it names the status rather than being swallowed into "no table".
+/// A non-success status other than 304 is a network failure that names the status rather than
+/// becoming an absent table.
 #[tokio::test]
 async fn a_server_error_is_reported_as_a_failed_fetch() {
     let (http, _) = transport(vec![Answer::from((503, "upstream is down"))]);

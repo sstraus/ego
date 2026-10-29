@@ -1,7 +1,7 @@
 //! Snapshots: bounded replay, and the cases where a snapshot must be
 //! thrown away rather than trusted.
 //!
-//! See `plans/m0a-contracts.md` Step 7 and `ARCHITECTURE.md` §5.
+//! Snapshots must reproduce full-replay state or fall back to full replay.
 //!
 //! The load-bearing assertion in this file is *state equality*:
 //! `resume(snapshot + suffix)` must equal `resume(full log)`. It is worth
@@ -463,7 +463,7 @@ mod snapshot {
 
     // -- AC1: stale snapshots are rejected --------------------------------
 
-    /// **The staleness case that actually happens.** regression case's tail
+    /// **The ordinary staleness case.** Tail
     /// repair truncates a torn log, so a snapshot can legitimately end up
     /// *ahead* of the log it describes. Trusting it would resurrect events
     /// the repair deliberately discarded.
@@ -581,14 +581,9 @@ mod snapshot {
         assert_eq!(resumed, fx.full_replay());
     }
 
-    /// A snapshot a *previous build of this binary* wrote, byte for byte, not
-    /// a synthetic one with its version field poked. `ItemState` gained four
-    /// required fields in
-    /// `docs/architecture.md`, so a v2 snapshot no
-    /// longer even parses — and the point of this test is that it does not
-    /// have to. Whichever rejection fires, resume produces the same state a
-    /// full replay does, which is what makes "a snapshot is a cache" true
-    /// rather than aspirational.
+    /// A retained old snapshot may fail to parse after required fields change.
+    /// Resume must still produce the full-replay state: snapshots are caches,
+    /// not independent durable authority.
     #[test]
     fn a_snapshot_from_before_the_item_fields_falls_back_to_a_full_replay() {
         let fx = session_with_events();

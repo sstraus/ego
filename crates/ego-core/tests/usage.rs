@@ -1,4 +1,4 @@
-//! contract for regression case: durable usage retains role and time.
+//! Durable usage retains role and time.
 
 use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{
@@ -25,7 +25,7 @@ fn cost(currency: &str, amount: &str) -> CostDelta {
             CurrencyCode::new(currency).expect("valid currency"),
         ),
         attribution: CostAttribution::Table {
-            revision: PricingRevision("regression_case-fixture".to_owned()),
+            revision: PricingRevision("usage-JZZ-fixture".to_owned()),
         },
         fx: None,
     }

@@ -1,7 +1,7 @@
 //! `DomainEvent` and the pure sync reducer: replay determinism, totality
 //! and causal-parent resolution.
 //!
-//! See `ARCHITECTURE.md` §1 and `plans/m0a-contracts.md` Step 2.
+//! Reducer behavior over durable event sequences.
 
 use ego_core::config::Mode;
 use ego_core::cost::{
@@ -1421,10 +1421,8 @@ mod reducer {
 
     // --- the attempt ledger ------------------------------------------------
     //
-    // See `docs/architecture.md`. The
-    // reducer is total, so "refused" means the variant's effect is not
-    // applied and a typed `Refusal` is recorded — the envelope bookkeeping
-    // still happens either way.
+    // The reducer is total. Refusal records a typed error and omits the
+    // variant's effect, but still applies envelope bookkeeping.
 
     /// A driver for one session's log: it hands out sequence numbers and
     /// applies as it goes, which is what the harness loop does.
@@ -2015,10 +2013,8 @@ mod reducer {
 
     /// A pause travels through `Running -> Requested -> Paused` and only a
     /// resume leaves the last state.
-    ///
-    /// The middle state is the contract, not an implementation detail: the
-    /// ADR requires `_ego/pause` to answer `pending` until the boundary
-    /// exists, and a two-state model has no way to say that.
+    /// `_ego/pause` reports `pending` until the durable boundary exists.
+    /// A two-state model cannot represent that interval truthfully.
     #[test]
     fn a_pause_reaches_its_boundary_through_a_pending_state() {
         let turn = TurnId::new();
@@ -2101,9 +2097,7 @@ mod reducer {
     }
 
     /// A boundary nothing asked for is ignored.
-    ///
-    /// It can only come from a log that lost its request, and reducing it
-    /// would manufacture the boundary the ADR says is never manufactured.
+    /// A boundary without its request must not manufacture a paused state.
     #[test]
     fn a_boundary_without_a_request_does_not_pause_a_running_session() {
         let mut state = SessionState::default();

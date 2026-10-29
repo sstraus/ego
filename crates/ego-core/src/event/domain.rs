@@ -1,6 +1,6 @@
 //! `DomainEvent`: the exhaustive internal reducer input.
 //!
-//! See `ARCHITECTURE.md` §1 for the variant set and the envelope fields.
+//! Durable session events.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,9 +32,8 @@ use crate::run::{CancelReason, DeniedBy, RequestId, RunId, RunSelections, RunSet
 use crate::state::Usage;
 use crate::store::blob::{BlobId, BlobRef};
 
-/// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
-/// sequence number, stable session/turn/item identity, a causal parent, an
-/// observation timestamp and a producer identity.
+/// Domain-event envelope: monotonic sequence, stable session/turn/item IDs, causal parent,
+/// observation timestamp, and producer identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     /// Position in the total order. Authoritative for ordering — see
@@ -120,13 +119,8 @@ pub enum SubagentTerminal {
 
 /// Who stopped a turn that did not finish on its own.
 ///
-/// Carried by [`ExitReason::Cancelled`] rather than left to the run level,
-/// because a timeout that interrupts a turn has to be durable: without this,
-/// the log and `PublicEvent::TurnCompleted` would say `Cancelled` while the
-/// CLI printed `timeout`, and replay, JSONL and ACP would give three accounts
-/// of one fact. A limit applied *between* turns is not here — that is the run
-/// level's, where it is true. See
-/// `docs/architecture.md`.
+/// Turn-interrupting timeouts must be durable so replay, JSONL and CLI
+/// report the same cause. Limits reached between turns belong to the run level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CancelCause {
     /// A human asked for it — `SIGINT`, or an interactive interrupt.
@@ -138,53 +132,33 @@ pub enum CancelCause {
     Host,
 }
 
-/// How a turn ended. Deliberately one field (paired with `ok` on
-/// `TurnCompleted`), never a separate error field alongside it (ARCH §1
-/// review note: "one error field, never two").
-///
-/// The variants are the *turn's* vocabulary. Why an invocation ended is
-/// [`RunTermination`](crate::run::RunTermination), which is a different
-/// question with a different lifetime: `max_turns` fires between two
-/// completed turns, and is not honestly a cause of the one before it.
+/// How a turn ended, paired with `ok` on completion. Invocation termination has a different
+/// lifetime: a between-turn limit is not the cause of the preceding completed turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExitReason {
     /// The turn ran to completion.
     Completed,
     /// The turn was stopped before it finished, by whom it says.
     Cancelled(CancelCause),
-    /// The turn stopped at a safe boundary because a host asked it to, and
-    /// can be continued.
-    ///
-    /// Top-level and deliberately not a [`CancelCause`]. `CancelCause`
-    /// answers *who* stopped the turn, and every one of its values maps to
-    /// ACP's `StopReason::Cancelled`; a host told its resumable hold was
-    /// "cancelled" throws away the turn state it was holding open, which is
-    /// the opposite of what it asked for.
-    /// `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-\
-    /// session.md` rejects "pause as cancel plus a later prompt" by name.
+    /// A host-requested resumable hold at a safe boundary. Keep it distinct from cancellation
+    /// so hosts do not discard state that remains resumable.
     Paused,
     /// The turn was stopped by a budget limit.
     Budget,
-    /// The run was asked for something it cannot do, and no retry will change
-    /// that: `CLI.md` §4.3's exit 2. Distinct from [`Provider`] because
-    /// nothing was sent, and from [`Internal`] because nothing of ours
-    /// failed — the invocation and the resolved model disagree, and the
-    /// caller is the only party who can settle it. See
-    /// `docs/architecture.md`.
+    /// The invocation requests something the resolved model cannot do. Nothing
+    /// was sent and no internal component failed; only the caller can change the
+    /// request, so retry cannot resolve it.
     ///
     /// [`Provider`]: ExitReason::Provider
     /// [`Internal`]: ExitReason::Internal
     Usage,
-    /// A call needed a grant that nobody in this run could give. `CLI.md`
-    /// §4.4: a headless run never hangs on a prompt, so an unresolvable
-    /// permission ends it rather than being answered on the model's behalf.
+    /// An unresolved permission ends a headless run rather than prompting indefinitely or
+    /// allowing the model to answer for the user.
     PermissionRequired,
     /// The provider explicitly reported that the model context window was
     /// exhausted. This is settled and never an automatic retry signal.
     ContextOverflow,
-    /// The provider or the network failed. Distinct from [`Internal`] because
-    /// `CLI.md` §4.3 makes them different exits — a script retries 4 and does
-    /// not retry 1.
+    /// The provider or the network failed.
     ///
     /// [`Internal`]: ExitReason::Internal
     Provider,
@@ -259,14 +233,9 @@ pub struct ToolTiming {
 /// earlier one wrote. `tests/codec.rs`'s committed `golden/store_log.jsonl`
 /// pins those bytes.
 ///
-/// What is additive, precisely: a new variant, or a new field **that decodes
-/// when it is absent** (an `Option`, or `#[serde(default)]` on a type that
-/// has one). A required field is not — a record written before it existed
-/// has no value for it and fails to decode, which is the same break as a
-/// rename. Renaming or re-tagging an existing variant or field is a
-/// `CODEC_VERSION` bump plus a migration, not a fixture update. (This note
-/// used to say "adding a variant or a field is fine", which was overbroad;
-/// corrected in `docs/architecture.md`.)
+/// Additive durable changes must decode when absent: optional or defaulted
+/// fields qualify, required fields do not. Renames and retagging need a
+/// `CODEC_VERSION` bump and migration rather than a fixture-only update.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
@@ -276,16 +245,8 @@ pub enum EventKind {
     SessionTitleChanged { title: Option<String> },
     /// Durable soft deletion. Storage remains available to lineage replay.
     SessionDeleted,
-    /// A host asked for this session's work to stop at its next safe
-    /// boundary, in a way it can later continue.
-    ///
-    /// The *intent*, not the boundary: the request is recorded before the
-    /// turn has stopped, because a pause that were only recorded once it had
-    /// taken effect would be lost by a crash in the window between asking and
-    /// stopping, and replay would then say the session is running and admit
-    /// more effects. `docs/decisions/2026-09-03-acp-host-control-is-\
-    /// negotiated-per-session.md` names that window: the response reports
-    /// `pending` until [`SessionPaused`](Self::SessionPaused) exists.
+    /// Record pause intent before reaching its safe boundary so a crash cannot lose the request
+    /// and admit more effects. Report `pending` until `SessionPaused` exists.
     SessionPauseRequested { request: RequestId },
     /// The safe boundary the request asked for was reached: the indivisible
     /// effect that was in flight settled truthfully, and nothing new was
@@ -483,8 +444,7 @@ pub enum EventKind {
         /// `None` is the judge's durable escalation, not a denial.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowed: Option<bool>,
-        /// The rules, the mode, the boundary or the party that decided —
-        /// `docs/architecture.md` §7.
+        /// The deciding rule, mode, boundary or external party.
         ///
         /// `Option` because a required field would not decode from a record
         /// written before it existed, which this type's own doc comment names
@@ -548,12 +508,9 @@ pub enum EventKind {
     },
     /// One attempt reached a terminal state.
     ///
-    /// Carries no money. `UsageUpdated` is the single accounting fact
-    /// (`docs/architecture.md`); two events
-    /// carrying the same figure are two events that can disagree once they
-    /// are bytes on disk. The `UsageReport` inside `outcome` is the
-    /// provider's own report, kept as *evidence* about the bookings rather
-    /// than as a booking: the reducer checks the two against each other.
+    /// Carries no money: `UsageUpdated` is the single accounting fact. The
+    /// `UsageReport` in `outcome` is provider evidence, not another booking;
+    /// the reducer checks it against the booked values.
     AttemptSettled {
         attempt: AttemptRef,
         outcome: Outcome,

@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn typing_during_long_output_echoes_within_500ms() {
     let answer: String = (0..2000)
-        .map(|row| format!("REGRESSION-MARKER-ROW-{row:04}\n"))
+        .map(|row| format!("OUTPUT-DIP-ROW-{row:04}\n"))
         .collect();
     let (reply, gate) = gated_paced_line(&answer);
     let stub = Stub::start(Plan {
@@ -27,20 +27,20 @@ fn typing_during_long_output_echoes_within_500ms() {
     let answer_start = output.len();
     input.write_all(b"print a long answer\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, answer_start, "REGRESSION-MARKER-ROW-0000");
+    until_normalized(&reader, &mut output, answer_start, "OUTPUT-DIP-ROW-0000");
     let draft_start = output.len();
     let typed = Instant::now();
-    input.write_all(b"DRAFT574RESPONSIVE").unwrap();
+    input.write_all(b"DRAFTFIXRESPONSIVE").unwrap();
     input.flush().unwrap();
     // PTY reads can coalesce a complete draft frame with a later output erase.
     // Observe the completed frame, not the screen at an arbitrary read boundary.
     let echoed = until_composer_frame(&reader, &mut output, draft_start, |rows| {
-        rows.iter().any(|row| row.contains("> DRAFT574RESPONSIVE"))
+        rows.iter().any(|row| row.contains("> DRAFTFIXRESPONSIVE"))
     });
     let elapsed = typed.elapsed();
-    assert!(echoed.join("\n").contains("DRAFT574RESPONSIVE"));
+    assert!(echoed.join("\n").contains("DRAFTFIXRESPONSIVE"));
     gate.release();
-    until_normalized(&reader, &mut output, answer_start, "REGRESSION-MARKER-ROW-1999");
+    until_normalized(&reader, &mut output, answer_start, "OUTPUT-DIP-ROW-1999");
     until_mcp_composer_is_idle(&reader, &mut output);
     let cleared = output.len();
     input.write_all(b"\x03").unwrap();
@@ -152,10 +152,10 @@ fn draft_echo_observer_accepts_completed_frame_before_coalesced_erase() {
         let mut output = captured.to_vec();
         let start = output.len();
         let rows = until_composer_frame(&receiver, &mut output, start, |rows| {
-            rows.iter().any(|row| row.contains("> DRAFT574RESPONSIVE"))
+            rows.iter().any(|row| row.contains("> DRAFTFIXRESPONSIVE"))
         });
         assert!(
-            rows.join("\n").contains("> DRAFT574RESPONSIVE"),
+            rows.join("\n").contains("> DRAFTFIXRESPONSIVE"),
             "split {split}"
         );
         assert!(output.len() > start, "an old echo satisfied split {split}");

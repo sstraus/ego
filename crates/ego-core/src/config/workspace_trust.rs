@@ -1,12 +1,8 @@
 //! What a workspace offers to be trusted with, and which executable changes
 //! require another answer.
 //!
-//! See `docs/architecture.md`.
-//! Split the way everything else in this crate is split: the *decisions* —
-//! what an inventory is, when two of them are the same, and whether a stored
-//! answer still applies — are pure and live here. Which paths get probed,
-//! reading them, and the locked document under `$EGO_HOME` are effects and
-//! live in the binary.
+//! Core owns pure trust decisions: inventory identity and stored-answer
+//! validity. The binary owns probing, file reads and locked `$EGO_HOME` state.
 
 use std::collections::{BTreeMap, BTreeSet};
 

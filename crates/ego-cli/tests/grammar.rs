@@ -144,17 +144,8 @@ fn usd() -> CurrencyCode {
 
 // --- argv ---
 
-/// `--` is honoured before the subcommand is decided, so a token after it is
-/// never read as one. Doing this inside clap is not possible: clap's own `--`
-/// handling is per-subcommand and would have to decide `run` *is* the
-/// subcommand before it could apply.
-///
-/// `ego -- run` is §4.5's own example, and its answer here is a session whose
-/// first prompt is the word "run" rather than a headless run: the token after
-/// the separator is a prompt, so no subcommand was given. The whole contract is
-/// now statable — the prompt is readable rather than merely inferred from a
-/// refusal — and the load-bearing half is still that `run` is not read as a
-/// command.
+/// Honor `--` before deciding subcommands. `ego -- run` starts an interactive prompt containing
+/// `run`, not a headless command.
 #[test]
 fn the_separator_stops_a_subcommand_name_from_being_one() {
     assert_eq!(converses(["--", "run"]).prompt.as_deref(), Some("run"));
@@ -220,10 +211,8 @@ fn the_sandbox_flag_is_parsed_in_both_clap_spellings() {
     }
 }
 
-/// §4.3: flags are never removed silently — a retired flag errors **by name**
-/// with its replacement. The table is empty today, so this tests the mechanism
-/// rather than an entry: the moment the rule is easiest to forget is the first
-/// retirement, when there is nothing but a note in a changelog.
+/// Retired flags must fail by name and name their replacement. Exercise the mechanism even
+/// while the production retirement table is empty.
 #[test]
 fn a_retired_flag_would_be_refused_with_its_replacement() {
     for (retired, replacement) in cli::RETIRED {
@@ -233,17 +222,8 @@ fn a_retired_flag_would_be_refused_with_its_replacement() {
     }
 }
 
-/// §2 documents fourteen commands and this build implements three. The other
-/// eleven were reaching the *interactive* refusal, which told a caller who
-/// typed `ego fork` that the permission dialog was missing — a true sentence
-/// about a surface they did not ask for.
-///
-/// The standard is already written down for the other half of the grammar
-/// (`CLI.md` §3.1: "refused **by name**, with the subsystem it waits on — not
-/// swallowed, and not reported as an unknown argument"). This is that rule
-/// applied to §2, and the failure it prevents is the one §3.1 exists to
-/// prevent: a documented surface whose absence is invisible to anyone who has
-/// not read the source.
+/// Unavailable recognized commands must fail by name with a concrete missing subsystem, not
+/// fall through to an unrelated interactive refusal.
 #[test]
 fn a_documented_subcommand_this_build_lacks_is_refused_by_its_own_name() {
     for (name, waiting_on) in cli::UNBUILT {
@@ -264,11 +244,8 @@ fn a_documented_subcommand_this_build_lacks_is_refused_by_its_own_name() {
     }
 }
 
-/// The complement, and the reason the check above is a table rather than "any
-/// unrecognised word". §2's first line is `ego [PROMPT]`, so a word that is
-/// *not* a documented command is a prompt and the interactive refusal is the
-/// correct answer for it. Widening the new rule to every unknown token would
-/// turn `ego "explain this"` into a spelling complaint.
+/// Unrecognized command text remains a prompt. Refusing every unknown first token would break
+/// `ego "explain this"`.
 #[test]
 fn a_word_that_is_not_a_documented_command_is_still_a_prompt() {
     for word in ["hello", "resumee", "explain this failing test"] {
@@ -285,18 +262,8 @@ fn normalised(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The reason is bound to the document, not just the name.
-///
-/// The first version of this file bound only the command *name* to §2 and left
-/// `waiting_on` free on both sides. `ego rules` then went stale in the code and
-/// in §2.1 independently, within an hour, when the permission rule grammar
-/// shipped and both surfaces went on blaming it — caught by a person, which is
-/// the mechanism this test replaces.
-///
-/// Two prose surfaces that agree today, with nothing that can say when they
-/// stop, are the same defect as a field that is omitted when empty: two
-/// different states, identical bytes. The code string is the source and the
-/// table quotes it.
+/// Bind unavailable-command diagnostics to the document verbatim, not just command names.
+/// Otherwise prose and executable refusals can drift independently.
 #[test]
 fn every_waiting_on_reason_is_the_one_the_document_prints() {
     let doc = normalised(include_str!("../../../CLI.md"));
@@ -350,8 +317,7 @@ fn no_tools_is_the_empty_tool_list_and_not_a_second_flag() {
     assert!(refusal.contains("--no-tools"), "{refusal}");
 }
 
-/// The session group of §4.5 is one value, so "which session" has exactly one
-/// answer and no rule anyone has to remember to check.
+/// Mutually exclusive durable-session choices occupy one value.
 #[test]
 fn the_session_flags_collapse_into_one_choice() {
     assert_eq!(parsed(["run", "Ask"]).session, SessionChoice::New);
@@ -408,11 +374,9 @@ fn the_mode_flags_collapse_into_one_value() {
 }
 
 /// The rules arrive in the order they were written, and both lists are kept.
-///
-/// Order matters: §7 of the rule ADR is first-match-wins within a list, so a
-/// parser that sorted or deduplicated would change which rule an operator's
-/// denial is attributed to. They stay text here — `Rule::load` runs in the
-/// config layer, so a flag and a file go through one parser and not two.
+/// Rule order is first-match-wins within a list. Sorting or deduplicating
+/// arguments could change denial attribution. Flags stay text until the
+/// shared configuration parser loads them.
 #[test]
 fn the_rule_flags_are_repeatable_and_keep_their_order() {
     let args = parsed([
@@ -557,10 +521,8 @@ fn a_gate_exists_even_when_the_ceiling_is_counted_in_tokens() {
     );
 }
 
-/// A money ceiling becomes a limited ledger, and a clamped one carries the
-/// figure that was asked for. §4 requires the clamp be stated, not silent:
-/// dropping `clamped_from` here would make `--budget 20$` publish as though
-/// it bound at $20 when it binds at $5.
+/// A limited ledger retains the requested figure when an administrator clamps it, so the
+/// published limit does not misrepresent what binds.
 #[test]
 fn a_money_ceiling_becomes_the_ledger_and_a_clamp_is_carried_into_it() {
     let plain = budget::gate(
@@ -612,8 +574,7 @@ impl StdinSource for Piped {
     }
 }
 
-/// The precedence table of §4.5, every row of it. It is total on purpose:
-/// every combination lands somewhere and nothing is silently dropped.
+/// Check every prompt-source precedence combination so no supplied input is silently dropped.
 #[test]
 fn every_row_of_the_input_precedence_table_lands_somewhere() {
     // `-` given: stdin is the prompt, whatever else was passed.
@@ -723,7 +684,7 @@ fn an_at_file_that_is_not_there_is_refused_rather_than_taken_literally() {
 
 const SOME_ID: &str = "0192f3a1-1c2b-7d3e-9a4f-5b6c7d8e8c41";
 
-/// §2's `ego resume [ID] [PROMPT]`, both positionals given.
+/// Resume with both an existing session ID and a prompt.
 #[test]
 fn resume_takes_an_id_and_a_prompt() {
     let args = parsed(["resume", SOME_ID, "next step"]);
@@ -734,10 +695,8 @@ fn resume_takes_an_id_and_a_prompt() {
     assert_eq!(args.prompt.as_deref(), Some("next step"));
 }
 
-/// **The first positional is an id only if it is one.** §2 spells both
-/// optional, so `ego resume "next step"` has to mean the latest session and
-/// that prompt — deciding by position alone would turn it into a
-/// malformed-id complaint about the prompt.
+/// A single resume positional is an ID only if it parses as one; otherwise it is the next
+/// prompt for the latest session.
 #[test]
 fn a_lone_positional_that_is_not_an_id_is_the_prompt() {
     let args = parsed(["resume", "next step"]);
@@ -769,8 +728,7 @@ fn a_first_of_two_positionals_must_be_an_id() {
     assert!(refusal.contains("not a session id"), "{refusal}");
 }
 
-/// §2 spells both positionals optional because the interactive surface takes
-/// over the latest session when neither was given.
+/// Promptless resume selects the latest session for interactive continuation.
 #[test]
 fn resume_with_no_prompt_enters_the_interactive_driver() {
     let args = converses(["resume"]);
@@ -838,7 +796,7 @@ fn ls_defaults_to_this_workspace_as_text() {
     assert_eq!(args.session_dir, None);
 }
 
-/// The two flags §2 line 39 and §4.6 give it.
+/// Session listing accepts its documented selection and output flags.
 #[test]
 fn ls_widens_with_all_and_renders_with_output() {
     let args = listed(["ls", "--all", "--output", "json"]);
@@ -895,8 +853,8 @@ fn acp_needs_nothing_to_serve() {
 /// loopback or public endpoint after parsing.
 #[test]
 fn acp_accepts_a_listener_endpoint_without_changing_the_stdio_default() {
-    let args = served(["acp", "--listen", "/tmp/ego-regression case.sock"]);
-    assert_eq!(args.listen.as_deref(), Some("/tmp/ego-regression case.sock"));
+    let args = served(["acp", "--listen", "/tmp/ego-listener-test.sock"]);
+    assert_eq!(args.listen.as_deref(), Some("/tmp/ego-listener-test.sock"));
 }
 
 /// The shared listener controls are valid only when ACP is actually opening
@@ -930,21 +888,18 @@ fn a2a_requires_listen_and_inherits_the_acp_sandbox_ceiling() {
     let args = a2a([
         "a2a",
         "--listen",
-        "/tmp/ego-regression case.sock",
+        "/tmp/ego-listener-test-a2a.sock",
         "--sandbox",
         "ro",
     ]);
-    assert_eq!(args.listen, "/tmp/ego-regression case.sock");
+    assert_eq!(args.listen, "/tmp/ego-listener-test-a2a.sock");
     assert_eq!(args.sandbox, Some(Confinement::Ro));
 }
 
 /// `--sandbox` names the weakest confinement a host may select.
 ///
-/// The flag is why this story exists: `ego acp` is headless, headless resolves
-/// untrusted, and an untrusted resolution discards the Project and Local
-/// layers, so the config file an operator would have written the key into is
-/// read by nobody. See
-/// `docs/architecture.md`.
+/// Headless ACP starts untrusted and does not load Project or Local layers.
+/// An explicit flag supplies the value without relying on those files.
 #[test]
 fn acp_takes_a_confinement_ceiling_by_name() {
     for (spelling, expected) in [
@@ -1107,11 +1062,8 @@ fn acp_takes_no_positional() {
 
 /// `--help` on any built command is answered, not refused.
 ///
-/// It used to be refused. clap reports `--help` through `Err` alongside the
-/// genuine failures, and one `map_err` turned every `Err` into a `UsageError`
-/// — so help went to stderr behind an `ego:` prefix and exited 2, the code
-/// `CLI.md` §4.3 reserves for a usage error. A script that piped `--help` got
-/// an empty stdout and a failure.
+/// Clap represents help through an error-shaped return. It must still write stdout and
+/// exit successfully, unlike a genuine usage error.
 #[test]
 fn asking_a_built_command_what_it_does_is_answered_and_not_refused() {
     for name in cli::BUILT {
@@ -1142,12 +1094,7 @@ fn a_usage_line_names_the_subcommand_it_belongs_to() {
     }
 }
 
-/// `ego --help` on its own lists the command set.
-///
-/// It used to reach the interactive refusal, so someone looking for the
-/// commands was told about the permission dialog — true, and about a surface
-/// they had not asked for. The same defect §2.1 exists to stop, one level
-/// further out.
+/// Bare help lists commands without falling through to an unrelated interactive refusal.
 #[test]
 fn the_bare_help_lists_every_command_this_build_has() {
     let text = answered(["--help"]);
@@ -1182,9 +1129,8 @@ fn top_help_and_readme_offer_the_same_runnable_ollama_quickstart() {
 
 /// And it offers nothing this build refuses.
 ///
-/// The complement, and the reason the overview reads `BUILT` rather than being
-/// typed out: an entry here for a command that is waiting on a subsystem would
-/// be `CLI.md` §2.1's hole again, in the one place a caller looks first.
+/// The overview reads `BUILT` so it cannot advertise an unavailable command independently
+/// of the parser.
 #[test]
 fn the_bare_help_offers_no_command_that_is_not_built() {
     let text = answered(["--help"]);
@@ -1212,8 +1158,7 @@ fn an_unknown_flag_is_still_refused_and_not_answered() {
     assert!(refusal.contains("--nonsense"), "{refusal}");
 }
 
-/// §4.5's separator rule reaches the new commands too: after `--` the word is
-/// a prompt, so `ego -- ls` is the interactive form and not the catalogue.
+/// The separator applies to new commands too: `ego -- ls` is prompt text, not session listing.
 #[test]
 fn the_separator_still_stops_the_new_subcommand_names() {
     for name in ["resume", "ls", "acp"] {
@@ -1249,13 +1194,8 @@ fn no_command_is_both_built_and_waiting_on_something() {
     }
 }
 
-/// Every command `CLI.md` §2 offers is accounted for by exactly one of the two
-/// tables — implemented, or refused by name with what it waits on.
-///
-/// The gap this closes is a command §2 promises that neither table mentions.
-/// It would fall through to the *interactive* refusal, which is the failure
-/// §2.1 was written to end: a caller who typed a documented command told about
-/// a surface they had not asked for.
+/// Every documented command belongs to exactly one availability table. A command missing from
+/// both would fall through to an unrelated interactive path.
 #[test]
 fn every_command_the_document_offers_is_in_exactly_one_table() {
     let doc = include_str!("../../../CLI.md");
@@ -1306,11 +1246,8 @@ fn every_command_the_document_offers_is_in_exactly_one_table() {
 
 /// The two by-name refusal rules, exercised without their tables.
 ///
-/// `UNBUILT` and `RETIRED` are both empty: everything `CLI.md` §2 documents is
-/// built, and nothing has been retired. Every other test about them therefore
-/// loops over nothing and passes, which is the shape a rule has right before
-/// somebody deletes it as dead code and reinvents it badly under deadline.
-/// These two hold the rules themselves against a fixture table.
+/// Both unavailable and retired tables are currently empty. Fixture tables exercise their
+/// refusal behavior even when production loops have no entries.
 #[test]
 fn a_documented_but_unbuilt_command_is_refused_by_name_with_what_it_waits_on() {
     let table = [("teleport", "a transporter")];

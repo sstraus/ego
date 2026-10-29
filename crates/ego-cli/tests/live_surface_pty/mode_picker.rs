@@ -60,12 +60,12 @@ fn shift_tab_retains_the_real_draft_and_is_ignored_by_the_mode_picker() {
     ]);
     ego.home_file("config.toml", "[permissions]\njudge='ollama/qwen3'\n");
     let mut session = modal_session_on(ego, stub);
-    session.press(b"REGRESSION-MARKER-DRAFT\x1b[Z");
+    session.press(b"KEEP-HQL-DRAFT\x1b[Z");
     session.wait("mode `auto` staged");
     session.press(b"\x1b[Z");
     session.wait("mode `accept-edits` staged");
     let shown = session.screen().join("\n");
-    assert!(shown.contains("REGRESSION-MARKER-DRAFT"), "draft lost: {shown}");
+    assert!(shown.contains("KEEP-HQL-DRAFT"), "draft lost: {shown}");
     assert!(
         session.stub.generations().is_empty(),
         "cycling submitted a model turn"
@@ -81,9 +81,9 @@ fn shift_tab_retains_the_real_draft_and_is_ignored_by_the_mode_picker() {
 // Catches: two busy keys resolve from stale editor mode instead of owner queue order.
 #[test]
 fn queued_shift_tab_cycles_preserve_draft_and_compose_after_a_direct_selection() {
-    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING");
+    let (reply, gate) = gated_paced_line("MODE-HQL-RUNNING");
     let stub = Stub::start(Plan {
-        completions: vec![reply, Reply::Sse(text("REGRESSION-MARKER-DRAFT-ANSWER"))],
+        completions: vec![reply, Reply::Sse(text("MODE-HQL-DRAFT-ANSWER"))],
         ..Plan::default()
     });
     let ego = Ego::against(&stub).conversing().args([
@@ -97,10 +97,10 @@ fn queued_shift_tab_cycles_preserve_draft_and_compose_after_a_direct_selection()
     ego.home_file("config.toml", "[permissions]\njudge='ollama/qwen3'\n");
     let mut session = modal_session_on(ego, stub);
     session.press(b"hold turn\r");
-    session.wait("REGRESSION-MARKER-RUNNING");
+    session.wait("MODE-HQL-RUNNING");
     // Direct selection and cycles are queued while the generation is fixed at default.
     session.press(b"/mode plan\r");
-    session.press(b"REGRESSION-MARKER-BUSY-DRAFT\x1b[Z\x1b[Z");
+    session.press(b"KEEP-HQL-BUSY-DRAFT\x1b[Z\x1b[Z");
     assert_eq!(
         session.stub.generations().len(),
         1,
@@ -110,15 +110,15 @@ fn queued_shift_tab_cycles_preserve_draft_and_compose_after_a_direct_selection()
     session.wait("mode `auto` staged");
     let shown = session.screen().join("\n");
     assert!(
-        shown.contains("REGRESSION-MARKER-BUSY-DRAFT"),
+        shown.contains("KEEP-HQL-BUSY-DRAFT"),
         "busy draft lost: {shown}"
     );
     session.press(b"\r");
-    session.wait("REGRESSION-MARKER-DRAFT-ANSWER");
+    session.wait("MODE-HQL-DRAFT-ANSWER");
     let (generations, _) = session.finish();
     assert_eq!(generations.len(), 2);
     assert!(
-        generations[1].to_string().contains("REGRESSION-MARKER-BUSY-DRAFT"),
+        generations[1].to_string().contains("KEEP-HQL-BUSY-DRAFT"),
         "retained draft did not reach next generation"
     );
 }

@@ -1,4 +1,4 @@
-//! regression case contract for the typed stored-user configuration projection.
+//! contract for the typed stored-user configuration projection.
 
 use std::path::PathBuf;
 

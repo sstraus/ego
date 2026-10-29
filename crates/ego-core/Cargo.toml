@@ -6,17 +6,14 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
-# ARCHITECTURE.md §2: ego-core opens no sockets and no files.
-# reqwest / rusqlite / rmcp are forbidden here — enforced by this manifest,
-# not by discipline.
+# Shared hash support for deterministic identifiers.
 [dependencies]
 base64 = "0.22.1"
 tree-sitter = "0.25.10"
 tree-sitter-bash = "0.25"
 futures = "0.3.34"
-# `net(...)` host normalisation to A-labels (same ADR, §5): an ID that differed
-# by how an editor encoded a character would not be revocable from a config
-# file written on another machine. Pure computation.
+# Normalize `net(...)` hosts to A-labels so equivalent Unicode encodings
+# produce the same revocable rule identity. This is pure computation.
 idna = "1"
 jsonschema = { version = "0.49.9", default-features = false }
 # Full bounded PNG validation. Pure computation; exact source bytes are retained.
@@ -25,14 +22,9 @@ schemars = "1.2.2"
 # Pure argument tokenization; never invokes a shell.
 shell-words = "1.1.1"
 serde = { version = "1.0.229", features = ["derive"] }
-# Instruction-file digests (docs/decisions/2026-08-21-instructions-a-workspace-
-# may-hand-a-model.md §7). Deliberately not the store's xxhash64: that detects
-# corruption, this has to hold up against substituted content in an export.
-# Pure computation — no sockets, no files — so it fits this manifest's rule.
-#
-# Also rule IDs (2026-08-21-a-rule-that-means-exactly-one-thing.md §8), which
-# is one crate and not two on purpose: nothing is authorised *by* an ID, so a
-# second hash is surface with no payer.
+# Cryptographic instruction digests resist content substitution in exports; the store's xxhash64
+# detects corruption instead. Rule IDs share this pure hash dependency but do not authorize
+# operations.
 sha2 = "0.10.9"
 # The store codec builds the durable JSONL line bytes itself, in library code,
 # so serde_json is a normal dependency rather than a dev-dependency. It is a

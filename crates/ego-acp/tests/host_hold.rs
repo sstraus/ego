@@ -1,4 +1,4 @@
-//! contract for regression case's `_ego/pause` and `_ego/resume` host controls.
+//! contract for `_ego/pause` and `_ego/resume` host controls.
 //!
 //! Every request crosses the pinned SDK's real JSON-RPC router, because the
 //! claim under test is a protocol claim: that a host which negotiated the
@@ -14,10 +14,7 @@ use ego_core::run::RunStatus;
 
 mod support;
 
-const ROOT: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/target/regression case-workspace"
-);
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/hold-workspace");
 const REQUEST: &str = "00000000-0000-0000-0000-000000000091";
 const SECOND_REQUEST: &str = "00000000-0000-0000-0000-000000000092";
 const THIRD_REQUEST: &str = "00000000-0000-0000-0000-000000000093";
@@ -48,10 +45,8 @@ async fn initialize_advertises_the_versioned_hold_extension() {
     connection.abort().await;
 }
 
-/// The negotiation half of the ADR: an agent built without the lifecycle port
-/// cannot stop a session at a durable boundary, so it says so twice — by not
-/// advertising the extension, and by answering `method_not_found` to anyone
-/// who calls it anyway.
+/// Without a lifecycle port, do not advertise hold extensions and answer
+/// `method_not_found` if a client calls one anyway.
 #[tokio::test]
 async fn an_agent_without_a_lifecycle_neither_advertises_nor_serves_hold() {
     let mut connection = support::Connected::new(support::agent());

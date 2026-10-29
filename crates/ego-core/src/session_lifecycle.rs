@@ -206,18 +206,9 @@ impl From<StoreError> for LifecycleAppendError {
     }
 }
 
-/// What a session's hold is, as a host can observe it.
-///
-/// Three values and not a boolean, because the middle one is the whole
-/// reason `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-
-/// session.md` distinguishes a request from a boundary: a host told `Paused`
-/// may assume no further effect will happen, and a host told `Pending` may
-/// not. Collapsing them would let a client act on a hold that has not landed.
-///
-/// Beside [`SessionActivity`] and not folded into it. Activity is about the
-/// run — is a turn in flight — and this is about the session: a session can
-/// be inactive because it finished and inactive because it is being held,
-/// and only one of the two will start work when asked.
+/// Host-visible hold state distinguishes a pending request from a reached pause boundary. Only
+/// the latter promises no further effects. Keep hold separate from activity: a finished session
+/// and a held inactive session respond differently to new work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HoldState {
@@ -1414,16 +1405,9 @@ where
     }
 
     /// Release a hold that is durably in place.
-    ///
-    /// `release` and not `resume`, which this type already uses for
-    /// `session/resume` — reattaching a client to a session. The two are
-    /// unrelated: one gives a connection a view, the other lets a stopped
-    /// session run again. The wire name stays `_ego/resume` because the ADR
-    /// ratified it; the collision is only in Rust.
-    ///
-    /// Only ever the idle path: [`SessionMetadata::release`] refuses anything
-    /// but a session that is durably paused, and a durably paused session by
-    /// definition has no turn left to hold the lease.
+    /// `release` lets a paused session run again; `resume` already means client
+    /// reattachment here. The wire operation remains `_ego/resume`. Only durable
+    /// paused sessions are eligible, so this path has no live turn lease.
     pub async fn release(
         &self,
         id: SessionId,

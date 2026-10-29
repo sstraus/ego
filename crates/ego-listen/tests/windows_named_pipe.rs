@@ -1,6 +1,6 @@
 #![cfg(windows)]
 
-//! Native Windows contracts for the local listener endpoint (regression case).
+//! Native Windows contracts for the local listener endpoint.
 //!
 //! These tests intentionally use Tokio's public named-pipe client to reach the
 //! listener. The owner-only DACL is a security property of the native pipe
@@ -35,7 +35,7 @@ static NEXT_PIPE_ID: AtomicU64 = AtomicU64::new(0);
 
 fn pipe_name() -> String {
     format!(
-        "{LOCAL_PIPE_PREFIX}ego-test-120-{}-{}",
+        "{LOCAL_PIPE_PREFIX}ego-test-QST-{}-{}",
         std::process::id(),
         NEXT_PIPE_ID.fetch_add(1, Ordering::Relaxed)
     )
@@ -231,7 +231,7 @@ async fn sequential_accepts_publish_the_next_pipe_instance_without_a_gap() {
 
 #[tokio::test]
 async fn invalid_pipe_name_returns_an_actionable_input_error() {
-    let invalid_name = format!("{LOCAL_PIPE_PREFIX}ego-test-120-invalid\\segment");
+    let invalid_name = format!("{LOCAL_PIPE_PREFIX}ego-test-QST-invalid\\segment");
     let admitted = local_endpoint(&invalid_name);
     let result = bind(&admitted).await;
     let error = result

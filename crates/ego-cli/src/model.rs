@@ -52,11 +52,8 @@ pub const OPENROUTER_BASE_URL: &str = "OPENROUTER_BASE_URL";
 /// The variable every Anthropic client reads to be pointed somewhere other
 /// than `api.anthropic.com`.
 ///
-/// It exists for the reason the other two do, and it became *necessary* on
-/// 2026-09-07. Until then `openai` was the only hosted row a test could point
-/// at a stub, so it carried every offline assertion about hosted behaviour;
-/// `2026-09-03-public-provider-wires-require-live-promotion.md` moved that row
-/// to Responses and made it unselectable pending live evidence.
+/// Offline hosted tests use this selectable row with supplied rates,
+/// independently of the public OpenAI mapping.
 ///
 /// `anthropic` and not `openrouter` is the row that inherits those tests,
 /// because the two settle identically: both declare
@@ -72,11 +69,8 @@ pub const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 /// URLs. Ollama and OpenAI use `/v1/`. Anthropic preserves a gateway prefix
 /// and appends `/v1/` only when that suffix is absent.
 ///
-/// It sets a versioned base, not a request endpoint: a row carries a base and the
-/// mapping joins its own path onto it
-/// (`docs/architecture.md`
-/// §2). Both variables name a *server*, which is what a base is, so this is
-/// also the spelling an operator already has in them.
+/// Rows carry versioned base URLs, not request endpoints. Mappings join
+/// their own paths onto those bases.
 fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
     let Ok(given) = std::env::var(var) else {
         return Ok(Url::parse(fallback).expect("a constant this file controls"));
@@ -107,23 +101,16 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
 
 /// The rows this build knows how to reach.
 ///
-/// Every row, unconditionally. A row names the variable its credential lives
-/// in and never reads it
-/// (`docs/architecture.md` §3), so a
-/// machine with no `OPENAI_API_KEY` still *has* an OpenAI row — it simply
-/// cannot authenticate against it yet, which is a different sentence and a
-/// different error.
+/// All rows exist regardless of credentials. They name credential variables
+/// without reading them, so a missing key is an authentication state, not
+/// an unknown-provider error.
 ///
 /// It used to be conditional, because a row could not be built without a key.
 /// That made a missing credential indistinguishable from an unknown provider
 /// and forced [`resolve`] to name one provider by hand to say the true thing.
 ///
-/// The API-key `xai` candidate remains absent. The distinct `xai-oauth` row
-/// is present because the subscription provider catalogue explicitly includes
-/// that subscription contract without collapsing its metering into the API
-/// key row. Gemini used to be absent for want of acceptance evidence and is
-/// now present:
-/// `docs/architecture.md`.
+/// The API-key `xai` candidate stays absent. `xai-oauth` is a distinct
+/// subscription contract with separate metering; Gemini is present.
 pub(crate) fn rows(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Vec<ProviderRow>, ResolveError> {
@@ -245,12 +232,9 @@ pub(crate) fn judge_thinking(
 /// error it is. Folding it into [`ResolveError`] would make "your TOML has a
 /// stray bracket" arrive as a statement about a model.
 ///
-/// `creds` is passed in for the same reason and one more: this is the *only*
-/// place a credential is read. What comes back beside the model is the
-/// resolved value itself, so the check here and the header sent later cannot
-/// disagree about whether a key exists — they are the same read
-/// (`docs/architecture.md`
-/// §6).
+/// Read credentials here once and return the resolved value with the model.
+/// The validation check and the eventual request headers then use the same
+/// credential snapshot.
 ///
 /// Returned beside the [`ResolvedModel`] rather than inside it, and that is
 /// the point of the pair: a resolved model is `Clone` and `Debug` and travels
@@ -889,10 +873,9 @@ fn auth_generation_error(error: crate::auth::AuthError) -> GenerationModelError 
 
 /// Whether a resolution failure is the network's fault or the caller's.
 ///
-/// `CLI.md` §4.3 gives them different exit codes on purpose — a script retries
-/// a 4 and never retries a 2 — and this is the only place the distinction is
-/// drawn. A model that is not installed is a 2 however long the daemon took to
-/// say so.
+/// Invalid model selection is a usage error; daemon or network failure is a runtime
+/// error. A model not installed remains an invalid selection regardless of response
+/// delay.
 pub fn is_provider_failure(err: &ResolveError) -> bool {
     matches!(err, ResolveError::EndpointUnreachable { .. })
 }
@@ -1040,7 +1023,7 @@ mod tests {
     // Catches: gateway prefixes are erased, or an existing /v1 suffix is duplicated.
     #[test]
     fn anthropic_base_override_keeps_gateway_prefix_without_duplicating_v1() {
-        const EXPECTED: &str = "EGO_REGRESSION_EXPECTED_MESSAGES_URL";
+        const EXPECTED: &str = "EGO_TEST_MODEL_EXPECTED_MESSAGES_URL";
         if let Ok(expected) = std::env::var(EXPECTED) {
             let row = rows(&Default::default())
                 .unwrap()
@@ -1602,21 +1585,12 @@ mod tests {
 
     /// The API-key candidate is still not runnable.
     ///
-    /// `docs/architecture.md`
-    /// §9 draws the line at selectability: a provider assembled from a
-    /// published document has offline evidence and no acceptance evidence, and
-    /// its legacy endpoint is now vendor-deprecated. Adding that candidate to
-    /// [`rows`] is one line and looks like progress, so the current-contract
-    /// rule needs a test rather than a comment. A live recording cannot promote
-    /// the retired mapping; an API-key row would first need the current
-    /// Responses mapping.
+    /// The API-key xAI candidate uses a retired endpoint. Offline fixtures or a
+    /// live recording cannot make that legacy mapping current; offering it
+    /// requires the current Responses contract.
     ///
-    /// `gemini` used to be in this list and is not a counter-example to it.
-    /// The bar §9 sets is a **current** contract, and
-    /// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` says a
-    /// current published contract with passing fixtures clears it. `xai`
-    /// cannot: its mapping is the vendor-deprecated endpoint, so what it lacks
-    /// is not a recording but a contract worth recording against.
+    /// Gemini uses a current published contract with offline fixtures. The xAI
+    /// API-key candidate lacks a current mapping, not merely a recording.
     #[test]
     fn a_candidate_provider_cannot_be_selected() {
         let ids = selectable();
@@ -1634,22 +1608,9 @@ mod tests {
         assert!(catalogue.row("xai-oauth").is_ok());
     }
 
-    /// An Anthropic request assembles from the builtin catalogue alone.
-    ///
-    /// The other half of story `regression`'s fourth criterion, kept as an
-    /// in-process assertion after story `regression` moved the child-process
-    /// half onto this same row.
-    ///
-    /// The layers are assembled here, with both file layers explicitly empty
-    /// — which is a *stronger* statement about where the facts came from than
-    /// an absent file would be, and reads nothing from the environment,
-    /// including the `ANTHROPIC_BASE_URL` the harness now sets. What it cannot
-    /// say is that the real code path skips the files; the child-process test
-    /// in `tests/run.rs` says that.
-    ///
-    /// It goes as far as `build_request`, because "reaches request assembly"
-    /// is the criterion and a `ResolvedModel` that never produced bytes has
-    /// not demonstrated that its capabilities are usable.
+    /// Build an Anthropic request from builtin capabilities with both file layers explicitly
+    /// empty. Reaching request assembly proves the capabilities are usable; the process test
+    /// separately proves the ordinary path works without a supplied models file.
     #[test]
     fn an_anthropic_request_assembles_from_the_builtin_catalogue_alone() {
         let hosted = crate::facts::builtin_only();

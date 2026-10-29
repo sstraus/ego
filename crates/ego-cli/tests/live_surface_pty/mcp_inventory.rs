@@ -3,7 +3,7 @@ use super::*;
 // Catches: a busy MCP listing leaks Rust structs, revisions and timestamps into the composer.
 #[test]
 fn busy_mcp_inventory_is_user_facing_and_bounded() {
-    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING");
+    let (reply, gate) = gated_paced_line("MCP-KAY-RUNNING");
     let stub = Stub::start(Plan {
         completions: vec![reply],
         ..Plan::default()
@@ -30,7 +30,7 @@ fn busy_mcp_inventory_is_user_facing_and_bounded() {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"hold stream\r").expect("turn");
     input.flush().expect("flush");
-    until(&reader, &mut output, b"REGRESSION-MARKER-RUNNING");
+    until(&reader, &mut output, b"MCP-KAY-RUNNING");
     let start = output.len();
     input.write_all(b"/mcp\r").expect("inventory");
     input.flush().expect("flush");

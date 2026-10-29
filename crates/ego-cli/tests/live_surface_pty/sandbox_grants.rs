@@ -6,15 +6,15 @@ use super::*;
 #[test]
 fn interactive_workspace_denial_asks_and_keeps_a_session_grant() {
     let outside = tempfile::tempdir().unwrap();
-    let path = outside.path().join("regression_case-input");
-    std::fs::write(&path, "REGRESSION-MARKER-SUCCESS").unwrap();
+    let path = outside.path().join("sandbox-VPX-input");
+    std::fs::write(&path, "READ-VPX-SUCCESS").unwrap();
     let path = std::fs::canonicalize(path).unwrap();
     let args = serde_json::json!({"argv": ["/bin/cat", path], "timeout_ms": 5000}).to_string();
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call("first-read", "exec", &args)),
             Reply::Sse(tool_call("second-read", "exec", &args)),
-            Reply::Sse(text("regression_case-DONE")),
+            Reply::Sse(text("SANDBOX-VPX-DONE")),
         ],
         ..Plan::default()
     });
@@ -47,12 +47,12 @@ fn interactive_workspace_denial_asks_and_keeps_a_session_grant() {
     input.write_all(b"y").unwrap();
     input.flush().unwrap();
     // The second call still requires command approval, not another path grant.
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-SUCCESS");
+    until_normalized(&reader, &mut output, start, "READ-VPX-SUCCESS");
     let second = output.len();
     until_normalized(&reader, &mut output, second, "[y] yes");
     input.write_all(b"y").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, second, "regression_case-DONE");
+    until_normalized(&reader, &mut output, second, "SANDBOX-VPX-DONE");
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
@@ -60,7 +60,7 @@ fn interactive_workspace_denial_asks_and_keeps_a_session_grant() {
     assert_eq!(requests.len(), 3);
     for request in &requests[1..] {
         assert!(
-            request.to_string().contains("REGRESSION-MARKER-SUCCESS"),
+            request.to_string().contains("READ-VPX-SUCCESS"),
             "{request}"
         );
     }
@@ -85,7 +85,7 @@ fn promoting_exec_before_sandbox_denial_does_not_ask() {
 #[cfg(target_os = "macos")]
 fn promoted_denial_has_no_terminal_authority(pending: bool) {
     let outside = tempfile::tempdir().unwrap();
-    let path = outside.path().join("regression_case-promotion-input");
+    let path = outside.path().join("sandbox-VPX-promotion-input");
     std::fs::write(&path, "PROMOTED-READ-MUST-NOT-RUN").unwrap();
     let path = std::fs::canonicalize(path).unwrap();
     let args = if pending {
@@ -96,7 +96,7 @@ fn promoted_denial_has_no_terminal_authority(pending: bool) {
             "promotion-fixture", path], "timeout_ms": 10000})
     }
     .to_string();
-    // regression case/654: a child denied after the turn ended settles later and starts
+    // a child denied after the turn ended settles later and starts
     // one automatic continuation. A pending question retires the denial inside
     // the turn, so the foreground turn consumes that outcome and no wake follows.
     let mut completions = vec![

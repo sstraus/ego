@@ -10,10 +10,10 @@ fn goal_continuations_compact_without_cross_session_parent() {
     for continuations in [3, 0, 20] {
         let checkpoint = "# Objective\nFinish the checked objective.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nSource turns finished.\n# Work in progress\nOperator verification.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nVerify completion.\n# Critical references\nNone.";
         let mut replies: Vec<_> = (0..=continuations)
-            .map(|i| Reply::Sse(text(&format!("REGRESSION-MARKER-ANSWER-{i}"))))
+            .map(|i| Reply::Sse(text(&format!("GOAL-KZG-ANSWER-{i}"))))
             .collect();
         replies.push(Reply::Sse(text(checkpoint)));
-        replies.push(Reply::Sse(text("REGRESSION-MARKER-RESUMED")));
+        replies.push(Reply::Sse(text("GOAL-KZG-RESUMED")));
         let stub = Stub::start(Plan {
             completions: replies,
             ..Plan::default()
@@ -25,7 +25,7 @@ fn goal_continuations_compact_without_cross_session_parent() {
             // A constant reason triggers the five-observation blocker before
             // the 20-turn boundary. Derive progress from actual session input.
             r#"input=$(cat)
-step=$(printf '%s' "$input" | grep -o 'REGRESSION-MARKER-ANSWER-[0-9]*' | tail -n 1)
+step=$(printf '%s' "$input" | grep -o 'GOAL-KZG-ANSWER-[0-9]*' | tail -n 1)
 printf '{"verdict":"continue","reason":"Verification remains after %s"}\n' "$step"
 "#,
         );
@@ -61,7 +61,7 @@ printf '{"verdict":"continue","reason":"Verification remains after %s"}\n' "$ste
             &reader,
             &mut output,
             start,
-            &format!("REGRESSION-MARKER-ANSWER-{continuations}"),
+            &format!("GOAL-KZG-ANSWER-{continuations}"),
         );
         // Intermediate goal continuations also draw empty composers. Only
         // the final stop receipt establishes that /compact can run idle.
@@ -160,7 +160,7 @@ printf '{"verdict":"continue","reason":"Verification remains after %s"}\n' "$ste
             ])
             .run();
         assert_eq!(resumed.code, Some(0), "{}", resumed.stderr);
-        assert!(resumed.stdout.contains("REGRESSION-MARKER-RESUMED"));
+        assert!(resumed.stdout.contains("GOAL-KZG-RESUMED"));
         assert_eq!(stub.generations().len(), continuations + 3);
     }
 }

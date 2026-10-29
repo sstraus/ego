@@ -1,5 +1,5 @@
 //! regression: the wire shape of the live provider retry status, which
-//! TUIC regression case renders.
+//! TUIC renders.
 
 use agent_client_protocol_schema::v1::SessionUpdate;
 use ego_acp::project::{provider_retry_cleared_v1, provider_retry_v1};
@@ -64,7 +64,7 @@ fn a_retry_is_a_session_info_patch_with_the_counter_the_wait_and_the_cause() {
 /// regression — catches: recovery looks like a spent finite allowance
 /// and a host cannot discover the force action or horizon.
 #[test]
-fn regression_case_recovery_status_exposes_horizon_and_force_action() {
+fn outage_recovery_status_exposes_horizon_and_force_action() {
     let event = PublicEvent::ProviderRetry {
         turn: TurnId::new(),
         attempt: 9,

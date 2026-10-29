@@ -1,6 +1,6 @@
 //! `PreparedCall` / `Permit` / `GuardedIo`: enforced, not declared, effects.
 //!
-//! See `ARCHITECTURE.md` §3.2 and §3.4, and `plans/m0a-contracts.md` Step 11.
+//! Policy grants remain scoped to prepared calls.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -269,8 +269,7 @@ mod permit {
         assert!(properties.contains_key("contents"));
     }
 
-    // --- policy: what a `PreparedCall` is actually authorised to do ---
-    // `docs/architecture.md` §1.
+    // --- policy: what a `PreparedCall` is actually authorized to do ---
 
     /// The engine an operator gets when they configure nothing: `default`
     /// mode, no rules of their own.
@@ -462,7 +461,7 @@ mod permit {
                 "{op}: {text}"
             );
         }
-        // regression case: writes need an explicit write grant, not silence or a read grant.
+        // writes need an explicit write grant, not silence or a read grant.
         let write = outside(OpName::Write).to_string();
         assert!(
             write.contains("`ego roots add --access read-write '/sibling/a b.md'`")
@@ -472,7 +471,7 @@ mod permit {
         assert!(!write.contains("--access read '"), "{write}");
     }
 
-    /// regression case. Catches: a pasted read-root hint splits a path or executes
+    ///. Catches: a pasted read-root hint splits a path or executes
     /// shell syntax instead of passing the exact path as one argument.
     #[cfg(unix)]
     #[test]
@@ -507,7 +506,7 @@ mod permit {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// regression case. Catches: a quoted filename turns the suggested write-root
+    ///. Catches: a quoted filename turns the suggested write-root
     /// command into shell syntax, or credential writes receive an unsafe grant hint.
     #[test]
     fn outside_write_recovery_quotes_the_exact_path_and_omits_credentials() {
@@ -594,10 +593,8 @@ mod permit {
 
     // --- the evaluation order ---------------------------------------------
     //
-    // `docs/architecture.md` §6. The order
-    // is the whole security property: what each step decides matters less
-    // than which step gets asked first, so every test below pins a *pair* of
-    // steps against each other rather than one step on its own.
+    // Decision order is part of the security contract. Pairwise cases check
+    // which step wins, not only each step's isolated result.
 
     /// An engine in `mode`, with those rules, over `/ws`.
     fn engine(mode: Mode, allow: &[&str], deny: &[&str]) -> PolicyEngine {
@@ -620,33 +617,16 @@ mod permit {
         )
     }
 
-    /// `parse`, not `load`, and the difference is the whole reason these
-    /// tests can say anything about `write`.
-    ///
-    /// `load` answers "may an operator store this today", and its §6a table
-    /// now says no for `write`: no tool in the registry constructs an
-    /// `Op::Write`, so a stored `write(...)` rule would match nothing and be
-    /// indistinguishable from a boundary that works. `parse` answers "is this
-    /// a sentence in the published grammar", which `write(**)` is and always
-    /// was.
-    ///
-    /// These tests are about the *engine* — the plan floor at step 2, the
-    /// allow list at step 3 — and the engine is asked about calls a
-    /// `PreparedCall` built here supplies. Its arithmetic over a mutating op
-    /// is real, testable and untouched by which tools happen to exist, and it
-    /// is exactly what would break silently on the day a write tool lands if
-    /// nothing exercised it in the meantime. So the rules are parsed rather
-    /// than loaded, and the coverage stays.
+    /// These engine tests parse rule syntax independently of producer availability. They
+    /// exercise real mutating prepared operations and plan/allow ordering, not the registry's
+    /// separate enforceability check.
     fn rule(raw: &str) -> Rule {
         Rule::parse(raw).unwrap_or_else(|err| panic!("{raw} is a sentence in the grammar: {err}"))
     }
 
     #[test]
     fn permit_step0_the_workspace_boundary_is_not_lifted_by_yolo() {
-        // The bypass mode bypasses *asking*. Where ego may reach is
-        // `ARCHITECTURE.md` §3.4 axis 4 — the sandbox — and it is a separate
-        // control, so a mode that turned the boundary off would be one axis
-        // silently doing another's job.
+        // The bypass mode bypasses *asking*.
         let engine = engine(Mode::Yolo, &["read(**)"], &[]);
         let denied = engine
             .classify_settled(read_call("/etc/passwd"))
@@ -751,10 +731,8 @@ mod permit {
 
     #[test]
     fn permit_step3_an_allow_that_matches_grants_only_the_call_and_not_the_rule() {
-        // The rule says `write(src/**)`; the call named one file. The permit
-        // must cover the file. A rule that widened the grant to its own
-        // pattern would make every allow a standing authority rather than an
-        // answer to one call — §1's whole subject.
+        // Grant scope follows the call's one file, not the broader pattern of its matching
+        // rule. An allow is not standing authority over every pattern match.
         let engine = engine(Mode::Default, &["write(src/**)"], &[]);
         let granted = engine
             .classify_settled(write_call("/ws/src/main.rs"))
@@ -870,29 +848,10 @@ mod permit {
 
     /// A refusal anywhere in a call refuses the call, and it must not be
     /// pre-empted by a *question* about an earlier operation.
-    ///
-    /// **This is the hazard the two-pass `classify` exists for, and it is
-    /// worth stating as an attack rather than as a property.** One pass
-    /// returns `Ask` at op one and never judges op two. The question then
-    /// reaches an approver looking like an ordinary workspace write — and a
-    /// mode that answers yes mints a permit over `scope_of(&call)`, which is
-    /// the *whole* call. `--yolo` would read `/etc/shadow`, through the one
-    /// boundary the ADR's §4a says no mode lifts.
-    ///
-    /// **The general shape, because it will happen again:** the single-pass
-    /// loop was in the tree for weeks and was harmless the entire time — not
-    /// because it was correct, but because step 5 lived *inside* `classify`
-    /// and nothing downstream could answer yes. The bug needed an approving
-    /// party to become exploitable, and the commit that introduced the port
-    /// was the commit that supplied one. A guard that is never exercised is
-    /// not a guard; it is an assumption with a guard's syntax, and the change
-    /// that first exercises it is the most dangerous change in the file. When
-    /// a decision moves from inline to a seam, re-read every early return on
-    /// the path to it — they were all written under the assumption that the
-    /// answer could not vary.
-    ///
-    /// What caught this was an *existing* test, not a new one. That is the
-    /// argument for asserting the boundary per-call rather than per-op.
+    /// Two-pass classification must check every hard boundary before asking
+    /// about any operation. Otherwise an ordinary first write could hide an
+    /// out-of-scope second read and approval would grant the entire call, even
+    /// in yolo. The assertion covers the complete call, not isolated operations.
     #[test]
     fn permit_step0_a_question_about_one_op_cannot_pre_empt_a_refusal_of_another() {
         let engine = engine(Mode::Yolo, &[], &[]);
@@ -922,11 +881,8 @@ mod permit {
 
     #[test]
     fn permit_step4_no_mode_asks_about_a_read_inside_the_workspace() {
-        // `ARCHITECTURE.md:238` counts prompt fatigue as a security bug, and
-        // :242 says `default` and `auto` review unresolved **sensitive**
-        // actions rather than every action. A mode that stopped the run to
-        // ask about reading a file in the workspace it was pointed at is how
-        // an operator learns to approve without looking.
+        // A mode that stopped the run to ask about reading a file in the workspace it was
+        // pointed at is how an operator learns to approve without looking.
         for mode in [
             Mode::Plan,
             Mode::Default,
@@ -1029,8 +985,7 @@ mod permit {
         );
     }
 
-    // --- what a denial tells the operator about lifting it ---
-    // `docs/architecture.md` §3, §5a.
+    // --- denial attribution and how the operator can lift it ---
 
     /// An engine denying `raw`, with that rule carried by `origins`.
     fn denying(raw: &str, origins: &[Source]) -> PolicyEngine {
@@ -1090,7 +1045,7 @@ mod permit {
         );
     }
 
-    /// The scenario the ADR was written for, end to end.
+    /// Exercise denial attribution end to end.
     ///
     /// The rule is denied in both `/etc/ego` and the operator's own config.
     /// The old code attributed it to whichever layer the merge loop left —
@@ -1141,7 +1096,6 @@ mod permit {
 
     // --- listing and searching: looking without reading -------------------
     //
-    // See `docs/architecture.md`.
 
     fn list_call(root: &str, pattern: &str) -> PreparedCall {
         PreparedCall::new(
@@ -1667,11 +1621,9 @@ mod permit {
 
     // --- Leg 2 of Invariant W: containment ------------------------------
     //
-    // `docs/architecture.md` calls this leg
-    // **evidence, and not proof**, and that framing is load-bearing. Leg 1 is
-    // decided by the compiler and is total. This is a check over a domain
-    // somebody chose, and it is true of the domain it generated and silent
-    // about every call outside it. Nobody downstream may cite it as more.
+    // Generated cases are evidence over their sampled domain, not proof for
+    // all calls. Compiler-enforced boundaries and runtime sampling establish
+    // different claims.
     //
     // What is generated is small and exhaustive rather than large and random:
     // every call of one or two ops drawn from three op kinds over six paths,
@@ -1682,12 +1634,9 @@ mod permit {
     // it does not have. A randomised generator would cover a wider domain and
     // report a different one on every run.
     //
-    // The assertion is stronger than the ADR asks for. The ADR asks that a
-    // path *not* contributed by an op be refused. This asserts the biconditional:
-    // `allows_x(p)` is `Ok` exactly when `p` is at or under a path some op of
-    // kind `x` contributed. One direction is containment; the other catches a
-    // scope that has quietly stopped granting what the call asked for, which
-    // is how a permit gets "fixed" by widening the next one.
+    // Assert the biconditional: `allows_x(p)` succeeds exactly for paths at or
+    // below an operation of kind `x`. Check both containment and that the
+    // permit still grants the access the call actually requested.
 
     /// Every path this leg probes, including three that must never be in
     /// scope: an escape, a sibling sharing a textual prefix, and a

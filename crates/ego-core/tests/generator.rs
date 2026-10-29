@@ -1,7 +1,7 @@
 //! `Generator` port, `ModelCapabilities` and `FakeGenerator`: the provider
 //! seam and its fake/replay counterpart.
 //!
-//! See `ARCHITECTURE.md` §2/§3.1 and `plans/m0a-contracts.md` Step 10.
+//! Provider-neutral generator contracts.
 
 use std::collections::BTreeSet;
 
@@ -472,12 +472,8 @@ mod generator {
     /// turn: the provider finished with this request and will hand the result
     /// over elsewhere, so there is nothing yet to record as completed.
     ///
-    /// This replaces `generator_fake_pending_stop_is_not_terminal`, whose
-    /// subject (`StopReason::Pending`) was removed in
-    /// `docs/architecture.md`. `Deferred`
-    /// is the remaining stop reason that assembles nothing, and it is the
-    /// more interesting one, because it is genuinely terminal while still
-    /// producing no `DomainEvent`.
+    /// `Deferred` is terminal but assembles no `DomainEvent`. Unfinished
+    /// generations instead have no stop reason.
     #[test]
     fn generator_fake_deferred_stop_assembles_no_turn() {
         let fake = FakeGenerator::new(vec![vec![AiEvent::Stop(StopReason::Deferred)]]);
@@ -681,10 +677,8 @@ mod generator {
         }));
     }
 
-    /// The whole point of three states rather than an `Option`: silence is not
-    /// permission. If this ever passes with an empty `gaps`, the field has
-    /// been read as "nothing stated, so send anything" — the exact mistake
-    /// `2026-08-21-grok-as-a-provider.md` §4 records Codex overruling.
+    /// Unstated reasoning support is not permission to send every level.
+    /// An empty gap list here would widen unknown capability knowledge.
     #[test]
     fn silence_about_reasoning_efforts_is_not_permission_to_send_any_of_them() {
         let mut caps = capabilities(ReasoningCarryover::Portable);

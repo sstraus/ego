@@ -453,7 +453,7 @@ mod tests {
                         producer: Producer::Main,
                     },
                     kind: EventKind::AssistantMessage {
-                        text: "REGRESSION-MARKER".to_owned(),
+                        text: "DISPLAY-ONLY-KOO".to_owned(),
                     },
                 },
             )
@@ -468,7 +468,7 @@ mod tests {
         let state = ego_core::state::SessionState::replay(entries.clone());
         let output = Recorded::default();
         replay(&store, id, &output, Capabilities::plain()).unwrap();
-        assert_eq!(*output.0.lock().unwrap(), "REGRESSION-MARKER\n");
+        assert_eq!(*output.0.lock().unwrap(), "DISPLAY-ONLY-KOO\n");
         assert_eq!(std::fs::read(log).unwrap(), before);
         assert_eq!(
             ego_core::state::SessionState::replay(source_entries(&store, id)),

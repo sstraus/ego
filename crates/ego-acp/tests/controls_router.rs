@@ -1,4 +1,4 @@
-//! router contract for the ACP session config options (regression case).
+//! router contract for the ACP session config options.
 //!
 //! Every request below crosses the pinned SDK's real v1 router, because the
 //! router is the only thing that can say whether a method is reachable. The
@@ -19,7 +19,7 @@ use ego_core::permit::Confinement;
 
 mod support;
 
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/controls");
 const UNSELECTED: &str = "__ego_unselected__";
 
 /// A seat that answers for one session and remembers what was staged.
@@ -166,9 +166,8 @@ async fn a_session_publishes_its_controls_when_the_connection_owns_a_seat() {
     connection.abort().await;
 }
 
-/// No seat is not an empty picker. A host must be able to tell "ego has no
-/// controls here" from "ego has controls and none are set", which is the same
-/// rule `docs/architecture.md` §3 applies to absent usage and cost.
+/// No seat is not an empty picker. Hosts must distinguish absent controls
+/// from controls that exist but have no selected values.
 #[tokio::test]
 async fn a_connection_without_a_seat_publishes_no_picker_at_all() {
     let mut connection = support::Connected::new(router(None));

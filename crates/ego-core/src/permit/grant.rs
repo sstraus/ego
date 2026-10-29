@@ -1,14 +1,12 @@
 //! `Permit`: an unforgeable, scoped grant, minted only by [`PolicyEngine`].
 //!
-//! See `ARCHITECTURE.md` §3.2 (R1: effects enforced, not declared) and
-//! §3.4. A tool never constructs or widens its own `Permit`: both of
-//! `Permit`'s fields are private to this module, and its only public
-//! constructor lives behind [`Sealed`], whose own constructor is private to
-//! this module too. No code outside `grant.rs` — not `tool.rs`, not
-//! `fs.rs`, not a consumer crate — can name `Sealed(())`, so the only way
-//! to produce a `Permit` anywhere in the program is this module's private
-//! `mint`, and the only way to reach *that* is
-//! [`PolicyEngine::classify`], which derives the scope from the call.
+//! A tool never constructs or widens its own `Permit`: both of `Permit`'s fields are
+//! private to this module, and its only public constructor lives behind [`Sealed`], whose
+//! own constructor is private to this module too. No code outside `grant.rs` — not
+//! `tool.rs`, not `fs.rs`, not a consumer crate — can name `Sealed(())`, so the only way
+//! to produce a `Permit` anywhere in the program is this module's private `mint`, and the
+//! only way to reach *that* is [`PolicyEngine::classify`], which derives the scope from
+//! the call.
 
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
@@ -58,11 +56,8 @@ struct Sealed(());
 /// source of truth: `Permit` is not `Clone`, `Sealed` is not exported, and no
 /// widening constructor is public.
 ///
-/// This leg does not prove that the scope is enforced. That is the
-/// `GuardedEffects` responsibility and `POTENTIALS.md` P23 open window: a
-/// permit that cannot be widened, checked against a path that is re-resolved
-/// between the check and the open, is still a hole. Leg 1 is only about where
-/// permits come from.
+/// This leg does not prove that the scope is enforced. Leg 1 is only about where permits
+/// come from.
 #[derive(Debug)]
 pub struct Permit {
     scope: Scope,
@@ -71,8 +66,7 @@ pub struct Permit {
     _sealed: Sealed,
 }
 
-/// Names the operation a [`Permit`] refused. `ARCHITECTURE.md` §3.2: a
-/// denial must name what was denied, not just that something was.
+/// Names the operation a [`Permit`] refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermitDenied {
     Write {
@@ -328,13 +322,8 @@ impl Permit {
 
 /// A call and the grant that answers it, as one value.
 ///
-/// [`Invariant W`](PolicyEngine) says a permit belongs to a call. Until this
-/// type existed nothing in the types said so: `classify` handed back a bare
-/// [`Permit`], and a caller holding the permit from call A alongside call B
-/// had two values it could pass in either combination. Pairing them here
-/// makes the correspondence structural — the same argument
-/// `2026-08-21-attempt-accounting-ledger.md` used to keep a reservation
-/// inside its `GenerationAttempt` rather than beside it.
+/// Pair a permit with its prepared call structurally. A caller must not be
+/// able to combine the grant for call A with call B.
 ///
 /// No `Clone` and no public constructor: an `Authorized` is produced by
 /// [`PolicyEngine::classify`] and by nothing else.
@@ -410,8 +399,7 @@ impl Authorized {
     }
 }
 
-/// Why policy refused to authorise a call. Names the operation, never just
-/// the fact of a refusal — `ARCHITECTURE.md` §3.2.
+/// Why policy refused to authorise a call.
 ///
 /// Every arm is a **settled** answer: the question was asked and the answer is
 /// no. A call nobody in this run can answer is not here — it is
@@ -424,13 +412,9 @@ pub enum PolicyDenied {
     /// of forty lines did it — and the ID is exactly what `ego rules revoke`
     /// takes.
     ///
-    /// It also carries **where the rule came from**, because the ID alone does
-    /// not answer the question an operator actually has. `RuleId` hashes the
-    /// predicate, so the same rule written in two layers has one ID by
-    /// construction — its own doc says the origin "is metadata that `rules ls`
-    /// shows" — and a run that ends at exit 3 has no second invocation in
-    /// which to show it. See
-    /// `docs/architecture.md`.
+    /// Include rule origins with the ID. Equal predicates share an ID across
+    /// layers, but the operator needs provenance to know which source can lift
+    /// a denial before the run exits.
     Denied {
         tool: String,
         op: OpName,
@@ -474,13 +458,8 @@ pub enum PolicyDenied {
         op: OpName,
         path: CanonPath,
     },
-    /// A party that was asked said no. Distinct from `Denied` because nobody
-    /// wrote a rule: there is nothing to grep for and nothing to revoke, and
-    /// telling an operator to look for a rule that does not exist is worse
-    /// than saying less.
-    ///
-    /// `by` names *who* refused. §5 deferred this field to "the audit event
-    /// that needs it"; that event has arrived, so the field has.
+    /// An asked party refused. Distinguish this from a matching deny rule so operators are not
+    /// sent looking for configuration nobody wrote. `by` records the actual party.
     Refused {
         tool: String,
         op: OpName,
@@ -521,10 +500,7 @@ pub enum PolicyDenied {
 impl PolicyDenied {
     /// A read, list or search the workspace boundary refused.
     ///
-    /// The one refusal the model can act on and nobody can lift mid-run: no
-    /// mode, rule or answer moves the boundary (`CLI.md` §4.4), and the call
-    /// changed nothing, so the turn has nothing to stop for. The caller
-    /// returns it to the model as a failed tool result and the turn goes on.
+    /// The caller returns it to the model as a failed tool result and the turn goes on.
     pub fn is_unreachable_read(&self) -> bool {
         matches!(
             self,
@@ -702,13 +678,9 @@ impl std::error::Error for PolicyDenied {}
 
 /// Why a call could not be settled without asking somebody.
 ///
-/// A value and not a `bool` because `ARCHITECTURE.md` §3.4 requires the
-/// *reason* to reach both the human and the audit event: they produce
-/// different prompts and different headless behaviours.
+/// Call-scoped permit construction remains private.
 ///
-/// **Two arms, not four.** `2026-08-21-a-permit-nobody-can-widen.md` §4 also
-/// names "the judge was unavailable" and "the judge was uncertain". There is
-/// no judge in this build, so those have no producer and are not declared.
+/// Terminal settlement errors remain distinct from pending approver states.
 ///
 /// The two that *are* declared are the two steps that can decline: the rules,
 /// and then the mode. They are chained rather than alternative — a question
@@ -725,8 +697,7 @@ pub enum Escalation {
     /// No allow rule covered it. `PolicyEngine::classify` is the producer:
     /// steps 0 to 3 ran and none of them settled it.
     NoRuleCovers { op: OpName, path: CanonPath },
-    /// The mode does not auto-approve this operation. `ModeApprover` is the
-    /// producer, at §6 step 5.
+    /// The mode does not auto-approve the operation. Produced by `ModeApprover`.
     ModeAsks {
         mode: Mode,
         op: OpName,
@@ -1069,17 +1040,9 @@ impl fmt::Display for EscapedBytes<'_> {
     }
 }
 
-/// A call that reached the end of the evaluation order without being settled.
-///
-/// No `Clone`, private fields, and constructible only in this module. A loop
-/// can carry one and hand it back; it cannot open one, and it cannot turn one
-/// into a [`Permit`] — [`PolicyEngine::classify`] remains the only path to
-/// one, so §5's separation is enforced by visibility rather than by a comment.
-///
-/// It deliberately carries no computed [`Scope`]. A mode or human approval
-/// decides whether the call proceeds; the engine derives the scope again from
-/// the still-sealed call when it mints. Thus neither the loop nor either party
-/// can nominate or widen the authority being approved.
+/// An unsettled call with sealed fields and no `Clone`. Only the engine constructs it and
+/// converts it into a permit. Scope is re-derived from the sealed call, never nominated by the
+/// loop or approver.
 #[derive(Debug)]
 pub struct Pending {
     call: PreparedCall,
@@ -1156,7 +1119,7 @@ pub enum Resolution {
     },
 }
 
-/// The sole minter of [`Permit`]s (`ARCHITECTURE.md` §3.2, §3.4).
+/// Classify every hard refusal before consulting approvers.
 ///
 /// # Invariant W
 ///
@@ -1193,10 +1156,8 @@ pub struct PolicyEngine {
     /// and `deny = ["exec(git *)"]` left `allow = ["exec(git push)"]` standing.
     allow: Vec<SourcedRule>,
     deny: Vec<SourcedRule>,
-    /// §6 step 5, built from `mode` by [`new`](Self::new) and reachable no
-    /// other way. See [`ModeApprover`]'s doc for why there is no constructor
-    /// that takes one: a port that let its holder pick the implementation
-    /// would have moved the mode out of the config and into the caller.
+    /// Mode approval is built by `new` from resolved configuration, not injected by the caller.
+    /// See `ModeApprover` for the visibility boundary.
     approver: Box<dyn Approver>,
     /// The final party, absent in headless runs. It is separate from
     /// `approver` so no caller can replace the mode derived from config.
@@ -1396,82 +1357,23 @@ impl PolicyEngine {
         }
     }
 
-    /// The same engine with a different party at §6 step 5, for tests that
-    /// need a verdict the mode cannot produce.
-    ///
-    /// **`#[cfg(test)]`, and only `ego-core`'s own test profile compiles it.**
-    /// It exists because `Verdict::Deny` has no production producer — the
-    /// mode never denies at step 5, since `plan`'s refusal is the floor at
-    /// step 2 — and an arm of `settle` that nothing could reach would be
-    /// untested code that reads as a decided behaviour. This is the seam that
-    /// makes it a decided behaviour.
-    ///
-    /// It is not a relaxation of the rule above it. No release build contains
-    /// this function, no other crate can call it, and the one caller is a
-    /// test in this file asserting what a refusal turns into.
+    /// Test-only alternative approver exercises verdicts the production mode does not produce.
+    /// This constructor is absent from release builds and inaccessible to other crates.
     #[cfg(test)]
     fn with_approver(self, approver: Box<dyn Approver>) -> Self {
         Self { approver, ..self }
     }
 
-    /// Decide what a prepared call may do, and hand back the grant that says
-    /// so (`docs/architecture.md` §1).
-    ///
-    /// This is the method that makes this an engine rather than a stamp. The
-    /// scope is derived *from the call*, so a permit can never allow more
-    /// than the call asked for — with [`mint`](Self::mint) alone, whoever
-    /// chose the `Scope` was the real policy, and the caller is the turn
-    /// loop, which has no business holding that authority.
-    ///
-    /// Takes the call **by value** and gives it back inside the
-    /// [`Authorized`], so the pairing is the only thing a caller can hold.
-    ///
-    /// **Pure and sync**, which is what lets the async decision be somebody
-    /// else's problem: nothing here awaits, opens anything or reads a clock.
-    ///
-    /// The order is fixed
-    /// (`docs/architecture.md` §6), first
-    /// match wins, and it is evaluated **per operation**. The sole exception
-    /// is a structurally supporting foreign transport after every opaque
-    /// identity is allowed; its authority is the same delegation, not a
-    /// second operator decision. Every independent operation must still be
-    /// answered before the call is authorised. That is why §4 of the rule ADR
-    /// refuses a conjunction across heads: it would be a second way to write
-    /// what the loop below already does.
-    ///
-    /// ```text
-    /// 0. the workspace boundary   (not a rule; no mode lifts it)
-    /// 1. deny                     (system denies are unioned in by resolve)
-    /// 2. mode floor               (plan refuses every mutating op)
-    /// 3. allow
-    /// →  ask
-    /// ```
-    ///
-    /// Steps 1 and 2 of the ADR's seven are one step here, and nothing is lost
-    /// by it: `resolve` unions the system layer's denies into the deny list
-    /// through a ceiling no higher layer can clear, and deny precedes allow
-    /// either way. What a separate step would buy is *attribution* in the
-    /// audit event, and that arrives with the event.
-    ///
-    /// **Step 5 — the mode ceiling — is not here, and it used to be.** It is
-    /// the first implementation of the [`Approver`] port, consulted by
-    /// [`settle`](Self::settle). The reason is in the ADR's §5 amendment and
-    /// it is not tidiness: with the ceiling inside this method, a `Pending`
-    /// could only ever be constructed *after* the mode had declined, so an
-    /// approver derived from the mode had exactly one reachable answer. The
-    /// port existed and the seat had no occupant.
-    ///
-    /// Step 6 (the judge) has no producer. Step 7 (the human) is optional, so
-    /// a headless engine still returns the question rather than answering it.
-    /// **Two passes, and the order between them is the point.** Every
-    /// operation is put through steps 0 to 2 before any of them is allowed to
-    /// raise a question, because "first match wins, top down" is a claim about
-    /// the *steps*, not about the order the ops happen to be in. A single pass
-    /// returns a question about op one and never reaches op two — so a call
-    /// that reads a workspace file and `/etc/shadow` would arrive at an
-    /// approver as an ordinary question, and a mode that answers yes would
-    /// authorise the whole call, boundary included. A refusal anywhere refuses
-    /// the call.
+    /// Decide what a prepared call may do and return its corresponding grant.
+    /// Derive scope from the call and return it inside [`Authorized`], preserving
+    /// the structural permit/call pairing. Classification is pure and synchronous.
+    /// Check boundary, deny and mode floor for every operation before any operation
+    /// may ask an approver. Otherwise an early ordinary question could hide a later
+    /// out-of-boundary operation and approval would authorize the whole call.
+    /// After hard refusals, explicit allows and [`settle`](Self::settle) handle
+    /// unresolved operations. System denies cannot be cleared by higher layers.
+    /// Supporting foreign transport may reuse an already admitted delegation,
+    /// never bypass an independent operation's decision.
     pub fn classify(&self, call: PreparedCall) -> Classification {
         if matches!(call.ops(), [Op::ReadEvidence { .. }]) {
             let permit = self.mint(scope_of(&call));
@@ -1585,17 +1487,9 @@ impl PolicyEngine {
         }))
     }
 
-    /// Put the question to the next party in §6's order and act on the answer.
-    ///
-    /// The mode-party await. What this module still owns, and does not
-    /// delegate, is *which* party is consulted and what its answer means: a
-    /// verdict is a party's opinion, and only this engine turns one into a
-    /// [`Permit`] — from a scope derived, as always, from the call.
-    ///
-    /// `Escalate` returns the mode's question. The turn must durably record it
-    /// before consulting the human decision step; keeping that append between
-    /// the two parties means a crash while the human is thinking cannot erase
-    /// the fact that the request was raised.
+    /// Consult the next policy party and interpret its verdict. Only the engine derives permit
+    /// scope. Escalation returns a question that the turn must persist before asking the human,
+    /// so a crash cannot erase the request.
     pub async fn settle(&self, pending: Pending) -> Resolution {
         if self.coordinator_high(pending.call()) {
             return Resolution::Ask(pending);
@@ -1732,11 +1626,8 @@ impl PolicyEngine {
         }
     }
 
-    /// The question, addressed to whoever is next.
-    ///
-    /// Private, and the only constructor of a [`Pending`] anywhere: §5's
-    /// property is that the engine decides who is asked, and a `Pending` a
-    /// caller could build is a caller nominating its own approver.
+    /// The only constructor of `Pending`. Keeping it private prevents callers from choosing
+    /// their own approval party.
     fn pending(&self, call: PreparedCall, why: Escalation) -> Pending {
         Pending {
             ask: PermissionRequest {
@@ -1755,11 +1646,9 @@ impl PolicyEngine {
     fn judge(&self, call: &PreparedCall, op: &Op) -> Result<(), Box<PolicyDenied>> {
         let path = op.subject_path(&self.workspace);
 
-        // 0. The workspace boundary. Evaluated before the rules because it is
-        //    not one of them: no operator wrote it, `--allow` cannot widen it,
-        //    and `yolo` does not lift it. `yolo` bypasses *asking*; the
-        //    sandbox (`ARCHITECTURE.md` §3.4 axis 4) is the axis that widens
-        //    or narrows where ego may reach, and it is a separate control.
+        // 0. The workspace boundary. Evaluated before the rules because it is not one of
+        // them: no operator wrote it, `--allow` cannot widen it, and `yolo` does not lift
+        // it.
         if let Some(path) = path
             && !matches!(op, Op::Spawn { .. })
         {
@@ -1855,15 +1744,9 @@ impl PolicyEngine {
 
     /// Mint a permit for an explicit scope.
     ///
-    /// **Private to `grant.rs`, and that is the load-bearing half of
-    /// Invariant W.** It used to be `pub`, reserved for "a later bypass mode
-    /// (`--yolo`) minting a deliberately wide grant". §1 of
-    /// `docs/architecture.md` removed that
-    /// use: bypass is a decision *whether to ask*, and a bypassed call is
-    /// still scoped from the call, so nothing anywhere needs a wide grant.
-    /// What was left was a public widening primitive kept for its own sake —
-    /// any holder of a `&PolicyEngine` could compose a `Scope` covering the
-    /// whole disk and get a `Permit` for it.
+    /// Private minting preserves call-scoped grants. Bypassing a prompt changes
+    /// whether to ask, not what the call may access; callers must not construct
+    /// an arbitrary wide `Scope` and mint authority for it.
     ///
     /// With it private, [`classify`](Self::classify) is the only path to a
     /// `Permit` in the entire program, and `classify` derives the scope from
@@ -2010,10 +1893,8 @@ fn refused(tool: String, why: &Escalation, by: Authority) -> PolicyDenied {
 /// The authority a call's own operations contribute — **the** definition,
 /// called once and never inlined at a second site.
 ///
-/// §1 of `2026-08-21-a-permit-nobody-can-widen.md`: the scope comes from the
-/// call, so a permit can never allow more than the call asked for and a rule
-/// that matched could not widen it if it wanted to. Nothing decides here; by
-/// the time this runs, every operation has already been approved.
+/// Scope comes only from the prepared call. Matching rules cannot widen it.
+/// Every operation has already been approved before scope construction.
 ///
 /// Scoped to the paths this call named, not to the workspace: a tool that
 /// asked to read one file is not thereby allowed to read the repository.
@@ -2073,14 +1954,9 @@ fn scope_of(call: &PreparedCall) -> Scope {
 
 /// Scope mechanics, and the one place `mint` can still be called.
 ///
-/// These tests live inside `grant.rs` rather than under `tests/` because
-/// they need [`PolicyEngine::mint`], and `mint` is private to this module —
-/// that privacy is half of §2 of
-/// `docs/architecture.md`, and a test
-/// binary that could reach it would be proof it is not private at all. What
-/// they check is what a `Scope` *means* once minted: the four path lists do
-/// not imply one another, `is_or_under` is component-wise and not a string
-/// prefix, and the guarded seam rechecks at use time.
+/// These tests need private `PolicyEngine::mint`, so they stay inside this
+/// module. They check independent path authorities, component-wise path
+/// containment and guarded rechecks without exposing grant construction.
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -2401,13 +2277,9 @@ mod tests {
     /// The second implementation of [`Approver`], and the only producer of
     /// [`Verdict::Deny`] anywhere.
     ///
-    /// The mode never denies at §6 step 5 — `plan`'s refusal is the floor at
-    /// step 2, inside `classify` — so without a party that can say no, the
-    /// `Deny` arm of [`PolicyEngine::settle`] would be code nothing could
-    /// reach. `2026-08-21-a-permit-nobody-can-widen.md` §5's amendment records
-    /// why the arm ships anyway: `Approver` is a public port, and one whose
-    /// vocabulary cannot express a refusal is a port the human seat at step 7
-    /// would have to break in order to use it.
+    /// `Approver` is a public port and must express refusal as well as approval.
+    /// Its `Deny` result must remain reachable for external parties even when
+    /// the mode approver does not produce it.
     ///
     /// It answers without asking anybody, which is the property the trait had
     /// to keep: an approver is a *party*, not a prompt, and a party that could
@@ -2741,7 +2613,7 @@ mod tests {
         guarded
             .write(&CanonPath::new("/ws/allowed"), b"root")
             .unwrap();
-        // ...and so is a nested descendant, arbitrarily deep.
+        //...and so is a nested descendant, arbitrarily deep.
         guarded
             .write(&CanonPath::new("/ws/allowed/nested/deep/file.txt"), b"deep")
             .unwrap();

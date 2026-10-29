@@ -2,7 +2,7 @@
 //! hooks, compaction, truncation — and the owner of the conversation types
 //! and all ports.
 //!
-//! See `ARCHITECTURE.md` §2 (crate layout) and §3 (core traits).
+//! Provider-neutral domain and policy core; external effects live in adapters.
 //!
 //! This crate sees the world through traits only: it opens no sockets and no
 //! files. Ports belong to the consumer — `ego-core` declares them, the

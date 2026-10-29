@@ -14,7 +14,7 @@ const MODEL_CHANGE: &str = "Resume model changed: anthropic/claude-opus-5-5 -> o
 #[test]
 fn raw_terminal_startup_resume_and_exit_keep_column_zero() {
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("REGRESSION-MARKER\n\nSECOND-LINE-337"))],
+        completions: vec![Reply::Sse(text("FIRST-LINE-PHW\n\nSECOND-LINE-PHW"))],
         ..Plan::default()
     });
     let places = support::Places::new();
@@ -61,8 +61,8 @@ fn raw_terminal_startup_resume_and_exit_keep_column_zero() {
     }
     assert_hints_aligned(&lines);
     assert_eq!(
-        column_of(&lines, "REGRESSION-MARKER"),
-        column_of(&lines, "REGRESSION-MARKER"),
+        column_of(&lines, "FIRST-LINE-PHW"),
+        column_of(&lines, "SECOND-LINE-PHW"),
         "the second replayed line starts where the first one ended:\n{shown}"
     );
     assert!(

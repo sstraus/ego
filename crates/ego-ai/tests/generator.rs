@@ -1,7 +1,6 @@
 //! The binding: a `Generator` that actually reaches a provider.
 //!
-//! See `plans/m0b-vertical-slice.md` Step 13.5 and
-//! `docs/guides/providers.md`.
+
 //!
 //! Steps 8, 9 and 10 shipped the `Http` seam, the openai-completions wire
 //! format and the turn loop, each green in isolation and none of them joined
@@ -162,10 +161,8 @@ fn generator(http: Arc<dyn Http>) -> WireGenerator {
 
 /// The fixture row's credential, resolved.
 ///
-/// A generator cannot be built without one, which is the type-level half of
-/// `docs/guides/providers.md` §6:
-/// there is no longer a state in which a generation exists and its credential
-/// does not.
+/// A generator cannot be built without a resolved credential, so generation
+/// and credential resolution cannot occupy inconsistent states.
 fn credential(creds: &dyn ego_ai::provider::Credentials) -> ResolvedCredential {
     row()
         .credential
@@ -556,16 +553,8 @@ async fn a_streamed_response_decodes_to_what_the_wire_format_decodes() {
 
 // --- the credential ---
 
-/// Story `regression`'s fifth criterion, stated as a property of the type
-/// rather than of who may call an accessor: a row names the variable its
-/// credential lives in and never holds the value.
-///
-/// The row is asked for its headers *first*, and inspected after. That
-/// ordering is the test. It used to be true only that a held [`Secret`]
-/// declined to print itself — a redaction one `derive` away from being wrong
-/// (`docs/guides/providers.md` §3). Resolving
-/// a credential now leaves the row exactly as it was, so there is nothing for
-/// a future `Serialize` to leak.
+/// Provider metadata names credential variables but never holds secret values. Header
+/// resolution must leave the row secret-free even if serialization is added later.
 #[test]
 fn resolving_a_credential_leaves_nothing_behind_in_the_row() {
     let row = row();
@@ -624,8 +613,7 @@ fn a_row_that_authenticates_with_nothing_neither_asks_nor_fails() {
 /// because getting either wrong produces the same symptom, a 401, and the
 /// operator cannot tell from it which mistake was made.
 ///
-/// The variant exists now and not before because `AGENTS.md` forbids one with
-/// no producer; its two producers are the mappings this story adds.
+/// Both named-header mappings exercise the credential strategy.
 #[test]
 fn a_credential_can_travel_under_a_header_the_provider_names() {
     let strategy = CredentialStrategy::HeaderFromEnv {
@@ -651,15 +639,8 @@ fn a_credential_can_travel_under_a_header_the_provider_names() {
     );
 }
 
-/// A missing credential is refused by name, at the one door there is.
-///
-/// There used to be two — a check at resolution and a second read when a
-/// request was assembled — and the test that lives here used to assert they
-/// agreed. §6 removed the second: the value is read once and carried, so the
-/// two cannot disagree because there is no longer a second one to disagree
-/// with. What must survive is the message, which is the whole reason the
-/// check is early: an operator can act on "set `OPENAI_API_KEY`" and cannot
-/// act on a 401.
+/// Refuse a missing credential by name before constructing a request. Resolution and header
+/// assembly use the same captured credential, not two environment reads.
 #[test]
 fn a_credential_that_is_not_configured_is_refused_by_name() {
     let refused = row()
@@ -741,16 +722,8 @@ async fn profile_extra_headers_reach_the_request_without_becoming_credentials() 
 
 // --- the seam ---
 
-/// A second `WireFormat`, so that "the generator uses the row's mapping" is a
-/// claim a test can fail.
-///
-/// It exists only here. A second *production* mapping arrives with the
-/// provider that needs it — Anthropic's Messages API — and inventing one early
-/// would be the stub `AGENTS.md` forbids. But the property this proves is not
-/// Anthropic's: it is that `WireGenerator` uses the mapping supplied by the
-/// resolved model rather than naming one internally, and a fake is the only way to state that before a second real
-/// one exists. Hardcoding `OpenAiCompletions` back into the generator leaves
-/// every other test in this file green and fails exactly these two.
+/// A test mapping proves that `WireGenerator` uses the resolved model mapping
+/// rather than hardcoding a production format.
 #[derive(Debug)]
 struct MarkerFormat;
 

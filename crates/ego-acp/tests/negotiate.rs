@@ -1,11 +1,8 @@
 //! The version this agent answers `initialize` with, as a table.
 //!
-//! `docs/architecture.md` §6.3 is a
-//! two-row table, and this file is that table read as a pure function. The same
-//! rows are driven through the real SDK router in `tests/initialize.rs`, and
-//! §6.4 says why one of the two is not enough: the SDK owns the negotiation, so
-//! a table only this crate believes is a binding whose two ends are both our
-//! code.
+//! The negotiation table is tested here as a pure function and through the
+//! real SDK router in `tests/initialize.rs`. Both matter because the SDK, not
+//! this table alone, owns the protocol negotiation.
 //!
 //! What this file has that the transport test cannot is *reach*. An
 //! `initialize` over a socket can carry `1` and `2`; the inputs that matter
@@ -22,11 +19,8 @@ fn the_version_we_serve_is_the_version_we_answer_with() {
 }
 
 /// **The row the obvious rule gets wrong.**
-///
-/// `min(wanted, our_max)` answers `2` here. We answer `1`, because v2 is an
-/// unstable draft and a client asking for `3` has not opted into it — see ADR
-/// §3.1, and §6.2 for the mechanism, which is that the v2 arm of the router is
-/// deliberately not configured.
+/// Requests above v1 still select v1, not an implicitly selected unstable
+/// v2 draft. The v2 router arm is deliberately not configured.
 #[test]
 fn a_version_newer_than_ours_gets_the_stable_one_and_never_the_draft() {
     for newer in [2u16, 3, 4, 100, 65535] {
@@ -46,18 +40,8 @@ fn a_version_newer_than_ours_gets_the_stable_one_and_never_the_draft() {
 }
 
 /// The pre-release, refused.
-///
-/// **This row was the opposite way round until the SDK was read rather than
-/// assumed.** ADR §3.2 argued that ACP gives the client the decision about
-/// whether our answer is usable, so an agent should answer `1` rather than fail
-/// `initialize`. The reasoning still holds and the code cannot act on it:
-/// `SupportedAgentProtocols::highest_compatible` requires `requested >= V1`, so
-/// a `0` matches no configured arm and the router replies with an error before
-/// any handler of ours runs. ADR §6.3 records the correction.
-///
-/// The test is kept, inverted, rather than deleted: what it now pins is that we
-/// know we refuse here, which is the fact a future reader of §3.2 would
-/// otherwise be misled about.
+/// `SupportedAgentProtocols::highest_compatible` requires `requested >= V1`.
+/// Zero matches no configured arm, so the SDK refuses before our handler runs.
 #[test]
 fn the_pre_release_version_is_refused_because_the_router_has_no_arm_below_one() {
     assert_eq!(negotiate(ProtocolVersion::V0), None);

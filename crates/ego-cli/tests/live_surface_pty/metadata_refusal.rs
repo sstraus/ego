@@ -28,8 +28,8 @@ fn unknown_metadata_subcommands_print_usage_without_changing_state() {
     until_prompt_from(&reader, &mut output, start);
 
     for (command, receipt) in [
-        ("/goal set REGRESSION-MARKER-OBJECTIVE", "REGRESSION-MARKER-OBJECTIVE"),
-        ("/name set REGRESSION-MARKER-TITLE", "REGRESSION-MARKER-TITLE"),
+        ("/goal set METADATA-AFP-OBJECTIVE", "METADATA-AFP-OBJECTIVE"),
+        ("/name set METADATA-AFP-TITLE", "METADATA-AFP-TITLE"),
     ] {
         let start = output.len();
         input.write_all(format!("{command}\r").as_bytes()).unwrap();
@@ -71,7 +71,7 @@ fn unknown_metadata_subcommands_print_usage_without_changing_state() {
         // readable in the transcript instead of vanishing on the next action.
         input.write_all(b"/name show\r").unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-TITLE");
+        until_normalized(&reader, &mut output, start, "METADATA-AFP-TITLE");
         drain_until_quiet(&reader, &mut output);
         expected_usages.push(usage);
     }

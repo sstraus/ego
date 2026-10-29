@@ -15,7 +15,7 @@ fn turn_finish_drains_typeahead_with_pending_answer() {
 }
 
 fn finish_with_typeahead(pending_answer: bool) {
-    let (first, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING");
+    let (first, gate) = gated_paced_line("FINISH-QDH-RUNNING");
     let Reply::GatedPaced {
         head,
         tail,
@@ -25,7 +25,7 @@ fn finish_with_typeahead(pending_answer: bool) {
         unreachable!();
     };
     let tail = if pending_answer {
-        text("REGRESSION-MARKER-ROW-A\nFINISH-463-ROW-B\nFINISH-463-ROW-C\n")
+        text("FINISH-QDH-ROW-A\nFINISH-QDH-ROW-B\nFINISH-QDH-ROW-C\n")
     } else {
         tail
     };
@@ -36,7 +36,7 @@ fn finish_with_typeahead(pending_answer: bool) {
                 tail,
                 gate: Arc::clone(&gate),
             },
-            Reply::Sse(text("REGRESSION-MARKER-RECOVERED")),
+            Reply::Sse(text("FINISH-QDH-RECOVERED")),
         ],
         ..Plan::default()
     });
@@ -50,7 +50,7 @@ fn finish_with_typeahead(pending_answer: bool) {
     ]);
     ego.file("AGENTS.md", "# turn finish fixture\n");
     // Allow replay against an explicitly selected historical executable.
-    let command = match std::env::var_os("EGO_REGRESSION_BINARY") {
+    let command = match std::env::var_os("EGO_FINISH_QUEUE_BINARY") {
         Some(binary) => ego.pty_command_with_program(binary),
         None => ego.pty_command(),
     };
@@ -80,7 +80,7 @@ fn finish_with_typeahead(pending_answer: bool) {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"start gated turn\r").unwrap();
     input.flush().unwrap();
-    until(&reader, &mut output, b"REGRESSION-MARKER-RUNNING");
+    until(&reader, &mut output, b"FINISH-QDH-RUNNING");
 
     // /tasks is delivered to the driver even while generation is running,
     // unlike normal busy submissions which use the turn's durable ingress.
@@ -131,7 +131,7 @@ fn finish_with_typeahead(pending_answer: bool) {
     until_prompt_from(&reader, &mut output, cleared);
     input.write_all(b"verify recovered seat\r").unwrap();
     input.flush().unwrap();
-    until(&reader, &mut output, b"REGRESSION-MARKER-RECOVERED");
+    until(&reader, &mut output, b"FINISH-QDH-RECOVERED");
     let start = output.len();
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();

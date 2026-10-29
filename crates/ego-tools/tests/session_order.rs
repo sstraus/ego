@@ -1,4 +1,4 @@
-//! Executable contract for regression case physical session ordering.
+//! Executable contract for physical session ordering.
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
 use ego_core::event::id::{EventId, Producer, Seq, SessionId, TurnId};
 use ego_core::event::time::Timestamp;

@@ -4419,7 +4419,7 @@ mod transport_selection_boundary {
 
 // Catches: the legacy object schema replaces the full round in continuation identity.
 #[tokio::test(flavor = "current_thread")]
-async fn regression_case_distinct_rounds_do_not_alias_one_durable_continuation() {
+async fn continuation_distinct_rounds_do_not_alias_one_durable_continuation() {
     let journal = Arc::new(Journal::default());
     let resolver = Arc::new(ExactCaptureResolver::default());
     let owner = context_free_owner(journal.clone(), resolver.clone());
@@ -4483,7 +4483,7 @@ async fn regression_case_distinct_rounds_do_not_alias_one_durable_continuation()
 
 // Catches: a single changed authority field is accepted because adjacent checks use &&.
 #[tokio::test(flavor = "current_thread")]
-async fn regression_case_resume_rejects_each_changed_envelope_authority_before_recording() {
+async fn continuation_resume_rejects_each_changed_envelope_authority_before_recording() {
     use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
     for changed in ["server", "method", "tool", "schema"] {
         let trace = Trace::default();

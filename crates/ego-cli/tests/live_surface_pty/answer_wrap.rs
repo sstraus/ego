@@ -29,7 +29,7 @@ fn check_answer_wrap(initial: u16, width: u16) -> Vec<String> {
             "L’eseguibile è stato rimosso perché il collegamento è rimasto sul percorso precedente e gli altri controlli sono stati saltati. ",
         ),
     ] {
-        let source = format!("💬 {}REGRESSION-MARKER-END", prose.repeat(5));
+        let source = format!("💬 {}WRAP-JUE-END", prose.repeat(5));
         let stub = Stub::start(Plan {
             completions: vec![Reply::Sse(text(&source))],
             ..Plan::default()
@@ -90,7 +90,7 @@ fn check_answer_wrap(initial: u16, width: u16) -> Vec<String> {
         let start = output.len();
         input.write_all(b"wrap fixture\r").unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-END");
+        until_normalized(&reader, &mut output, start, "WRAP-JUE-END");
         until_prompt_from(&reader, &mut output, start);
         drain_until_quiet(&reader, &mut output);
         let mut terminal = vt100::Parser::new(40, initial, 0);
@@ -103,7 +103,7 @@ fn check_answer_wrap(initial: u16, width: u16) -> Vec<String> {
 
         // Optional raw recordings let the real TUIC canvas replay the same PTY
         // bytes; the automated oracle below remains the physical screen.
-        if let Some(directory) = std::env::var_os("EGO_REGRESSION_CAPTURE_DIR") {
+        if let Some(directory) = std::env::var_os("EGO_ANSWER_WRAP_CAPTURE_DIR") {
             let directory = std::path::PathBuf::from(directory);
             std::fs::create_dir_all(&directory).unwrap();
             let stem = format!("{language}-{initial}-to-{width}");
@@ -145,7 +145,7 @@ fn check_answer_wrap(initial: u16, width: u16) -> Vec<String> {
             .expect("visible answer marker");
         let last = rows
             .iter()
-            .position(|row| row.contains("REGRESSION-MARKER-END"))
+            .position(|row| row.contains("WRAP-JUE-END"))
             .expect("visible answer end");
         let shown = rows[first..=last].join("");
         let context = format!("{language} initial={initial} live={width}: {shown:?}");

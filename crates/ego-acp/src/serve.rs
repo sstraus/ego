@@ -834,7 +834,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
 /// What `durable_agent_with_compaction` puts in its `initialize` answer.
 ///
 /// Exposed so a local surface can say what this build advertises without
-/// connecting to it. regression case is why: TUICommander read the pause extension
+/// connecting to it. is why: TUICommander read the pause extension
 /// as two separately versioned entries while this crate publishes one `hold`
 /// naming both methods, and because nothing local could report the shape, the
 /// only way to find the mismatch was to run a second implementation and watch
@@ -2262,10 +2262,9 @@ where
 
 /// The generation controls this session offers, or nothing.
 ///
-/// Absent controls stay absent rather than becoming an empty picker, which is
-/// the same fallback rule `docs/architecture.md` §3 applies to usage and cost. A
-/// seat that cannot be read is a warning and an omission, not a refusal to
-/// open the session: creating a session has never depended on the picker.
+/// Absent controls stay absent rather than becoming an empty picker.
+/// An unreadable seat produces a warning and omission, not a session-open
+/// refusal: session creation does not depend on the picker.
 fn config_options(
     controls: Option<&Arc<dyn SessionControls>>,
     session: SessionId,

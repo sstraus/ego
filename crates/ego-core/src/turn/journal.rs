@@ -1,10 +1,7 @@
 //! The one place a `DomainEvent` is assembled, persisted and reduced.
 //!
-//! See `docs/architecture.md` §5. Before this existed,
-//! eight test files built their own `Envelope`, and they disagreed with each
-//! other — `tests/public_golden.rs:167` gives a permission its own `ItemId`
-//! while `tests/reducer.rs:143` reuses the tool's. That is what a contract
-//! with no implementation looks like.
+//! The journal centralizes envelope construction so turn callers share
+//! item and permission identity rules.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -38,19 +35,13 @@ use crate::store::session_store::{SessionStore, StoreError};
 /// same reason one layer out: a host told about an event that was never written
 /// would be reporting a turn nobody can resume into.
 ///
-/// That ordering is also why the sink is handed [`SessionState`]: at the
-/// moment of publication this journal holds the reduction *including* the
-/// event it is publishing, which is precisely what a consumer projecting
-/// cumulative figures needs and cannot obtain for itself in the right order.
-/// See `docs/architecture.md`.
+/// Publish the reduced state including the current event. Cumulative
+/// consumers cannot reconstruct the correct ordering independently.
 pub struct Journal<'a> {
     session: SessionId,
     store: &'a dyn SessionStore,
     clock: &'a dyn Clock,
-    /// Where the public projection goes the moment it is durable. Held rather
-    /// than accumulated: `CLI.md` §4.2 says *live*, and a `Vec` handed over
-    /// at turn end is a different contract wearing the same flag — as well as
-    /// a buffer that grows for the life of the session.
+    /// Where the public projection goes the moment it is durable.
     sink: &'a dyn EventSink,
     producer: Producer,
     /// Continues from the resumed state's `last_seq`, so reloading a session

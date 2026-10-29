@@ -6,7 +6,6 @@
 //! its own way. A list whose first row is not the row `ego resume` would pick
 //! is a list that lies about what the next command does.
 //!
-//! `docs/architecture.md`.
 
 use std::path::Path;
 
@@ -18,7 +17,7 @@ use serde::Serialize;
 
 use crate::cli::UsageError;
 
-/// The version of the shape `--output json` writes (`CLI.md` §4.6).
+/// The version of the session catalogue JSON schema.
 ///
 /// Its own number, not `PUBLIC_EVENT_VERSION`. That one versions the event
 /// stream a run publishes; this versions a catalogue listing, and the two
@@ -79,9 +78,8 @@ pub fn resolve(
             });
     };
 
-    // Named explicitly, so the catalogue is asked whether it exists rather
-    // than asked to choose. A `run` would have created it; `resume` must not
-    // (ADR §3), so an id nobody has used is a refusal and not a fresh session.
+    // Resume asks for the named session and refuses if it does not exist.
+    // Unlike a new run, it must not create the requested id.
     //
     // `{wanted}` and not `{wanted:?}` in both refusals below: these reach an
     // operator, and `SessionId(0192…)` names a Rust type they cannot act on.
@@ -107,7 +105,7 @@ pub fn resolve(
     Ok(meta.id)
 }
 
-/// One row of `--output json` and one line of `--output jsonl` (`CLI.md` §4.6).
+/// One catalogue row for JSON or JSONL output.
 ///
 /// A shape of its own rather than `SessionMeta` serialised directly: that type
 /// is the store port's, and publishing it would make a field added for a
@@ -138,7 +136,7 @@ impl Row {
     }
 }
 
-/// The single object `ego ls --output json` writes (`CLI.md` §4.6).
+/// The single catalogue object emitted by `ego ls --output json`.
 ///
 /// An object with a `sessions` key and not a bare array, so the listing can
 /// carry its own `v` — a top-level array has nowhere to put one, and a

@@ -1,4 +1,4 @@
-//! contract for regression case: the real CLI renders the core sanitized export.
+//! The real CLI renders the core sanitized export.
 
 use std::path::{Path, PathBuf};
 
@@ -235,7 +235,7 @@ fn exports_mask_known_env_values_in_every_format() {
 #[test]
 #[cfg(unix)]
 fn child_secret_is_masked_in_model_context_event_log_and_export() {
-    const TOKEN: &str = "ego-child-token-274-unique";
+    const TOKEN: &str = "ego-child-token-NKO-unique";
     let home = tempfile::tempdir().unwrap();
     let workspace = tempfile::tempdir().unwrap();
     let stub = Stub::start(Plan {

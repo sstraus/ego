@@ -2,11 +2,8 @@
 //!
 //! # Why this is a second mapping and not a fourth profile
 //!
-//! `docs/guides/providers.md` §4
-//! allows a provider to differ in exactly three places, and Anthropic differs
-//! in the request's *shape* and the stream's *event model* — neither of which
-//! is one of the three. The three structural reasons, each asserted below
-//! rather than asserted in prose:
+//! Anthropic's request shape and event model require a separate mapping.
+//! The following tests assert the structural differences:
 //!
 //! - the system prompt is a top-level parameter, so there is no `role:
 //!   "system"` message to build;
@@ -18,12 +15,8 @@
 //!
 //! # What the goldens are, and what they are worth
 //!
-//! Hand-assembled from the published Messages API specification and the
-//! streaming reference, read 2026-08-22 — `[D]+[S]` in `docs/14`'s evidence
-//! classes, never `[R]`. No `ANTHROPIC_API_KEY` exists in this repository, so
-//! nothing here has been observed against a live server. They pin the
-//! *contract*; `crates/ego-cli/tests/smoke.rs` is where a recording would
-//! replace them.
+//! Synthetic transcripts assembled from the published Messages API and streaming
+//! specification. These are contract fixtures, not live-server evidence.
 //!
 //! Fields this mapping ignores are present in the transcripts on purpose
 //! (`service_tier`, `inference_geo`, `ping`, `stop_sequence`), so that
@@ -229,10 +222,8 @@ fn a_failed_tool_result_carries_the_flag_that_says_so() {
 
 /// No ceiling is a refusal, not a number this mapping picked.
 ///
-/// `max_tokens` is required by the Messages API and
-/// `GenRequest::max_output_tokens` is an `Option`. A default invented here
-/// would be a silent choice about someone's bill, which is exactly what
-/// `docs/guides/providers.md` I5 forbids doing quietly.
+/// The Messages API requires `max_tokens`; `GenRequest::max_output_tokens`
+/// is optional. Inventing a default would silently choose a billing limit.
 #[test]
 fn a_request_with_no_ceiling_is_refused_rather_than_given_one() {
     let req = GenRequest {

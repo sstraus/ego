@@ -915,7 +915,7 @@ fn compaction_profile(
                 default_reasoning_effort: None,
             },
             metering: Metering::Unmetered {
-                revision: MeteringRevision("regression_case".to_string()),
+                revision: MeteringRevision("compaction-EAN".to_string()),
             },
             pricing_unavailable: None,
             rates: None,
@@ -1120,7 +1120,7 @@ fn compaction_drains_raced_prompt_before_capturing_source_history() {
     let mut turn = turn.with_interactive_control(&mut control);
     let (accepted, prepared) = futures::executor::block_on(async {
         futures::join!(
-            ingress.submit("REGRESSION-MARKER".to_owned(), Vec::new()),
+            ingress.submit("RACED-SOURCE-WORK-HUP".to_owned(), Vec::new()),
             turn.prepare_compaction(None, Vec::new()),
         )
     });
@@ -1133,7 +1133,7 @@ fn compaction_drains_raced_prompt_before_capturing_source_history() {
     );
     let request = serde_json::to_string(&generator.calls()[0]).unwrap();
     assert!(
-        request.contains("REGRESSION-MARKER"),
+        request.contains("RACED-SOURCE-WORK-HUP"),
         "checkpoint omitted raced work: {request}"
     );
     let acknowledged = store
@@ -1142,7 +1142,7 @@ fn compaction_drains_raced_prompt_before_capturing_source_history() {
         .find(|event| {
             matches!(
                 &event.kind, EventKind::UserPrompt { text, queued_prompt: Some(_), .. }
-                if text == "REGRESSION-MARKER"
+                if text == "RACED-SOURCE-WORK-HUP"
             )
         })
         .expect("source acknowledgement");
@@ -1532,7 +1532,7 @@ fn compaction_error_boundaries_are_typed_and_provider_reached_work_is_settled() 
 
 // Catches: an attempt inherited from a dead process blocks clean-session recovery forever.
 #[test]
-fn regression_case_compaction_recovers_inherited_attempt_before_checkpoint() {
+fn crash_compaction_recovers_inherited_attempt_before_checkpoint() {
     let (profile, _) = compaction_profile(
         "compaction-model",
         ThinkingLevel::Low,

@@ -68,7 +68,7 @@ fn startup_notices_word_wrap_at_80_columns_without_splitting_words() {
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
-    if let Some(directory) = std::env::var_os("EGO_REGRESSION_CAPTURE_DIR") {
+    if let Some(directory) = std::env::var_os("EGO_NOTICE_WRAP_CAPTURE_DIR") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("startup-80.ansi"), &output).unwrap();

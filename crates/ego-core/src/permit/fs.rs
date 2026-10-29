@@ -1,12 +1,7 @@
 //! `Fs`, the raw filesystem seam, and `GuardedIo`, the permit-checking
 //! facade tools actually receive.
 //!
-//! `ARCHITECTURE.md` §2/§3.3: `ego-core` opens no files itself — `Fs` is a
-//! trait implemented elsewhere (a fake, in-memory one in this crate's
-//! tests; the real OS-backed one lives in `ego-tools`). `PathResolver` is the
-//! narrower slice of it exposed at `prepare` time, before any `Permit`
-//! exists: enough to chase symlinks into canonical operations (§3.2), never
-//! enough to read or write content.
+//! Filesystem authority consumed by guarded adapters.
 
 use std::fmt;
 use std::path::Path;
@@ -33,10 +28,8 @@ use crate::suspension::{ContinuationError, GuardedMcpResume};
 
 /// Why a filesystem operation failed, as opposed to being *denied*.
 ///
-/// The distinction is the point: a tool that was refused and a tool that
-/// looked and found nothing are telling the model two different things, and a
-/// single "it didn't work" collapses them. See
-/// `docs/architecture.md` §6.
+/// A refusal and an empty successful result convey different facts.
+/// Keep them distinct rather than flattening both into a generic failure.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FsError {
     NotFound {
@@ -114,8 +107,6 @@ pub trait PathResolver: Send + Sync {
 }
 
 /// The raw filesystem seam. Unchecked: nothing here consults a `Permit`.
-/// Tools never hold this directly (`ARCHITECTURE.md` §3.2); it is held by
-/// the loop and wrapped in [`GuardedEffects`] before a tool ever sees it.
 pub trait Fs: PathResolver {
     /// User-visible receipt for the last successful builtin write.
     fn write_notice(&self, _path: &CanonPath) -> Option<String> {
@@ -155,17 +146,14 @@ pub trait Fs: PathResolver {
     fn scan(&self, req: &ScanRequest) -> Result<Scan, FsError>;
 }
 
-/// The fs subset of the permit-checking facade a `Tool::execute` actually
-/// receives (`ARCHITECTURE.md` §3.2). Every method re-derives the current
-/// canonical target before checking the permit: trusting a path resolved
-/// back at `prepare` time would let a symlink swapped in between `prepare`
-/// and `execute` slip a write through to a target that was never checked.
+/// Every method re-derives the current canonical target before checking the permit:
+/// trusting a path resolved back at `prepare` time would let a symlink swapped in between
+/// `prepare` and `execute` slip a write through to a target that was never checked.
 ///
-/// That is the window this seam closes, and it is worth being precise about
-/// which one it is. The check and the use still name the target by *path*,
-/// not by handle, so a component swapped between `allows_read` and the open
-/// is resolved a second time and is not re-checked. Closing that needs
-/// handle-relative, no-follow opens, which is `POTENTIALS.md` P23.
+/// That is the window this seam closes, and it is worth being precise about which one it
+/// is. The check and the use still name the target by *path*, not by handle, so a
+/// component swapped between `allows_read` and the open is resolved a second time and is
+/// not re-checked.
 pub trait GuardedIo<'s>: Send + Sync {
     fn write_notice(&self, _path: &CanonPath) -> Option<String> {
         None
@@ -189,10 +177,8 @@ pub trait GuardedIo<'s>: Send + Sync {
 
     /// The lines under `req.root` that `matcher` accepts.
     ///
-    /// The seam reads the files; the caller supplies only the judgement and
-    /// receives only the verdicts. That is what lets `grep` work without ever
-    /// holding read authority over the subtree
-    /// (`docs/architecture.md` §2).
+    /// The guarded seam reads; the caller supplies judgment and receives
+    /// verdicts. This permits content search without granting subtree read access.
     fn search(&self, req: &ScanRequest, matcher: &dyn LineMatcher) -> Result<Found, IoDenied>;
 
     /// Execute the exact process specification admitted by this permit.
@@ -686,12 +672,7 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
     /// Re-resolve `root`, check it against the permit with `allows`, and hand
     /// back a request rooted at the *fresh* target.
     ///
-    /// This runs before anything is opened. A traversal that walked first and
-    /// filtered afterwards would already have read the directory it was about
-    /// to refuse — the denial would have been performed and only its report
-    /// suppressed — and would turn a refusal into a partial success, which
-    /// tells a model "here are three matches" when the true answer is "you may
-    /// not look there" (`plans/m0b-vertical-slice.md:59-60`).
+    /// Validate the walk request before opening any path.
     fn admit(
         &self,
         req: &ScanRequest,

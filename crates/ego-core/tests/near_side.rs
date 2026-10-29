@@ -1,14 +1,8 @@
 //! The near side of the provider seam names no provider and no protocol.
 //!
-//! `docs/architecture.md` §5
-//! calls this the *necessary* condition of its three invariants, and it is
-//! necessary in the strict sense: passing proves nothing on its own, and
-//! failing proves the seam has been crossed. The *sufficient* condition — that
-//! a stranger can add a provider or a whole protocol from outside — is
-//! `crates/ego-ai/tests/invariants.rs`, and the two catch different mistakes.
-//! This one catches the sloppy violation, in the pull request that introduces
-//! it rather than in review; that one catches the subtle violation, and is far
-//! too coarse to say which line caused it.
+//! Source-level name absence is necessary but not sufficient for the
+//! provider-neutral boundary. External adapter composition in
+//! `crates/ego-ai/tests/invariants.rs` checks the complementary condition.
 //!
 //! **It is a grep in a test**, which is inelegant, and this repository already
 //! keeps one where the property is worth more than the elegance:
@@ -45,11 +39,8 @@ const NEAR_SIDE: &[&str] = &[
 /// Every provider id and protocol name this build could be tempted to branch
 /// on.
 ///
-/// The six providers of `docs/architecture.md`
-/// §1, plus the two wire-level spellings that identify a protocol without
-/// naming a vendor: a path only one family serves, and a header only one
-/// family sends. Matched case-insensitively, so `OpenAI`, `openai` and
-/// `OPENAI` are one needle.
+/// Provider and wire-level spellings identify forbidden core dependencies.
+/// Match case-insensitively so changing letter case cannot evade the check.
 const FORBIDDEN: &[&str] = &[
     "openai",
     "openrouter",
@@ -105,7 +96,7 @@ fn the_near_side_names_no_provider_and_no_protocol() {
          A difference between providers belongs in `ego-ai`: a model fact in \
          `ModelCapabilities`, a transport fact in the row's headers, or a wire \
          format of its own \
-         (`docs/architecture.md` §4).\n\n{}",
+         (`ARCHITECTURE.md`).\n\n{}",
         breaches.join("\n")
     );
 }

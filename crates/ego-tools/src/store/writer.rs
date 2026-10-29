@@ -1,11 +1,8 @@
 //! Opening a session for writing: lease, repair, resume — in that order.
 //!
-//! See `docs/architecture.md`. The five
-//! durable-store pieces (`recover`, `resume`, the lease, and the two snapshot
-//! APIs) were each correct and each uncalled; this is the composition of the
-//! three that belong to opening. Snapshot writing is deliberately not here —
-//! a snapshot is a checkpoint taken after events are applied, not something
-//! an open does.
+//! Opening composes lease acquisition, recovery and replay. Snapshot writes
+//! remain separate: checkpoints are taken after state reduction, not as an
+//! unconditional side effect of opening.
 //!
 //! ## Why repair is not opt-in
 //!
@@ -318,8 +315,7 @@ impl SessionBlobSource for SessionWriter<'_> {
 }
 
 impl JsonlStore {
-    /// The per-session writer lease, alongside `events.jsonl`,
-    /// `manifest.json` and `snapshot.json` (`ARCHITECTURE.md` §5).
+    /// The writer lease lives beside event, manifest and snapshot files.
     pub(super) fn lease_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("lease")
     }

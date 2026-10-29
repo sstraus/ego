@@ -1118,7 +1118,7 @@ fn a_hold_whose_boundary_never_arrived_is_still_releasable() {
     assert_eq!(service.hold(id).unwrap(), HoldState::Running);
 }
 
-// regression case: cut after the whole answered turn, never at item creation.
+// cut after the whole answered turn, never at item creation.
 fn fork_turn(
     store: &FakeStoreControl,
     source: SessionId,

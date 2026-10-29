@@ -14,6 +14,80 @@ This document describes the public command conventions. For exact arguments, use
 
 ## 2. Command set
 
+<!-- ego-cli-command-set:start -->
+```
+ego [PROMPT]                  interactive session (prompt submitted if given)
+ego run [PROMPT]              headless one-shot; PROMPT from argv or stdin; -f FILE loads an agent file
+ego continue [ID] [PROMPT]    alias of resume; same session selection and options
+ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
+                              --answer QUESTION_ID=JSON answers pending input;
+                              --name and --goal-operation are metadata-only operations
+ego ls                        list sessions (this workspace; --all for every one)
+ego rm <ID> [--yes] [--force]  tombstone one session; confirm unless --yes;
+                              --force acknowledges an uncertain run
+ego fork <ID> [--at ITEM_ID]   branch after a completed turn
+ego checkpoint [-C DIR] <ID> preview|restore COMMIT|close
+                              inspect or selectively undo builtin file edits
+ego compact <ID> [--request-id UUID] [--budget LIMIT] [--max-output-tokens N]
+                              publish one idempotent checkpoint target
+ego export <ID> [--sanitize] [--format md|json|jsonl|transcript] [--file PATH]
+                [--follow] [--after SEQ]
+                [-C DIR] [--session-dir DIR]
+                              render a session; Markdown is the default
+ego mcp add NAME --stdio [--cwd DIR] [--inherit-env NAME]... -- COMMAND [ARG]...
+        add NAME --http URL [--profile current|legacy-sse] [--auth none|oauth] [--allow-insecure-loopback]
+        rm NAME | ls [--json] | login NAME | reload [NAME]
+                              shared configuration and live admission service;
+                              login NAME --client-id ID | --cimd URL | --dcr
+ego mcp-server --max-concurrent-runs N --retained-requests N
+               --max-resource-bytes N [-C DIR] [--session-dir DIR]
+                              serve ego AS an MCP server on stdio: scoped
+                              run/continue/cancel/status tools, plus compact
+                              (delegation surface for Claude, Codex, CI) plus
+                              sanitized resources; no MCP Tasks or prompts
+ego auth   login|logout|status [PROVIDER]
+ego models [--provider P] [--refresh] [--json]
+ego hooks  ls [--json]                     read-only admitted hook catalogue
+ego config capabilities|snapshot|batch|get|set|unset|ls|edit
+ego roots  add|rm|ls                         user perimeter roots
+ego rules  ls|allow|deny|revoke|remember|explain   (permission rules,
+                              stable IDs; `explain <tool> <args>` shows the
+                              canonical intent + matching rule, dry)
+ego usage  [--period P] [--all-roles] [--json] cost and token report
+ego acp [--tools LIST | --no-tools] [--allow RULE] [--deny RULE]
+        [--profile NAME] [--append-system TEXT|@file] [--output-style NAME]
+        [--instructions FILE]
+        [--listen ENDPOINT [--allow-public-bind]
+         [--max-connections N] [--connection-lifetime DURATION]
+         [--max-ingress-bytes N]]
+                              serve ACP on stdio by default, or on an explicit
+                              endpoint. The seven session flags use the
+                              general session shape and mean here exactly what
+                              they mean for `ego run`; naming none of them is
+                              the unshaped session. Listener controls default
+                              to 32 connections, 24h, and 134217728 cumulative
+                              ingress bytes per connection. TCP endpoints need
+                              EGO_ACP_TOKEN; local endpoints use operating-
+                              system peer identity and never read that token.
+                              Public addresses additionally require
+                              --allow-public-bind and cap `off` confinement at
+                              `workspace`.
+ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
+                              serve Agent2Agent discovery information.
+                              ENDPOINT is a socket path —
+                              authenticated by the operating system, the
+                              preferred form — or an address, which requires a
+                              credential in EGO_A2A_TOKEN. An address reachable
+                              from outside this machine is refused by name
+                              unless the operator asks for it
+ego worktree show|cleanup RECEIPT_UUID   inspect or safely remove a retained local checkout
+ego orchestrator brief [--root PATH]  read-only TUIC children and unread results
+ego doctor [--json]           read-only redacted health snapshot
+ego setup [PROMPT] [--profile NAME] [--directory PATH]
+                             transient read-only setup inventory
+```
+<!-- ego-cli-command-set:end -->
+
 | Command | Purpose |
 | --- | --- |
 | `ego run` | Run a prompt without interactive questions |
@@ -59,6 +133,13 @@ refused. See [permissions](docs/guides/permissions.md).
 use. Token or monetary limits, turn limits, and `--timeout` bound work. Consult
 the generated reference for units, defaults, and mutually exclusive options.
 
+| Flags | Effect |
+| --- | --- |
+| `--allow` / `--deny` | Permission rules use the `read`, `write`, `list`, `search`, `exec`, `net`, and `tool` heads. Rules match prepared operations, not rendered shell strings. |
+
+`-v` and `--verbose` are recognized but unavailable. Configure diagnostics with
+`EGO_LOG` and `EGO_LOG_FILE` instead; see [troubleshooting](docs/guides/troubleshooting.md).
+
 ### Managed worktree launch
 
 `ego --worktree feat/task "implement the task"` approves creation of a named Git
@@ -73,11 +154,74 @@ or platform cannot support.
 
 ## 4. Output contracts
 
+<!-- ego-cli-json-output:start -->
 ### 4.1 `--output json` (one object on stdout at completion)
 
-JSON output is a completion object, not a stream of terminal updates. Tool output
-and diagnostics do not become extra JSON objects on stdout. See
-[automation](docs/guides/automation.md) for parsing examples and schema validation.
+```json
+{
+  "v": 18,
+  "session": "s_9f2k…",
+  "result": "…final assistant text or --schema-validated object…",
+  "exit_reason": "done|budget|max_turns|timeout|permission|question|paused|error",
+  "turns": 4,
+  "usage": { "uncached_input_tokens": 8110, "cache_read_tokens": 40100,
+             "cache_write_tokens": 1200, "output_tokens": 3120 },
+  "context": { "used_tokens": 51410, "provenance": "generation_boundary" },
+  "cost": { "state": "known",
+            "total": { "amount": "0.083", "currency": "USD" } }
+}
+```
+
+`v` is **`PUBLIC_EVENT_VERSION`**, the same number §4.2's events carry, and not
+a number of its own. This object is a projection of the same public model —
+`usage`, `cost` and `context` are that vocabulary's types, so a change to them
+changes both surfaces at once, and a second number would let one of the two
+move without the other. §4.6's catalogue is versioned separately for the
+opposite reason: it publishes no part of the event model.
+
+When the session has a goal, the summary also contains `goal`:
+`{"status":"achieved|stopped|exhausted|active","reason":"…"}`.
+The field is absent for sessions without a goal. `achieved` means the durable
+goal was achieved; it has no `reason`. `stopped` carries the goal-check stop
+reason (including bounded evaluator failure diagnostics), or the blocker reason.
+`exhausted` carries the goal continuation or goal-check token budget reason.
+`active` means the goal remains open without a goal-check stop, for example
+when the invocation needs human input. Its last blocker reason is included if
+present. `ok` and `exit_reason` still describe the invocation, not goal success:
+a completed invocation can have `ok:true`, `exit_reason:"done"`, and a stopped
+or exhausted goal. Consumers that require goal success must inspect `goal.status`.
+
+`usage` is the sum of the per-generation deltas, split by the categories that
+are *priced differently*; it is a flow and only grows. `context` is the
+occupancy *level* of the live context window and goes **down** after a
+compaction, so it is reported separately and never derived from `usage`.
+The last measured occupancy is not clamped to the model window. A delivered
+final answer completes its turn even if usage reaches or exceeds the resolved
+window. Before the next provider request, a known-full context is refused with
+`context_overflow`, asking for `/compact` or a larger model window. Unknown occupancy and history added since
+the measurement are not an exact preflight token count; a provider-reported
+context overflow remains a separate typed failure.
+`cost.amount` is an exact decimal **string**, not a JSON number — binary floats
+cannot represent a price. `cost.state` is `unstarted` before the first priced
+generation, and `{"state":"unknown","reason":…}` once any generation could not
+be priced: an unpriceable generation makes the session total unknown rather
+than silently under-reported.
+
+On exit 3, exactly one human-input payload is present. A permission boundary
+uses the existing `denied`/`denied_by` fields. An `AskQuestion` boundary uses a
+`question` object containing its stable ID, prompt, choice mode, options, and
+whether free text is accepted. A script answers it with
+`ego resume ID --answer QUESTION_ID=JSON`; a mismatched ID or value is exit 2,
+not an answer guessed against a different question.
+
+`paused` is the one reason that carries **no** payload and asks nothing. The
+session stopped because a host called `_ego/pause`, and
+the only thing that moves it again is that host calling `_ego/resume`. It is
+exit 6 and deliberately not exit 3 for exactly that reason: a script that reads
+3 goes looking for a `denied`/`denied_by` pair or a `question` object, and a
+pause has neither.
+
+<!-- ego-cli-json-output:end -->
 
 ### 4.2 `--output jsonl` (one event per line, live)
 
@@ -87,9 +231,23 @@ whole lines and use the documented versioned event fields. See the
 
 ### 4.3 Exit codes
 
-Use process exit status to distinguish successful completion from refusal,
-invalid input, budget exhaustion, cancellation, and runtime failure. The
-[CLI overview](docs/reference/README.md) documents the exit-status table.
+| Code | Meaning |
+| --- | --- |
+| 0 | Completed |
+| 1 | Task failure or internal runtime failure |
+| 2 | Invalid input or usage |
+| 3 | Permission or question requires human input |
+| 4 | Provider, network, uncertain delivery, or context-overflow failure |
+| 5 | Budget or maximum-turn limit |
+| 6 | Host-requested safe-boundary pause |
+| 124 | Timeout |
+| 130 | SIGINT |
+| 143 | SIGTERM |
+
+Completion reasons and exit codes are different classifications. For example,
+`budget` and `max_turns` share code 5. A pause has no human-input payload;
+permission and question outcomes do. See `RunTermination` in
+`crates/ego-core/src/run.rs` for the shared mapping.
 
 ### 4.4 Non-interactive posture: untrusted by default
 
@@ -168,3 +326,33 @@ override only the models they name. Unknown capabilities and prices remain
 unknown. First-run defaults and service-tier settings are separate from
 capability declarations. See [providers](docs/guides/providers.md) and
 [configuration](docs/reference/configuration.md).
+
+### 7.3 Managed configuration write scopes
+
+The matrix lists keys accepted by managed configuration writes. `yes` means
+the key is writable in that target; `no` means the write is refused. An
+ordinary profile and the reserved `ci` profile have distinct scopes.
+
+<!-- ego-managed-config-keys:start -->
+| Key | User base | User profile | ci profile |
+|---|---|---|---|
+| `model` | yes | yes | yes |
+| `thinking` | yes | yes | yes |
+| `mode` | yes | yes | yes |
+| `sandbox` | yes | yes | yes |
+| `roots` | yes | yes | yes |
+| `exec_paths` | yes | yes | yes |
+| `exec.env` | yes | yes | yes |
+| `exec.env_allowlist` | yes | yes | yes |
+| `network` | yes | yes | yes |
+| `budget` | yes | yes | yes |
+| `bare` | yes | no | no |
+| `permissions.judge` | yes | yes | yes |
+| `ui.statusline.template` | yes | no | no |
+| `ui.keybindings` | yes | no | no |
+| `ui.vim` | yes | no | no |
+| `session_dir` | no | no | yes |
+| `artifact_dir` | no | no | yes |
+| `auth.PROVIDER.headers` | yes | no | no |
+| `auth.PROVIDER.credential_command` | yes | no | no |
+<!-- ego-managed-config-keys:end -->

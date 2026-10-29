@@ -1,8 +1,6 @@
 //! `SessionState` and the pure, sync reducer.
 //!
-//! See `ARCHITECTURE.md` §1: state is a reduction over an append-only event
-//! log, and compaction and forking are events *in* the log rather than
-//! operations *on* it.
+//! Session state reduced from durable events.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -56,16 +54,9 @@ pub struct Usage {
     pub web_search_requests: u64,
     /// Input tokens billed at the full rate — not served from cache.
     ///
-    /// **The partition direction is this type's, not a wire's**, and the
-    /// wires disagree: OpenAI's `prompt_tokens` *includes* its cache figures
-    /// while Anthropic's `input_tokens` *excludes* them, so the same
-    /// arithmetic applied to both is a silent factor-of-two in one direction
-    /// or the other. Here the four fields are disjoint and this one is what
-    /// is left after the two cache categories are taken out; a mapping that
-    /// receives an already-exclusive figure passes it through, and one that
-    /// receives an inclusive figure subtracts. Asserted per profile by check
-    /// 4 of `docs/architecture.md`
-    /// §9, which is where it can actually fail.
+    /// The four usage fields are disjoint. Wires with inclusive prompt usage
+    /// subtract cache categories; wires with exclusive input usage pass it
+    /// through. Provider conformance fixtures check this normalization.
     pub uncached_input_tokens: u64,
     /// Input tokens served from the provider's prompt cache.
     pub cache_read_tokens: u64,
@@ -231,15 +222,9 @@ impl Usage {
 
 /// Whether a session is running, holding, or held.
 ///
-/// Three states and not a `bool`, because the middle one is the whole point.
-/// `docs/architecture.md`
-/// requires that `_ego/pause` report `paused` **only** once the durable
-/// boundary exists and report `pending` before then: an indivisible provider,
-/// permission or tool effect that is already in flight settles truthfully
-/// first, and that gap is observable to a host and can outlive a crash. A
-/// boolean would have to answer "is it paused?" with "yes" during a window
-/// where an effect is still running, which is the one thing the contract
-/// forbids saying.
+/// `_ego/pause` reports `paused` only once its durable boundary exists.
+/// Before then it reports `pending` while an in-flight provider, permission
+/// or tool effect settles. A boolean cannot express that observable gap.
 ///
 /// The request id travels with both states so a host retrying over a
 /// reconnected transport learns what *its own* request achieved. It answers
@@ -280,34 +265,11 @@ impl PauseState {
 }
 
 /// Which hold requests this session has already answered, and with what.
-///
-/// The idempotency key of `_ego/pause` and `_ego/resume`, and the reason
-/// [`PauseState`] alone is not enough: state-based idempotence only holds
-/// while the state has not moved on. Two retries defeat it. A resume whose
-/// answer was lost in transit, re-sent, finds the session already running and
-/// would be told "not paused" — that its request failed, when it succeeded. A
-/// pause re-delivered late, after the host released it, would find the session
-/// running and hold it a second time, on one request the host made once.
-///
-/// So the answer is remembered per request rather than inferred from where the
-/// session ended up. This is not a second store: every entry is folded from
-/// `SessionPaused` and `SessionResumed`, which already carry the request that
-/// asked. The log stays the only authority and this is its index.
-///
-/// The key is `(session, operation, request)`. Session, because the request id
-/// is session-bound at the wire and coupling two logs through a shared id
-/// would let one session refuse work on account of another. Operation,
-/// because a host is entitled to spend one id on a pause and the same id on
-/// the resume that releases it; those are two requests, not one reused. The
-/// ADR's "reuse with different bytes refuses" needs no fingerprint here: the
-/// request body is `v`, `sessionId` and `requestId` and nothing else, so the
-/// key *is* the body. A future field would change that and would have to bring
-/// a fingerprint with it.
-///
-/// It grows and is not pruned, like `generations` below and for the same
-/// reason: an entry that was dropped would be answered as though it had never
-/// arrived, which is the behaviour this type exists to prevent. Holds are
-/// human-paced acts, a handful per session, not per-token records.
+/// Remember pause/resume answers per `(session, operation, request)`, not
+/// current state: delayed retries must not repeat effects or report prior
+/// success as failure. The index is folded from durable events and is not
+/// pruned. The key covers the current closed body; adding request fields
+/// would require binding those bytes too.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HoldReceipts {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -375,11 +337,7 @@ pub struct TurnState {
 
 /// What an item is, and therefore who authored it.
 ///
-/// Not [`crate::public::ItemKind`], which answers a different question for a
-/// different audience: that one collapses user and assistant into a single
-/// `Message` (`CLI.md` §4.2) and adds kinds that never become items here.
-/// Rebuilding a conversation needs exactly the distinction the public one
-/// throws away.
+/// Rebuilding a conversation needs exactly the distinction the public one throws away.
 ///
 /// Decided by the first event that touches the item and never revised: an
 /// item's author is settled when it is created. Without it a rebuilt history
@@ -905,12 +863,9 @@ impl QuestionContinuation {
 
 /// One money observation, in the order it was applied.
 ///
-/// One entry per `UsageUpdated`, not one per attempt: providers report usage
-/// in increments, and giving each increment its own entry means accumulation
-/// is just the fold, with no second addition rule for `CostDelta` to disagree
-/// with [`CumulativeCost::add_delta`]. A correction collapses all of one
-/// attempt's entries into a single revised one. See
-/// `docs/architecture.md`.
+/// One entry per `UsageUpdated` permits ordinary folding without another
+/// addition rule. A correction replaces all increments for one attempt
+/// with its single revised accounting value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Charge {
     /// Which durable generation fact owns this spend, or whether it predates
@@ -1098,8 +1053,8 @@ impl QueuedPrompt {
     }
 }
 
-/// The reduction of a `DomainEvent` log: the harness's entire semantic
-/// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
+/// Semantic state reduced from a domain-event log exclusively by the pure synchronous `apply`
+/// function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
     /// Standing user registrations, reduced independently of model prose.
@@ -1183,20 +1138,10 @@ pub struct SessionState {
     /// [`Self::charges`].
     pub cost: CumulativeCost,
     /// Every money contribution, in application order.
-    ///
-    /// A `Vec` and not a map, and the order is load-bearing rather than
-    /// incidental: `CumulativeCost::add_delta` is order-dependent twice over
-    /// — the first `Known` delta fixes the settlement currency and the first
-    /// `Unknown` reason is the one kept — so refolding an unordered
-    /// collection can produce a different total from the original fold, and
-    /// with a `HashMap` a different one on each replay. See the ADR for the
-    /// worked counterexample.
-    ///
-    /// Grows by one entry per attempt and is not pruned: a correction can
-    /// only replace a contribution that is still here. That is proportional
-    /// to attempts, not to log length — a log holds many events per attempt —
-    /// but it is unbounded over a session's life. The *lifecycle* state
-    /// ([`Self::live_attempts`]) is the part bounded by live generations.
+    /// Retain attempt costs in order. Currency and the first unknown reason
+    /// are order-dependent, so refolding a map could change totals. Keep entries
+    /// for corrections; this is unbounded by session lifetime but proportional
+    /// to attempts, not log events. Live-attempt state is separately bounded.
     pub charges: Vec<Charge>,
     /// Models whose cost anomaly has already been durably announced.
     #[serde(default)]
@@ -2002,15 +1947,9 @@ impl SessionState {
             }
             EventKind::SessionTitleChanged { title } => self.title = title.clone(),
             EventKind::SessionDeleted => self.deleted = true,
-            // Total like every other arm, and the transitions it will not make
-            // are as load-bearing as the ones it will. A second request while
-            // one is already outstanding leaves the first standing, because
-            // the first is the one the boundary will answer and overwriting it
-            // would tell a retrying host its own request had been honoured. A
-            // boundary for a request nothing asked for is ignored rather than
-            // trusted: it can only come from a log that lost its request, and
-            // reducing it would manufacture the very boundary the ADR says is
-            // never manufactured.
+            // An outstanding pause request cannot be overwritten. Ignore a boundary
+            // without its matching request rather than manufacture a pause state from
+            // an incomplete log.
             EventKind::SessionPauseRequested { request } => {
                 if self.pause == PauseState::Running {
                     self.pause = PauseState::Requested { request: *request };
@@ -3032,8 +2971,7 @@ impl SessionState {
     /// matters most in practice — a provider that reported no usage, priced
     /// properly an hour later.
     ///
-    /// O(n) per correction, and a log crafted to be all corrections replays
-    /// in O(n²). See `POTENTIALS.md`.
+    /// O(n) per correction, and a log crafted to be all corrections replays in O(n²).
     fn refold(&mut self) {
         let mut usage = Usage::IDENTITY;
         let mut cost = CumulativeCost::default();

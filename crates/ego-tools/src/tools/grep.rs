@@ -18,11 +18,8 @@ pub struct GrepParams {
     pub path: Option<String>,
 }
 
-/// Searches file contents. Holds `search` authority and no `read` authority:
-/// the guarded seam opens the files and this tool only supplies the
-/// judgement, so a grep approved to look for `TODO` cannot go read `.env`
-/// instead (`docs/architecture.md`
-/// §2).
+/// Searches contents through the guarded seam. The caller supplies the
+/// matching judgment and receives results, not arbitrary file-read authority.
 pub struct GrepTool;
 
 impl TypedTool for GrepTool {

@@ -1,10 +1,8 @@
 //! Rebuilding a sendable [`Conversation`] from a reduced session log.
 //!
-//! See `docs/architecture.md` §4. This lives beside
-//! [`Conversation`] rather than inside the turn loop because it is defined
-//! entirely in terms of the invariants that type owns; the loop is one caller
-//! of it, and putting it here means it is testable before the loop exists and
-//! stays testable without one.
+//! Conversation history rules live beside [`Conversation`] because they
+//! depend on its invariants, not the turn loop. They remain testable
+//! without constructing a running turn.
 //!
 //! The durable log is never rewritten. Everything below produces the request
 //! that is about to be assembled, and nothing else.
@@ -52,13 +50,10 @@ impl std::fmt::Display for Repair {
 /// What a synthesized answer says. Deliberately not a tool's own vocabulary:
 /// the tool did not say this, the harness did.
 ///
-/// **The second sentence is `POTENTIALS.md` P21's answer.** P21's trigger was
-/// "the first tool whose `descriptor` cannot honestly claim to be read-only",
-/// and `write` is it. A tear is precisely the case where nobody knows whether
-/// the call took effect, so repeating it and not repeating it are both capable
-/// of being wrong — and the party best placed to find out is the one holding
-/// the tools. Telling it "this did not complete" and nothing more is what
-/// makes the repeat the default.
+/// A tear is precisely the case where nobody knows whether the call took effect, so
+/// repeating it and not repeating it are both capable of being wrong — and the party best
+/// placed to find out is the one holding the tools. Telling it "this did not complete"
+/// and nothing more is what makes the repeat the default.
 ///
 /// P21 sketches a bigger answer — a `safe_to_repeat` on `ToolDescriptor`, a
 /// per-dispatch delivery certainty modelled on the transport's. None of that
@@ -71,14 +66,9 @@ const TORN: &str = "the tool call did not complete: the session ended before its
 
 /// Rebuild `state`'s history as something a provider will accept, and say
 /// what had to be repaired to get there.
-///
-/// Every branch either completes the history or truncates to a prefix that was
-/// already complete, so no repair below can *cause* an `Err`. What it can do is
-/// fail to cure one that was already in the log: a log holding two calls under
-/// one provider id is corruption, not a tear, and it is refused rather than
-/// given a reading (ADR §6). The whole [`HistoryError`] propagates and not just
-/// that variant, because a rebuild that names the one error it believes
-/// reachable is the exact claim §6 was written to retract.
+/// Repairs complete a history or truncate to an already-complete prefix.
+/// Pre-existing duplicate call IDs are corruption, not torn output; propagate
+/// the full [`HistoryError`] rather than silently reinterpret them.
 pub fn conversation_from(
     state: &SessionState,
 ) -> Result<(Conversation, Vec<Repair>), HistoryError> {
@@ -326,13 +316,12 @@ fn conversation_from_inner(
             // request and settlement are not conversation messages; the
             // correlated `ToolCallCompleted` is the provider-visible answer.
             ItemKind::Question => {}
-            // Taken a generation at a time, not a call at a time. The model
-            // issued every call in one run at once, so all their uses belong
-            // to one assistant turn and all their results to the one user
-            // turn that answers it. Emitting each call with its own answer in
-            // between would describe a conversation in which the model saw
-            // the first result before choosing the second — five turns where
-            // three happened. See `POTENTIALS.md` P22.
+            // Taken a generation at a time, not a call at a time. The model issued every
+            // call in one run at once, so all their uses belong to one assistant turn and
+            // all their results to the one user turn that answers it. Emitting each call
+            // with its own answer in between would describe a conversation in which the
+            // model saw the first result before choosing the second — five turns where
+            // three happened.
             ItemKind::ToolCall if item.context_command => {
                 if let Some(result) = &item.tool_result {
                     push(

@@ -1,7 +1,7 @@
 //! Resolving a local model by asking the daemon, instead of writing down what
 //! it probably says.
 //!
-//! See `docs/guides/providers.md` §3 and §4.
+
 //!
 //! ## Why the context window is measured and not read
 //!
@@ -15,9 +15,8 @@
 //!   `num_ctx` — a server-side setting no API exposes and no catalogue,
 //!   generated or otherwise, could ever contain.
 //!
-//! Taking the first would tell the budget gate, the `context.used_tokens`
-//! occupancy of `CLI.md` §4.1, and eventually M3's compaction trigger that
-//! there is four times the room there is. So the served value is observed.
+//! Observe the served context value instead of treating architecture metadata as a
+//! configured daemon ceiling.
 //!
 //! `/api/ps` answers only for models loaded right now, so a cold model is
 //! loaded first — with the daemon's own load-only request, not with a token
@@ -394,12 +393,9 @@ async fn load(row: &ProviderRow, model: &str, http: &Arc<dyn Http>) -> Result<()
 /// since `max_tokens` is deprecated at OpenAI and a shared wire format is not
 /// where a provider's name belongs.
 ///
-/// **It is true again, and by a different route.** The row names
-/// [`wire::ollama`](crate::wire::ollama), a mapping of its own, which sends
-/// the ceiling in the field this daemon reads
-/// (`docs/guides/providers.md`
-/// §8). The request caps itself; `ollama_ceiling.rs`'s third recording is
-/// `ego`'s own body against a live 0.32.14 daemon, stopping at the ceiling.
+/// The row selects [`wire::ollama`](crate::wire::ollama), which sends the
+/// ceiling in the daemon's supported field. `ollama_ceiling.rs` retains the
+/// recording that exercises ego's request body against the daemon.
 ///
 /// `max_output_tokens` stays `None` regardless, and the distinction is worth
 /// keeping: this field is what the *daemon states*, and it states nothing. The
@@ -468,14 +464,9 @@ fn capabilities_from(tag: &Tag, served_context: Option<u64>) -> ModelCapabilitie
         // `xhigh` come back one tier away from what the caller asked for,
         // silently and with a 200.
         //
-        // This field was `Any` until the wire survey caught it. The earlier
-        // measurement was not wrong, it was narrower than it read: it proved
-        // every level is *accepted*, and accepted was taken for honoured.
-        // That is the mistranslation `docs/guides/providers.md` I5 calls
-        // worse than a refusal, and `ReasoningEffortSupport`'s own preamble
-        // says the parameter is not advisory. Naming the five refuses the
-        // other two at `request_gaps`, before the request is built, telling
-        // the caller which levels would have worked.
+        // Accepted effort values are not necessarily honored effort values.
+        // `ReasoningEffortSupport` names only the five supported levels so
+        // `request_gaps` refuses the others before building a request.
         reasoning_efforts: ReasoningEffortSupport::Only(BTreeSet::from([
             ThinkingLevel::Off,
             ThinkingLevel::Low,

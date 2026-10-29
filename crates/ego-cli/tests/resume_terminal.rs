@@ -12,7 +12,7 @@ fn tty_resume_task_asks_permission_and_stays_interactive() {
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(text("SESSION-CREATED")),
-            Reply::Sse(tool_call("regression_case", "exec", r#"{"argv":["seq","1","3"]}"#)),
+            Reply::Sse(tool_call("exec-IRH", "exec", r#"{"argv":["seq","1","3"]}"#)),
             Reply::Sse(text("RESUME-TASK-DONE")),
             Reply::Sse(text("LATER-MESSAGE-DONE")),
         ],
@@ -213,7 +213,7 @@ fn ci_resume_permission_exits_three_or_uses_profile_preapproval_without_promptin
             completions: vec![
                 Reply::Sse(text("SESSION-CREATED")),
                 Reply::Sse(tool_call(
-                    "regression_case",
+                    "exec-ci-IRH",
                     "exec",
                     r#"{"argv":["seq","1","3"]}"#,
                 )),

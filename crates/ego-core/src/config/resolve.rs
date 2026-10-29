@@ -1,5 +1,4 @@
-//! Precedence resolution and the trust gate. Pure functions over injected
-//! sources — no file I/O (`plans/m0a-contracts.md` Step 12).
+//! Precedence resolution and the trust gate.
 
 use super::error::ConfigError;
 use std::collections::BTreeMap;
@@ -16,8 +15,7 @@ use crate::generator::types::ThinkingLevel;
 use crate::permit::Confinement;
 use crate::permit::rule::Rule;
 
-/// Ambient-loading posture (`CLI.md` §4.5): whether project-local config,
-/// hooks, skills and MCP servers may load.
+/// Only the system layer can impose a non-relaxable ceiling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Posture {
     Bare,
@@ -117,8 +115,8 @@ pub struct Effective {
     pub roots: Vec<crate::permit::RootCfg>,
     /// What this run may spend, after precedence and the system clamp.
     ///
-    /// `2026-08-21-a-run-with-no-ceiling.md` §4: both fields are `None`
-    /// unless somebody wrote a ceiling, because ego imposes none of its own.
+    /// Both fields remain `None` unless a ceiling was explicitly configured.
+    /// ego does not impose a ceiling of its own.
     pub ceilings: Ceilings,
     /// What the system clamp reduced, per field, so the run can say so.
     ///
@@ -249,25 +247,18 @@ fn join(settings: &[&'static str]) -> String {
 /// applied — a profile changes what its own layer contributes, it does not
 /// change that layer's rank.
 ///
-/// **Trust gate** (`CLI.md` §4.5): ambient discovery is trust-gated, and
-/// that includes project-local *config*, not just hooks/skills/MCP. When the
-/// resolved posture is [`Posture::Bare`] — because the workspace is
-/// [`Trust::Untrusted`], or because any layer's `bare` flag forced it even
-/// while trusted — the `project` and `local` layers are dropped entirely
-/// before anything else is computed: they cannot affect `model`, `mode`,
-/// `permissions` or which `[profile.NAME]` tables are available. `bare`
-/// itself is read from every layer regardless of eligibility, since asking
-/// for *more* restriction from an otherwise-excluded source is never a
-/// security problem.
+/// When the resolved posture is [`Posture::Bare`] — because the workspace is
+/// [`Trust::Untrusted`], or because any layer's `bare` flag forced it even while trusted
+/// — the `project` and `local` layers are dropped entirely before anything else is
+/// computed: they cannot affect `model`, `mode`, `permissions` or which `[profile.NAME]`
+/// tables are available. `bare` itself is read from every layer regardless of
+/// eligibility, since asking for *more* restriction from an otherwise-excluded source is
+/// never a security problem.
 ///
-/// **System ceiling** (`ARCHITECTURE.md` §3.4): a `deny` entry from any
-/// `system`-sourced layer — its own base `permissions.deny`, and its active
-/// `[profile.NAME]` override's `permissions.deny` if one is selected — is
-/// collected into a ceiling *before* the ordinary precedence merge runs, and
-/// re-applied after. No other layer's `allow`, and no profile override that
-/// merely omits the entry, can pull it back out. Multiple `system` layers
-/// union rather than overwrite. Deny entries from any other source are
-/// ordinary config and can be relaxed by a higher-precedence layer.
+/// No other layer's `allow`, and no profile override that merely omits the entry, can
+/// pull it back out. Multiple `system` layers union rather than overwrite. Deny entries
+/// from any other source are ordinary config and can be relaxed by a higher-precedence
+/// layer.
 ///
 /// Returns [`ConfigError::UnknownProfile`] if `active_profile` is given but
 /// no eligible layer defines that profile — missing from one layer is
@@ -463,11 +454,8 @@ fn resolve_inner(
             .and_then(|p| p.budget.as_ref())
             .or(sourced.value.budget.as_ref())
         {
-            // Per field, so a layer naming a token ceiling does not erase a
-            // money ceiling a lower one set. They are independent
-            // instruments — §9's token ceiling needs no rates and binds on
-            // every metering class — and merging them into one slot would
-            // make naming either a way to drop the other.
+            // Merge token and money ceilings per field. Naming one must not erase the other;
+            // they enforce independent resources.
             ceilings.apply(budget);
         }
         if let Some(path) = profile.and_then(|profile| profile.session_dir.clone()) {
@@ -530,13 +518,9 @@ fn resolve_inner(
     // if !deny.contains(&entry) { deny.push(entry); }
     // ```
     //
-    // which is correct about enforcement — one deny is one entry — and threw
-    // away the only fact an attribution needs. A predicate denied in both
-    // `/etc/ego/config.toml` and the operator's own config arrived here
-    // already present, was skipped, and kept whichever origin the merge loop
-    // happened to leave: the *user* copy, the one whose deletion changes
-    // nothing. See
-    // `docs/architecture.md`.
+    // Deduplicating predicates must preserve all origins. Otherwise a rule
+    // shared by system and user layers could report only the user source, whose
+    // removal would not lift the denial.
     for entry in system_deny {
         Ruleset::merge(&mut permissions.deny, entry, Source::System);
     }
@@ -550,14 +534,8 @@ fn resolve_inner(
     // allow.retain(|entry| !deny.contains(entry));
     // ```
     //
-    // which spelled "deny beats allow" as *string equality between two
-    // lists*: `deny = ["exec(git *)"]` left `allow = ["exec(git push)"]`
-    // standing, because the strings differ, and the resolved config then said
-    // the push was allowed. No better comparison rescues it — those two rules
-    // are neither equal nor unrelated, and the only place their relationship
-    // is decidable is against an actual call. See
-    // `docs/architecture.md` §6 and
-    // `docs/architecture.md` §7.
+    // Deny/allow relationships are decided against actual calls, not by string
+    // equality between rule lists. Different patterns can overlap semantically.
     //
     // The system-deny ceiling above is a *different* job and stays: it
     // guarantees a `/etc/ego` entry is present in the list at all, which no
@@ -589,12 +567,9 @@ fn resolve_inner(
         )
     });
 
-    // The same construction one field over: a `system` ceiling is gathered
-    // outside the ordinary merge and re-applied after it, so no
-    // higher-precedence layer and no profile override can raise it. `min`
-    // rather than "system wins", because `CLI.md:311` binds everyone to the
-    // administrator's cap and not to the administrator's *figure* — an
-    // operator asking for less keeps their own.
+    // The same construction one field over: a `system` ceiling is gathered outside the
+    // ordinary merge and re-applied after it, so no higher-precedence layer and no
+    // profile override can raise it.
     let system_ceiling = system_budget_ceiling(&eligible, active_profile_name);
     let clamped = ceilings.clamp(&system_ceiling);
 

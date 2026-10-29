@@ -1,22 +1,6 @@
-//! `StoreRecord` codec: pure encode/decode with an xxhash64 integrity
-//! checksum over `seq` and canonical payload bytes.
-//!
-//! See `plans/m0a-contracts.md` Step 3. No I/O lives here.
-//!
-//! A session's `events.jsonl` (ARCH §5) is a sequence of lines. The first
-//! line is a versioned [`Header`]; every line after that is either a
-//! [`StoreRecord`] or, once the codec grows a new record shape in a later
-//! version, a line this build of the codec doesn't recognise. That third
-//! case is [`StoreLine::Unknown`] — its raw bytes are preserved verbatim
-//! rather than dropped, so a reader on an older binary can still forward an
-//! event log unchanged. This module has no rewrite/migration function: any
-//! future rewrite (compaction, migration — later steps) that reads a
-//! [`StoreLine::Unknown`] and does not re-emit its [`RawLine::as_bytes`]
-//! untouched is *silently discarding data*, not "fixing up" the line. That
-//! is a decision a rewrite must make deliberately (copy verbatim, or refuse
-//! to proceed) — this codec makes silent loss structurally awkward (the raw
-//! bytes are the only thing `Unknown` carries) but cannot itself prevent a
-//! caller from choosing to drop them.
+//! Pure record codec with xxhash64 integrity over sequence and canonical payload bytes. A
+//! stream begins with a versioned header, then records. Unknown future lines retain raw bytes;
+//! any rewriting caller must preserve those bytes or refuse, never silently discard them.
 
 use std::path::PathBuf;
 
@@ -27,9 +11,7 @@ use xxhash_rust::xxh64::xxh64;
 use crate::event::id::{Seq, SessionId};
 use crate::event::time::Timestamp;
 
-/// The codec version written into every session's header line, and — since
-/// `docs/architecture.md` §3 —
-/// actually compared when one is read.
+/// The codec version written into each session header and checked on read.
 ///
 /// v12 binds hook plans, starts, and settlements to explicit descriptor and
 /// activation identities, and makes admitted skill-hook snapshots sufficient
@@ -105,30 +87,10 @@ impl Header {
     }
 }
 
-/// A durable record: `{seq, checksum, payload}`.
-///
-/// `seq` is the adapter-owned, one-based physical position in the complete
-/// session stream. It is deliberately independent of a `DomainEvent`'s
-/// envelope sequence and a `RunTransaction`'s revision, both of which remain
-/// semantic counters inside `payload`.
-///
-/// `checksum` is the xxhash64 (seed [`CHECKSUM_SEED`]) of `seq` **and**
-/// `payload`'s canonical JSON bytes — the exact bytes of each value as they
-/// appear on the line, not a re-serialisation of a parsed form. [`encode_record`]
-/// and [`decode_line`] both preserve this: encoding hashes the bytes it is
-/// about to write, and decoding hashes the raw substrings [`decode_line`]
-/// found on the line (via [`RawValue`], which never re-serialises), before
-/// any other part of the record is interpreted. `seq` is included precisely
-/// because it is the log's authoritative ordering key (ARCH §1) and later
-/// tail-repair (Step 6) makes recovery decisions from it — a corrupted
-/// `seq` that stayed valid JSON would otherwise validate.
-///
-/// The two byte strings are combined via [`checksum_of`], which
-/// length-prefixes each with a fixed 8-byte big-endian length before
-/// concatenating: `seq` and `payload` are both variable-length, so hashing
-/// their bytes back to back with no framing would let e.g. `seq=b"1"` +
-/// `payload=b"23"` collide with `seq=b"12"` + `payload=b"3"`. The length
-/// prefixes make the split unambiguous.
+/// Durable `{seq, checksum, payload}` envelope. Physical stream position is independent of
+/// semantic event counters. Hash the raw sequence and payload value bytes with separate 8-byte
+/// big-endian length prefixes; unframed concatenation would admit ambiguous splits. Decode
+/// verifies original substrings, not reserialized JSON.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoreRecord {
     pub seq: Seq,

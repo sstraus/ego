@@ -1,10 +1,8 @@
 //! `OsFs`: the [`Fs`] a model's tools actually run against.
 //!
-//! The only *model-controlled* filesystem adapter in the workspace — the
-//! session store touches `std::fs` too, but behind a seam no tool can reach
-//! (`docs/architecture.md` §7).
-//! Nothing here consults a `Permit`: this is the raw seam, held by the turn
-//! loop and wrapped in `GuardedFs` before a tool ever sees it.
+//! Model-controlled filesystem access crosses this adapter, wrapped in
+//! `GuardedFs` before tools use it. Session-store filesystem I/O is separate
+//! and unreachable by model tools.
 
 use std::ffi::OsString;
 use std::fs;
@@ -392,13 +390,9 @@ impl Walk<'_> {
     /// A symlink: resolved, reported if it lands on a file, and never
     /// descended into.
     ///
-    /// This is the no-follow rule (`docs/architecture.md`
-    /// §4). A walk resolves many paths where a read resolves one, so a
-    /// symlinked directory inside an in-scope root is an escape the root check
-    /// cannot see; refusing to enter one closes it and makes cycles impossible
-    /// rather than merely detectable. A symlinked *file* is still reported —
-    /// under its canonical target, so an escape is something the permit check
-    /// can see and refuse.
+    /// Do not follow directory symlinks during walks: they can escape roots
+    /// or form cycles. Report file symlinks under canonical targets so ordinary
+    /// permit checks can reject out-of-scope results.
     fn link(&mut self, relative: std::path::PathBuf, at: &Path) {
         let Ok(target) = fs::canonicalize(at) else {
             return; // dangling, or a loop

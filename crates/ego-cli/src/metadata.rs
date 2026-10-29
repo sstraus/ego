@@ -383,7 +383,7 @@ fn render_machine(value: &impl Serialize, out: &Stdout) {
 }
 
 #[cfg(test)]
-mod regression_case_tests {
+mod interactive_metadata_tests {
     use super::*;
     use ego_core::event::domain::EventKind;
     use ego_core::event::id::{Producer, Seq, TurnId};
@@ -455,7 +455,7 @@ mod regression_case_tests {
     }
 
     #[test]
-    fn regression_case_runtime_epoch_persists_and_replays() {
+    fn interactive_metadata_runtime_epoch_persists_and_replays() {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let store = Arc::new(JsonlStore::new(

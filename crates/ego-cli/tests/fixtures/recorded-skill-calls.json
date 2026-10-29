@@ -1,0 +1,22 @@
+[
+  {
+    "source": "/home/example/Gits/.tmp/sample-run/work/20000102T120000Z-00000001/sessions/00000000-0000-4000-8000-000000010090/events.jsonl",
+    "line": 14,
+    "payload": {
+      "kind": "invoke",
+      "name": "amber-check",
+      "arguments": "",
+      "bare": false,
+      "invocation": "",
+      "path": ""
+    }
+  },
+  {
+    "source": "/home/example/Gits/.tmp/sample-run/work/20000102T120000Z-00000001/sessions/00000000-0000-4000-8000-000000010094/events.jsonl",
+    "line": 19,
+    "payload": {
+      "kind": "invoke",
+      "name": "amber-check"
+    }
+  }
+]

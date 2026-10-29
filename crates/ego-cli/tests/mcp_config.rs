@@ -1,4 +1,4 @@
-//! contract for regression case semantic MCP CLI values.
+//! contract for semantic MCP CLI values.
 
 use std::path::Path;
 

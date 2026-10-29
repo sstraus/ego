@@ -7,10 +7,8 @@
 //! the deepest form allowed, snapping to the xterm cube or to the sixteen
 //! basics only where it must.
 //!
-//! `docs/architecture.md` §2 is
-//! the reason `fg` and `bg` are separate options rather than one "colour": the
-//! diff writes background and the syntax pass writes foreground, and a type
-//! that could hold only one of them would force one of the two to win.
+//! Foreground and background are separate: the diff pass sets background
+//! and the syntax pass sets foreground without either replacing the other.
 
 use std::fmt::Write as _;
 
@@ -369,12 +367,8 @@ impl Style {
 }
 
 /// Every colour this build can name, in one place.
-///
-/// The diff half is the palette read off the capture in the ADR — not copied
-/// for its own sake, but because those six values are the only ones in this
-/// file that were *measured* rather than chosen, and a diff whose two
-/// backgrounds are not clearly ordered (line, then changed span) stops
-/// carrying the second signal.
+/// Diff line and changed-span backgrounds must stay visibly ordered so
+/// the palette preserves both change signals.
 pub struct Palette;
 
 impl Palette {
@@ -432,9 +426,8 @@ mod tests {
         }
     }
 
-    /// Both axes in one sequence, foreground first, matching the order the
-    /// captured renderer uses — and, more to the point, *both present*: this
-    /// is the type that makes §2's two passes composable.
+    /// Combine foreground and background in one sequence so syntax highlighting and diff
+    /// highlighting compose.
     #[test]
     fn the_two_axes_are_independent_and_travel_together() {
         let style = Style::fg(Rgb(248, 248, 242)).with_bg(Rgb(2, 40, 0));

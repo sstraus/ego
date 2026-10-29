@@ -332,7 +332,7 @@ fn cancelling_a_streaming_stdio_turn_leaves_the_session_able_to_run_the_next_pro
 /// regression — catches: an ACP seat stops after six failed attempts,
 /// or its force action is unavailable while a prompt response is outstanding.
 #[test]
-fn regression_case_acp_recovers_without_a_new_prompt_and_force_retry_is_routable() {
+fn outage_acp_recovers_without_a_new_prompt_and_force_retry_is_routable() {
     let places = Places::new();
     let mut completions = vec![
         Reply::StatusRetryAfter {
@@ -456,7 +456,7 @@ fn known_http_400_does_not_wedge_the_next_acp_prompt_or_erase_delivery() {
 /// Catches: a host crash leaves the ACP run uncertain and rejects every fresh prompt
 /// before the shared journal can settle the interrupted generation.
 #[test]
-fn regression_case_reloaded_acp_accepts_new_prompt_after_killed_generation() {
+fn crash_reloaded_acp_accepts_new_prompt_after_killed_generation() {
     let places = Places::new();
     let Reply::Paced { head, tail, .. } = paced("before crash", std::time::Duration::ZERO) else {
         unreachable!("paced produces a split reply");

@@ -107,14 +107,9 @@ pub fn card(served: &Served) -> AgentCard {
         }),
         documentation_url: None,
         icon_url: None,
-        // The card declares the scheme this endpoint actually enforces, which
-        // is a property of the transport it is served over and not of A2A.
-        // `docs/architecture.md`
-        // authenticates a local endpoint by the operating system, and a card
-        // demanding a bearer token there would send a caller to configure a
-        // secret this listener will never read — an instruction that is simply
-        // false. A2A has no scheme meaning "the transport already answered", so
-        // the honest spelling is to declare none.
+        // The card declares only authentication this endpoint enforces. Local endpoint
+        // authentication comes from the operating system, not a bearer token. A2A has
+        // no scheme for transport-established identity, so the card declares none.
         security_schemes: bearer_scheme(served.authentication),
         // A requirement with no scopes: presenting the token is the whole of
         // the authorization decision, because this listener has one caller

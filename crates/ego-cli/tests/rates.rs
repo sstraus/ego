@@ -1,16 +1,6 @@
-//! §5's third rate source, composed: the cache, the fetch, and the six
-//! outcomes `docs/architecture.md` §7 tabulates.
-//!
-//! This is the only place in the workspace where the three crates that own the
-//! pieces meet — `ego-tools` holds the cache because it owns `StoreIo`,
-//! `ego-ai` holds the fetch and the decode because it owns `Http`, and
-//! `ego-core` holds the types and opens nothing — so it is also the only place
-//! the composition can be wrong.
-//!
-//! The claim under test is §7's first row and it is a *privacy* claim, not an
-//! optimisation: an ordinary `ego` run contacts nobody but the model provider.
-//! Missing price sources now resolve without a quote. The admission gate
-//! emits a durable anomaly rather than inventing a price or refusing a call.
+//! Compose third-party rates across the real cache, fetch/decode, and core owners. No required
+//! quote means no pricing contact. Missing rate knowledge stays explicit rather than inventing
+//! a price.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -214,12 +204,8 @@ fn transport(wire: &Arc<Wire>) -> Arc<dyn Http> {
     Arc::clone(wire) as Arc<dyn Http>
 }
 
-/// **§7's first row, and the one that is a property rather than a case.**
-///
-/// No ceiling means no rate source is consulted at all — offline or not — so
-/// an ordinary run reaches nobody but the model provider. That is a privacy
-/// result and it has to be true before there is a third-party fetch to leak
-/// through, not after.
+/// No ceiling requiring rates means no pricing source lookup, offline or online. This protects
+/// privacy as well as avoiding unnecessary work.
 #[tokio::test]
 async fn a_run_with_no_ceiling_reads_no_cache_and_opens_no_socket() {
     let fixture = Fixture::new();
@@ -260,7 +246,7 @@ async fn a_money_ceiling_on_an_unmetered_row_neither_reads_nor_fetches() {
     assert_eq!(wire.calls(), 0);
 }
 
-/// §7 row 4: a fresh cache and a ceiling means no fetch is needed at all.
+/// A fresh cache satisfies the ceiling without a fetch.
 #[tokio::test]
 async fn a_fresh_cache_prices_the_ceiling_without_touching_the_network() {
     let fixture = Fixture::new();
@@ -283,7 +269,7 @@ async fn a_fresh_cache_prices_the_ceiling_without_touching_the_network() {
     assert_eq!(wire.calls(), 0, "a fresh table needs no revalidation");
 }
 
-/// §7 row 2: the same, offline. No request leaves the host and the run works.
+/// A fresh cache works offline without any network request.
 #[tokio::test]
 async fn an_offline_run_prices_a_ceiling_from_a_fresh_cache() {
     let fixture = Fixture::new();
@@ -375,7 +361,7 @@ async fn a_first_priced_run_fetches_the_table_and_leaves_it_cached() {
             .expect("from the cache this time")
             .is_some()
     );
-    assert_eq!(quiet.calls(), 0, "fetched once, per §6's title");
+    assert_eq!(quiet.calls(), 0, "a fresh cache performs no fetch");
 }
 
 /// Catches: a failed fetch losing the network recovery cause.
@@ -412,8 +398,8 @@ async fn malformed_cached_prices_preserve_the_invalid_rate_cause_without_a_fetch
     assert_eq!(wire.calls(), 0);
 }
 
-/// §5 is an *order*, first hit wins: rates the operator wrote down are never
-/// second-guessed by a third party's summary, and the table is not even read.
+/// Operator rates outrank third-party rates; do not even read the table when supplied rates
+/// answer.
 #[tokio::test]
 async fn rates_that_are_already_resolved_are_not_replaced_by_the_table() {
     let fixture = Fixture::new();

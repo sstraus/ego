@@ -85,11 +85,8 @@ fn a_prefixed_key_resolves_from_the_same_two_halves() {
 
 /// An absent rate decodes as **absent**, never as zero.
 ///
-/// `gpt-5` states no cache-write rate. `docs/guides/providers.md`
-/// §9 requires an absent figure to decode as absent, and `cost.rs:335-339`
-/// says why: a price list saying zero per token and a row that has no
-/// per-token price at all are different facts, and once they share a spelling
-/// nothing downstream can tell them apart.
+/// An absent cache-write rate stays absent, not zero. Unknown price and
+/// known zero price are different facts throughout cost settlement.
 ///
 /// What that absence *means* for a ceiling is not decided here. This decoder
 /// reports what the document says; the resolver decides what follows.
@@ -149,25 +146,9 @@ fn a_bare_key_belonging_to_another_provider_does_not_match() {
     assert!(matches!(err, TableError::NoEntry { .. }), "{err}");
 }
 
-/// **The finding this test exists for.** Two spellings of one model that
-/// disagree are refused, not resolved by preference.
-///
-/// `gemini-exp-1206` appears twice in the real table. `gemini/gemini-exp-1206`
-/// prices it at **zero**; the bare `gemini-exp-1206` prices it at `3e-07` in
-/// and `2.5e-06` out. Four models in the file disagree with themselves this
-/// way, and this one disagrees in the direction that matters: a run that took
-/// the prefixed entry would reserve **nothing** against a money ceiling and
-/// the ceiling would admit everything.
-///
-/// So neither preference is available. "Prefer the prefixed key" picks the
-/// zero here and is unsafe; "take the dearer of the two" publishes a price no
-/// source stated, which is the fabrication `cost.rs` refuses one field over.
-/// A third party's table that contradicts itself about a price is not evidence
-/// a guarantee can rest on, and the operator's remedy already exists and
-/// outranks it: `models.toml` is §5's first source.
-///
-/// The refusal names both keys, because "your table disagrees with itself"
-/// is unactionable without them.
+/// Refuse contradictory prices for two keys naming the same model. A zero alias can
+/// under-reserve; selecting a dearer entry invents authority. Name both keys so the operator
+/// can correct the table or supply explicit rates.
 #[test]
 fn two_spellings_of_one_model_that_disagree_are_refused_rather_than_picked() {
     let err = table()
@@ -345,22 +326,9 @@ fn a_table_entry_becomes_a_dollar_quote_that_names_the_table_it_came_from() {
     );
 }
 
-/// A category the table does not state stays absent in the quote, and the
-/// consequence is a refusal rather than an invented rate.
-///
-/// This is the whole answer to "where does *how this provider bills cache
-/// writes* live": nowhere. The quote carries what the document said, and
-/// `ego-core`'s `an_unpriced_input_category_leaves_the_bound_unknown` is what
-/// follows — a money ceiling on `openai/gpt-5` cannot be bounded and the gate
-/// refuses, naming the missing category. An operator remedies it in
-/// `models.toml`, which §5 ranks above the table anyway.
-///
-/// The alternative was a per-provider rule completing the quote from the
-/// input rate. It is refused because the premise is false: `gpt-5.6` states a
-/// cache-write rate of 6.25e-06 against a 5e-06 input, and every `gpt-5.x`
-/// below it states none — so "how OpenAI bills cache writes" is not a fact
-/// about OpenAI at all, and a row-wide field asserting one would be wrong for
-/// the very model this build targets.
+/// Keep omitted categories absent. A money ceiling with an unpriced input category cannot
+/// establish a bound; operator configuration can supply it. Do not infer model-specific
+/// cache-write rates from provider identity.
 #[test]
 fn a_rate_the_table_omits_is_absent_in_the_quote_and_bounds_nothing() {
     let quote = table()
@@ -378,12 +346,9 @@ fn a_rate_the_table_omits_is_absent_in_the_quote_and_bounds_nothing() {
 
 /// The provenance and the quote name one table, because one mints the other.
 ///
-/// `2026-08-21-a-run-with-no-ceiling.md` §10 puts the revision on
-/// `RateSource::Table` so an operator can see *which* table their ceiling
-/// rests on. Two values describing one source, assembled side by side, are
-/// two values that can disagree once they are bytes on disk — so this is
-/// built the way `catalogue::provider_reported` is, by taking the revision
-/// from the thing that already holds it.
+/// `RateSource::Table` takes its revision from the table itself. Constructing
+/// the attribution independently could let persisted source and revision
+/// disagree about which prices constrained the run.
 #[test]
 fn the_rate_source_cannot_disagree_with_its_quote_about_which_table() {
     let revision = PricingRevision("litellm@1.79.3#9f86d081".to_string());

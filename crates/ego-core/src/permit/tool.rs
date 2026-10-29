@@ -1,6 +1,4 @@
-//! `Tool`, the dynamic-dispatch trait every tool implements, and `Typed<T>`,
-//! the adapter builtin tools use to get a `schemars`-derived JSON Schema and
-//! typed params for free (`ARCHITECTURE.md` §3.2).
+//! Typed tool descriptions and guarded execution ports.
 
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
@@ -568,18 +566,11 @@ fn base64(bytes: &[u8]) -> String {
     output
 }
 
-/// One tool, dynamically dispatched (`ARCHITECTURE.md` §3.2): MCP tools are
-/// dynamic by nature, and boxing one trait beats a static registry macro
-/// plus a second registration mechanism for builtins.
+/// Preparation describes exact requested effects without executing them.
 ///
-/// `execute` receives the call and a [`GuardedIo`] — never the raw `Fs`, and
-/// no longer a `Permit` either. Every tool that ever existed took the permit
-/// and ignored it, because the authority reaches a tool only as the seam's
-/// willingness to act: `io.read(p)` succeeds exactly when the permit covers
-/// `p`. Handing the permit over as well gave a tool a second, unchecked
-/// handle on its own grant, and gave a caller two values to pair — which is
-/// what `docs/architecture.md` §3 exists to
-/// prevent. The permit now lives inside the `GuardedFs` and dies with it.
+/// `execute` receives [`GuardedIo`], never a raw filesystem or separate
+/// permit. The grant stays inside `GuardedFs`, so callers cannot mispair
+/// a tool call with another call's permit.
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
 
@@ -636,9 +627,7 @@ pub trait TypedTool: Send + Sync {
         'io: 'a;
 }
 
-/// Adapts any [`TypedTool`] into a [`Tool`]: derives the JSON Schema via
-/// `schemars`, and turns a parse failure into `ToolError::InvalidParams` —
-/// model feedback, not a panic (`ARCHITECTURE.md` §3.2).
+/// Tool execution receives only guarded effect adapters.
 pub struct Typed<T>(pub T);
 
 impl<T: TypedTool> Tool for Typed<T> {

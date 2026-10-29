@@ -1,59 +1,10 @@
-//! The litellm price table: fetched, decoded, and never trusted with a float.
+//! Fetch and decode the third-party price table without file I/O. `ego-tools` owns cache
+//! storage through `StoreIo`. Runs read a usable cache before fetching.
 //!
-//! `docs/guides/providers.md` §5 makes this the
-//! *third* and last rate source — behind an operator's own quote and behind the
-//! provider's published prices — "because it is a third party's summary of
-//! someone else's prices". §6 puts the fetching and decoding here, in the crate
-//! that owns `Http` and the wire formats, and the reading and writing in
-//! `ego-tools`, which owns `StoreIo`.
-//!
-//! What lives in this file is the fetch and the decode, and **no file is
-//! opened by either**. The bytes arrive from a socket or from a caller and
-//! become values `ego-core` can consume; where they are kept, and for how long
-//! they stay usable, is `ego_tools::pricing`'s question and is asked through
-//! `StoreIo`.
-//!
-//! The two halves are separable on purpose and are read in the opposite order
-//! from which they are written: a run reads the cache first and only fetches
-//! when what it found is missing or stale (§7's table), so [`Table::decode`]
-//! runs on every priced run and [`fetch`] runs on roughly one a week.
-//!
-//! # Why the numbers get their own parser
-//!
-//! [`Amount::from_str`](std::str::FromStr) refuses an exponent, and the reason
-//! it gives is right: "one spelling per value, so parsing a serialised amount
-//! cannot introduce a form the serialiser would never emit" (`cost.rs:314-320`).
-//! That is a rule about ego's own round trip. litellm's document is not ego's
-//! serialisation — it is a foreign format, and a foreign format is decoded at
-//! the seam rather than by relaxing the durable type's grammar.
-//!
-//! The grammar accepted here is JSON's number, minus the sign. Measured against
-//! the real artefact (3111 entries, 2380 of them `mode: "chat"`) the file uses
-//! two spellings — `5e-06` and `0.0` — and both appear for the same field, so a
-//! decoder tuned to either one alone would drop rates silently.
-//!
-//! # Why the rounding has a direction
-//!
-//! Some values in the file carry binary-float noise. The deepest is
-//! `3.0001999999999996e-07`, which is `0.30002` per million divided by a
-//! million in Python and printed as an `f64`; representing it exactly needs 23
-//! fractional digits and [`MAX_SCALE`] is 12.
-//!
-//! So a value can be too deep to represent, and *which way it is bent* is a
-//! budget decision rather than a numeric one. A rate is multiplied by a token
-//! count to mint a reservation, and `budget.rs`'s premise is that the
-//! reservation is pessimistic — so a rate below the truth is a reservation
-//! below the truth, which is the one direction the gate must never err in.
-//! Rounding is therefore **up**, never to nearest: over-reserving by at most a
-//! unit in the twelfth place is bounded and safe, and "nearest" is right for a
-//! measurement and wrong for a bound.
-//!
-//! Rounding up stops at the smallest representable amount rather than at zero,
-//! for the reason `cost.rs:335-339` gives: "a price list saying zero per token
-//! and a row that has no per-token price at all are different facts". A rate
-//! that fell to `0` here would publish the first while meaning the second. A
-//! *stated* zero — which litellm writes for locally served rows — is untouched,
-//! because its digits are zero rather than merely small.
+//! Foreign JSON numbers accept exponent notation at this seam without relaxing the durable
+//! `Amount` grammar. Rates deeper than `MAX_SCALE` are rounded upward, never downward, so
+//! reservation bounds remain pessimistic. A positive rate must not become zero; a stated zero
+//! remains zero.
 
 use ego_core::budget::PricingQuote;
 use ego_core::cost::{Amount, CurrencyCode, MAX_SCALE, MoneyError, PricingRevision};
@@ -281,10 +232,8 @@ pub struct Table {
 
 /// What one model costs per token, as the table states it.
 ///
-/// Every category is `Option` and none defaults, because
-/// `docs/guides/providers.md` §9 requires an absent
-/// figure to decode as absent. What an absence *means* for a ceiling is not
-/// decided here: this type reports what the document says.
+/// Each category is optional and an absent figure stays absent. This type
+/// reports document data; ceiling policy decides what an absence means.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableEntry {
     /// Which key in the document this came from, so a figure stays traceable
@@ -314,22 +263,9 @@ pub enum TableError {
         field: &'static str,
         source: PriceError,
     },
-    /// The document carries this model twice, under two spellings, with
-    /// different prices.
-    ///
-    /// Refused rather than resolved by preference, and the reason is
-    /// measured: four models in the real file disagree with themselves, and
-    /// `gemini-exp-1206` disagrees in the direction that matters — one of its
-    /// two entries prices it at **zero**, so a run that preferred that
-    /// spelling would reserve nothing against a money ceiling and the ceiling
-    /// would admit everything.
-    ///
-    /// Neither available preference is safe. "Prefer the prefixed key" picks
-    /// the zero; "take the dearer" publishes a price no source stated, which
-    /// is the fabrication `cost.rs:335-339` refuses. A third party's table
-    /// that contradicts itself about a price is not evidence a guarantee can
-    /// rest on — and §5's first source, an operator's own `models.toml`,
-    /// already outranks it.
+    /// Refuse conflicting prices for two spellings of one model. Choosing a zero-priced alias
+    /// can under-reserve; choosing the dearer entry invents an authoritative price. Operator
+    /// rates can override an unusable third-party table.
     Contradiction { model: String, keys: Vec<String> },
 }
 
@@ -447,28 +383,10 @@ impl TableEntry {
             && self.output == other.output
     }
 
-    /// The same five figures, as the quote a budget gate consumes.
-    ///
-    /// **Nothing is completed, derived or defaulted.** A category the document
-    /// left out arrives here as `None` and leaves as `None`, and what follows
-    /// is `ego-core`'s to decide: an unpriced *input* category makes the upper
-    /// bound unknown, so a money ceiling on such a model refuses and names the
-    /// category (`budget.rs`'s `dearest_input_rate`). That refusal is the
-    /// intended behaviour and not a gap to be papered over — §5 ranks an
-    /// operator's own `models.toml` above this table precisely so there is a
-    /// place to put a rate the third party does not carry.
-    ///
-    /// A per-provider rule completing the quote from the input rate was
-    /// considered and refused on the data: `gpt-5.6` states a cache-write rate
-    /// of 6.25e-06 against a 5e-06 input while every `gpt-5.x` below it states
-    /// none, so "how this provider bills cache writes" is not a fact about a
-    /// provider at all. A field on `ProviderRow` asserting one would be wrong
-    /// for the model this build targets, and a rate ego invented would be a
-    /// reservation resting on a number nobody published.
-    ///
-    /// `revision` is supplied rather than derived: this type is the decode of
-    /// a *document*, and which fetch of that document it was is known to
-    /// whatever read the bytes, not to the parser.
+    /// Project the stated rate categories into a quote without completing missing values. An
+    /// unpriced input category leaves a money bound unknown. Operator configuration can supply
+    /// missing rates; a provider-wide cache-write assumption would invent model-specific
+    /// prices. The caller supplies the fetch revision.
     pub fn into_quote(self, revision: PricingRevision) -> PricingQuote {
         PricingQuote {
             web_search: None,
@@ -598,31 +516,16 @@ pub enum FetchError {
     /// The exchange did not deliver: transport failure, or a status that is
     /// neither success nor [`NOT_MODIFIED`].
     ///
-    /// §7's "online, fetch fails" row, which takes exit 4 when nothing usable
-    /// is cached — the exit `CLI.md:211-212` reserves for what a script
-    /// retries.
+    /// If an online pricing fetch fails and no usable cache exists, report a retryable
+    /// runtime failure.
     Unreachable { endpoint: String, message: String },
-    /// Bytes arrived and are not a price table.
-    ///
-    /// Its own variant rather than a failed fetch, because it is not a network
-    /// problem and retrying does not fix it: the realistic cause is an
-    /// interception — a captive portal, a proxy's rate-limit page, an HTML
-    /// error served with a 200 — and §6 names every cached file by its content
-    /// hash, so admitting one would leave a permanent, hash-named non-table in
-    /// `$EGO_HOME/pricing/`.
+    /// Bytes arrived but are not a price table. Distinguish a captive portal or HTML error from
+    /// a failed fetch before it becomes a hash-named cache artifact.
     NotATable { source: TableError },
     /// Nothing upstream identifies these bytes.
-    ///
-    /// §6 requires the `PricingRevision` to name "the source, the upstream
-    /// version and the content hash". The source is a constant and the hash is
-    /// ours; the middle term exists only if the server states one, and a
-    /// revision reading `litellm@unknown#…` would be attributable to bytes and
-    /// to no artefact anyone can go and look at — the silently-vacuous shape
-    /// this ADR refuses everywhere else.
-    ///
-    /// GitHub always sends one, so this fires only behind something that
-    /// strips validators. That operator is told which header is missing, and
-    /// §5 leaves `models.toml` open to them, ranked above this table anyway.
+    /// A pricing revision needs source, upstream version and content hash.
+    /// If a proxy strips the validator, refuse with the missing header named
+    /// rather than fabricate an upstream version. Operator rates remain available.
     Unidentified { header: &'static str },
 }
 
@@ -646,18 +549,9 @@ impl fmt::Display for FetchError {
 
 impl std::error::Error for FetchError {}
 
-/// Ask upstream for the table, offering back whatever is already cached.
-///
-/// `known` is the validator of the copy on disk, when there is one. Supplying
-/// it is what makes "fetched once" cheap: an unchanged table costs one round
-/// trip and no body, and the cached blob's age is refreshed without a second
-/// identical file.
-///
-/// **This opens a socket and nothing else decides whether it should.** §5 gates
-/// every rate source on a ceiling existing and §7 makes `--offline` a property
-/// of the transport, so both refusals happen above and below this function
-/// rather than inside it: `Metering::ceiling_needs_rates` decides whether to
-/// call at all, and the injected run transport enforces offline confinement.
+/// Fetch with the cached validator so an unchanged response refreshes age without another body.
+/// The caller decides whether a ceiling needs rates; the injected transport enforces offline
+/// confinement. This function opens a socket only after those boundaries admit it.
 pub async fn fetch(http: &Arc<dyn Http>, known: Option<&str>) -> Result<Fetched, FetchError> {
     let unreachable = |message: String| FetchError::Unreachable {
         endpoint: UPSTREAM.to_string(),

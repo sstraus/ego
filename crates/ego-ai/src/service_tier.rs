@@ -1,5 +1,4 @@
-//! Catalogue policy from captured provider documentation, 2026-10-16.
-//! See docs/guides/providers.md. Unknown support fails closed.
+//! Catalogue service-tier policy. Unknown support fails closed.
 
 use ego_core::budget::PricingQuote;
 use ego_core::cost::Amount;

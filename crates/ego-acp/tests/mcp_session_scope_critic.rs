@@ -199,7 +199,7 @@ struct EmptyTools;
 
 impl AdmittedToolSource for EmptyTools {
     fn capture(&self) -> Result<CapturedToolCatalogue, ToolCatalogueError> {
-        CapturedToolCatalogue::new("regression", Vec::new())
+        CapturedToolCatalogue::new("critic-GWD", Vec::new())
     }
 }
 

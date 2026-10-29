@@ -1,8 +1,7 @@
 //! The ACP connection's operator seat for model, effort, mode and sandbox.
 //!
-//! `2026-09-03-acp-host-control-is-negotiated-per-session.md` makes the
-//! connected client the person in an ACP-owned turn. This is the other half
-//! of that: the picker that person is offered, and what a pick actually does.
+//! The connected client is the human seat in an ACP-owned turn. This module
+//! projects the offered controls and applies the client's choices.
 //!
 //! Model, effort and mode are answered from the same two sources the terminal
 //! picker uses — the discovered model catalogue and the workspace's resolved
@@ -88,10 +87,8 @@ pub struct AcpSessionControls {
     /// The weakest confinement this connection may run at, and the value a
     /// session starts on.
     ///
-    /// A ceiling rather than a default:
-    /// `docs/architecture.md`.
-    /// The operator who spawned the process set it, and no message on this
-    /// connection can move it.
+    /// An operator-set ceiling, not a default. Messages on this connection
+    /// cannot raise it.
     sandbox_ceiling: Confinement,
     catalogue: Option<ModelCatalogueSnapshot>,
     sessions: Mutex<HashMap<SessionId, SessionSeat>>,

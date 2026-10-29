@@ -1,4 +1,4 @@
-//! contract for regression case: the status row reads as a sentence for an operator —
+//! The status row reads as a sentence for an operator —
 //! model, effort, mode, context as a share of the window, and money — not as
 //! `key=value` pairs, and it says nothing about trust unless trust needs
 //! attention.
@@ -226,7 +226,7 @@ fn context_and_cost_follow_the_durable_usage_events_of_the_session() {
             cost_delta: CostDelta::Known {
                 amount: money("USD", "0.0124"),
                 attribution: CostAttribution::Table {
-                    revision: PricingRevision("regression_case-fixture".to_owned()),
+                    revision: PricingRevision("status-DOJ-fixture".to_owned()),
                 },
                 fx: None,
             },

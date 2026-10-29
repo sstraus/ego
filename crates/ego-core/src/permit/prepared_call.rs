@@ -1,7 +1,5 @@
-//! `PreparedCall`: canonical operations, resolved at `prepare` time — never
-//! prose, never a rendered shell string (`ARCHITECTURE.md` §3.2, §3.4).
-//! This is what the policy engine classifies to mint a `Permit`, and what a
-//! judge model evaluates in `auto` mode.
+//! This is what the policy engine classifies to mint a `Permit`, and what a judge model
+//! evaluates in `auto` mode.
 
 use std::fmt;
 
@@ -27,17 +25,12 @@ pub(crate) fn frame(digest: &mut Sha256, bytes: &[u8]) {
 
 /// One canonical operation a `Tool::execute` intends to perform.
 ///
-/// [`GuardedIo`](super::GuardedIo) covers both the filesystem operations and
-/// exact argv-native process execution. Network operations remain owned by
-/// their transport seams (`ARCHITECTURE.md` §3.4 axis 4).
+/// [`GuardedIo`](super::GuardedIo) covers both the filesystem operations and exact
+/// argv-native process execution.
 ///
-/// [`Op::List`] and [`Op::Search`] exist so that a tool which walks a subtree
-/// does not have to be described as one that reads it. See
-/// `docs/architecture.md` §1–2:
-/// expressing a glob as `Read { path: root }` would hand it the authority to
-/// read every byte under `root`, which is not a rounding error in the
-/// description — it is a much larger grant, arrived at because no other
-/// variant existed.
+/// [`Op::List`] and [`Op::Search`] are narrower than subtree read access.
+/// Representing glob as `Read { path: root }` would authorize reading bytes
+/// when the caller requested only names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     /// One named file's contents.
@@ -96,21 +89,12 @@ pub enum SessionProcessAction {
 /// — to independently agree they are the same authority, with nothing holding
 /// them to it. One `Op::Write` has one arm in each of the four.
 ///
-/// That is the same test [`Op::List`] and [`Op::Search`] pass and these two
-/// fail: those are separate variants because they are separate *authorities*
-/// (see `2026-08-21-reading-without-reading-everything.md` §1–2). Replacing a
-/// whole file and replacing a string inside it are one authority applied two
-/// ways.
+/// Whole-file replacement and string replacement share write authority.
+/// By contrast, [`Op::List`] and [`Op::Search`] represent distinct authorities.
 ///
-/// **[`Change::Replace`] does not determine the resulting bytes** and
-/// [`Change::Whole`] does. That is a real difference in what a party
-/// authorising this call is being shown, and it is unavoidable: the bytes an
-/// edit produces are a function of the bytes already there, and the only
-/// moment that could compute them is `prepare` — which has no read authority,
-/// because it runs before a `Permit` exists. See
-/// `docs/architecture.md`.
-/// What is *not* weakened is the authority granted: both reach exactly the one
-/// path the op names.
+/// [`Change::Replace`] does not determine output bytes, whereas
+/// [`Change::Whole`] does. Preparation cannot read existing bytes before a
+/// permit exists; both forms nevertheless authorize exactly the named path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     /// Every byte of the file, replaced.
@@ -217,18 +201,9 @@ impl Op {
         }
     }
 
-    /// Does this operation change the world?
-    ///
-    /// The one axis the mode floor and ceiling turn on
-    /// (`2026-08-21-a-permit-nobody-can-widen.md` §6): `plan` refuses every
-    /// mutating op outright, and `default` reviews unresolved *sensitive*
-    /// actions rather than every action, because `ARCHITECTURE.md:238` counts
-    /// prompt fatigue as a security bug. A read inside the workspace that
-    /// stopped the run to ask would be that bug.
-    ///
-    /// Derived from the variant and not from a table, because unlike §6a's
-    /// head→operations mapping this is not a fact about *this build* — a
-    /// write mutates in every build there will ever be.
+    /// Whether an operation mutates. Plan refuses mutation; default can settle ordinary
+    /// workspace reads. Derive this intrinsic property from the variant, not the current
+    /// producer inventory.
     pub fn mutates(&self) -> bool {
         match self {
             Op::Read { .. }

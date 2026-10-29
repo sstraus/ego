@@ -7,7 +7,6 @@
 //! is reported `not_checked` with the reason and the command that would get it
 //! — which is the whole difference between a diagnosis and a guess.
 //!
-//! See `docs/architecture.md`.
 
 use std::path::PathBuf;
 
@@ -748,7 +747,7 @@ impl HealthProbe for Acp {
         // The exact `_meta.ego` object a host reads out of `initialize`, taken
         // from the composer rather than restated. A host that cannot find
         // `_ego/pause` can now be told what this side actually publishes,
-        // which is the fact regression case had to discover by connecting.
+        // which is the fact had to discover by connecting.
         let advertised = ego_acp::serve::durable_advertisement();
         let extensions = advertised
             .meta

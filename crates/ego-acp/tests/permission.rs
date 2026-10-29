@@ -1,4 +1,4 @@
-//! contract for the ACP human permission seat (regression case).
+//! contract for the ACP human permission seat.
 //!
 //! The connected host is the only human seat for an ACP-owned turn. These
 //! pin the two halves that decide whether that is true: the question ego
@@ -109,9 +109,7 @@ fn an_option_ego_never_offered_is_a_denial() {
     );
 }
 
-/// No connection is no human. The adapter must never fall through to stdin
-/// or to approval; the ADR calls terminal input behind an ACP connection a
-/// second, invisible human seat.
+/// No connection means no human seat. Never fall through to stdin or approval.
 #[test]
 fn a_seat_with_no_live_connection_denies_and_never_reaches_for_a_terminal() {
     let adapter = AcpPermissionAdapter::new(session());

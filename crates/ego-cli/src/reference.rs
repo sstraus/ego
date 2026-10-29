@@ -1,10 +1,7 @@
 //! The two artifacts that are written down from the parser, not beside it.
 //!
-//! `CLI.md` §4 requires the reference and the shell completions to come from
-//! "the same final clap definitions", and says why: a hand-maintained command
-//! list is not release evidence. It is a second description of the grammar,
-//! and a second description is a thing that can quietly stop being true while
-//! every test around it stays green.
+//! Generate reference and completions from the final clap definitions. A separate
+//! handwritten command list could silently drift from the parser.
 //!
 //! So both artifacts are rendered from [`crate::cli::root_command`], the file
 //! on disk is the snapshot, and a test regenerates and compares. A flag added

@@ -1,11 +1,8 @@
 //! The parties that may answer a question the rules did not settle.
 //!
-//! `docs/architecture.md` §6 orders three of
-//! them: the mode at step 5, the judge at step 6, the human at step 7. One
-//! trait serves the policy parties because "may this proceed" is one question
-//! however it is answered — and the engine, not the party, decides what the
-//! answer means. The human has a distinct port so the turn can durably record
-//! the request before awaiting that final seat.
+//! The engine orders mode, judge and human decisions. Approvers answer
+//! whether a call may proceed; the engine interprets that answer. The human
+//! port is separate so the turn can durably record a question before waiting.
 //!
 //! The mode and a distinct optional human seat exist in this build. The mode
 //! implementation is deliberately *not* public: an [`Approver`] is a seam for
@@ -24,26 +21,13 @@ use super::prepared_call::Op;
 use crate::config::Mode;
 use crate::event::id::ItemId;
 
-/// What a party answered about a [`Pending`].
-///
-/// §4's `Verdict`, minus its `by: Authority`. That field exists for one
-/// reader — the audit event that records *who* let something through — and
-/// that event is the next slice, with its own contract decision. A field
-/// whose only reader is unbuilt is a field nothing can be wrong about, so it
-/// arrives with its reader.
+/// A party's verdict on a pending call. The policy engine owns permit construction and audit
+/// attribution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
-    /// Approved without asking anybody further.
-    ///
-    /// **Not "wider authority".** The scope is still derived from the call by
-    /// `scope_of`, so an approval decides *whether to ask*, never *what for*.
-    ///
-    /// `by` names the party. §4 deferred it with "it arrives with its
-    /// reader"; the reader is `EventKind::PermissionDecided`, and it has
-    /// arrived. The engine does **not** reconstruct this after the fact from
-    /// `self.mode` — a party that answers says who it was, because an engine
-    /// inferring an authority behind a `dyn Approver` would be recording a
-    /// guess in an audit log.
+    /// Approval controls whether to proceed, not grant width. Scope remains derived from the
+    /// prepared call. The answering party supplies its identity for the permission audit; the
+    /// engine must not infer it behind a dynamic approver.
     Allow { by: Authority },
     /// Refused. The call does not run and no later party is consulted.
     /// `by` names the party, for the same reason `Allow`'s does.
@@ -62,9 +46,7 @@ pub enum Verdict {
     /// a variant nothing produces and nothing pins. So do not "simplify" this
     /// away, and do not read its absence from the production path as a bug.
     Deny { by: Authority },
-    /// Not this party's to answer. The question moves on with the reason
-    /// attached, which is what `ARCHITECTURE.md` §3.4 requires to reach both
-    /// the next party and the audit event.
+    /// Not this party's to answer.
     Escalate { why: Escalation },
 }
 
@@ -125,23 +107,9 @@ pub trait HumanApprover: fmt::Debug + Send + Sync {
     ) -> BoxFuture<'a, PermissionDecision>;
 }
 
-/// §6 step 5: the mode ceiling.
-///
-/// **Crate-private, and that is the condition the whole port rests on.**
-/// Until this was a port, the ceiling lived inside `classify` and nothing
-/// outside could decline to apply it. A port moves the choice of
-/// implementation somewhere, and wherever that somewhere is, *it* becomes the
-/// mode: a turn loop that could hand in a `yolo` approver while the operator
-/// configured `default` has relocated the policy into the caller.
-/// `PolicyEngine` already refuses that exact move for `Scope` — "whoever
-/// chose the `Scope` was the real policy, and the caller is the turn loop,
-/// which has no business holding that authority" — and a mode chosen by the
-/// loop is that sentence with a different noun.
-///
-/// So this type cannot be named outside `ego-core`, `PolicyEngine::new` is
-/// the only thing that builds one, and it builds it from the `Mode` the
-/// config layers resolved. There is no expression a caller could write that
-/// produces `yolo` behaviour from a `default` configuration.
+/// Mode approver, crate-private and built only from resolved configuration by
+/// `PolicyEngine::new`. External callers cannot inject a permissive implementation that
+/// contradicts the configured mode.
 #[derive(Debug)]
 pub(super) struct ModeApprover {
     mode: Mode,
@@ -179,10 +147,8 @@ impl ModeApprover {
                                 | Op::ProtocolConnect { .. }
                         )
                 }
-                // `ARCHITECTURE.md:242` — these review unresolved
-                // **sensitive** actions, not every action. A read inside the
-                // workspace that stopped the run to ask would be the prompt
-                // fatigue `ARCHITECTURE.md:238` counts as a security bug.
+                // Approvers decide whether to proceed; the policy engine interprets the
+                // answer.
                 //
                 // `Plan` never arrives here with a mutating op: the floor at
                 // step 2 already refused it. `Auto` deliberately declines at

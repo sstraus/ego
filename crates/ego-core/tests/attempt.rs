@@ -1,8 +1,7 @@
 //! Generation attempts: the identity a retry keeps, the identity it does not,
 //! and the delivery certainty that decides whether a retry is safe at all.
 //!
-//! See `docs/architecture.md` and
-//! `plans/m0b-vertical-slice.md` Steps 1-2.
+
 //!
 //! What these tests defend is one claim: **a generation and a wire attempt are
 //! not the same thing, and confusing them double-bills**. Prior history is
@@ -138,10 +137,9 @@ mod attempt {
 /// The attempt lifecycle: who owns the authorisation between admission and
 /// settlement, and what happens when nobody does.
 ///
-/// See `plans/m0b-vertical-slice.md` Steps 4-5. The claim under test is that
-/// a `GenerationAdmission` can no longer be borrowed twice, settled by the wrong
-/// gate, or quietly abandoned — and that real response spend is recorded
-/// exactly once, against the gate that admitted it.
+/// The claim under test is that a `GenerationAdmission` can no longer be borrowed twice,
+/// settled by the wrong gate, or quietly abandoned — and that real response spend is
+/// recorded exactly once, against the gate that admitted it.
 mod lifecycle {
     use std::sync::{Arc, Mutex};
 
@@ -444,14 +442,8 @@ mod lifecycle {
     /// An attempt that ends without a terminal frame was cancelled, whoever
     /// cancelled it.
     ///
-    /// This replaces `pending_is_not_a_terminal_state`. That test proved
-    /// `Outcome::new` rejected `StopReason::Pending` and that a `Stop(Pending)`
-    /// frame folded to `Aborted`; the variant was removed in
-    /// `docs/architecture.md`, so the guard
-    /// it exercised no longer exists — "not finished yet" is now the absence
-    /// of a `StopReason`, which is what this asserts. The round-trip below
-    /// is the other half: every variant that *can* be decoded is terminal, so
-    /// a durable `Outcome` needs no validation on the way in.
+    /// An unfinished attempt has no `StopReason`. Every decodable stop variant
+    /// is terminal, so a durable `Outcome` needs no non-terminal validation guard.
     #[test]
     fn an_attempt_with_no_terminal_frame_is_an_abort() {
         assert_eq!(outcome_of(Vec::new()).stop(), StopReason::Aborted);

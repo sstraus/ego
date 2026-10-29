@@ -1,38 +1,9 @@
 //! What terminal `finish_reason` a local Ollama daemon puts on a turn that
 //! called a tool. Recorded, not reasoned about.
-//!
-//! # Why this file exists
-//!
-//! The wire ADR §8 item 3 left this open: tool-call *deltas* from Ollama were
-//! confirmed well formed, and the ceiling work confirmed `length` for a
-//! truncated turn and `stop` for an ordinary one, but the reason accompanying
-//! a **tool call** had never been observed. It matters because
-//! `consume_finish_reason` (`crates/ego-ai/src/wire/openai_completions.rs:749`)
-//! knows exactly five spellings and turns anything else into an
-//! [`AiEvent::Error`] plus [`StopReason::Error`]. Had Ollama spelled it
-//! anything but `tool_calls`, every ordinary agentic turn on the local row
-//! would have been logged as a failure — the same class as xAI's `end_turn`,
-//! except this row exists today.
-//!
-//! **It maps cleanly.** Ollama emits `tool_calls`, which is one of the five.
-//! There is no defect here, and this file exists to say so in a form that can
-//! be replayed rather than in a sentence that cannot. Item 3 stays open until
-//! something can replay it; this is that something.
-//!
-//! # The recordings
-//!
-//! Observed from `http://localhost:11434/v1/chat/completions`; response/tool identities and clocks are synthetic,
-//! `GET /api/version` answering `{"version":"0.32.14"}`, model
-//! `gemma4:12b-mlx` (`/api/show` reports `["completion","tools","thinking"]`).
-//! One tool is offered; the prompt asks for it by name. Two recordings,
-//! identical but for `reasoning_effort`, because a model that thinks before
-//! calling emits a different delta sequence and the terminal frame had to be
-//! checked against both:
-//!
-//! | `reasoning_effort` | reasoning | tool call | `finish_reason` |
-//! |---|---|---|---|
-//! | `"none"` | absent | `read_file` | `tool_calls` |
-//! | `"high"` | 160 chars | `read_file` | `tool_calls` |
+//! Ollama tool-call recordings exercise terminal `tool_calls` frames with
+//! and without reasoning. Captured from a local 0.32.14 daemon serving
+//! `gemma4:12b-mlx`; both recordings must decode as tool calls, not errors.
+//! Response/tool identities and clocks are synthetic; observed payloads are preserved.
 
 use ego_ai::wire::openai_completions::StreamDecoder;
 use ego_core::generator::port::AiEvent;

@@ -1,10 +1,7 @@
 //! What a ceiling is written as, and what resolving one produces.
 //!
-//! See `docs/architecture.md` §§4 and 8. The
-//! grammar is tested here, in the crate that owns it, rather than beside the
-//! flag: it is one parser with two surfaces, and a table of spellings that
-//! lived next to `--budget` would say nothing about the config key that
-//! shares it.
+//! Test the shared budget grammar in its owning crate. Flag and config
+//! consumers must use the same parser.
 
 use ego_core::ceiling::{Budget, Ceilings, tokens_reached};
 use ego_core::cost::{Amount, CurrencyCode, Money};
@@ -51,11 +48,8 @@ mod ceiling {
         }
     }
 
-    /// §8's addition: a decimal plus an ISO 4217 code. Without it the only
-    /// currency anybody could write was USD, and a EUR-priced row had no
-    /// ceiling that could bind it — the gate refuses a limit in the wrong
-    /// currency rather than converting, so `10$` against a EUR row is not a
-    /// smaller ceiling, it is no ceiling at all.
+    /// Parse an explicit decimal and ISO currency. A EUR cap cannot safely become a USD cap or
+    /// depend on an invented exchange rate.
     #[test]
     fn a_ceiling_can_be_written_in_the_currency_it_binds() {
         assert_eq!(parse("10EUR").expect("a budget"), money("10", "EUR"));
@@ -163,9 +157,7 @@ mod ceiling {
         );
     }
 
-    /// Nothing is imposed by default. `CLI.md:296-299` — "ego itself imposes
-    /// none" — so the resolved ceilings of a run nobody configured are two
-    /// absences, not two large numbers.
+    /// Nothing is imposed by default.
     #[test]
     fn nothing_is_a_ceiling_until_somebody_writes_one() {
         assert_eq!(
@@ -297,19 +289,13 @@ mod ceiling {
         );
     }
 
-    /// §5's gate, and §9's claim that the token ceiling is the one instrument
-    /// that needs no rates, no fetch and no network.
-    ///
-    /// The middle case is the whole test. A token ceiling is still a ceiling,
-    /// so a gate written as "any ceiling at all" would pass every other
-    /// assertion here and quietly drag a price lookup in behind it — which is
-    /// exactly what an air-gapped operator reached for the token ceiling to
-    /// avoid, and what §7's first row promises does not happen.
+    /// Only monetary ceilings consult rates. A token-only ceiling must not trigger file, fetch,
+    /// or network pricing work.
     #[test]
     fn only_a_money_ceiling_needs_rates() {
         assert!(
             !Ceilings::default().needs_rates(),
-            "no ceiling consults nothing, which is §5's ordinary case"
+            "no ceiling consults no rate source"
         );
 
         let mut tokens_only = Ceilings::default();
@@ -346,8 +332,7 @@ mod ceiling {
         }
     }
 
-    /// "Reached", not "exceeded": `CLI.md:128` says exit 5 when the ceiling
-    /// is hit, so landing exactly on it stops the run.
+    /// An absent budget remains unlimited.
     #[test]
     fn a_token_ceiling_is_reached_at_the_figure_not_past_it() {
         assert!(!tokens_reached(Some(1_000), &used(999)));

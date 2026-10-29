@@ -10,7 +10,7 @@ fn question_picker_word_wraps_at_live_width_after_resize() {
     let rows = screen_rows_from_grid(&screen);
     let first = rows
         .iter()
-        .position(|row| row.starts_with("REGRESSION-MARKER"))
+        .position(|row| row.starts_with("PICKER-ILO"))
         .unwrap();
     let last = rows.iter().position(|row| row.starts_with("> 1.")).unwrap();
     assert_eq!(
@@ -42,7 +42,7 @@ fn question_picker_uses_distinct_role_styles_and_respects_no_color() {
         let label = screen.cell(row("2. Second choice"), 5).unwrap();
         let description = screen.cell(row("First description"), 5).unwrap();
         let hint = screen.cell(row("Up/Down"), 0).unwrap();
-        let question = screen.cell(row("REGRESSION-MARKER"), 0).unwrap();
+        let question = screen.cell(row("PICKER-ILO"), 0).unwrap();
         assert_eq!(
             question.fgcolor(),
             vt100::Color::Default,
@@ -71,7 +71,7 @@ fn question_picker_redraw_keeps_one_copy_after_four_moves() {
     let rows = screen_rows_from_grid(&screen);
     assert_eq!(
         rows.iter()
-            .filter(|row| row.starts_with("REGRESSION-MARKER"))
+            .filter(|row| row.starts_with("PICKER-ILO"))
             .count(),
         1,
         "navigation left duplicate picker frames: {rows:?}"
@@ -108,7 +108,7 @@ fn screen_rows_from_grid(screen: &vt100::Screen) -> Vec<String> {
 fn capture(no_color: bool, moves: usize) -> (vt100::Screen, String) {
     let rows = if moves > 0 { 24 } else { ROWS };
     let question = format!(
-        "REGRESSION-MARKER L’eseguibile è disponibile ma occorre scegliere misure diverse perché {}fine domanda.",
+        "PICKER-ILO L’eseguibile è disponibile ma occorre scegliere misure diverse perché {}fine domanda.",
         "la descrizione deve rimanere leggibile senza parole tagliate al bordo della finestra e "
             .repeat(3)
     );
@@ -123,7 +123,7 @@ fn capture(no_color: bool, moves: usize) -> (vt100::Screen, String) {
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call("question", "ask_question", &call)),
-            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+            Reply::Sse(text("PICKER-ILO-DONE")),
         ],
         ..Plan::default()
     });
@@ -193,7 +193,7 @@ fn capture(no_color: bool, moves: usize) -> (vt100::Screen, String) {
     terminal.screen_mut().set_size(rows, COLS);
     terminal.process(&output[resize_at..]);
     let screen = terminal.screen().clone();
-    if let Some(directory) = std::env::var_os("EGO_REGRESSION_CAPTURE_DIR") {
+    if let Some(directory) = std::env::var_os("EGO_PICKER_ROLES_CAPTURE_DIR") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
         let stem = format!(
@@ -208,7 +208,7 @@ fn capture(no_color: bool, moves: usize) -> (vt100::Screen, String) {
     let done = output.len();
     input.write_all(b"\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, done, "REGRESSION-MARKER-DONE");
+    until_normalized(&reader, &mut output, done, "PICKER-ILO-DONE");
     until_prompt_from(&reader, &mut output, done);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();

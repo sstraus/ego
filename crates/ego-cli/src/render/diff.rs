@@ -1,13 +1,7 @@
 //! Two files, on two axes.
 //!
-//! `docs/architecture.md` §2 is
-//! the whole of this module's shape, and it was read off a capture rather than
-//! invented: the diff writes **background** and only background; a foreground
-//! pass writes foreground. In the captured renderer that is what lets
-//! `(CancelCause)` stay Monokai white on a lighter green while a doc comment
-//! on the next line stays comment-grey on a darker one. A design where the
-//! diff sets the text colour has to choose, every line, between saying *this
-//! changed* and saying *this is a comment*.
+//! Diff rendering writes background; syntax rendering writes foreground.
+//! Keeping the passes separate preserves both change marking and syntax color.
 //!
 //! There is no syntax pass in this build — [`Highlighter`] has one
 //! implementation and it returns the base colour. That is deliberate and it is
@@ -192,9 +186,8 @@ mod tests {
         );
     }
 
-    /// The claim §2 is built on. The changed span gets a *lighter background*
-    /// and keeps whatever foreground the highlighter chose — here, a colour
-    /// for `fn` that no diff code knows about.
+    /// A changed span gets a lighter background while retaining the highlighter's foreground
+    /// color.
     #[test]
     fn a_changed_span_keeps_its_syntax_colour() {
         let lines = render("fn old() {}\n", "fn new() {}\n", 40, &OneWord);

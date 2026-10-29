@@ -8,10 +8,8 @@
 //! same names, same intent, and free to drift apart because nothing made them
 //! agree.
 //!
-//! They are not ports in the sense
-//! `docs/architecture.md` means:
-//! nothing here is a boundary this crate owns. They are the *adapters* that
-//! answer ports `ego-acp` and `ego-mcp` own, and one adapter can answer both.
+//! These are adapters for ports owned by `ego-acp` and `ego-mcp`, not new
+//! boundaries owned by this crate. One adapter can serve both protocols.
 //!
 //! ## Why the root resolver keeps two error types and two sentences
 //!

@@ -192,7 +192,7 @@ fn python_script_read_denial_reaches_the_existing_grant_flow() {
     let workspace = base.join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let script = base.join("refused script.py");
-    std::fs::write(&script, "print('REGRESSION-MARKER-READ')\n").unwrap();
+    std::fs::write(&script, "print('PYTHON-VPX-READ')\n").unwrap();
     let python = "/Applications/Xcode.app/Contents/Developer/usr/bin/python3";
     let text = format!(
         "{python}: can't open file '{}': [Errno 1] Operation not permitted\n",

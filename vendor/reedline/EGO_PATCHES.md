@@ -31,8 +31,11 @@ The permitted local delta is intentionally narrow:
   the last `read_line` left on screen so the next prompt starts on its first
   row. The painter records the rows, the cursor position and the terminal size
   at the return (`PromptFootprint`), and erases nothing when the size or the
-  cursor no longer match. the terminal integration uses it to replace an answered question
+  cursor no longer match. The terminal integration uses it to replace an answered question
   with one transcript row; the API carries no εgo policy and is written to be
   proposed upstream.
 
 Do not add εgo policy, DTOs, input handling, or rendering to this crate. Remove the local patches when equivalent upstream APIs and corrections are available.
+
+For the public terminal controls that use this integration, see
+`docs/guides/interactive.md`.

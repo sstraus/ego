@@ -6,10 +6,8 @@ use super::*;
 
 /// The currency a session settles in.
 ///
-/// One constant and not a flag, because `--currency` is not in `CLI.md` §3 and
-/// a currency nobody can state is worse than a stated one: every quote this
-/// build can produce is either zero (a local daemon) or supplied alongside its
-/// own currency.
+/// Use a shared currency value rather than invent an unsupported `--currency` flag.
+/// Supplied rate quotes carry their own currency.
 pub(super) const SETTLEMENT: &str = "USD";
 
 /// The active session's asynchronous authority for one staged model switch.
@@ -448,10 +446,8 @@ pub(super) async fn run_process(
     config::capture_profile(&mut args);
     let output = args.output;
     let quiet = args.quiet;
-    // The one place the terminal is asked what it is. §4.5's "stdout is
-    // protocol-clean" is why the machine-readable modes are not asked at all
-    // rather than asked and ignored: there is no environment in which a JSON
-    // document acquires an escape sequence.
+    // Probe terminal capabilities only for terminal rendering. Machine-readable output must
+    // never acquire escape sequences.
     let environment = Environment::read();
     let capabilities = match output {
         Output::Text => Capabilities::of(&Terminal {
@@ -465,9 +461,8 @@ pub(super) async fn run_process(
     let sink: &dyn EventSink = match output {
         Output::Text => &text_sink,
         Output::Jsonl => &jsonl_sink,
-        // §4.1 is a single object at completion, so nothing is published as it
-        // happens — but the run still needs a sink, and one that writes
-        // nothing is the honest one rather than a collector nobody reads.
+        // JSON completion publishes once at settlement. Use a sink that writes nothing during
+        // the run, not a collector nobody consumes.
         Output::Json => &ego_core::sink::NullSink,
     };
 
@@ -522,10 +517,8 @@ pub(super) async fn interactive_process(
             message: "profile 'ci' is available only through 'ego run' or 'ego resume'".to_owned(),
         });
     }
-    // A machine-readable stream has no reader here. `--output json` is a
-    // single document at completion and a conversation has no completion, so
-    // the flag is refused by name rather than quietly producing a stream
-    // nobody can consume — `CLI.md` §4.5.
+    // Interactive conversations have no single completion document. Refuse incompatible
+    // machine-output flags rather than producing an unconsumable stream.
     if args.output != Output::Text {
         return Ended::refused(RunTermination::UsageError {
             message: format!(
@@ -761,10 +754,8 @@ pub(super) struct Announce<'a> {
 /// How long a run has to take before finishing it is worth a desktop
 /// notification.
 ///
-/// A notification for a run the operator watched finish is an interruption
-/// reporting something they already know. A minute is the point past which
-/// they have plausibly looked at something else — and `-q`, which `CLI.md` §1.3
-/// calls quiet progress, suppresses it at any duration.
+/// Completion notifications are for unattended work. Suppress them for short runs or
+/// quiet presentation.
 pub(super) const NOTIFY_AFTER: Duration = Duration::from_secs(60);
 
 impl<'a> Announce<'a> {

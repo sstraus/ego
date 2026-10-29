@@ -1,10 +1,8 @@
 //! `exec(...)` patterns: a token vector, never a string.
 //!
-//! `docs/architecture.md` §6. The
-//! pattern is tokenised once, at parse time, so that `git   *` and `git *`
-//! are one rule with one ID; matching then runs token by token against a
-//! canonical argv. A pattern is never re-rendered into a shell string, for
-//! any purpose — `ego rules ls` renders the token vector.
+//! Tokenize patterns once at parse time so whitespace aliases have one
+//! rule ID. Match canonical argv token by token; never render a pattern
+//! back into a shell command, including for `ego rules ls`.
 //!
 //! **This half is only worth anything if the argv is the real argv.** The
 //! argv-native exec producer supplies that other half: it constructs one
@@ -40,17 +38,9 @@ impl ArgvPattern {
         &self.tokens
     }
 
-    /// Tokenise the text between `exec(` and `)`.
-    ///
-    /// POSIX-ish, and only as much of it as §6 lists: runs of whitespace
-    /// separate tokens, `'…'` and `"…"` group, `\` escapes. Nothing expands —
-    /// there is no command substitution here, no parameter expansion and no
-    /// globbing against the filesystem, because a *pattern* that consulted
-    /// the world would mean something different on every machine.
-    ///
-    /// Quoting groups; it does not disarm a `*`. `\*` is the literal star and
-    /// `*` is the wildcard, one spelling each, so `'*'` is a literal star for
-    /// the same reason `'a'` is the letter `a`.
+    /// Tokenize exec patterns with whitespace, grouping quotes, and backslash escapes. Perform
+    /// no shell expansion or filesystem globbing. Escaped stars are literal; unescaped stars
+    /// remain wildcards under the grammar's quoting rules.
     pub fn parse(raw: &str) -> Result<Self, RuleParseError> {
         let mut tokens: Vec<ArgvToken> = Vec::new();
         let mut current = GlobBuilder::default();

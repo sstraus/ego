@@ -1,25 +1,7 @@
-//! The rule grammar's host canonicaliser and the `--offline` seam's must not
-//! disagree about what a spelling means.
-//!
-//! `docs/guides/providers.md` §5's
-//! last bullet wanted one shared classifier, with `http.rs` as its first
-//! caller. **That is not what shipped, and the reason is recorded here because
-//! the ADR is wrong about it rather than merely unimplemented** — see the
-//! bottom of this file.
-//!
-//! What is left is the property the sharing was *for*. `POTENTIALS.md` P19 is
-//! about two subsystems classifying one destination differently:
-//! `http://2130706433/` and `http://127.0.0.1/` are the same machine, and a
-//! build where `net(127.0.0.1)` and `--offline` disagree about that has a
-//! boundary with a hole in it that neither subsystem can see.
-//!
-//! Two implementations exist. `ego-core`'s is hand-written, deliberately: a
-//! rule's canonical form is hashed into its `RuleId`, and an ID that changed
-//! meaning under `cargo update` is the one failure mode §8 calls unacceptable.
-//! `ego-ai`'s reads `url::Host`, also deliberately: `--offline` classifies
-//! what the transport parsed, never the text. Both reasons are good and
-//! neither yields to the other, so the honest guarantee is not one
-//! implementation — it is **two that are pinned to agree**.
+//! The rule grammar and HTTP transport must agree on endpoint identity, including alternate
+//! numeric loopback spellings. Core keeps canonical rule identity stable across dependency
+//! updates; HTTP classifies the parsed transport destination. These tests pin their agreement
+//! without conflating the two owners.
 
 use ego_core::permit::rule::{Host, Rule};
 use url::Url;
@@ -104,17 +86,9 @@ fn a_name_is_never_an_address_and_an_address_is_never_a_name() {
     assert!(matches!(as_url("github.com"), url::Host::Domain(_)));
 }
 
-/// **This test found a real defect and is the reason the file exists.**
-///
-/// A host whose last label is numeric is an address, and if it is not a valid
-/// one it is nothing. WHATWG says so and `url` enforces it, so
-/// `http://256.1.1.1/` does not parse at all.
-///
-/// The grammar used to fall through to a name, storing
-/// `Host::Name("256.1.1.1")` — a rule that could never match any destination,
-/// held by an operator who believed they had named an address. §2's worst
-/// failure mode, reached by a typo. Both sides now refuse, so the rule fails
-/// where it is written instead of failing silently where it is used.
+/// Refuse an invalid numeric host instead of storing it as a name. WHATWG rejects
+/// `http://256.1.1.1/`; accepting a rule for that spelling would create a boundary that never
+/// matches a destination.
 #[test]
 fn a_host_that_looks_like_a_broken_address_is_refused_by_both_and_named_by_neither() {
     for spelling in [
@@ -170,27 +144,7 @@ fn userinfo_cannot_appear_in_a_rule_and_does_not_fool_the_seam() {
     );
 }
 
-// --- Why §5's last bullet did not ship as written -----------------------
-//
-// "The classifier is shared, it lives beside the grammar, and `http.rs`
-// becomes its first caller rather than its second implementation."
-//
-// `http.rs` cannot call it, for two independent reasons:
-//
-// 1. **`Endpoint` cannot express what `--offline` decides.** The transport's
-//    `LoopbackOnly` admits all of `127.0.0.0/8`, IPv6 loopback, and the name
-//    `localhost`. `Host::Ip` is a single literal and the grammar has no range
-//    construct — §4 lists what a rule deliberately cannot say, and a CIDR
-//    would be a new one nobody asked for. A shared classifier would therefore
-//    have to grow a construct that exists only for its non-rule caller.
-//
-// 2. **The grammar has no endpoint consumer at all.** §6a refuses every
-//    `net(...)` rule at load, because no tool in this build produces a network
-//    operation. So the "second real consumer" P19 was waiting for still has
-//    not arrived: there is one consumer, `http.rs`, and a classifier shared
-//    with nobody is one implementation with an extra seam in it.
-//
-// The tests above are what the bullet was *for*, and they hold today. When a
-// network tool lands and `net(...)` becomes enforceable, the question is worth
-// reopening with a real second consumer in hand — at which point sharing may
-// well be right, and these tests are what would make the merge safe.
+// The transport and grammar have different representations: loopback transport policy covers
+// address ranges, while a rule endpoint denotes a single authority. Keep their observable
+// classification aligned through the tests above without adding range syntax to the rule
+// grammar.

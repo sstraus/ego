@@ -1,4 +1,4 @@
-//! contract for model-default reasoning resolution (regression case and 089).
+//! contract for model-default reasoning resolution (model defaults).
 
 use ego_core::generator::capabilities::{
     CacheRetention, CancelSemantics, ModelCapabilities, ReasoningCarryover, ReasoningEffortSupport,

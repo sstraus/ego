@@ -8,10 +8,8 @@
 //! person sees*: the wording of the question, whether a refusal says anything
 //! at all, whether the answer scrolls past under a repaint.
 //!
-//! These are what `ego` writes at a real terminal for one launch in each
-//! posture, committed, so a change to any of that shows up as a diff in a page
-//! of text a person can read. See
-//! `docs/architecture.md`.
+//! Real-terminal launch transcripts cover each posture. Changes to rendered
+//! startup output remain visible as committed text diffs.
 //!
 //! **They prove no bytes reach a terminal.** Like the render transcripts, this
 //! is a fixture, not an observation: the escape sequences are stripped and the
@@ -311,7 +309,7 @@ fn readable_discards_reply_row_repaints_but_keeps_the_answer() {
 // Catches: adjacent status frames with different clocks or token counts survive.
 #[test]
 fn readable_discards_concatenated_working_repaints() {
-    // Recorded from rb result 20261029T042025Z-53407 and the regression case RED
+    // Recorded from rb result 20261029T042025Z-53407 and the RED
     // (20261029T061159Z-5592), after the existing escape-stripping boundary.
     for row in [
         "◓ Working 1s · ↓ ~5 tokens · Esc to interrupt◑ Working 2s · ↓ ~5 tokens · Esc to interrupt",

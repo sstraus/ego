@@ -1,36 +1,11 @@
 //! Reading the money a provider states it will charge for one request.
 //!
-//! See `docs/guides/providers.md` §5 and §8.
-//!
-//! operator's constraint on this path is that it be **wire-format independent**:
-//! one mechanism, fed by any provider that states a cost, never an OpenRouter
-//! special case and never an xAI one. The ADR states the testable form of it:
-//!
-//! > Adding a second provider-reported decoder must require no change to
-//! > `budget.rs`, `cost.rs` or `port.rs`.
-//!
-//! This module is where that holds or fails. A decoder is a value a provider
-//! row carries; every one of them produces the same
-//! [`Money`], which leaves as the same provider-neutral
-//! [`AiEvent::ProviderCost`](ego_core::generator::port::AiEvent::ProviderCost),
-//! and nothing past that port knows the field name or the unit. The two
-//! shipped here were chosen because they agree about nothing on the wire —
-//! [`XaiUsdTicks`] reads an integer count of `1e-10 USD` ticks, [`OpenRouterUsd`]
-//! reads a plain decimal USD figure — so a test that runs both through the
-//! identical `ego-core` path demonstrates the independence rather than
-//! asserting it.
-//!
-//! ## Why the raw JSON text, and not a parsed number
-//!
-//! [`read`](ProviderCost::read) takes the response's `usage` object as
-//! **unparsed bytes**. `serde_json::Value` turns every non-integer number into
-//! an `f64`, and an OpenRouter cost is a small decimal like `0.00001234`:
-//! going through `f64` would round it before [`Amount`] ever saw it, and
-//! rendering the `f64` back to text can produce `1.234e-5`, an exponential
-//! form [`Amount`] deliberately refuses to parse. So each decoder pulls the
-//! one field it declares out as a [`RawValue`] and parses the exact digits the
-//! provider sent. `ego-core`'s "no floating-point money in the domain" rule
-//! (`cost.rs`) starts here, not at the domain boundary.
+
+//! Cost decoders normalize wire-specific locations and units into [`Money`]
+//! and [`AiEvent::ProviderCost`](ego_core::generator::port::AiEvent::ProviderCost).
+//! New decoders must not change core budget or accounting code. Parse raw
+//! JSON decimal digits, not `f64`, to preserve exact monetary values and avoid
+//! scientific notation that [`Amount`] deliberately rejects.
 
 use std::fmt;
 
@@ -131,18 +106,9 @@ impl ProviderCost for XaiUsdTicks {
         &self.revision
     }
 
-    /// A whole number of ticks, restated as USD at scale 10.
-    ///
-    /// A tick count with a fractional part is not something the schema
-    /// produces, and is refused rather than rounded: it would mean this
-    /// decoder no longer understands the unit, which is not a condition to
-    /// paper over with a division.
-    ///
-    /// A stated **zero** is a stated zero — a real charge of nothing, which a
-    /// fully cached request genuinely is. §9's "0 means absent" rule belongs
-    /// to the *pricing table* endpoint, where a zero rate would be a claim
-    /// about a price list; it does not reach a per-request figure the
-    /// provider computed itself.
+    /// Restate whole ticks as USD at scale 10. Fractional ticks are refused rather than rounded
+    /// because they indicate an unknown unit. A provider-reported zero charge is real zero, not
+    /// a missing pricing-table rate.
     fn read(&self, usage: &RawValue) -> Option<Money> {
         let ticks: u128 = field(usage, "cost_in_usd_ticks")?.get().parse().ok()?;
         Amount::new(ticks, XAI_TICK_SCALE)

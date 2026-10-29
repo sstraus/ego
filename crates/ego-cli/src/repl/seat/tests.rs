@@ -999,7 +999,7 @@ fn surface_action_sink_routes_all_four_policy_controls() {
 }
 
 #[test]
-fn regression_case_surface_sink_routes_name_and_goal() {
+fn interactive_metadata_surface_sink_routes_name_and_goal() {
     let pending = Arc::new(Mutex::new(None));
     let mut sink = SurfaceActionSink {
         pending: Arc::clone(&pending),
@@ -1021,7 +1021,7 @@ fn regression_case_surface_sink_routes_name_and_goal() {
 }
 
 #[test]
-fn regression_case_surface_effect_maps_idle_and_refuses_busy() {
+fn interactive_metadata_surface_effect_maps_idle_and_refuses_busy() {
     let mut editor = Reedline::create();
     let phase = SurfacePhase::new(EditPhase::Idle);
     let status = Arc::new(Mutex::new(SurfaceStatus::default()));
@@ -1386,7 +1386,7 @@ fn retry_row_is_bounded_and_expired_countdown_saturates() {
 }
 
 #[test]
-fn persistent_instruction_actions_487_route_menus_and_refuse_busy_ingress() {
+fn persistent_instruction_actions_route_menus_and_refuse_busy_ingress() {
     // Catches: menu actions lack an owner or busy slash input mutates persistent state.
     let pending = Arc::new(Mutex::new(None));
     let mut sink = SurfaceActionSink {

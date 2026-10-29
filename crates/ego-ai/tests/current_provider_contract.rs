@@ -1,6 +1,6 @@
 //! contract for provider inventory and managed Kimi model selection.
 //!
-//! regression case deliberately resolves the mapping through the public catalogue
+//! deliberately resolves the mapping through the public catalogue
 //! seam. The unresolved row is deployment authority; the resolved model is
 //! the only value allowed to carry the wire into generation.
 
@@ -286,13 +286,8 @@ fn kimi_anthropic_fixture_decodes_usage_on_the_beta_messages_stream() {
 /// The public `openai` row resolves, and this is the test that says so rather
 /// than letting its absence from the table above look like a decision.
 ///
-/// It used to assert the opposite. `2026-09-03-public-provider-wires-require-
-/// live-promotion.md` withheld the row until conformance check five was
-/// recorded against a live entitled model;
-/// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` amends that,
-/// because the remedy the refusal named needed a source checkout the operator
-/// it addressed may not have. Nothing about the evidence changed — no
-/// recording exists — only where the missing check is paid for.
+/// The row is offered on its published contract and offline fixtures.
+/// Those fixtures are not a claim of live provider acceptance.
 ///
 /// The claim is that no gate stands in front of resolution, so it is made
 /// against `unasked_http()`: resolving this row must reach a wire without
@@ -636,7 +631,7 @@ fn rejected_kimi_credentials_are_typed_and_render_relogin_without_secret_materia
     }
 }
 
-/// regression case: the statuses *outside* the 401/402/403 carve-out are scrubbed too.
+/// the statuses *outside* the 401/402/403 carve-out are scrubbed too.
 ///
 /// `rejected_kimi_credentials_are_typed_and_render_relogin_without_secret_material`
 /// above proves the credential-rejection branch, which was the only body-free
@@ -800,7 +795,7 @@ fn missing_kimi_credential_refuses_before_discovery() {
 fn qwen_oauth_has_no_selectable_compatibility_surface() {
     // ego-ai has no public provider inventory API. This negative inventory
     // check is therefore limited to the selectable source surfaces; all
-    // positive regression case assertions use the public resolution API.
+    // positive assertions use the public resolution API.
     // `qwen` alone is not retired: Ollama's current local `ollama/qwen3`
     // model is a valid selectable surface. Match the removed OAuth contract,
     // not that unrelated model family.

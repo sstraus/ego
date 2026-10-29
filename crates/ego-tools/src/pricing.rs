@@ -1,50 +1,13 @@
-//! The cached price table: immutable blobs, one mutable pointer, and a clock.
+//! Cache immutable price blobs and one atomic mutable pointer through `StoreIo`. Core owns
+//! types; `ego-ai` fetches and decodes.
 //!
-//! `docs/architecture.md` §6 and its §6.1
-//! amendment. §6 splits the work three ways and this is the middle third:
-//! `ego-ai` fetches and decodes because it owns `Http` and the wire formats,
-//! **`ego-tools` reads and writes because it owns `StoreIo`**, and `ego-core`
-//! holds the types and opens nothing.
+//! Blobs use content hashes; `current.json` names the selected blob and freshness metadata.
+//! Refuse missing, corrupt, stale, future-dated, or mismatched entries without directory
+//! fallback.
 //!
-//! # The layout, and the hole §6 left
-//!
-//! §6 says the artefacts are named by their content hash so a later fetch
-//! cannot overwrite the bytes an earlier reservation used, and also that a
-//! table older than a stated age is refused. Those do not compose: a content
-//! hash is not a clock, and a directory of hashes says nothing about which of
-//! them is current. §6.1 resolves it with two kinds of file:
-//!
-//! - `$EGO_HOME/pricing/<sha256>.json` — the fetched bytes, verbatim, never
-//!   rewritten. §6's immutability is about *these*.
-//! - `$EGO_HOME/pricing/current.json` — which blob is current, what upstream
-//!   called it, and when it arrived. Replaced atomically.
-//!
-//! The pointer is not a table artefact; it is the mutable index that selects
-//! one. Replacing it mutates no bytes a past reservation was computed from.
-//!
-//! # Everything here fails closed
-//!
-//! A cache exists to bound a guarantee the operator explicitly asked for, so
-//! "I could not establish which table this is" must never resolve to "use one
-//! anyway". A missing pointer, a torn pointer, a version this build does not
-//! know, a missing blob, a hash mismatch, an age past the limit, or a stamp in
-//! the reader's future are all refusals — and none of them scans the directory
-//! for something else to use. A fallback would price a run from a table the
-//! pointer does not name, which is exactly the attribution the hash exists to
-//! make impossible.
-//!
-//! # Why publication takes a lease and reading does not
-//!
-//! [`StoreIo`]'s scratch path is [`tmp_path_for`](crate::store::tmp_path_for),
-//! a pure function of its target, so two ego processes refreshing this
-//! **machine-scoped** cache both write `current.json.tmp` and one can rename a
-//! file the other is still writing. The existing [`Lease`] is reused rather
-//! than a second lock invented. Readers need none: immutable blobs plus an
-//! atomic pointer swap are enough.
-//!
-//! Nothing is ever collected. A quote carries its [`PricingRevision`] and the
-//! artefact it names has to stay readable for that attribution to mean
-//! anything; a rule that could justify deleting one needs its own proof.
+//! Publication reuses a lease because processes otherwise share the same scratch path. Readers
+//! need no lease with immutable blobs and atomic pointer replacement. Retain artifacts
+//! referenced by past pricing revisions.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -72,12 +35,8 @@ const LOCK: &str = "pricing.lock";
 /// verify does not mean something merely because its familiar fields parse.
 const POINTER_VERSION: u32 = 1;
 
-/// How long a cached table may go unrefreshed before a ceiling refuses it.
-///
-/// §6's default. Seven days is a policy choice and not evidence — prices
-/// change on announcement rather than on a schedule, so no age is *safe* —
-/// and what it buys is a bounded exposure window plus a roughly weekly fetch
-/// cadence.
+/// Maximum age since the last successful check. Seven days is the default policy exposure
+/// window, not evidence that prices cannot change sooner.
 pub const MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// How long a lease holder may be silent before a caller that also believes it
@@ -111,12 +70,8 @@ pub struct Cached {
 /// Why the cache could not answer, or could not be written.
 #[derive(Debug)]
 pub enum CacheError {
-    /// No pointer at all: no ceiling has ever been used on this host.
-    ///
-    /// Distinct from [`Stale`](Self::Stale) and from
-    /// [`Corrupt`](Self::Corrupt) because the three send an operator to three
-    /// different places, and §7's table gives the first two different exit
-    /// codes depending on the egress posture.
+    /// No cache pointer. Keep absence distinct from stale and corrupt entries so diagnostics
+    /// identify the actual remedy.
     Empty,
     /// The cached table is older than the caller allows.
     Stale {
@@ -256,16 +211,9 @@ impl<'a> PricingCache<'a> {
         )?)
     }
 
-    /// Store `bytes` and make them current, returning the revision they were
-    /// stored under.
-    ///
-    /// Blob first, pointer last. Any failure before the final atomic replace
-    /// leaves the previous pointer selecting the previous blob, which is
-    /// §Failure semantics' "a bad fetch never half-replaces a good table".
-    ///
-    /// Re-publishing identical bytes writes the same blob and a fresh pointer:
-    /// the freshness gate is about when ego last *checked*, not about when the
-    /// document last changed.
+    /// Publish blob first and pointer last. Failure before atomic pointer replacement leaves
+    /// the prior table selected. Identical bytes retain blob identity while refreshing the
+    /// check timestamp.
     pub fn publish(
         &self,
         bytes: &[u8],
@@ -300,11 +248,8 @@ impl<'a> PricingCache<'a> {
         Ok(revision(upstream_version, &sha256))
     }
 
-    /// The current table, if there is one and it is young enough.
-    ///
-    /// The question a run about to price something asks, and the only one it
-    /// should: a table too old to bound a ceiling with is refused rather than
-    /// returned with a caveat, because §6 says "refused, not warned about".
+    /// Read the selected table only if it is young enough to bound the requested ceiling.
+    /// Refuse stale data rather than returning it with a warning.
     pub fn load(&self, now: Timestamp, max_age: Duration) -> Result<Cached, CacheError> {
         let cached = self.current(now)?;
         let age = Duration::from_millis(
@@ -379,12 +324,8 @@ impl<'a> PricingCache<'a> {
     }
 }
 
-/// The three facts §6 requires of a revision, in one string.
-///
-/// Minted here and nowhere else so the value a reservation records and the
-/// value a later read reports are the same spelling. `ego-core` treats it as
-/// opaque — it neither parses nor compares beyond equality — so the format is
-/// this module's to choose and its only job is to be unambiguous.
+/// Encode source, upstream revision, and content hash in one unambiguous revision. Core treats
+/// this identity as opaque.
 fn revision(upstream_version: &str, sha256: &str) -> PricingRevision {
     PricingRevision(format!("litellm@{upstream_version}#{sha256}"))
 }

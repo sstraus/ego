@@ -62,15 +62,9 @@ accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
 
 # ---------------------------------------------------------------------------
-# openai-codex. The ChatGPT subscription serves the GPT-6 models the API serves.
-# The GPT-6 floor selects the set pi.dev publishes for `openai-codex` on 2026-10-11
-# (cross-check only; the facts come from the openai snapshot). The API row lists
-# `none`; the authenticated Codex models cache (2026-09-26) lists low..max for
-# gpt-6-sol, so `off` is dropped. The context is the
-# authenticated Codex cache value, 272,000
-# (docs/architecture.md),
-# not the API's 1,050,000. Default efforts from the authenticated Codex models
-# cache: gpt-6-sol medium (2026-09-26), gpt-6.1-sol low (2026-09-29).
+# openai-codex uses the ChatGPT subscription contract. Its authenticated model
+# cache supplies reasoning levels and the 272,000-token context, not the
+# API row's 1,050,000-token context. Default effort values come from that cache.
 [provider.openai-codex]
 models_dev = "openai"
 floor = "2026-09-04"
@@ -134,13 +128,9 @@ max_width = 8000
 max_height = 8000
 
 # ---------------------------------------------------------------------------
-# gemini (models.dev key `google`). Current generation: Gemini 3.8 Flash
-# (2026-09-02) plus the newest Pro and Flash-Lite, which the 3.8 generation has not
-# refreshed. Wire facts read 2026-09-08 from the Gemini 3.8 Flash, function-calling,
-# thinking and Interactions documentation
-# (docs/architecture.md): parallel function calls,
-# signed thought blocks replayed within the provider, short caching, cooperative
-# cancel. Exact image admission limits stay unknown. Preview and live ids are not
+# Gemini capability facts follow its function-calling, thinking and Interactions
+# contracts: parallel calls, signed thought replay, short caching and cooperative
+# cancel. Exact image limits remain unknown. Preview and live ids are not
 # verified against the `/v1` Interactions surface.
 [provider.gemini]
 models_dev = "google"
@@ -215,10 +205,8 @@ transport = "sse"
 [stated."openai/chat-latest"]
 source = "https://developers.openai.com/api/docs/models/chat-latest"
 read = "2026-10-15"
-# Responses probe 2026-10-15: POST https://api.openai.com/v1/responses with
-# model=chat-latest, reasoning.effort=medium returned HTTP 200, status=completed,
-# reasoning.effort=medium and output_text=ok (16 total tokens). Only Medium is
-# measured; do not infer Off, Low or High. See ADR 2026-10-11, regression.
+# Only Medium effort is declared for chat-latest. Do not infer other
+# reasoning levels from an accepted Medium request.
 reasoning = true
 reasoning_options = [{ type = "effort", values = ["medium"] }]
 limit = { context = 400000, output = 128000 }

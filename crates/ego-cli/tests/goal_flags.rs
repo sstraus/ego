@@ -378,8 +378,8 @@ fn goal_visibility_headless_quiet_keeps_receipts_on_stderr() {
     let places = Places::new();
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(text("REGRESSION-MARKER")),
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("FIRST-HEADLESS-ZYY")),
+            Reply::Sse(text("LAST-HEADLESS-ZYY")),
         ],
         ..Plan::default()
     });
@@ -407,12 +407,12 @@ fn goal_visibility_headless_quiet_keeps_receipts_on_stderr() {
         .run();
     assert_eq!(finished.code, Some(0), "{}", finished.stderr);
     assert!(
-        finished.stdout.contains("REGRESSION-MARKER"),
+        finished.stdout.contains("FIRST-HEADLESS-ZYY"),
         "{}",
         finished.stdout
     );
     assert!(
-        finished.stdout.contains("REGRESSION-MARKER"),
+        finished.stdout.contains("LAST-HEADLESS-ZYY"),
         "{}",
         finished.stdout
     );

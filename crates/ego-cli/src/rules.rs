@@ -713,8 +713,8 @@ fn render_rows(rows: Vec<String>, out: &dyn TextOutput) {
 
 fn render_list_text(rows: &[EffectiveRule], out: &dyn TextOutput) {
     if rows.is_empty() {
-        // The rule ADR fixes the text listing as tab-separated rows, so an
-        // empty one has no stdout at all and says why on stderr instead.
+        // Text rule listings are tab-separated rows. An empty listing explains
+        // itself on stderr without inventing a stdout row.
         out.note(&empty_listing(
             "no permission rules are in effect",
             "ego rules allow",

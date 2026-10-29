@@ -1,7 +1,6 @@
 //! `RuleId`: what makes `ego rules revoke` possible without the original
 //! context.
 //!
-//! `docs/architecture.md` §8.
 
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -18,14 +17,8 @@ use std::str::FromStr;
 /// somebody revoked years ago is not the deny that was there.
 pub const GRAMMAR_VERSION: u32 = 1;
 
-/// Crockford's alphabet, lowercased, written out here rather than taken from
-/// a crate.
-///
-/// An ID is a durable identifier in an operator's config file. If the
-/// alphabet came from a dependency, a `cargo update` that changed it would
-/// silently change what every stored ID denotes — the same objection §5
-/// raises to inheriting glob semantics, applied to the other end of the
-/// pipeline.
+/// Fixed lowercase Crockford alphabet for durable rule IDs. A dependency update must not
+/// silently change the meaning of stored identifiers.
 const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 
 /// The identity of a rule's *predicate*.

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use portable_pty::{NativePtySystem, PtySize, PtySystem};
 use support::{Ego, Plan, Reply, Stub, text, tool_call};
 
-const CHILD: &str = "EGO_REGRESSION_PTY_CHILD";
+const CHILD: &str = "EGO_HELD_PERMISSION_PTY_CHILD";
 const TEST: &str = "run::interactive_driver::held_permission_receipt::permission_decision_reaches_run_with_a_held_printer_row";
 
 // Catches: the real seat sends a permission receipt to a full bounded printer
@@ -19,9 +19,10 @@ const TEST: &str = "run::interactive_driver::held_permission_receipt::permission
 #[tokio::test]
 async fn permission_decision_reaches_run_with_a_held_printer_row() {
     if std::env::var_os(CHILD).is_some() {
-        let arguments: Vec<String> =
-            serde_json::from_str(&std::env::var("EGO_REGRESSION_ARGS").expect("isolated driver argv"))
-                .unwrap();
+        let arguments: Vec<String> = serde_json::from_str(
+            &std::env::var("EGO_HELD_PERMISSION_ARGS").expect("isolated driver argv"),
+        )
+        .unwrap();
         let crate::cli::Invocation::Interactive(args) = crate::cli::parse(arguments).unwrap()
         else {
             panic!("interactive fixture");
@@ -42,8 +43,8 @@ async fn permission_decision_reaches_run_with_a_held_printer_row() {
     let call = r#"{"argv":["/bin/sh","-c","printf decision-received > decision-received"],"timeout_ms":5000}"#;
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(tool_call("regression_case", "exec", call)),
-            Reply::Sse(text("regression_case-DONE")),
+            Reply::Sse(tool_call("held-EXM", "exec", call)),
+            Reply::Sse(text("HELD-EXM-DONE")),
         ],
         ..Plan::default()
     });
@@ -60,7 +61,7 @@ async fn permission_decision_reaches_run_with_a_held_printer_row() {
     command.env(CHILD, "1");
     command.env("RUST_MIN_STACK", "16777216");
     command.env(
-        "EGO_REGRESSION_ARGS",
+        "EGO_HELD_PERMISSION_ARGS",
         serde_json::to_string(&[
             "ego",
             "--thinking",
@@ -157,15 +158,15 @@ async fn permission_decision_reaches_run_with_a_held_printer_row() {
         thread::sleep(Duration::from_millis(10));
     }
     let progressed_before_release = std::fs::read_to_string(&decision).ok();
-    assert!(!screen.screen().contents().contains("regression_case-ROW"));
+    assert!(!screen.screen().contents().contains("HELD-EXM-ROW"));
     // Release even on RED and reap this child's threads before the assertion.
     ego.file("printer-release", "release\n");
     if progressed_before_release.is_none() {
         child.kill().unwrap();
     } else {
-        wait("regression_case-DONE", &mut output, &mut screen);
+        wait("HELD-EXM-DONE", &mut output, &mut screen);
         let shown = screen.screen().contents();
-        assert!(shown.contains("regression_case-ROW"), "held row missing: {shown}");
+        assert!(shown.contains("HELD-EXM-ROW"), "held row missing: {shown}");
         assert!(
             shown
                 .lines()

@@ -1,11 +1,8 @@
 //! No mapping sends a spelling the contract it targets has retired.
 //!
-//! `AGENTS.md` §Milestones carries the rule as prose — *target the current
-//! version of every provider contract* — and prose is not a guard. Story
-//! 036's fifth criterion asks for the falsifiable form, in the same spirit as
-//! `crates/ego-core/tests/near_side.rs`: a check that fails in the pull
-//! request that reintroduces a retired field rather than in a review that
-//! might not happen.
+//! Target current provider contracts. These source checks catch retired
+//! fields at review time rather than relying on prose. The analogous core
+//! boundary checks live in `crates/ego-core/tests/near_side.rs`.
 //!
 //! # It reads the bytes, not the source
 //!
@@ -18,15 +15,9 @@
 //!
 //! # A deprecation belongs to a contract, not to a wire shape
 //!
-//! `max_tokens` is the case that forces this. OpenAI marks it `deprecated:
-//! true` in favour of `max_completion_tokens`; Ollama's compatibility surface
-//! reads `max_tokens` and discards `max_completion_tokens`, which is the whole
-//! reason [`ego_ai::wire::ollama`] exists as a second mapping
-//! (`docs/guides/providers.md`
-//! §8). One key, retired by one vendor and current for another. So the table
-//! below is keyed on **(spelling, mapping)** and never on spelling alone: a
-//! mapping is derived from exactly one published contract, and that contract's
-//! deprecations are the ones that bind it.
+//! OpenAI retires `max_tokens` in favor of `max_completion_tokens`; Ollama
+//! reads the former and discards the latter. The table is keyed by spelling
+//! and mapping, not spelling alone, because contracts differ.
 //!
 //! # Why a member's own deprecations are not in the table
 //!
@@ -43,13 +34,10 @@
 //!   (`openai/openai-openapi`, `openapi.yaml` 2.3.0, read 2026-08-22). xAI
 //!   documents the same requirement; a live Ollama honours it.
 //! - OpenRouter retired a **precondition, not a spelling.** Nothing succeeded
-//!   it, so there is no second spelling to choose between — which is the shape
-//!   `AGENTS.md` actually forbids.
+//!   it, so there is no alternate spelling for the mapping to select.
 //!
-//! Dropping the field to please the one member that ignores it would cost the
-//! other three their usage figures and would buy a fifth mapping differing in
-//! an inert field. `docs/guides/providers.md` §3 is where that
-//! argument lives in full.
+//! Dropping an inert field for one provider would remove required usage
+//! reporting for other members of the mapping.
 
 use ego_ai::provider::{GEMINI_BASE, XAI_BASE};
 use ego_ai::wire::{
@@ -389,10 +377,8 @@ fn no_mapping_sends_a_retired_spelling() {
     assert!(
         all.is_empty(),
         "a mapping is sending a field the contract it targets has deprecated.\n\
-         `AGENTS.md` forbids carrying a second spelling of a capability so that \
-         an older model keeps working: the current spelling is the only one this \
-         build speaks, and a model that needs the old one is absent from the \
-         supplied table instead.\n\n{}",
+         use the current spelling of the target contract rather than carrying \
+         an obsolete alias for an older model.\n\n{}",
         all.join("\n")
     );
 }
@@ -522,7 +508,7 @@ fn the_table_names_only_mappings_this_build_has() {
 /// that one pins the family's body, and this one pins the *conclusion* — that
 /// a member's deprecation of an inert precondition did not remove a field the
 /// mapping's own contract still requires. It is the assertion that would have
-/// failed had regression case resolved the question the other way, and it is here so
+/// would fail if the implementation resolved the question the other way, and it is here so
 /// the module doc above cannot drift away from the code.
 ///
 /// **Only the two mappings this claim concerns.** `stream_options.include_usage` is a field

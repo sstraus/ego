@@ -1,12 +1,8 @@
 //! The pricing cache: immutable blobs, one mutable pointer, and a clock.
 //!
-//! `docs/architecture.md` §6.1 is the contract
-//! these tests hold. §6 as originally written said two things that do not
-//! compose — the artefacts are immutable and named by their content hash, and
-//! a table older than a stated age is refused — and a content hash is not a
-//! clock. §6.1 resolves it: `pricing/<sha256>.json` holds the bytes and never
-//! changes, `pricing/current.json` says which of them is current and when it
-//! arrived, and only the pointer is ever replaced.
+//! Immutable content-addressed blobs hold rates; `pricing/current.json`
+//! holds the selected hash and arrival time. Only the pointer changes.
+//! Content hashes identify bytes but cannot establish freshness.
 //!
 //! Every refusal below fails **closed**. A pricing cache exists to bound a
 //! guarantee the operator explicitly asked for, so "I could not establish
@@ -99,8 +95,7 @@ fn what_is_published_comes_back_and_the_blob_is_named_by_its_hash() {
     assert_eq!(cached.bytes, TABLE);
     assert_eq!(cached.revision, revision);
 
-    // The revision names all three facts §6 asks of it: the source, the
-    // upstream version, and the content hash.
+    // The revision names its source, upstream version, and content hash.
     let spelled = revision.0;
     assert!(spelled.starts_with("litellm@etag-1#"), "{spelled}");
     let hash = spelled.rsplit('#').next().expect("a hash after the #");
@@ -111,11 +106,8 @@ fn what_is_published_comes_back_and_the_blob_is_named_by_its_hash() {
     assert!(home.pricing().join(POINTER).exists());
 }
 
-/// A second fetch of *different* bytes leaves the first blob where it was.
-///
-/// This is the property §6 is actually about, and the only one a content hash
-/// buys. A `PricingRevision` recorded on a past reservation has to keep naming
-/// readable bytes, or the attribution it exists for means nothing.
+/// A different fetched body must not overwrite a prior immutable blob referenced by an earlier
+/// reservation.
 #[test]
 fn a_later_fetch_cannot_overwrite_the_bytes_an_earlier_one_stored() {
     let home = Home::new();
@@ -161,22 +153,15 @@ fn republishing_the_same_bytes_refreshes_the_age_and_adds_no_blob() {
     assert_eq!(blobs(&home), 1, "identical bytes are one artefact");
 }
 
-/// An empty cache is its own answer, and not an error about a file.
-///
-/// §7's table sends "missing" and "stale" to the same refusal but they reach
-/// it from different places — one operator has never run with a ceiling and
-/// the other has an old copy — so the type keeps them apart.
+/// Keep absent and stale cache states distinct even when both refuse: their operator remedies
+/// differ.
 #[test]
 fn a_cache_that_was_never_written_says_so() {
     let home = Home::new();
     assert!(matches!(load(&home.cache(), DAY), Err(CacheError::Empty)));
 }
 
-/// Past the age, it is refused. Never used with a warning.
-///
-/// §6: "Refused because `--budget` is a request for a guarantee and a stale
-/// table cannot supply one, so the failure must be closed; a warning would be
-/// the silently-vacuous shape again, one layer down."
+/// Refuse past-age tables. A warning cannot supply the guarantee a monetary budget requires.
 #[test]
 fn a_table_older_than_the_maximum_age_is_refused_and_names_its_age() {
     let home = Home::new();
@@ -194,10 +179,7 @@ fn a_table_older_than_the_maximum_age_is_refused_and_names_its_age() {
     assert_eq!(max_age, MAX_AGE);
 }
 
-/// The boundary is inclusive: exactly at the age it is still usable.
-///
-/// Pinned because "older than" and "at least as old as" differ by one
-/// millisecond a year, and a reader of §6 cannot tell which was meant.
+/// The maximum-age boundary is inclusive: exactly at the configured age remains usable.
 #[test]
 fn a_table_exactly_at_the_maximum_age_is_still_usable() {
     let home = Home::new();
@@ -242,13 +224,8 @@ fn a_blob_whose_bytes_no_longer_match_its_name_is_refused() {
     assert!(matches!(err, CacheError::Corrupt { .. }), "{err}");
 }
 
-/// A pointer naming a blob that is not there is refused, and nothing is
-/// guessed from the directory.
-///
-/// §6.1: "Nothing scans the directory for a fallback." A cache that fell back
-/// to whatever blob it could find would price a run from a table the pointer
-/// does not name, which is precisely the attribution the hash exists to make
-/// impossible.
+/// Refuse a pointer to a missing blob. Directory fallback could silently price from a table the
+/// pointer never selected.
 #[test]
 fn a_pointer_whose_blob_is_gone_does_not_fall_back_to_another_one() {
     let home = Home::new();
@@ -312,12 +289,8 @@ fn a_torn_pointer_is_corruption_and_not_an_empty_cache() {
     assert!(matches!(err, CacheError::Corrupt { .. }), "{err}");
 }
 
-/// A failed publication leaves the previous table exactly where it was.
-///
-/// §Failure semantics: "a bad fetch never half-replaces a good table". The
-/// write order is what buys it — blob first, pointer last — so any failure
-/// before the final atomic replace leaves the old pointer selecting the old
-/// blob.
+/// Failed publication preserves the previous selected table. Blob-first, pointer-last ordering
+/// protects that invariant.
 #[test]
 fn a_publication_that_fails_leaves_the_previous_table_readable() {
     let home = Home::new();
@@ -411,11 +384,8 @@ fn no_fetch_ever_removes_an_earlier_artefact() {
     }
 }
 
-/// The cache is under `$EGO_HOME`, machine-scoped, and creates its own home.
-///
-/// §6: "Machine-scoped, not session-scoped: it is the same table for every
-/// session on the host." A first run with a ceiling must not have to be
-/// preceded by an `mkdir`.
+/// The cache is machine-scoped under `EGO_HOME` and creates its own directory; sessions share
+/// the selected table.
 #[test]
 fn the_directory_is_created_on_first_publication() {
     let home = Home::new();

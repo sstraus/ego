@@ -289,18 +289,9 @@ impl Workspace {
         })
     }
 
-    /// What policy concludes about a call, for a call the run settles without
-    /// a human.
-    ///
-    /// Every call in this file reads, lists or searches inside a workspace,
-    /// which the default mode answers without asking anybody — at §6 step 5,
-    /// which is the `Approver` port rather than part of `classify`. So the
-    /// whole order runs here: a helper that stopped at `classify` would find
-    /// every read unsettled and say the builtins had lost their authority.
-    ///
-    /// A call still open after `settle` would mean a read-only builtin had
-    /// started asking for authority it never used to need — worth a loud
-    /// failure naming the tool, not a quiet `is_err()`.
+    /// Exercise the complete classification and settlement order for ordinary workspace reads.
+    /// Stopping at classification would mistake an unsettled call for a builtin without
+    /// authority; mode approval belongs to settlement.
     fn authorize(&self, call: PreparedCall) -> AuthorizationResult {
         let unanswered = |pending: &Pending| {
             panic!(
@@ -323,11 +314,7 @@ impl Workspace {
 
     /// What policy concludes when the answer is a *question*.
     ///
-    /// The mirror of [`Workspace::authorize`], which panics on one. Both are
-    /// needed for the same reason the mode is now a parameter: a question the
-    /// run cannot answer is the outcome `CLI.md` §4.4 is written about, and
-    /// until a tool could produce a mutating op nothing in this workspace
-    /// could reach it.
+    /// Check the pending-question result without treating it as an automatic grant.
     fn asks(&self, call: PreparedCall) -> Pending {
         let pending = match self.policy.classify(call) {
             Classification::Ask(pending) => pending,
@@ -521,30 +508,10 @@ mod registration {
         }
     }
 
-    /// §6a's table, checked against the tools instead of against itself.
-    ///
-    /// `OPERATIONS` (`ego-core/src/permit/rule/rule/parse.rs`) says, per head,
-    /// whether this build produces operations of that shape — and an operator
-    /// who writes a head it says exists gets a rule that loads and matches
-    /// nothing, which the table's own doc calls the failure it is there to
-    /// prevent: they "cannot tell that apart from a boundary that works".
-    ///
-    /// `exec` and `write` are now reachable through registered producers, so
-    /// their effect heads must stay coupled to the operations those tools
-    /// prepare. `read_tool_result` is also registered, but its
-    /// session-evidence operation is intentionally not an operator rule head:
-    /// its exact reference authority is intrinsic to the session.
-    ///
-    /// So this test is here rather than beside the table, and it derives the
-    /// answer instead of restating it: every builtin is prepared with a call
-    /// it accepts, the operations it actually asks for are collected, and the
-    /// table is required to agree. A head marked available with no producer
-    /// fails, and so does the reverse.
-    ///
-    /// **The sample list is checked against the registry first**, and that
-    /// check is not ceremony: every registered producer must contribute a
-    /// prepared sample, or the table could silently agree with a survey that
-    /// skipped a new tool.
+    /// Check declared operation-head availability against real builtin preparation. Include
+    /// every registered producer, collect its requested operations, and require `OPERATIONS` to
+    /// agree in both directions. `read_tool_result` uses intrinsic session-evidence authority,
+    /// not a user-authored head.
     #[test]
     fn the_heads_this_build_says_it_enforces_are_the_ones_its_tools_ask_for() {
         let ws = populated();
@@ -634,7 +601,7 @@ mod registration {
             assert_eq!(
                 table_says_available,
                 asked_for,
-                "§6a's table says `{op}` operations {} in this build, and the \
+                "the operation inventory says `{op}` operations {} in this build, and the \
                  builtins {} one. A rule with that head would {}",
                 if table_says_available {
                     "exist"
@@ -979,10 +946,7 @@ mod write {
 
     #[test]
     fn the_default_mode_asks_before_a_write_and_settles_a_read_without_asking() {
-        // The first observable difference between two modes in this
-        // workspace. `Default` reviews unresolved *sensitive* actions
-        // (`ARCHITECTURE.md:242`), and until a mutating op existed there were
-        // none to review, so `default` and `edits` were the same run.
+        // Mutating tools expose the difference between observational and write authority.
         let ws = Workspace::in_mode(Mode::Default);
         ws.file("src/main.rs", "fn main() {}\n");
 
@@ -1436,11 +1400,8 @@ mod edit {
 
     #[test]
     fn edit_prepares_a_read_and_a_write_of_the_file_it_names() {
-        // `docs/architecture.md` Step C, first invariant. The operation
-        // carries the substitution rather than the resulting bytes, because
-        // the resulting bytes are not knowable here — and because "replace
-        // this text with that text in this file" is the reviewable sentence
-        // the `PreparedCall` exists to be.
+        // The operation carries the reviewable substitution, not resulting bytes
+        // that preparation cannot know without reading the file.
         let ws = editable();
 
         let call = ws
@@ -1944,7 +1905,7 @@ mod grep {
     // Catches: a single-file fallback opens a FIFO and waits forever for a writer.
     #[test]
     fn single_file_search_rejects_fifo_without_blocking() {
-        const CHILD: &str = "EGO_REGRESSION_FIFO_CHILD";
+        const CHILD: &str = "EGO_FIFO_TEST_FIFO_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let ws = Workspace::new();
             let fifo = ws.root.join("pipe");
@@ -2629,7 +2590,7 @@ mod end_to_end {
             .collect();
         assert!(offered.contains(&"read".to_string()), "got {offered:?}");
 
-        // ...and the second request carries the file's real contents back,
+        //...and the second request carries the file's real contents back,
         // which is only possible if the whole chain ran: prepare resolved the
         // path on disk, policy minted a permit for it, and `GuardedEffects` opened
         // it.

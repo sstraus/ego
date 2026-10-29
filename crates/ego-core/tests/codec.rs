@@ -1,7 +1,7 @@
 //! `StoreRecord` codec v1: header/record roundtrip, checksum integrity,
 //! forward compatibility for unrecognised lines.
 //!
-//! See `ARCHITECTURE.md` §1/§5 and `plans/m0a-contracts.md` Step 3.
+//! Exercise durable codec read and write behavior.
 
 use ego_core::cost::{Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingRevision};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
@@ -411,19 +411,9 @@ mod codec {
         assert_eq!(lines.len(), 2);
     }
 
-    // --- golden: the durable wire format --------------------------------
-    //
-    // Every test above this line round-trips through *this* build, so all of
-    // them still pass if a field is renamed, the checksum framing changes or
-    // a `DomainEvent` variant's serde shape moves — encoder and decoder move
-    // together and agree with each other. That is precisely the failure a
-    // durable format cannot afford: `events.jsonl` is read back by future
-    // builds, so the bytes are the contract, not the round-trip.
-    //
-    // The fixture is committed data. It pins the record envelope *and* the
-    // `DomainEvent` payload shape, which no other golden covers — the public
-    // goldens pin the `PublicEvent` projection, which is deliberately a
-    // different schema with its own compatibility policy (ARCH §1).
+    // Committed durable bytes protect compatibility beyond same-build round trips. Pin both
+    // record envelope and domain-event payload; public event goldens cover a different
+    // projection schema.
 
     /// A log with a fixed session, fixed ids and fixed timestamps, so its
     /// encoding is byte-for-byte reproducible.
@@ -534,12 +524,8 @@ mod codec {
                         },
                         fx: None,
                     },
-                    // Deliberately absent, and the record above is committed
-                    // without it. This is the backward-read evidence: a
-                    // `UsageUpdated` written before attempts were attributed
-                    // still decodes, which is the whole reason the field is
-                    // optional rather than required
-                    // (`docs/architecture.md`).
+                    // Intentionally absent: logs written before attempt attribution still
+                    // decode without inventing an attribution value.
                     attempt: None,
                 },
             },
@@ -672,14 +658,9 @@ mod codec {
     /// The committed log decodes under today's codec, with every checksum
     /// intact and every payload still parsing as a `DomainEvent`.
     ///
-    /// This used to be called "written by a past build", and that name
-    /// overclaimed: the fixture is regenerated whenever the durable format
-    /// moves, so it has only ever proved that *this* build reads *this*
-    /// fixture. `docs/architecture.md` §3 makes
-    /// the gap explicit rather than leaving it in a test name — v1 logs are
-    /// not readable by a v2 build, deliberately, because none exist outside
-    /// this repository. If that ever stops being true, this is the test that
-    /// has to grow a real v1 fixture and a migration beside it.
+    /// This fixture is regenerated with the durable format. It proves current
+    /// fixture readability, not compatibility with an independently archived
+    /// past build. A real migration claim needs a retained past-format fixture.
     #[test]
     fn codec_golden_log_decodes_and_verifies_under_todays_codec() {
         let lines = decode_log(include_str!("golden/store_log.jsonl").as_bytes())
@@ -707,14 +688,8 @@ mod codec {
         }
     }
 
-    /// `Usage` gained two fields in
-    /// `docs/architecture.md`
-    /// — one for cache writes at an extended retention, one for the share of
-    /// the output the provider attributed to reasoning — and that ADR's
-    /// argument for leaving `CODEC_VERSION` alone is that both decode when
-    /// absent. This is the test that argument rests on, and it is written
-    /// against the bytes the *previous* build committed rather than against
-    /// anything this build can produce.
+    /// Added usage fields decode when absent. Check this against committed
+    /// pre-field bytes rather than data the current encoder just generated.
     ///
     /// The two fields decode to different things on purpose. Nothing ego has
     /// ever spoken to offers an extended cache retention, so a record without
@@ -844,12 +819,8 @@ mod codec {
         assert_eq!(decoded.kind.name(), "reasoning_state");
     }
 
-    /// `ToolCallStarted` gained `call_id` in
-    /// `docs/architecture.md`, as an `Option` with a
-    /// serde default rather than a required field plus a `CODEC_VERSION`
-    /// bump. This is the claim that decision rests on: a payload written
-    /// before the field existed still decodes, and decodes to the only honest
-    /// value — not to a fabricated id, and not to an error.
+    /// Old `ToolCallStarted` bytes without `call_id` decode to absence, not
+    /// a fabricated id or an error.
     ///
     /// The other half of the same claim is that a `None` does not re-appear
     /// in the bytes, so a log round-tripped by this build is byte-identical

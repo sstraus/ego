@@ -1,4 +1,4 @@
-//! contract for regression case's rooted JSONL compaction target port.
+//! contract for rooted JSONL compaction target port.
 
 use std::fs;
 use std::io;

@@ -230,7 +230,7 @@ fn leaks(rendered: &str) -> Option<&'static str> {
     .find(|secret| rendered.contains(secret))
 }
 
-/// regression case: no token-endpoint body reaches a rendered `FlowError`.
+/// no token-endpoint body reaches a rendered `FlowError`.
 ///
 /// Every non-2xx classification is driven, including the two that were never
 /// covered — `Temporary` and `Protocol` — against a body built to be
@@ -356,7 +356,7 @@ fn no_token_refusal_renders_the_endpoint_body_yet_all_keep_provider_and_status()
 
 /// The body is scrubbed from the error and *kept* in the log.
 ///
-/// Criterion three of regression case: dropping the bytes from the rendered failure
+/// Dropping the bytes from the rendered failure
 /// must not blind an operator debugging a real outage, so the whole answer goes
 /// to `tracing` — as a field of its own, so a structured subscriber can drop it
 /// without losing the classification beside it.

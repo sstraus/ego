@@ -624,7 +624,7 @@ impl Turns<'_> {
         }
     }
 
-    /// The last assistant message, as `CLI.md` §4.1's `result`.
+    /// The final assistant message used as the completion `result`.
     fn answer(&self, state: &SessionState) -> Value {
         Value::String(last_assistant_message(state))
     }
@@ -668,12 +668,8 @@ async fn process_signal() -> CancelCause {
     CancelCause::User
 }
 
-/// The text of the last assistant message in the session.
-///
-/// Read from `SessionState` rather than accumulated while streaming: the state
-/// is the fold of the durable log, so what is reported is what was written
-/// down. An empty string when the run produced no assistant message — §4.1's
-/// `result` is a string, and a run that said nothing said the empty thing.
+/// Read the final assistant text from reduced durable state, not a second streaming
+/// accumulator. No assistant message yields an empty result string.
 pub(super) fn last_assistant_message(state: &SessionState) -> String {
     state
         .items

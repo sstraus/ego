@@ -1,14 +1,8 @@
 //! Ollama's OpenAI-compatible endpoint, as its own mapping.
 //!
-//! It looks like [`openai_completions`](super::openai_completions) and it is
-//! not that format.
-//! `docs/guides/providers.md` §8
-//! settles the question from a measurement rather than from the resemblance:
-//! a live daemon honours `max_tokens` and discards `max_completion_tokens`, so
-//! Ollama fails the family's first conformance check and is not a member of
-//! it. §4 then leaves exactly three places an adaptation may live — a model
-//! fact, a transport fact, or a different mapping — and "no fourth option and
-//! no flag". A ceiling is none of the first two, so it is this file.
+//! Ollama honors `max_tokens` and discards `max_completion_tokens`. Its
+//! mapping shares projection and decoding with Chat Completions but writes
+//! the ceiling field the daemon actually honors.
 //!
 //! What this mapping does *not* do is duplicate the family. The request body
 //! is [`openai_completions::common_request`] plus the one field that differs;

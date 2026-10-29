@@ -155,11 +155,7 @@ fn an_import_through_a_symlinked_directory_never_reads_its_target() {
     assert_eq!(set.skipped[0].reason, Refusal::Symlink);
 }
 
-/// Refused even when the target is perfectly ordinary and inside the
-/// workspace. Containment is not checked because a containment check that a
-/// swap between check and open can defeat is not containment
-/// (`POTENTIALS.md` P23) — so the rule is the same one either way, and it is
-/// visible rather than silent.
+/// Refused even when the target is perfectly ordinary and inside the workspace.
 #[test]
 fn a_symlink_to_an_in_workspace_file_is_refused_too_rather_than_specially_allowed() {
     let tree = Tree::new();

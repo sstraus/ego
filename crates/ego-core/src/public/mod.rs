@@ -1,8 +1,7 @@
 //! `PublicEvent`: the privacy-filtered, compatibility-governed projection of
 //! the internal event log.
 //!
-//! See `ARCHITECTURE.md` §1 (four serialisations, one semantic model) and
-//! `CLI.md` §4.2. A new internal event never becomes public automatically.
+//! A new internal event never becomes public automatically.
 
 pub mod transcript;
 
@@ -18,9 +17,7 @@ use crate::generator::types::ErrorKind;
 use crate::question::{QuestionMode, QuestionOption, QuestionRequest, QuestionTarget};
 use crate::state::Usage;
 
-/// The current `PublicEvent` schema version, carried in `SessionStarted`'s
-/// `v` field. `CLI.md` §4.2: "the schema is versioned in the header and
-/// published".
+/// The current `PublicEvent` schema version, carried in `SessionStarted`'s `v` field.
 ///
 /// **Incremented when the shape moves, not when the branch merges.** This
 /// went 5 → 6 for two changes that ship together: `UsageUpdated`'s
@@ -129,12 +126,9 @@ pub enum InstructionSource {
 
 /// One instruction file a run loaded, described but **never quoted**.
 ///
-/// `docs/architecture.md` I2 asks for each path, digest and scope to be
-/// recorded in the public start event, and asks for the *text* to stay out of
-/// it. Those are one requirement, not two: the stream this rides is what a CI
-/// job archives, and an `AGENTS.md` is one symlink away from being something
-/// else — which is why `config::Refusal::Symlink` exists at all. A descriptor
-/// proves which file contributed; it does not republish it.
+/// Record instruction path, digest and scope, not its text. Public events
+/// may be archived by CI; a descriptor establishes which file contributed
+/// without republishing workspace content.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionDescriptor {
     /// Where the file was found.
@@ -142,10 +136,8 @@ pub struct InstructionDescriptor {
     /// Lowercase hex SHA-256 of the bytes as read — the digest
     /// `config::load` already computed, carried rather than recomputed.
     ///
-    /// It describes the file, not the prompt: the assembler frames what it
-    /// sends, so a digest over the framed text would change with the framing
-    /// and prove nothing about the repository. See
-    /// `docs/architecture.md` §4.
+    /// Digest the file, not framed prompt text. Prompt framing can change
+    /// without any repository content change.
     pub sha256: String,
     /// How many bytes that digest covers.
     pub bytes: u64,
@@ -156,7 +148,7 @@ pub struct InstructionDescriptor {
     pub source: InstructionSource,
 }
 
-/// The item kinds carried by `item.*` events, per `CLI.md` §4.2.
+/// Public event projection is explicit, not automatic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
@@ -204,23 +196,18 @@ pub enum MeteringKind {
 
 /// What the configured ceiling actually does to a generation.
 ///
-/// Three values and not an `Option<Money>`, because a flag that *appears* to
-/// bind and does not is a false statement, and the two ways it fails to bind
-/// are different: nobody set one, or one was set against a row no monetary
-/// ceiling can reach. See `2026-08-21-a-run-with-no-ceiling.md` §10.
+/// Distinguish no ceiling from a configured monetary ceiling that cannot
+/// constrain this row's charges. Both differ from an effective limit.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "effect", rename_all = "snake_case")]
 pub enum CeilingEffect {
-    /// No ceiling was configured, so nothing binds and no rates were looked
-    /// up. The ordinary case: ego imposes no ceiling of its own (§4).
+    /// No configured ceiling means no binding limit and no rate lookup.
     None,
     /// A ceiling is in force at `limit`.
     Binds {
         limit: Money,
-        /// The higher figure that was asked for, when an administrator's
-        /// non-relaxable ceiling reduced it. §4 requires the clamp be
-        /// **stated, not silent** — otherwise the flag reads as binding at a
-        /// figure it does not.
+        /// The higher requested figure before an administrator's clamp. Report both so the flag
+        /// does not appear to bind at the wrong limit.
         #[serde(skip_serializing_if = "Option::is_none")]
         clamped_from: Option<Money>,
     },
@@ -232,18 +219,9 @@ pub enum CeilingEffect {
     },
 }
 
-/// The privacy-filtered, versioned JSONL wire event — `CLI.md` §4.2's
-/// three-level envelope: `session.started` / `turn.started|completed` /
-/// `item.started|delta|completed`.
-///
-/// `SessionStarted`, `TurnStarted` and `MeteringSelected` have no
-/// `DomainEvent` counterpart: nothing in `EventKind` (ARCH §1's exhaustive
-/// internal set) marks the start of a session or a turn, or the choice of a
-/// metering, because none of those is a fact the *reducer* establishes —
-/// they are facts the harness that drives a session already knows, before
-/// any domain event exists. So the harness constructs those three variants
-/// directly; `project_public` below only ever returns the others, which do
-/// each originate from a `DomainEvent`.
+/// Usage preserves unknown and reported states. Session start, turn start, and metering
+/// selection are harness facts without reducer events; the harness constructs those public
+/// variants directly. Other public variants project domain events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicEvent {
@@ -258,8 +236,7 @@ pub enum PublicEvent {
         /// Schema version. Always `PUBLIC_EVENT_VERSION`.
         v: u32,
         session: SessionId,
-        /// Feature detection by name, never version parsing (`CLI.md`
-        /// §4.2).
+        /// Detect optional features by field name and presence, not version parsing.
         capabilities: Vec<String>,
         /// MCP server load errors. Present only when non-empty — a CI gate
         /// is a presence check, not a length check.
@@ -373,16 +350,12 @@ pub enum PublicEvent {
         turn: TurnId,
         item: ItemId,
         kind: ItemKind,
-        /// One outcome field, never a second status field beside it
-        /// (`ARCHITECTURE.md` §1: "single `ok` field for outcomes").
+        /// Completion facts are derived from durable session state.
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
-    /// A turn finished. Every `TurnCompleted` carries its own outcome; the
-    /// *last* one in the stream is, by construction, the terminal event —
-    /// no separate "final result" mechanism is needed (`CLI.md` §4.2: "no
-    /// `--output-last-message` temp-file dance").
+    /// A turn finished.
     ///
     /// Deliberately no usage field: turn completion is a turn *outcome*,
     /// while usage is observed at a *generation* boundary — a fallback
@@ -679,23 +652,12 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // whose only reader is unbuilt is a field nothing can be wrong about,
         // so it arrives with its reader.
         //
-        // `2026-08-21-a-permit-nobody-can-widen.md` §7 expected the opposite
-        // and priced a `PUBLIC_EVENT_VERSION` bump for it. What was wrong was
-        // the assumed consumer, not the projection rule: 5→6 is paid by every
-        // ACP host and every `--output jsonl` reader, for a field none of them
-        // asks for.
+        // This projection adds no authority field without a consumer contract.
+        // Changing it would affect every ACP host and JSONL reader.
         //
-        // **`CLI.md` §4.1 does publish an authority, and that is the same rule
-        // rather than an exception to it.** `Report.denied_by` reaches a
-        // consumer through `RunTermination`, not through this projection —
-        // `--output json` publishes to a `NullSink` and produces no events at
-        // all — and it has a reader that §4.4 names: exit 3 offers three
-        // opt-ins that act on different axes, and which one applies is the
-        // authority. So the field arrived on the surface that asks for it and
-        // not on the one that does not. Do not read this comment as "the
-        // authority is never published"; read it as "this projection adds
-        // nothing a consumer has not asked for". See
-        // `2026-08-21-an-exit-code-that-names-who-refused.md`.
+        // Denial authority reaches completion consumers through `RunTermination`,
+        // not this live event projection. The operator can then identify which
+        // configuration axis can lift the refusal.
         //
         // **Not withheld for privacy, and the difference matters to whoever
         // reads this next.** `Source` is a six-value layer name
@@ -745,13 +707,9 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             candidate: candidate.clone(),
             decision: decision.clone(),
         }),
-        // `window` is deliberately not projected. It reaches consumers through
-        // the reduction a sink is handed beside the event
-        // (`docs/architecture.md`), which is
-        // where the only reader of it — the ACP `UsageUpdate` denominator —
-        // already looks. Carrying it here as well would put the same fact on
-        // two versioned surfaces that could then disagree, and would cost a
-        // `PUBLIC_EVENT_VERSION` bump for a field no published consumer reads.
+        // `window` reaches usage consumers through reduced state supplied beside
+        // the event. Duplicating it here would add another versioned surface for
+        // the same fact without a published reader.
         EventKind::ContextWindowUpdated {
             used_tokens,
             provenance,
@@ -766,13 +724,9 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *ok,
             exit_reason: *exit_reason,
         }),
-        // Never public, and this is a privacy decision rather than a
-        // tidiness one. The blob is provider-private and opaque — ego does
-        // not know what is encoded in it, which is precisely why it cannot
-        // publish it. A consumer that needs to know the model reasoned has
-        // the reasoning item and its deltas; nothing downstream can act on
-        // the continuation token, and `CLI.md` §4.2's rule is that a new
-        // internal event never becomes public automatically.
+        // Never public, and this is a privacy decision rather than a tidiness one. The
+        // blob is provider-private and opaque — ego does not know what is encoded in it,
+        // which is precisely why it cannot publish it.
         EventKind::ReasoningState { .. } | EventKind::ProviderContent { .. } => None,
         EventKind::PromptQueued { .. }
         | EventKind::PromptDeliveryExpedited { .. }

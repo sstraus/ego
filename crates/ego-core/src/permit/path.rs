@@ -1,12 +1,8 @@
 //! `CanonPath`: a path believed canonical at the moment it was produced.
 //!
-//! `ARCHITECTURE.md` §3.2: symlinks are chased into `PreparedCall`'s
-//! canonical operations. "Believed" is the load-bearing word — a
-//! `CanonPath` is a snapshot, not a promise that the target stays put.
 //! [`GuardedFs`](super::GuardedFs) re-derives the current truth from
-//! [`Fs::canonicalize`](super::Fs::canonicalize) before ever trusting one,
-//! which is what defeats a symlink swapped in between `prepare` and
-//! `execute` (`fs.rs`).
+//! [`Fs::canonicalize`](super::Fs::canonicalize) before ever trusting one, which is what
+//! defeats a symlink swapped in between `prepare` and `execute` (`fs.rs`).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -14,12 +10,9 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// A path, as resolved by some [`Fs`](super::Fs) at a point in time.
-///
-/// Serialisable because `Escalation` is, and `Escalation` is recorded in a
-/// durable event. Unlike [`Scope`](super::Scope) — where a `Deserialize` impl
-/// would be a public constructor for a value the permit ADR deliberately made
-/// unconstructible — `CanonPath::new` is already public and does no
-/// resolution, so serde adds no capability that was not already there.
+/// Serialization adds no constructor authority: `CanonPath::new` is already
+/// public and performs no resolution. Unlike scope, this value cannot mint
+/// a permit merely by being constructed.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CanonPath(PathBuf);
 

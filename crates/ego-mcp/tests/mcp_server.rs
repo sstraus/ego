@@ -1,4 +1,4 @@
-//! contract for the inbound, scoped MCP server (regression case).
+//! contract for the inbound, scoped MCP server.
 //!
 //! These tests deliberately exercise the injected controller seam. The MCP
 //! adapter owns protocol validation, connection visibility, and sanitisation;
@@ -28,7 +28,7 @@ fn call(name: &str, body: Value) -> McpServerToolCall {
     McpServerToolCall::new(
         name.to_owned(),
         body.as_object().expect("object request").clone(),
-        Some("client-058".to_owned()),
+        Some("client-MCS".to_owned()),
     )
     .expect("valid MCP call")
 }

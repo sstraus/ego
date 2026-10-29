@@ -71,12 +71,10 @@ pub(crate) fn rooted_path(root: &Path, path: PathBuf) -> PathBuf {
 /// component untouched, so a symlinked file still arrives at the loader as a
 /// symlink and is still refused by name instead of quietly followed.
 ///
-/// **A file that is not there refuses the run.** `CLI.md` §4.4: invalid config
-/// is never skipped silently. The operator named this file; proceeding without
-/// it ignores an instruction that was given, which is the silently vacuous
-/// flag `--budget` was fixed for one flag over — and `--system @file` already
-/// exits 2 for the same mistake. `symlink_metadata` rather than `exists`,
-/// because a *dangling* symlink must reach the loader and be refused as the
+/// The operator named this file; proceeding without it ignores an instruction that was
+/// given, which is the silently vacuous flag `--budget` was fixed for one flag over — and
+/// `--system @file` already exits 2 for the same mistake. `symlink_metadata` rather than
+/// `exists`, because a *dangling* symlink must reach the loader and be refused as the
 /// symlink it is, not reported here as an absence.
 pub(super) fn explicit(path: &Path, cwd: &Path) -> Result<PathBuf, UsageError> {
     let refuse =
@@ -112,13 +110,8 @@ pub(super) fn rooted_at_file(value: &str, cwd: &Path) -> Result<String, UsageErr
     prompt::at_file(&format!("@{}", rooted.display()))
 }
 
-/// The instructions and system prompt this run generates under.
-///
-/// **`--bare`, and a headless run in an untrusted workspace, call
-/// `InstructionIo` zero times.** Not "read nothing" — make no call at all, so
-/// nothing is stat'd, opened or read, and there is nothing for a dialog to be
-/// raised about. That is the mechanism behind §4.4, and it is
-/// `Selection::Disabled` doing it, one layer down.
+/// Resolve instructions and system prompt. Bare or untrusted headless execution makes zero
+/// `InstructionIo` calls through `Selection::Disabled`, not reads that happen to return empty.
 pub(super) fn instructions(
     effective: &Effective,
     args: &Args,
@@ -351,10 +344,8 @@ pub(super) fn tools_with_mode(
 
 /// The capability names `session.started` publishes.
 ///
-/// Feature detection by name (`CLI.md` §4.2), so a consumer never parses a
-/// version — and by *observation*, not by a hand-written list: a capability
-/// this build does not have must not be advertised, and the cheapest way to
-/// keep that true is to derive each one from the thing that provides it.
+/// Advertise capabilities from observed collaborators, not a handwritten list that can
+/// claim unavailable behavior.
 pub(super) fn capabilities(
     tools: &[RegisteredTool],
     instructions: bool,
@@ -897,10 +888,8 @@ pub(super) fn finish_rooted_settings(
         .transpose()?;
     let root = cwd.clone();
 
-    // §4 requires the clamp be stated, not silent: a `--budget 20$` reduced to
-    // an administrator's $5 must not read as binding at $20. The money half
-    // travels into the gate, which publishes it on every `MeteringSelected`;
-    // the token half has no such carrier, so it is said here.
+    // Report requested budgets reduced by administrator ceilings. Money clamps travel through
+    // the gate; token clamps are announced here.
     if let Some(asked) = effective.clamped.tokens {
         diagnostics.note(&format!(
             "the token ceiling of {asked} was reduced to {} by a system ceiling",

@@ -1,51 +1,10 @@
-//! The permission rule grammar: one language for four surfaces.
+//! One canonical permission grammar for flags, configuration, agent files, and management.
+//! Rules match prepared operations, not shell text, and do not choose permit scope. Relative
+//! paths use the match-time root.
 //!
-//! `docs/architecture.md`.
-//! `--allow` on the command line, `permissions.allow` in four config layers,
-//! `allow:` in an agent file's frontmatter and `ego rules ls` are supposed to
-//! speak one language, and `CLI.md:29-31` states that as a requirement: "The
-//! permission rule you pass as `--allow`, write in config, and see in
-//! `/permissions` is the same string."
-//!
-//! What makes it more than a shared string is here: a **canonical AST**, so
-//! that two spellings of one predicate are one value with one identity, and
-//! matching against the *structure* of a [`PreparedCall`](super::PreparedCall)
-//! rather than against rendered text.
-//!
-//! This module opens no file and knows no workspace root. The root is a
-//! match-time parameter, which is what keeps a rule written in a committed
-//! `.ego/config.toml` portable to every checkout.
-//!
-//! ## What a rule does not decide
-//!
-//! A rule decides **whether to ask**, and never how wide a grant is.
-//! `2026-08-21-a-permit-nobody-can-widen.md` §1 settles that: the scope of a
-//! permit comes from the call's own operations, and a rule that matched could
-//! not widen it if it wanted to. Nothing in this module constructs a
-//! [`Scope`](super::Scope), and nothing here can.
-//!
-//! ## What is here and what is waiting
-//!
-//! All seven heads parse, canonicalise and take an ID, because the grammar is
-//! published as one thing — `ARCHITECTURE.md:252` makes that a gate. All seven
-//! can currently match, `net` and `tool` included: `net` matches
-//! [`Op::Connect`] and [`Op::ProtocolConnect`], `tool` matches [`Op::Opaque`],
-//! and this build produces all three shapes.
-//!
-//! The refusal path below is therefore unreachable today, and it stays because
-//! the condition it guards is a property of the *build*, not of the grammar.
-//! Were a head to lose its operations, a rule with it would still be
-//! well-formed, still have a stable ID and still render in `rules ls` — and
-//! [`Rule::load`] would **refuse it**, by name, saying that no tool in this
-//! build produces operations of that shape. Not a parse error, which would lie
-//! about the grammar and churn the ID later; and not a silent non-match, which
-//! is the worse failure: an operator who writes `exec(rm -rf /)` in a deny list
-//! cannot tell a rule that matches nothing apart from a boundary that works.
-//! §6a.
-//!
-//! It self-heals. When the operations arrive, [`Rule::matches`] gains an arm
-//! and one entry in `parse.rs`'s `OPERATIONS` table changes; no rule is
-//! rewritten and no ID is recomputed.
+//! All seven heads currently have producers. `Rule::load` still checks build enforceability so
+//! a future head cannot silently become a valid rule that matches nothing. Grammar identity
+//! remains separate from current producer availability.
 
 mod argv;
 mod endpoint;
@@ -132,19 +91,9 @@ impl Rule {
         })
     }
 
-    /// Parse a rule **and refuse it if this build cannot enforce it** (§6a).
-    ///
-    /// This is what every surface that *stores* a rule calls — config layers
-    /// today, frontmatter and `--allow` when they arrive. [`parse`](Self::parse)
-    /// is the grammar alone and is what `rules explain` wants: rendering a rule
-    /// nobody can enforce is fine, believing in it is not.
-    ///
-    /// The refusal is not a parse error, and the distinction is the whole
-    /// point. A rule with an unenforceable head is a valid sentence with a
-    /// stable ID that renders correctly in `rules ls`; what it lacks is
-    /// anything to match. Calling that a grammar error would churn the ID on
-    /// the day the head became usable, and would be a temporary message about
-    /// a permanent grammar.
+    /// Parse a rule and refuse it if this build has no matching operation producer.
+    /// Unenforceable is distinct from malformed: the canonical grammar and stable ID do not
+    /// change when a producer becomes available.
     pub fn load(raw: &str) -> Result<Self, RuleLoadError> {
         let rule = Self::parse(raw)?;
         if let Some(awaiting) = rule.head().awaiting() {
@@ -191,15 +140,8 @@ impl Rule {
         self.matches(op, root)
     }
 
-    /// Does this rule cover `op`?
-    ///
-    /// Per operation, and never per call. A call with several operations is
-    /// matched by several rules and *every* operation must be covered — which
-    /// is why §4 refuses a conjunction across heads: `exec(git *) &&
-    /// write(src/**)` describes a call with two operations, and that is
-    /// already the semantics.
-    ///
-    /// `root` anchors relative path patterns and is ignored by absolute ones.
+    /// Match per operation. Every operation in a call needs coverage, potentially from
+    /// different rules. Relative patterns use `root`; absolute patterns do not.
     pub fn matches(&self, op: &Op, root: &Path) -> bool {
         match (self, op) {
             (Rule::Read(pattern), Op::Read { path }) => pattern.matches(path.as_path(), root),

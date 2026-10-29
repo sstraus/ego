@@ -8,9 +8,9 @@ fn child_tool_calls_share_one_task_header_and_keep_output_width() {
         completions: vec![
             Reply::Sse(tool_call("task1", "task", &serde_json::json!({"name": label, "prompt": "Read calc.py then print three progress lines"}).to_string())),
             Reply::Sse(tool_call("read1", "read", r#"{"path":"calc.py"}"#)),
-            Reply::Sse(tool_call("exec1", "exec", r#"{"argv":["printf","REGRESSION-MARKER-one\nTASK-535-two\nTASK-535-three\n"]}"#)),
+            Reply::Sse(tool_call("exec1", "exec", r#"{"argv":["printf","TASK-WRE-one\nTASK-WRE-two\nTASK-WRE-three\n"]}"#)),
             Reply::Sse(text("child final")),
-            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+            Reply::Sse(text("TASK-WRE-DONE")),
         ],
         ..Plan::default()
     });
@@ -36,11 +36,11 @@ fn child_tool_calls_share_one_task_header_and_keep_output_width() {
     let start = output.len();
     input.write_all(b"inspect with a task\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DONE");
+    until_normalized(&reader, &mut output, start, "TASK-WRE-DONE");
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
     let rows = screen_rows(&output, 40, 80);
-    if let Some(directory) = std::env::var_os("EGO_REGRESSION_CAPTURE_DIR") {
+    if let Some(directory) = std::env::var_os("EGO_TASK_ROWS_CAPTURE_DIR") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("task.ansi"), &output).unwrap();
@@ -70,7 +70,7 @@ fn child_tool_calls_share_one_task_header_and_keep_output_width() {
         .expect("child exec row");
     assert!(header < read && read < exec);
     assert!(rows[read].starts_with("    ") && rows[exec].starts_with("    "));
-    for tail in ["REGRESSION-MARKER-one", "REGRESSION-MARKER-two", "REGRESSION-MARKER-three"] {
+    for tail in ["TASK-WRE-one", "TASK-WRE-two", "TASK-WRE-three"] {
         assert!(
             rows.iter()
                 .any(|row| row.trim() == tail && row.starts_with("      ")),
@@ -84,7 +84,7 @@ fn child_tool_calls_share_one_task_header_and_keep_output_width() {
 // or remains on screen after the child settles.
 #[test]
 fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() {
-    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-STREAM");
+    let (reply, gate) = gated_paced_line("CHILD-EXT-STREAM");
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call(
@@ -94,7 +94,7 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
             )),
             Reply::Sse(tool_call("read643", "read", r#"{"path":"ledger.txt"}"#)),
             reply,
-            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+            Reply::Sse(text("PARENT-EXT-DONE")),
         ],
         ..Plan::default()
     });
@@ -113,7 +113,7 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
     ego.file("AGENTS.md", "# child activity fixture\n");
     ego.file("ledger.txt", "usage ledger\n");
     // Native evidence uses a copied binary, never an mbx target while it builds.
-    let program = std::env::var_os("EGO_REGRESSION_BIN");
+    let program = std::env::var_os("EGO_TASK_BINDING_BIN");
     let command = program.as_ref().map_or_else(
         || ego.pty_command(),
         |path| ego.pty_command_with_program(path),
@@ -145,7 +145,7 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
     drain_until_quiet(&reader, &mut output);
     let live = output.clone();
     gate.release();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DONE");
+    until_normalized(&reader, &mut output, start, "PARENT-EXT-DONE");
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
     let settled = output.clone();
@@ -156,7 +156,7 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
     drop(pair);
     reader_join.join().unwrap();
     writer_join.join().unwrap();
-    if let Some(directory) = std::env::var_os("EGO_REGRESSION_CAPTURE_DIR") {
+    if let Some(directory) = std::env::var_os("EGO_TASK_BINDING_CAPTURE_DIR") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("live.ansi"), &live).unwrap();
@@ -196,7 +196,7 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
 // Catches: the durable runtime has no seat relay, or parent idle clears its child row.
 #[test]
 fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
-    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-STREAM");
+    let (reply, gate) = gated_paced_line("BACKGROUND-FSR-STREAM");
     struct ReleaseOnDrop(Arc<ReleaseGate>);
     impl Drop for ReleaseOnDrop {
         fn drop(&mut self) {
@@ -209,12 +209,12 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
             Reply::Sse(tool_call(
                 "task644",
                 "task",
-                r#"{"name":"Inspect durable","prompt":"REGRESSION-MARKER","background":true}"#,
+                r#"{"name":"Inspect durable","prompt":"BACKGROUND-FSR","background":true}"#,
             )),
-            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+            Reply::Sse(text("PARENT-FSR-DONE")),
         ],
         prompt_completions: vec![(
-            "REGRESSION-MARKER".into(),
+            "BACKGROUND-FSR".into(),
             vec![
                 Reply::Sse(tool_call("read644", "read", r#"{"path":"ledger.txt"}"#)),
                 reply,
@@ -236,7 +236,7 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
         ]);
     ego.file("AGENTS.md", "# durable activity fixture\n");
     ego.file("ledger.txt", "usage ledger\n");
-    let program = std::env::var_os("EGO_REGRESSION_BIN");
+    let program = std::env::var_os("EGO_TASK_RETRY_BIN");
     let command = program.as_ref().map_or_else(
         || ego.pty_command(),
         |path| ego.pty_command_with_program(path),
@@ -264,7 +264,7 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
     let start = output.len();
     input.write_all(b"launch durable task\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DONE");
+    until_normalized(&reader, &mut output, start, "PARENT-FSR-DONE");
     until_normalized(&reader, &mut output, start, "qwen3 · off · yolo");
     let deadline = Instant::now() + Duration::from_secs(10);
     while stub.generations().len() < 4 && Instant::now() < deadline {
@@ -274,7 +274,7 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
     }
     // Child progress is deliberately not parent transcript. Probe with editing input
     // to obtain the latest owner-painted frame without depending on provider order.
-    input.write_all(b"REGRESSION-MARKER").unwrap();
+    input.write_all(b"DRAFT-FSR").unwrap();
     input.flush().unwrap();
     drain_until_quiet(&reader, &mut output);
     let live = output.clone();
@@ -298,7 +298,7 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
     drop(pair);
     reader_join.join().unwrap();
     writer_join.join().unwrap();
-    if let Some(directory) = std::env::var_os("EGO_REGRESSION_CAPTURE_DIR") {
+    if let Some(directory) = std::env::var_os("EGO_TASK_RETRY_CAPTURE_DIR") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("live.ansi"), &live).unwrap();
@@ -325,7 +325,7 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
         rows[index].contains('[') && rows[index].contains(']'),
         "missing child identity: {visible}"
     );
-    assert!(visible.contains("> REGRESSION-MARKER"), "{visible}");
+    assert!(visible.contains("> DRAFT-FSR"), "{visible}");
     assert!(
         !visible.contains("Working"),
         "parent must be idle: {visible}"
@@ -340,5 +340,5 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
         "{}",
         screen.screen().contents()
     );
-    assert!(screen.screen().contents().contains("> REGRESSION-MARKER"));
+    assert!(screen.screen().contents().contains("> DRAFT-FSR"));
 }

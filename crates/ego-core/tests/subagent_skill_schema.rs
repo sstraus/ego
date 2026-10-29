@@ -1,9 +1,5 @@
-//! contract for M4 S1: typed child, skill, hook, accounting, and codec facts.
-//!
-//! These tests deliberately build the durable wire shapes through serde. The
-//! event log is the contract boundary: a future implementation must make the
-//! shapes below typed, closed, replayable, and privacy preserving rather than
-//! teaching this test a second in-memory DTO.
+//! Typed child, skill, hook, accounting, and codec wire contracts. The durable event log is the
+//! boundary; serde shapes must remain closed, replayable, and privacy-preserving.
 
 use ego_core::config::ModelRef;
 use ego_core::event::domain::{DomainEvent, GenerationRole};
@@ -119,7 +115,7 @@ fn assert_json_key_order(serialized: &str, keys: &[&str]) {
     assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
 }
 
-mod regression_case {
+mod schema {
     use super::*;
 
     #[derive(Default)]

@@ -1,4 +1,4 @@
-//! contract for operator headers on the login exchange (regression case).
+//! contract for operator headers on the login exchange.
 //!
 //! Removing the vendor disguise left one request with no way back: the Copilot
 //! token exchange talks to an endpoint that may gate on a client it

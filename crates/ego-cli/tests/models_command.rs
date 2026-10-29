@@ -660,10 +660,8 @@ fn kimi_refresh_without_credential_returns_an_unavailable_snapshot_without_trans
 
 #[test]
 fn unknown_provider_exits_two_before_any_transport() {
-    // `gemini` was in this list until
-    // `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` put it in
-    // the inventory. `xai` stays: the API-key candidate row genuinely is not
-    // built, and `xai-oauth` is a different row on a different contract.
+    // Gemini is in the inventory. The API-key xAI candidate is not;
+    // `xai-oauth` is a separate row on a different contract.
     for provider in ["not-admitted", "xai"] {
         let stub = Stub::start(Plan {
             installed: vec!["qwen3".to_string()],
@@ -680,21 +678,9 @@ fn unknown_provider_exits_two_before_any_transport() {
     }
 }
 
-/// A row nobody configured is listed, and says where it came from.
-///
-/// Story `regression`'s fifth criterion, both halves in one run because the
-/// interesting claim is the *difference* between them: the same command, the
-/// same provider, one file added, and only the overridden slug changes source.
-///
-/// `--provider anthropic` rather than the whole table on purpose. Anthropic's
-/// resolver is `Supplied`, so it enumerates from the catalogue and opens no
-/// socket, which makes this a test about layering rather than about whichever
-/// endpoints happen to answer on the machine running it.
-///
-/// The home is held here rather than by the harness because the two runs have
-/// to share it: `Ego` owns its temp directories and consumes itself on `run`,
-/// so a second invocation against the *same* `$EGO_HOME` needs the directory
-/// to outlive both.
+/// Listing distinguishes builtin facts from a user override of the same slug. Use the supplied
+/// Anthropic catalogue to avoid network discovery. Both invocations share one home so only the
+/// added file changes precedence.
 #[test]
 fn builtin_rows_are_listed_as_builtin_until_a_file_overrides_one() {
     let home = tempfile::tempdir().expect("a temp home");
@@ -775,13 +761,9 @@ transport = "sse"
 /// The `openai` row reads as available once its key is set, and its
 /// availability turns on the key alone.
 ///
-/// This asserted the opposite until
-/// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`, which amends
-/// the live-promotion ADR: the row is offered on its published contract, and
-/// no recording exists or is claimed. The two runs below are the whole point —
-/// with the key the row is available and with it absent it is
-/// `missing_credential`. A gate that still stood would make both readings
-/// identical, so a single assertion could not tell the ADR was honoured.
+/// The public row uses its published contract. Credentials distinguish
+/// available from `missing_credential`; offline tests do not claim a live
+/// acceptance recording.
 #[test]
 fn the_openai_row_reads_as_available_with_its_key_set_and_wants_only_that_key() {
     let availability = |key: Option<&str>| {
@@ -856,9 +838,8 @@ fn stored_openai_codex_credential_lists_the_builtin_default_on_a_fresh_home() {
 /// selection. A run stopped by the promotion gate never reached one, and said
 /// so by naming `EGO_SMOKE`.
 ///
-/// The exit code is deliberately asserted as "not usage". `2` is the code
-/// `CLI.md` §4.3 reserves for an invocation that must change, and a model this
-/// build offers is not one.
+/// A runtime provider refusal is not an invalid invocation; assert that its exit is not
+/// usage error.
 #[test]
 fn selecting_the_openai_row_reaches_the_transport_rather_than_a_gate() {
     let refused = Ego::nowhere()

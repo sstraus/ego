@@ -1,10 +1,8 @@
-//! contract for ACP session config options (regression case, criterion 1).
+//! contract for ACP session config options.
 //!
-//! `docs/architecture.md` §2 says model and config control is projected as
-//! `session/set_config_option` over model-category options, and that a valid
-//! change is staged and applied only at a safe generation boundary. These
-//! pin the wire half of that: what a host is offered, and what ego does with
-//! every answer a host can send back.
+//! Model and config control use `session/set_config_option` over model-category
+//! options. Valid changes apply only at safe generation boundaries. These tests
+//! pin the offered values and the response to each host answer.
 //!
 //! Nothing here may accept a value ego did not offer. The available list is
 //! the whole authority: the adapter matches an incoming value against it
@@ -97,11 +95,8 @@ fn values(option: &v1::SessionConfigOption) -> Vec<String> {
 /// Every control ego offers, each in the ACP category a host uses to decide
 /// where to render it.
 ///
-/// Sandbox is `Other` and the other three are named categories, because the
-/// pinned schema has no category for a confinement and the three it does name
-/// all mean something else. Calling it `Mode` to avoid `Other` would tell
-/// every connected host that confinement is a permission mode, which it is
-/// not (`2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`).
+/// Sandbox uses `Other` because the pinned schema has no confinement category.
+/// Calling it `Mode` would incorrectly present confinement as permission mode.
 #[test]
 fn every_control_is_offered_in_its_own_acp_category() {
     let options = controls::options(&state());

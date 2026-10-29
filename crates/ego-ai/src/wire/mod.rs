@@ -1,4 +1,4 @@
-//! Wire formats: one module per API shape (`ARCHITECTURE.md` §3.1).
+//! Wire formats: one module per API shape.
 //!
 //! A wire format turns a provider-neutral `GenRequest` into bytes and turns
 //! the bytes back into [`AiEvent`](ego_core::generator::port::AiEvent)s. It
@@ -6,14 +6,9 @@
 //! [`crate::http`] and to the provider table — so a wire format is testable
 //! against a transcript, which is what the goldens here do.
 //!
-//! [`WireFormat`] is the seam, and it exists now because both conditions its
-//! absence was waiting on have been met.
-//! `docs/guides/providers.md` §1 retired the
-//! original reason — a trait extracted from one implementation invents the
-//! second one's requirements — when operator set the target at six providers, and
-//! §6 put the extraction behind regression case and 035 because those move
-//! `GenRequest` and `AiEvent`, the types the signature is made of. Both have
-//! landed, so the signature is written against types that have stopped moving.
+//! [`WireFormat`] separates provider-neutral generation types from wire
+//! encoding and decoding. Implementations share the core request and event
+//! contracts, not provider-name switches.
 
 pub mod anthropic_messages;
 mod cache;
@@ -62,17 +57,10 @@ pub(crate) fn request_has_audio(req: &GenRequest) -> bool {
 
 /// One API shape: how a [`GenRequest`] becomes bytes, and how the bytes become
 /// [`AiEvent`]s.
-///
-/// Two methods and no third, because the ADR's §2 split leaves a mapping with
-/// exactly two jobs. Everything a request needs that is *not* a fact about the
-/// shape — the address, the credential, whether this provider states a
-/// monetary total — arrives as a parameter from the profile. Providers whose
-/// current bytes agree reuse one value; a real request or event difference is
-/// represented by a distinct value rather than a provider branch inside it.
-///
-/// `Debug` because a [`ProviderRow`](crate::provider::ProviderRow) is
-/// `Debug` and a row worth logging must not lose which shape it speaks.
-/// `Send + Sync` because a row is shared across a generation's tasks.
+/// A mapping owns encoding and decoding. Addresses, credentials and cost
+/// decoders arrive from the row as parameters. Providers with identical
+/// semantics share a stateless value; real shape differences use distinct
+/// values. `Debug`, `Send` and `Sync` support shared provider rows.
 pub trait WireFormat: fmt::Debug + Send + Sync {
     /// Only mappings with a proven bidirectional contract opt in.
     fn websocket(&self) -> bool {
@@ -81,14 +69,9 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
 
     /// The complete HTTP request for `req` against `target`.
     ///
-    /// A [`RequestTarget`] and not a URL, and that is the whole enforcement
-    /// mechanism for "no per-provider branch in shared code": the target
-    /// carries a base and a list of headers and **no provider identity**, so
-    /// a mapping that wanted to branch on who it serves has nothing to branch
-    /// on (`docs/guides/providers.md`
-    /// §2). A provider that needs a different body is a different value of
-    /// this trait — §4 allows a model fact, a transport fact or another
-    /// mapping, and no fourth option and no flag.
+    /// A [`RequestTarget`] carries a base and headers but no provider identity.
+    /// Mappings cannot branch on who they serve. Different request semantics
+    /// require a different mapping rather than a provider flag.
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -102,12 +85,9 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
     }
 
     /// One provider response, decoded into the generation's events.
-    ///
-    /// Takes the `Result` rather than the response so a request that never got
-    /// one is the same kind of thing as one that failed halfway. `cost` is the
-    /// profile's own declaration of where it states a charge, carried in
-    /// rather than looked up here — the metering ADR §8 forbids a `match` on a
-    /// provider id inside a mapping, and a parameter is how that stays true.
+    /// Accept `Result` so unsent requests and interrupted responses use one
+    /// error path. The row supplies its cost decoder; the mapping never selects
+    /// one by provider id.
     fn decode(
         &self,
         response: Result<HttpResponse, HttpError>,
@@ -116,40 +96,18 @@ pub trait WireFormat: fmt::Debug + Send + Sync {
 }
 
 /// Everything a mapping needs about where a request goes.
-///
-/// Deliberately carries no provider id: a mapping that cannot learn who it is
-/// serving cannot branch on it, and "no per-provider branch in shared code"
-/// stops being a rule anyone has to remember
-/// (`docs/guides/providers.md`
-/// §2).
-///
-/// The fields are private and the ADR's sketch has them public. The data and
-/// its visibility to a mapping are identical either way; what the accessors
-/// buy is that [`url`](Self::url) is the **only** way to reach a URL from
-/// here, so every mapping joins its path to the base the same way. A mapping
-/// holding the base directly would be a mapping that could `set_path` it, and
-/// the difference between `join` and `set_path` on a base with a prefix is a
-/// request sent somewhere unintended.
-///
-/// **A guardrail, not an enforcement**, and the distinction is worth stating
-/// because the stronger claim is inviting and false. `join` itself accepts an
-/// absolute path, a `../` that climbs out of the prefix, and a whole other
-/// URL; and a mapping builds an [`HttpRequest`] itself, so it can put any URL
-/// in one whatever this type offers. What privacy buys is that the *accident*
-/// cannot happen — a mapping cannot reach for `set_path` on a base it never
-/// holds. A mapping determined to send its request elsewhere is not what this
-/// prevents, and nothing at this seam could.
+/// There is no provider id. Private fields route ordinary URL construction
+/// through [`url`](Self::url), preserving base prefixes consistently. This is
+/// a guardrail against accidental `set_path`, not hostile adapter enforcement:
+/// an adapter can still construct another `HttpRequest` URL explicitly.
 pub struct RequestTarget<'a> {
     base: &'a Url,
     headers: &'a [ego_core::permit::HttpHeader],
 }
 
 impl<'a> RequestTarget<'a> {
-    /// `base` is the row's, ending in `/` — see
-    /// [`ProviderRow::base`](crate::provider::ProviderRow::base), which is
-    /// where that is guaranteed. `headers` is the profile's contribution, the
-    /// credential above all, and it is opaque here because a wire format is
-    /// not allowed to know a credential (`ARCHITECTURE.md` §3.1).
+    /// The row supplies a trailing-slash base and opaque headers, including credentials.
+    /// Mappings own API paths, not credential resolution.
     pub fn new(base: &'a Url, headers: &'a [ego_core::permit::HttpHeader]) -> Self {
         RequestTarget { base, headers }
     }
@@ -179,11 +137,8 @@ impl<'a> RequestTarget<'a> {
     /// A JSON body posted to this target's `path`, asking for an event stream
     /// back.
     ///
-    /// The two headers it adds are facts about *what is being sent and what is
-    /// wanted back*, which is the only kind of header a mapping is allowed to
-    /// add (`ARCHITECTURE.md` §3.1). It lives here rather than in each mapping
-    /// because it is the same two headers for every streaming JSON API, and a
-    /// mapping that had to remember them is a mapping that can forget one.
+    /// Shared JSON-stream headers describe content and response format. Keeping them here
+    /// prevents individual mappings from forgetting one.
     pub fn post_json(&self, path: &str, body: Vec<u8>) -> HttpRequest {
         // Explicit opt-in only: request bodies can contain private prompt text.
         // Never include headers, which carry credentials.
@@ -393,12 +348,11 @@ pub(crate) fn decode_response(
 /// is one attempt, and the cost of guessing "transient" is `--retry N`
 /// attempts and an exit code that tells a script to try again.
 ///
-/// **The known gap: `429`.** A rate limit and an exhausted quota can share it,
-/// and they are opposite answers — the first clears on its own, the second
-/// never does. Only the body distinguishes them, and only on the rows that
-/// publish a discriminator. `Transient` is the right reading of the status
-/// alone, and the wrong reading of an empty wallet. `POTENTIALS.md` P26, whose
-/// trigger is an OpenAI credential existing.
+/// **The known gap: `429`.** A rate limit and an exhausted quota can share it, and they
+/// are opposite answers — the first clears on its own, the second never does. Only the
+/// body distinguishes them, and only on the rows that publish a discriminator.
+/// `Transient` is the right reading of the status alone, and the wrong reading of an
+/// empty wallet.
 ///
 /// **What this does not do.** It classifies the non-200 path and only that. A
 /// row can answer `200` to a request that was wrong — Ollama accepts `role:
@@ -604,19 +558,10 @@ impl ErrorBody {
 }
 
 /// What a `401` or `403` is told to consider, once ego stopped impersonating.
-///
-/// ego sends its own identity and never a vendor client's, so "this client is
-/// not one of ours" is now a refusal an operator can actually receive — and it
-/// arrives as the same status as a wrong key, with a body that rarely says
-/// which. Appending the recipe costs one sentence and saves the operator
-/// guessing; withholding it would leave the amended ADR's opt-in override
-/// discoverable only by reading the source.
-///
-/// **Appended, never substituted.** What the vendor said comes first and whole:
-/// a hint that displaced the body would hide the case where the vendor *did*
-/// explain itself.
+/// Identity refusals can resemble bad credentials. Append an override hint
+/// after the complete vendor message; never replace that message with a hint.
 const IDENTITY_HINT: &str = "if this provider gates on a client identity ego \
-     does not ship, `docs/guides/providers.md` §7.8 is the \
+     does not ship, `docs/guides/providers.md` is the \
      `[auth.<provider>.headers]` recipe";
 
 pub(crate) async fn read_error_body(

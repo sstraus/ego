@@ -1,12 +1,7 @@
-//! contract for regression case: every empty listing says what is missing.
+//! Every empty listing says what is missing.
 //!
-//! A first run has no credentials, no user configuration, no rules of its own,
-//! no hooks and no MCP servers. Five commands answered that with silence and
-//! exit 0, which reads as a broken command rather than an empty store. The
-//! explanation is a diagnostic and therefore stderr: the stdout shapes of
-//! `config ls` and `rules ls` are fixed by
-//! `docs/architecture.md`
-//! and by the rule ADR, and an extra row on stdout would corrupt both.
+//! First-run empty listings need stderr diagnostics, not silence. Keep
+//! structured stdout intact: an explanatory row would corrupt its schema.
 
 mod support;
 
@@ -30,18 +25,9 @@ fn auth_status_names_the_login_command_when_nothing_is_stored() {
 
 /// `auth status` has no `--json`, and that absence is a contract rather than an
 /// omission.
-///
-/// regression case asks that "`--json` variants emit an empty array/object". Four of
-/// the five listings declare one; `auth` does not — CLI.md gives its surface as
-/// `login|logout|status [PROVIDER]`, and §2's command set is closed the same way
-/// the trust ADR relies on when it refuses to add an `ego trust`. Growing one
-/// here would mean inventing an unspecified schema on the one command that
-/// handles credentials: array or provider-keyed object, how a version is
-/// carried, how "that provider is absent" differs from "nothing is stored", and
-/// which credential metadata is safe to serialise. "Empty array/object" answers
-/// none of those, and a machine format for credentials is not a detail to guess
-/// at. So the flag stays absent, and this test is what makes that a decision:
-/// add it without amending CLI.md and this fails.
+/// Structured empty listings preserve their existing schema. Do not add
+/// a JSON credential surface to `auth` without defining its privacy and
+/// versioning contract; this test keeps that unsupported flag absent.
 #[test]
 fn auth_status_has_no_json_variant_while_the_cli_contract_excludes_it() {
     let listed = empty().subcommand("auth").args(["status", "--json"]).run();

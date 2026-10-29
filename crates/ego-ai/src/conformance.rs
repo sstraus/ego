@@ -14,14 +14,9 @@ pub const FINAL_PROFILE_COUNT: usize = 11;
 /// identity and have no meaning at another address; OpenRouter is itself a
 /// gateway, so a gateway in front of it is not a case this repository has.
 ///
-/// `gemini` is here as of
-/// `docs/guides/providers.md`.
-/// It was the one implemented row left out of this array, and it was left out
-/// for the reason that ADR rejects: no sanitized live recording exists. Its
-/// absence was worse than the `openai` refusal it mirrored, because a row that
-/// is not in this array has no refusal at all — `-m gemini/…` answered
-/// "unknown provider", which is false about a mapping this build ships,
-/// fixtures and all.
+/// `gemini` has an implemented mapping and appears in this inventory.
+/// Leaving an implemented row out would report an incorrect unknown-provider
+/// error rather than its actual availability.
 pub fn final_provider_rows(
     ollama: ProviderRow,
     openai: ProviderRow,

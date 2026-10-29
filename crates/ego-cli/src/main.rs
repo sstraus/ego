@@ -1,12 +1,9 @@
 //! The process.
 //!
-//! Short on purpose. The only thing that happens here which cannot happen
-//! anywhere else is the last line: a `u8` from
-//! [`RunTermination::exit_code`](ego_core::run::RunTermination::exit_code)
-//! becoming the status the shell sees. That mapping lives in `ego-core` and is
-//! never re-derived here — `CLI.md` §4.3 is one table, and a second copy in a
-//! binary would be a second chance to disagree with an ACP host about what
-//! "budget" exits with.
+//! Short on purpose. The only thing that happens here which cannot happen anywhere else
+//! is the last line: a `u8` from
+//! [`RunTermination::exit_code`](ego_core::run::RunTermination::exit_code) becoming the
+//! status the shell sees.
 
 use ego_cli::cli::{self, Invocation};
 use ego_cli::output::{self, Stdout};
@@ -372,11 +369,8 @@ async fn ordinary_main() -> std::process::ExitCode {
                 selected_session: None,
                 mcp_errors: Vec::new(),
             },
-            // `--help` and `--version`. On **stdout** and exit 0, because the
-            // question was answered: `CLI.md` §4.3's exit 2 is a usage error, and
-            // asking what a command does is not misusing it. The text is written
-            // whole rather than through `out.line`, which appends a newline clap's
-            // rendering already has.
+            // Help and version are successful stdout answers, not usage errors. Write
+            // clap's complete text without appending another newline.
             Ok(Invocation::Answered(text)) => {
                 out.write(&text);
                 Ended {

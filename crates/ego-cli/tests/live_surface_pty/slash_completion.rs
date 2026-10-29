@@ -79,7 +79,7 @@ fn selected_skill_completion_enter_delivers_one_admitted_instruction() {
     ego.file("AGENTS.md", "# Selected skill fixture\n");
     ego.file(
         ".ego/skills/zebra-completion/SKILL.md",
-        "---\nname: zebra-completion\ndescription: Selected skill consumer\nuser-invocable: true\ndisable-model-invocation: true\n---\nSELECTED-SKILL-INSTRUCTION-537\n",
+        "---\nname: zebra-completion\ndescription: Selected skill consumer\nuser-invocable: true\ndisable-model-invocation: true\n---\nSELECTED-SKILL-INSTRUCTION-CYJ\n",
     );
     let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
     let mut output = Vec::new();
@@ -105,7 +105,7 @@ fn selected_skill_completion_enter_delivers_one_admitted_instruction() {
     let request = generations[0].to_string();
     assert!(request.contains("Admitted skill instruction"), "{request}");
     assert!(
-        request.contains("REGRESSION-MARKER"),
+        request.contains("SELECTED-SKILL-INSTRUCTION-CYJ"),
         "{request}"
     );
 }

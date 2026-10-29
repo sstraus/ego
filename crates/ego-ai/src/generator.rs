@@ -1,7 +1,6 @@
 //! The binding: the wire format, the transport and the attempt, joined.
 //!
-//! See `plans/m0b-vertical-slice.md` Step 13.5 and
-//! `docs/guides/providers.md`.
+//! See the provider guide at `docs/guides/providers.md`.
 //!
 //! This module composes and returns. It folds no delivery certainty and
 //! decides no stop reason, because both already have exactly one owner:
@@ -96,19 +95,13 @@ pub struct WireGenerator {
     http: Arc<dyn Http>,
     /// The row's credential, already resolved.
     ///
-    /// The one copy in the process, and it lives here because this is the one
-    /// thing that must send it — the row must not hold a secret
-    /// (`docs/guides/providers.md` §3) and
-    /// neither may a `ResolvedModel`, which is `Clone` and travels to the
-    /// ledger.
+    /// The generator holds the resolved credential because it must send it.
+    /// Neither the provider row nor the cloneable, ledger-bound `ResolvedModel`
+    /// holds a secret.
     ///
-    /// Resolved rather than resolvable, which is
-    /// `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §6's whole
-    /// point: this field used to be an `Arc<dyn Credentials>` and every
-    /// generation re-read the environment through it, so a variable rotated
-    /// mid-run changed behaviour silently and every generation was fallible
-    /// for a condition settled at startup. Now the failure has exactly one
-    /// site, and it is the site that can name the variable to set.
+    /// Resolved once, not re-read per request. Rotating an environment variable
+    /// mid-run must not silently change generation identity. Credential failures
+    /// are reported at startup, where the missing variable can be named.
     credential: ResolvedCredential,
     codex_session: Arc<futures::lock::Mutex<crate::codex_session::Session>>,
 }
@@ -290,13 +283,9 @@ impl Generator for WireGenerator {
     }
 
     fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
-        // No credential branch here, and its absence is the change §6 bought.
-        // A missing key is refused once, at resolution, where the message can
-        // name the variable to set and the exit code can be `CLI.md` §4.3's 2
-        // rather than a provider's 4. What used to sit here was the same
-        // refusal re-derived per generation, for a condition that could not
-        // have changed since — and it re-read the environment to do it, so a
-        // rotated variable silently changed a running turn.
+        // Resolve credentials once before generation. Missing keys produce a
+        // configuration refusal rather than a repeated provider failure, and mid-run
+        // environment rotation must not change identity.
         let (request, names) = match self.build_request(&req) {
             Ok(request) => request,
             // Refused before a socket exists. `DefinitelyUnsent` is honest
@@ -339,11 +328,8 @@ impl Generator for WireGenerator {
             "provider generation request");
         let http = Arc::clone(&self.http);
         let profile = self.profile.clone();
-        // The row's own declaration of where it states a charge, carried to
-        // the decoder rather than looked up there: one mapping is spoken by
-        // providers that report a cost and by providers that do not, and a
-        // `match` on the provider id inside a wire format is the special case
-        // the metering ADR §8 forbids.
+        // Pass the row's declared cost decoder to the mapping. Shared mappings
+        // must not choose it through provider-id branches.
         let cost = self.row.cost.clone();
         let wire = self.wire;
         let websocket = wire.websocket();

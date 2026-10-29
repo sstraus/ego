@@ -1,4 +1,4 @@
-//! regression case contract for the core-owned managed mutation vocabulary.
+//! contract for the core-owned managed mutation vocabulary.
 
 use ego_core::config::{
     ManagedConfigKey, ManagedConfigValue, ProfileName, UserConfigMutation, UserConfigTarget,

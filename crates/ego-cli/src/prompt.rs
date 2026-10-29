@@ -1,18 +1,6 @@
-//! The input-precedence algorithm of `CLI.md` §4.5, and the `@file`
-//! convention `--system` and `--schema` share.
-//!
-//! Ratified in `docs/architecture.md`, whose
-//! §3.4 is the table [`assemble`] must grow into when `-f` lands: an agent
-//! file's body is the argv prompt's peer and the two together are *refused*
-//! rather than concatenated, while `--attach` never enters this algorithm at
-//! all because an attachment is a content block and not prompt text.
-//!
-//! §2's stdin contract, which the document takes from Codex as "the cleanest
-//! surveyed": the prompt is an argument; `-` reads it from stdin; and with
-//! *both* an argv prompt and piped stdin, stdin is appended as a delimited
-//! context block. The delimiter matters — text a pipe supplied and text a
-//! person typed are different things, and running them together lets the
-//! first impersonate the second.
+//! Shared prompt precedence and `@file` handling. Agent files and argv prompts are mutually
+//! exclusive. `-` selects stdin; argv plus piped stdin appends a delimited context block so
+//! piped data cannot impersonate user prompt text. Attachments remain separate content blocks.
 
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -184,8 +172,7 @@ fn non_empty(text: &str, why: &str) -> Result<String, UsageError> {
     }
 }
 
-/// Resolve a value that may be `@file`, the convention `CLI.md` §3 gives
-/// `--system`, `--append-system` and `--schema`.
+/// Resolve inline text or `@file` content for system and schema inputs.
 ///
 /// A missing file is a usage error and not a warning: a run whose system
 /// prompt silently became the literal text `@missing.md` has been misled about

@@ -270,7 +270,7 @@ mod fixture_repositories;
 #[test]
 #[should_panic(expected = "child must pass exactly one test")]
 fn reexec_rejects_missing_child_test() {
-    isolated("regression_case");
+    isolated("missing_child_test");
 }
 
 // Catches: a stricter child oracle rejects a real single-test run.

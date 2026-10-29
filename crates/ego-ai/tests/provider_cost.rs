@@ -1,8 +1,7 @@
 //! Two providers that agree about nothing on the wire, settling through one
 //! `ego-core` path.
 //!
-//! See `docs/guides/providers.md` §8, whose rule
-//! this file exists to make falsifiable:
+//! Provider-reported cost must obey this rule:
 //!
 //! > Adding a second provider-reported decoder must require no change to
 //! > `budget.rs`, `cost.rs` or `port.rs`.
@@ -629,17 +628,10 @@ const TOLLGATE_USAGE: &str = r#"{"prompt_tokens":1000,"completion_tokens":250,
 
 /// A decoder nobody in `ego-ai` wrote settles a generation through the same
 /// code the shipped two do.
-///
-/// This is the ADR rule's *sufficient* condition, and the counterpart of
-/// `crates/ego-core/tests/near_side.rs`, which is its necessary one: that
-/// grep proves the near side never names a provider, and this proves an
-/// externally written decoder can use it. Neither implies the other — a
-/// `match` on something other than a name would pass the grep, and a near
-/// side that named providers freely could still happen to be extensible.
-///
-/// The figure asserted is Tollgate's own and is nowhere near the table's
-/// $0.00675 for the same transcript, so a settlement that had quietly fallen
-/// back to the quote fails here rather than looking correct.
+/// An externally supplied decoder exercises the same accounting path.
+/// Core name-absence checks alone cannot prove extensibility. Tollgate's
+/// reported figure differs from the quote, so silently using quote settlement
+/// would fail this test.
 #[tokio::test]
 async fn a_decoder_written_outside_this_crate_settles_without_touching_the_near_side() {
     let (_gate, settled, events) = settle_through_core(

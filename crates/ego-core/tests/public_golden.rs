@@ -1,10 +1,9 @@
 //! `PublicEvent` projection: golden fixtures for the privacy-filtered,
 //! versioned JSONL output contract.
 //!
-//! See `ARCHITECTURE.md` §1, `CLI.md` §4.2 and `plans/m0a-contracts.md`
-//! Step 8. Fixtures live in `tests/golden/` as committed data files, not
-//! inline string literals, so a change to the projection shows up as a
-//! reviewable diff in a data file rather than a diff in test code.
+//! Fixtures live in `tests/golden/` as committed data files, not inline string literals,
+//! so a change to the projection shows up as a reviewable diff in a data file rather than
+//! a diff in test code.
 
 use ego_core::budget::{BudgetGate, Metering, SettlementSource};
 use ego_core::cost::{
@@ -702,8 +701,7 @@ mod public_golden {
         let clamped = BudgetGate::clamped(usd("5"), usd("20"));
 
         let cases = [
-            // No ceiling at all: the ordinary case (§4), and the one where no
-            // rate source was consulted because nothing needed one.
+            // No ceiling means no rate source was consulted.
             (
                 currency(),
                 unlimited.ledger(),
@@ -717,24 +715,16 @@ mod public_golden {
                 RateSource::Operator,
                 r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"operator"}}"#,
             ),
-            // A currency row settled from the provider's own invoice. Its
-            // ceiling still rests on rates, because a stated cost arrives
-            // after the tokens are spent and can never bound them — and the
-            // rates it rests on are the operator's, which §5 ranks first.
+            // A provider invoice settles cost after generation; it cannot supply a
+            // pre-generation bound. The ceiling still uses operator rates.
             (
                 invoiced(),
                 limited.ledger(),
                 RateSource::Operator,
                 r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"operator"}}"#,
             ),
-            // §5's third and weakest source: a ceiling resting on a third
-            // party's summary of someone else's prices. This is the case §10
-            // adds `rates` to the event *for* — the two lines above and this
-            // one report the same binding ceiling and are materially
-            // different guarantees, and a consumer that could not tell them
-            // apart could not report honestly on either. The revision travels
-            // with it because "a table said so" is not attributable until it
-            // says which table.
+            // Third-party rate provenance must be distinguishable from operator rates even when
+            // the same numeric ceiling binds. Carry the exact table revision for attribution.
             (
                 currency(),
                 limited.ledger(),
@@ -743,8 +733,8 @@ mod public_golden {
                 },
                 r#"{"type":"metering_selected","turn":"00000000-0000-0000-0000-000000000002","metering":"currency","ceiling":{"effect":"binds","limit":{"amount":"5","currency":"USD"}},"rates":{"source":"table","revision":"litellm@1.79.3#9f86d081"}}"#,
             ),
-            // An administrator's non-relaxable ceiling reduced what was asked
-            // for. §4 requires the clamp be stated, not silent.
+            // Report an administrator's clamp rather than silently replacing the requested
+            // ceiling.
             (
                 currency(),
                 clamped.ledger(),

@@ -1,14 +1,6 @@
 //! What the agent answers a real `initialize` with, over a real connection.
-//!
-//! `tests/negotiate.rs` reads the rule as a function. This drives it through
-//! the SDK's own router and asks what came back on the wire, because since ADR
-//! §6 the negotiation is the SDK's: our decision is which arms
-//! [`ego_acp::serve::agent`] configures, and only the router can say what that
-//! configuration answers.
-//!
-//! Without this pair, `negotiate` would be a table this crate believes and
-//! nothing checks — a binding whose two ends are both our own code. Here one
-//! end is a dependency we do not control.
+//! `tests/negotiate.rs` checks the pure rule. This file uses the SDK router
+//! to check that the configured protocol arms produce that rule on the wire.
 
 use agent_client_protocol::{ConnectTo, Lines};
 use agent_client_protocol_schema::ProtocolVersion;
@@ -77,12 +69,8 @@ fn answered(response: &serde_json::Value) -> Option<ProtocolVersion> {
     serde_json::from_value(version.clone()).ok()
 }
 
-/// The two rows of ADR §6.3, asked of the router itself.
-///
-/// `0` is the row that corrects §3.2, and it is asserted here rather than only
-/// in `negotiate.rs` because §3.2's claim was about what a *connection* does —
-/// a pure function could have gone on agreeing with the ADR forever while the
-/// wire said something else.
+/// Check both supported negotiation and refusal through the SDK router.
+/// Zero is refused by the SDK router, not merely the pure helper.
 #[tokio::test]
 async fn the_router_answers_what_negotiate_says_it_answers() {
     for wanted in [0u16, 1, 2, 3, 65535] {

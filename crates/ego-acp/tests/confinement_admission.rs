@@ -29,7 +29,7 @@ const MCP_COMMAND: &str = "/bin/true";
 #[cfg(windows)]
 const MCP_COMMAND: &str = r"C:\Windows\System32\cmd.exe";
 
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/admission");
 
 #[derive(Debug, Default)]
 struct Admission {

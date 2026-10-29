@@ -1297,7 +1297,7 @@ mod confinement_ceiling_tests {
     #[test]
     fn resolves_flag_then_config_then_default_and_caps_only_admitted_public() {
         let local = Admitted::Local {
-            name: "regression case.sock".to_owned(),
+            name: "listener-test.sock".to_owned(),
         };
         let loopback = Admitted::Loopback("127.0.0.1:8080".parse().unwrap());
         let public = Admitted::Public("0.0.0.0:8080".parse().unwrap());

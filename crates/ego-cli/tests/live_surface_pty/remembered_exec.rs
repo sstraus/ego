@@ -7,10 +7,10 @@ fn remembered_git_status_runs_a_later_compound_without_another_prompt() {
     let first = r#"{"argv":["git","status","--short"],"timeout_ms":5000}"#;
     let second = r#"{"argv":["/bin/sh","-c","git status --porcelain; git status --short"],"timeout_ms":5000}"#;
     let mut session = modal_session_with(vec![
-        Reply::Sse(tool_call("regression_case", "exec", first)),
-        Reply::Sse(text("REGRESSION-MARKER-DONE")),
-        Reply::Sse(tool_call("regression_case", "exec", second)),
-        Reply::Sse(text("REGRESSION-MARKER-DONE")),
+        Reply::Sse(tool_call("remember-KSD", "exec", first)),
+        Reply::Sse(text("FIRST-KSD-DONE")),
+        Reply::Sse(tool_call("reuse-KSD", "exec", second)),
+        Reply::Sse(text("SECOND-KSD-DONE")),
     ]);
     let init = std::process::Command::new("git")
         .args(["init", "--quiet"])
@@ -31,9 +31,9 @@ fn remembered_git_status_runs_a_later_compound_without_another_prompt() {
         "{preview}"
     );
     session.press(b"a");
-    session.wait("REGRESSION-MARKER-DONE");
+    session.wait("FIRST-KSD-DONE");
     session.press(b"status again\r");
-    session.wait("REGRESSION-MARKER-DONE");
+    session.wait("SECOND-KSD-DONE");
     let screen = session.screen().join("\n");
     assert!(
         !screen.contains("Allow run"),

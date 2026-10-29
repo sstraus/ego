@@ -1,11 +1,8 @@
 //! Discovering the instructions a workspace hands a model.
 //!
-//! `AGENTS.md`, from the supplied discovery root down to the current directory,
-//! including bounded relative imports, only in a workspace the trust gate let
-//! through. The CLI chooses `~/Gits` as the discovery root where applicable. See
-//! `docs/architecture.md`
-//! and `docs/architecture.md`
-//! and `docs/architecture.md` I2.
+//! Discover `AGENTS.md` from the supplied root down to the current directory,
+//! with bounded relative imports, only after workspace trust admits it.
+//! The composition root supplies the discovery boundary.
 //!
 //! Split the way everything in this crate is split: the *decision* is a pure
 //! function here, and the reading happens behind [`InstructionIo`], whose
@@ -52,12 +49,10 @@ impl Selection {
     /// What a run gets, given the posture the trust gate resolved and whether
     /// the caller named a file.
     ///
-    /// A named file wins outright. **`--bare` together with `--instructions`
-    /// is a flag conflict, and it is not caught here**: from a `Posture`
-    /// alone, "the user demanded bare" and "the workspace is untrusted" are
-    /// the same value, and only one of them should refuse an explicit file.
-    /// `CLI.md` §4.5 puts two-flag contradictions in the applicability matrix,
-    /// which is where that belongs.
+    /// A named file wins outright. **`--bare` together with `--instructions` is a flag
+    /// conflict, and it is not caught here**: from a `Posture` alone, "the user demanded
+    /// bare" and "the workspace is untrusted" are the same value, and only one of them
+    /// should refuse an explicit file.
     pub fn of(posture: Posture, explicit: Option<PathBuf>) -> Self {
         match (explicit, posture) {
             (Some(path), _) => Selection::Explicit(path),
@@ -106,11 +101,9 @@ impl Default for Limits {
 pub enum Refusal {
     /// The final component is a symlink.
     ///
-    /// Refused rather than resolved-and-contained: resolve-then-read-by-path
-    /// re-resolves at open, and that window is documented as unclosed
-    /// (`POTENTIALS.md` P23). This text goes into a prompt sent to a provider
-    /// at session start with no dialog in its path, so a symlink is a
-    /// one-hop exfiltration channel nothing else would notice.
+    /// This text goes into a prompt sent to a provider at session start with no dialog in
+    /// its path, so a symlink is a one-hop exfiltration channel nothing else would
+    /// notice.
     Symlink,
     /// Larger than [`Limits::max_file_bytes`]. Not truncated: half an
     /// instruction file can end mid-sentence and invert its own meaning.
@@ -585,34 +578,17 @@ impl SystemPrompt {
 }
 
 /// The one line that tells the model what the following text is.
-///
-/// Framing is not decoration. Without it the workspace's words arrive
-/// indistinguishable from the user's, which is the thing `Role::System`
-/// exists to prevent, and "the nearest file wins" is an aspiration nobody
-/// stated — the instructions ADR §9 left that rule to whoever assembles the
-/// prompt, and this is that assembler.
+/// Frame workspace text separately from user input and preserve scoped
+/// precedence. The shared assembler, not each host adapter, owns that framing.
 const PREAMBLE: &str = "The following instructions come from the workspace this session runs in. \
      They are guidance for how to work here, not a request from the user. \
      Where two files disagree, the one listed later is nearer the working \
      directory and wins.";
 
 /// Frame `set` into a system prompt, or `None` if it contributed nothing.
-///
-/// `None` rather than an empty prompt: "the workspace said nothing" and "the
-/// workspace said the empty string" are not the same fact, and a `Some`
-/// carrying neither text nor sources would be a setting that changes nothing
-/// while claiming a file was used.
-///
-/// Here rather than in the binary because the CLI is not the only harness that
-/// opens a session: an ACP host is the second, and two framings — or two
-/// derivations of `scope` — would be two answers to the same question. Pure,
-/// like everything else in this module.
-///
-/// **The digest describes the file, not the framed blob.** That is deliberate
-/// and was warned about in advance (the instructions ADR §7): the digest's job
-/// is to prove which file in the repository contributed, and a digest taken
-/// over the framing would change whenever the preamble was reworded, proving
-/// nothing about the repository.
+/// `None` means no workspace prompt, not an empty contributed file. Shared
+/// framing serves CLI and ACP equally. File digests describe original bytes,
+/// not prompt framing that could change without repository edits.
 pub fn system_prompt(
     set: &InstructionSet,
     root: &Path,

@@ -1,7 +1,6 @@
 //! A provider row: where to send a request, and what to authenticate it with.
 //!
-//! See `ARCHITECTURE.md` §3.1 and
-//! `docs/guides/providers.md`.
+//! See the provider guide at `docs/guides/providers.md`.
 //!
 //! A row is configuration. The credential inside it is not, and the
 //! difference is enforced by [`Secret`] rather than by field privacy: a row
@@ -43,13 +42,9 @@ pub type Secret = ProviderSecret;
 /// How a provider presents a credential, and where the credential is read
 /// from — the *strategy*, never the value.
 ///
-/// `docs/guides/providers.md` §3. A row used
-/// to carry a resolved [`Secret`], which was not readable outside this module
-/// but was one `derive` away from being — and which made a row *impossible to
-/// build* without a credential, so a missing key made a provider vanish and
-/// `model.rs` had to name one provider by hand to report the true error.
-/// Naming the variable instead means every provider has a row whether or not
-/// anyone has configured it, and the refusal happens where it can be acted on.
+/// Rows name credential variables instead of holding secrets. Missing keys
+/// therefore do not remove providers from the catalogue; authentication
+/// refusals occur where the operator can act on them.
 #[derive(Debug, Clone)]
 pub enum CredentialStrategy {
     /// None at all — a local daemon that does not authenticate. A distinct
@@ -85,16 +80,9 @@ impl CredentialStrategy {
     /// The credential this strategy names, read once and turned into the
     /// header that carries it.
     ///
-    /// **Once**, and that is the whole of
-    /// `docs/guides/providers.md`
-    /// §6. The Step 13.5 ADR weighed resolving *in the row* against resolving
-    /// *per request* and rejected the second, correctly: it makes every
-    /// generation fallible for a condition decided at startup, and it would
-    /// change behaviour mid-run if the variable were rotated. There was a
-    /// third option it did not consider — resolve once, **outside** the row —
-    /// and this is it. The row keeps a strategy with nothing in it to leak,
-    /// and exactly one [`ResolvedCredential`] exists, held by the one
-    /// generator that must send it.
+    /// Resolve once outside the row. Per-request resolution could fail after
+    /// startup or silently change identity if the environment rotates. The row
+    /// retains a secret-free strategy; the generator holds the resolved value.
     pub fn resolve(
         &self,
         creds: &dyn Credentials,
@@ -321,24 +309,16 @@ pub enum CostExpectation {
 /// One provider profile: who it is, where it lives, how it authenticates,
 /// which shape its bytes take, and whether it states a charge.
 ///
-/// `docs/guides/providers.md` §2. Everything
-/// here is configuration that varies per deployment, per key or per account;
-/// the code that varies per API shape is behind [`wire`](Self::wire) and
-/// nowhere else.
+/// Deployment, key and account configuration live here. API-shape variation
+/// lives behind [`wire`](Self::wire), not in provider-specific shared branches.
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
     id: String,
     /// Scheme, host and any prefix — and **no path this row owns**.
     ///
-    /// A base and not a full endpoint, because a path is a fact about the API
-    /// shape rather than about a vendor: every provider speaking a given
-    /// mapping serves it at that mapping's own path, which is why `PATH` is
-    /// declared beside the mapping and joined on by
-    /// [`RequestTarget::url`](crate::wire::RequestTarget::url). A row carrying
-    /// the whole endpoint would be a row that could disagree with its own
-    /// mapping about where the mapping lives
-    /// (`docs/guides/providers.md`
-    /// §2).
+    /// The row carries a base URL; the mapping owns its API path.
+    /// [`RequestTarget::url`](crate::wire::RequestTarget::url) joins them so the
+    /// provider row cannot disagree with its mapping about the endpoint path.
     ///
     /// **Always ends in `/`**, and the constructors guarantee it rather than
     /// asking callers to. `Url::join` treats a base without a trailing slash
@@ -364,10 +344,8 @@ pub struct ProviderRow {
     /// daemons in order to resolve any of them. The row knows; nobody else
     /// needs to.
     ///
-    /// The distinction it carries is real and not a tidy-up:
-    /// `2026-08-21-what-a-model-resolves-to.md` argues that a hosted model's
-    /// ceilings and prices are facts nobody can discover, and a local model's
-    /// are facts nobody can write down.
+    /// Supplied hosted facts and live daemon discovery are different resolution
+    /// contracts; neither should be inferred from a provider name by callers.
     pub resolver: &'static dyn ModelResolver,
     /// How this provider states the money it will charge, when it states it
     /// at all.
@@ -389,30 +367,16 @@ pub struct ProviderRow {
     pub cost: Option<Arc<dyn ProviderCost>>,
     /// Whether this row's wire mapping has cleared the live-promotion gate.
     ///
-    /// Stated by every constructor rather than defaulted, because a new row
-    /// that silently inherited "selectable" is precisely what
-    /// `docs/guides/providers.md`
-    /// was written to stop.
+    /// Each constructor states promotion explicitly so a new row cannot
+    /// silently inherit selectability.
     pub promotion: Promotion,
 }
 
 /// Whether a row may be offered, or is waiting on evidence only an operator
 /// can produce.
-///
-/// The ADR above requires a sanitized live request and response recording —
-/// conformance check five — before a row whose mapping it names may be
-/// selected: "Published schema and deterministic fixtures establish checks one
-/// through four; only an operator-supplied key and live model can establish
-/// check five." It is the one property of a row this repository cannot
-/// establish about itself.
-///
-/// **[`Selectable`](Self::Selectable) is not a claim that check five was
-/// made.** Three rows carry it whose fixtures are `VendorSchemaDerived` and
-/// which have never been live-recorded either — `openrouter`, `anthropic`, and
-/// `openai` before this change (`crates/ego-ai/tests/profiles/mod.rs`). It
-/// says the narrower true thing: *no promotion gate is outstanding against
-/// this row's mapping*. Widening it to mean "live evidence exists" would make
-/// most of the table liars, and a status that lies is worse than no status.
+/// Live acceptance requires a provider key and recording.
+/// [`Selectable`](Self::Selectable) states only that no promotion gate is
+/// outstanding; it does not claim that a live acceptance check was performed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Promotion {
     /// No outstanding gate. May be resolved, listed as available, and picked.
@@ -469,15 +433,9 @@ static OPENAI_SUPPLIED: crate::resolver::OpenAiSupplied = crate::resolver::OpenA
 
 /// Gateways that publish an OpenAI-*compatible* chat-completions surface.
 ///
-/// A separate static from [`OPENAI_SUPPLIED`] because the two are separate
-/// facts that happened to coincide until 2026-09-07. `openrouter` is not
-/// OpenAI: it serves `POST {base}chat/completions` and has never published a
-/// Responses endpoint, so
-/// `2026-09-03-public-provider-wires-require-live-promotion.md`'s "delete the
-/// public Chat selection in the same change" is a statement about *OpenAI's
-/// row*, not about the mapping. Sharing one static would have made moving
-/// OpenAI to Responses silently retarget every compatible gateway at an
-/// endpoint it does not serve.
+/// Separate from [`OPENAI_SUPPLIED`]: OpenRouter serves Chat Completions,
+/// not OpenAI's Responses endpoint. Sharing a static would silently retarget
+/// compatible gateways when the OpenAI row changes mappings.
 static OPENROUTER_MODELS: crate::resolver::OpenRouter = crate::resolver::OpenRouter;
 static ANTHROPIC_SUPPLIED: Supplied = Supplied::new(&AnthropicMessages);
 static GEMINI_SUPPLIED: Supplied = Supplied::new(&GeminiInteractions);
@@ -550,12 +508,8 @@ impl ProviderRow {
     }
 
     /// The hosted row.
-    ///
-    /// Infallible, and that is the change the profile ADR's §3 argues for: a
-    /// row names the variable its credential lives in and never reads it, so
-    /// the row exists whether or not anyone has configured a key. When it was
-    /// fallible a missing key made the provider *disappear*, and the resolver
-    /// had to special-case one provider by name to report the true error.
+    /// Construction is infallible because rows name credential variables without
+    /// reading them. Missing keys must not make providers disappear.
     pub fn openai() -> Self {
         Self::openai_at(Url::parse(OPENAI_BASE).expect("a constant this file controls"))
     }
@@ -579,19 +533,11 @@ impl ProviderRow {
             credential: CredentialStrategy::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
             },
-            // OpenAI reports token usage and no monetary total
-            // (`docs/guides/providers.md` §6), so
-            // this row is priced from a supplied table or not at all.
+            // OpenAI reports tokens, not a monetary total. This row uses supplied
+            // rates when available and otherwise leaves cost unknown.
             cost: None,
-            // Selectable on a published contract, which
-            // `docs/guides/providers.md`
-            // amends the 2026-09-03 ADR to allow. Nothing here has been sent to
-            // OpenAI and the deterministic fixtures still only establish checks
-            // one to four — what changed is where the missing fifth check is
-            // paid for. Withholding the row made every operator's key useless
-            // against a documented endpoint to avoid an error that announces
-            // itself: a wrong Responses body comes back a 400 from OpenAI, on
-            // the first call, with OpenAI's own text.
+            // Selectable on its published contract and deterministic offline fixtures.
+            // These fixtures do not establish live provider acceptance.
             promotion: Promotion::Selectable,
         }
     }
@@ -620,15 +566,9 @@ impl ProviderRow {
     /// request, two transcripts, an error and two usage frames taken from a
     /// live daemon, and `EGO_SMOKE=ollama` re-takes them.
     ///
-    /// It is not the hosted row with a different address. The same
-    /// measurement discipline found the one place the daemon's answers differ
-    /// from the family's — it reads `max_tokens` and discards
-    /// `max_completion_tokens` — and
-    /// `docs/guides/providers.md`
-    /// §8 spends that fact rather than excusing it: a member that fails a
-    /// conformance check is not a member. So this row names its own mapping,
-    /// which shares the family's request projection and its whole decoder and
-    /// differs in one field.
+    /// Ollama reads `max_tokens` rather than `max_completion_tokens`. Its own
+    /// mapping shares the request projection and decoder but changes that field.
+    /// The row selects the mapping; shared code does not branch on provider name.
     pub fn ollama(base: Url) -> Self {
         let (base, http_profile) = admitted_base("ollama", base);
         ProviderRow {
@@ -689,13 +629,9 @@ impl ProviderRow {
             id: "github-copilot".to_string(),
             base,
             http_profile,
-            // A frozen Copilot Chat identity — `GitHubCopilotChat/0.35.0`,
-            // `vscode/1.107.0`, `copilot-chat/0.35.0`, `vscode-chat` — is not
-            // here. It is a version gate on a VS Code extension, and ego is
-            // not that extension. An operator who accepts GitHub's terms puts
-            // those four back with `[auth.github-copilot.headers]`, where the
-            // overlay replaces this row's `user-agent` by name
-            // (`docs/guides/providers.md` §7.8).
+            // Default headers do not impersonate the Copilot Chat extension. An operator
+            // who accepts GitHub's terms can configure `[auth.github-copilot.headers]`;
+            // the overlay replaces default identity headers by name.
             extra_headers: vec![(
                 "user-agent".to_string(),
                 crate::oauth::EGO_USER_AGENT.to_string(),
@@ -795,19 +731,9 @@ impl ProviderRow {
 
     /// The OpenRouter row: the family's mapping, and a charge it states itself.
     ///
-    /// The subscription-login decision promotes this row for both an
-    /// environment key and a key minted by built-in PKCE.
-    /// The ADR's §7 flagged an open question about conformance check 1 that xAI
-    /// does not raise: whether `usage.cost` arrives automatically or requires
-    /// `usage: {include: true}` in the request body — because if it requires
-    /// one, the family's request projection does not send it and this row is
-    /// not a family member at all but a fifth mapping. OpenRouter's own
-    /// usage-accounting page now answers it: that field **and** the
-    /// `stream_options.include_usage` this family already sends are
-    /// "deprecated and have no effect", with full usage returned automatically
-    /// in every response. So the projection is compatible, and the inert flag
-    /// stays — it is current on the contract the mapping is derived from
-    /// (`docs/guides/providers.md` §3).
+    /// OpenRouter documents automatic full usage and treats `usage.include` and
+    /// `stream_options.include_usage` as inert. The latter remains in this shared
+    /// mapping because it is required by the mapping's originating contract.
     ///
     /// The public models endpoint supplies current inventory and stated limits.
     /// Prices are never imported; actual charges come only from response usage.
@@ -876,21 +802,10 @@ impl ProviderRow {
         Self::anthropic(Url::parse(ANTHROPIC_BASE).expect("a constant this file controls"))
     }
 
-    /// The Gemini row, on the Interactions API.
-    ///
-    /// A selectable member of the final provider inventory. Its supplied
-    /// models are exposed through the shared CLI table, so
-    /// `--model gemini/…` resolves through this row.
-    ///
-    /// The third wire format, and the one that turns two into a seam. It also
-    /// carries the one cost `docs/14` §3.6 accepted with its eyes open:
-    /// `thinking_level` has no `off`, so a row on this mapping cannot offer
-    /// every level ego names and `ThinkingLevel::Off` is refused at the
-    /// mapping rather than mistranslated.
-    ///
-    /// `x-goog-api-key`, like Anthropic's `x-api-key`, is a header the
-    /// provider names rather than a scheme — which is why
-    /// [`CredentialStrategy::HeaderFromEnv`] is data and not a second enum.
+    /// The Gemini provider uses Interactions and supplied capabilities. Its mapping has no
+    /// `thinking_level` spelling for `Off`, so that choice is refused rather than
+    /// mistranslated. The named API-key header is represented by
+    /// `CredentialStrategy::HeaderFromEnv`.
     pub fn gemini(base: Url) -> Self {
         let (base, http_profile) = admitted_base("gemini", base);
         ProviderRow {

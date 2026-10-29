@@ -1615,7 +1615,7 @@ where
 /// One in-memory ACP connection to the real pinned SDK router.
 ///
 /// Three suites grew their own copy of this before it had a home; those are
-/// left alone here and tracked on regression case rather than reconciled mid-story.
+/// left unchanged here; these tests do not reconcile it.
 /// New router tests use this one so the fourth copy is the last.
 pub struct Connected {
     to_agent: mpsc::UnboundedSender<String>,

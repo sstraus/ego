@@ -1,5 +1,4 @@
-//! `JsonlStore`: the filesystem `SessionStore` — a JSONL event log plus a
-//! JSON manifest, per session directory (`ARCHITECTURE.md` §5).
+//! Filesystem JSONL session store and derived manifests.
 //!
 //! ```text
 //! <root>/<session-id>/
@@ -218,12 +217,9 @@ impl Repair {
 
 /// Check the log's header line and return the offset just past it.
 ///
-/// **Separate from the tail scan below, and the separation is the point.**
-/// The header is not a candidate for repair. A prefix scan that rejects the
-/// line at index 0 has established a valid prefix of zero bytes, and a
-/// caller that then truncates to that length deletes the entire session —
-/// which is what this store did, reporting it as an ordinary `Repair`. See
-/// `docs/architecture.md` §1.
+/// Validate the header before tail repair. Treating a damaged first line
+/// as an ordinary zero-length valid prefix could delete an entire session
+/// whose records remain intact.
 ///
 /// So the header is answered here, before anything is allowed to remove a
 /// byte. `read` and `recover` both come through this function so the two
@@ -253,8 +249,7 @@ fn decoded_header(bytes: &[u8]) -> Result<Option<(Header, usize)>, StoreError> {
 fn header_end(bytes: &[u8]) -> Result<Option<usize>, StoreError> {
     match decoded_header(bytes)? {
         Some((header, end)) if header.v == CODEC_VERSION => Ok(Some(end)),
-        // ADR §3. Nothing compared `v` before, so a log written by a later
-        // build was read as though it were this version's.
+        // Check the codec version before interpreting records from another build.
         Some((header, _)) => Err(StoreError::UnsupportedLog { found: header.v }),
         None => Ok(None),
     }
@@ -636,13 +631,9 @@ impl JsonlStore {
     /// `-C DIR` before anything reads a path, so there is a single notion of
     /// "here".
     ///
-    /// It must already be canonical. This type does not resolve it — that
-    /// would be a second canonicaliser to keep in step with `run.rs`'s, and
-    /// `AGENTS.md`'s reuse-first rule says one. A path that has not been
-    /// through `std::fs::canonicalize` will not compare equal to the same
-    /// directory reached through a symlink or through `/var` instead of
-    /// `/private/var`, and the failure is a session that quietly does not
-    /// belong to the workspace it was created in.
+    /// The caller supplies an already canonical workspace. Re-resolving here
+    /// would duplicate `run.rs` and could misidentify symlink or `/var` aliases
+    /// as a different workspace.
     pub fn new(
         root: impl Into<PathBuf>,
         workspace: impl Into<PathBuf>,
@@ -1439,13 +1430,9 @@ impl JsonlStore {
     /// Bring `id`'s on-disk state back to something every later read can
     /// trust, and report what had to change.
     ///
-    /// This is the recovery half of `ARCHITECTURE.md` §5 and
-    /// `plans/m0a-contracts.md` Step 6, and it must be run before a session
-    /// is read or appended to after a crash. It is idempotent: running it on
-    /// an already-clean session returns a clean [`Repair`] and touches
-    /// nothing, so a caller can run it unconditionally on open rather than
-    /// having to first work out whether a crash happened — which is not
-    /// knowable from the outside anyway.
+    /// Recover before reading or appending after a crash. Recovery is idempotent: clean
+    /// sessions remain untouched. Repair scratch files, torn tails and derived manifests;
+    /// do not remove a live writer's lease.
     ///
     /// The three kill points, in the order they are repaired:
     ///
@@ -1585,13 +1572,10 @@ impl JsonlStore {
             // a rebuild can lose — so the header is the better authority for
             // a value that must never drift.
             //
-            // This comment used to add "and is checksum-protected". It is
-            // not: `encode_header` is a plain `serde_json::to_vec`
-            // (`codec.rs:186-190`) and the checksum covers `StoreRecord`
-            // only, which makes the header the *least* protected line in the
-            // file. The conclusion survives on the write-once clause alone;
-            // the deleted clause was never checked. ADR §2 of
-            // `docs/architecture.md`.
+            // The header is write-once, not checksum-protected: `encode_header` uses
+            // plain JSON, while `StoreRecord` payloads carry checksums. Its creation
+            // identity is authoritative because it is not rewritten, not because it
+            // has the record checksum.
             created: projected_meta.created,
             updated: projected_meta.updated,
             title: projected_meta.title,
@@ -2733,18 +2717,9 @@ impl SessionStore for JsonlStore {
                 }
             }
             let manifest_path = dir.join("manifest.json");
-            // A catalogue that dies on one bad directory is a worse failure
-            // mode than one that quietly hides a session: the event log's
-            // own integrity is independently protected by `StoreRecord`
-            // checksums (Step 3), and a corrupt or unreadable manifest is a
-            // defect a later story can rebuild from the log
-            // (`ARCHITECTURE.md` §5) rather than something that should take
-            // down `list()` for every session. That reasoning applies
-            // equally to an I/O error reading the manifest (e.g. a
-            // permissions problem on one session directory) and to a parse
-            // error on its contents — both are per-session failures, so
-            // both are skipped and warned about the same way, rather than
-            // one killing the whole call and the other not.
+            // Skip and warn on individual unreadable or corrupt manifests. One broken
+            // catalogue entry must not prevent listing every healthy session; the log
+            // remains independently checksummed.
             let cached = match self.io.read(&manifest_path) {
                 Ok(Some(bytes)) => serde_json::from_slice::<RunManifest>(&bytes)
                     .map_err(|error| error.to_string())

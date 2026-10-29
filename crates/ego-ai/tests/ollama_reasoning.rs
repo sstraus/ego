@@ -3,12 +3,8 @@
 //!
 //! # Why this file exists
 //!
-//! `POTENTIALS.md` P24 records that xAI streams reasoning in
-//! `delta.reasoning_content`, that `Delta`
-//! (`crates/ego-ai/src/wire/openai_completions.rs:379`) has only `content`,
-//! `refusal` and `tool_calls`, and that the field is therefore dropped while
-//! its tokens are still billed at the output rate. That was a documented
-//! *risk*, read from xAI's schema.
+//! Reasoning extension fields need decoding even when token accounting already reports
+//! their billed output. These fixtures preserve that distinction.
 //!
 //! It is now a measured fact on a second row, and the spelling is not even
 //! the same one. **Ollama uses `delta.reasoning`, not
@@ -34,16 +30,9 @@
 //!
 //! # The remedy, and where this file was wrong about it
 //!
-//! This file used to carry a section headed "Where the remedy is not", ruling
-//! out `Delta` on two grounds: that adding `reasoning` would put one
-//! provider's extension into the format every provider uses, and that it would
-//! still miss xAI's spelling. The second is a reason to read **both** names,
-//! not neither. The first is answered by
-//! `docs/guides/providers.md` §4,
-//! which rules that an extension field is decoded opportunistically and
-//! uniformly for every member of the family, and §8, which applies it here by
-//! name: the deciding question is whether there is any member for which
-//! reading both fields is wrong, and there is not.
+//! Decode both reasoning extension spellings uniformly. Opportunistic
+//! decoding must not require a provider-name switch or drop a spelling
+//! another member of the mapping uses.
 //!
 //! So `Delta` reads `reasoning` and `reasoning_content`, no branch and no
 //! provider id, and this row's reasoning text now reaches
@@ -149,9 +138,8 @@ fn the_two_recordings_differ_only_in_reasoning_effort() {
     );
 }
 
-/// Ollama spells it `reasoning`. xAI, per `POTENTIALS.md` P24, spells it
-/// `reasoning_content`. Two rows, two names, one concept — which is the
-/// reason the decoder reads both names rather than either one.
+/// Ollama uses `reasoning`; the archived xAI Chat schema uses `reasoning_content`. Decode
+/// both uniformly.
 #[test]
 fn ollama_streams_reasoning_under_its_own_member_name() {
     let reasoning = reasoning_on_the_wire(HIGH_TRANSCRIPT);

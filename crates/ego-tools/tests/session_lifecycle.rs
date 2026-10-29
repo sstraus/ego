@@ -1,4 +1,4 @@
-//! adapter contract for regression case.
+//! adapter contract for.
 //!
 //! These tests exercise the outer durable-session adapter. Creation is a
 //! header-only operation; appending a conversation event is intentionally not

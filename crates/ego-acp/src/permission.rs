@@ -1,11 +1,9 @@
 //! ACP v1 permission adapter: the connected host is the sole human seat.
 //!
-//! `docs/architecture.md`
-//! makes the connected client the only person in an ACP-owned turn, and
-//! forbids the adapter from opening stdin when that client cannot answer.
-//! Everything below exists to keep both halves of that true: the question
-//! carries the canonical operation, and every answer that is not an explicit
-//! grant settles as a denial.
+//! The connected client is the sole human seat in an ACP-owned turn.
+//! The adapter must not open stdin when that client cannot answer. Questions
+//! carry the canonical operation; every answer other than an explicit grant
+//! settles as a denial.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -215,8 +213,7 @@ impl AcpPermissionAdapter {
     /// from its side the prompt is still open.
     async fn decide_live(&self, item: ItemId, request: PermissionRequest) -> PermissionDecision {
         let Some(connection) = self.connection.as_ref() else {
-            // No seat is not consent, and the fallback a terminal would offer
-            // is the second invisible human the ADR rejects.
+            // No seat is not consent. Never open terminal input behind an ACP connection.
             return PermissionDecision::Deny;
         };
         // A previous tool-session grant cannot approve newly reconstructed

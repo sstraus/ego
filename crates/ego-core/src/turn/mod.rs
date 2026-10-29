@@ -1,14 +1,10 @@
 //! The turn loop: the one component that runs a turn and writes the log.
 //!
-//! See `docs/architecture.md`. Named `turn` rather than
-//! the plan's `loop`, which is a keyword and would spell every reference
-//! `r#loop`.
+//! Named `turn` rather than the Rust keyword `loop`.
 //!
-//! What a turn is, here: one user prompt, and then as many generations as it
-//! takes to answer it — a generation that stops to call tools is followed by
-//! their results and another generation, until one stops without calling
-//! anything. `ARCHITECTURE.md` §4: this is thin async orchestration, and every
-//! decision inside it is a pure function it calls.
+//! What a turn is, here: one user prompt, and then as many generations as it takes to
+//! answer it — a generation that stops to call tools is followed by their results and
+//! another generation, until one stops without calling anything.
 
 mod catalogue;
 mod commands;
@@ -262,8 +258,7 @@ where
     }
 }
 
-/// A cooperative cancellation signal
-/// (`docs/architecture.md` §4).
+/// A cooperative cancellation signal.
 ///
 /// A concrete type and not a trait: there is exactly one way to implement
 /// "someone asked to stop", and a trait would buy an indirection for it. Not
@@ -417,23 +412,15 @@ pub struct TurnConfig {
     pub fallbacks: Vec<ModelRef>,
 }
 
-/// What ended a turn.
-///
-/// No event list. Events reach their consumer through the
-/// [`EventSink`](crate::sink::EventSink) as they happen, because `CLI.md`
-/// §4.2 says *live* and a vector handed back here could only ever be a
-/// batch. A caller that wants the batch anyway supplies a
-/// [`CollectingSink`](crate::sink::CollectingSink) and takes it from there.
+/// Turn outcome without a buffered event list. Events reach `EventSink` live; callers needing a
+/// batch can supply `CollectingSink`.
 #[derive(Debug)]
 pub struct TurnOutcome {
     pub turn: TurnId,
     pub ok: bool,
     pub exit_reason: ExitReason,
     /// What was refused and by whom, when `exit_reason` is
-    /// [`ExitReason::PermissionRequired`]. `CLI.md` §4.1 requires the denied
-    /// action in the result: a script handed exit 3 and no subject has been
-    /// told nothing it can act on. §4.4's four remedies need the authority
-    /// too, which is why this is one [`Denial`] and not a string.
+    /// [`ExitReason::PermissionRequired`].
     pub denied: Option<Denial>,
     /// Direct product result when the turn was a forked skill invocation.
     pub skill: Option<crate::skill::SkillInvocationOutcome>,
@@ -3463,11 +3450,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 },
             )?;
         }
-        // `turn.started` of `CLI.md` §4.2. Published rather than appended:
-        // `EventKind` has no counterpart, because the start of a turn is not
-        // something the reducer establishes — it is what the loop knows the
-        // instant it mints the id. Before this, nothing in the workspace
-        // could emit it at all.
+        // Publish turn-start status when the loop mints the turn id; do not invent a
+        // reducer-owned durable counterpart.
         self.journal.publish(&PublicEvent::TurnStarted { turn })?;
         self.admit_skill_catalogue(turn)
     }
@@ -4012,13 +3996,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             // boundary between generations, the only place a turn can be
             // stopped without abandoning an attempt that is already paid for.
             //
-            // Post-generation where money is pre-generation, and the
-            // asymmetry is principled (§9). Money must be held before the
-            // request because once a provider reports what a generation cost
-            // the money is spent; tokens differ in exactly that property —
-            // on an unmetered or subscription row no charge is raised at all.
-            // `CLI.md:128` spells it the same way: "exit 5 when hit", not
-            // "when it would be hit".
+            // Money must be held before the request because once a provider reports what
+            // a generation cost the money is spent; tokens differ in exactly that
+            // property — on an unmetered or subscription row no charge is raised at all.
             if tokens_reached(self.config.token_ceiling, &self.budget_usage()?) {
                 return Ok(DriveOutcome::Ended(ExitReason::Budget, None));
             }
@@ -4073,13 +4053,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     // `Internal`; the provider decided it, so it reads as an
                     // upstream condition like any other.
                     StopReason::Deferred => ExitReason::Provider,
-                    // The one place a provider's classification changes
-                    // where the run lands. An `Invalid` is a request that
-                    // will be wrong again — schema, context length, an
-                    // unsupported parameter — so it is exit 2 and not
-                    // exit 4: `CLI.md:215` tells a script to retry on 4,
-                    // and a request that cannot succeed is precisely what
-                    // it must not retry.
+                    // The one place a provider's classification changes where the run
+                    // lands.
                     //
                     // Everything else is exit 4. `Unclassified` lands
                     // there by failing closed — nothing was read that
@@ -4268,20 +4243,9 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 self.close_unstarted_siblings(turn, &pending[index..])?;
                 return Ok(Some(DriveOutcome::Ended(reason, None)));
             }
-            // `CLI.md` §4.4: a run with nobody to ask does not answer a
-            // permission question on the model's behalf. The denial is
-            // still logged against the call — the model's audience
-            // argument holds for the *record*, it just no longer decides
-            // whether the run continues.
-            //
-            // Both endings below are exit 3 and they are not the same
-            // fact. "Denied by r1:…" tells an operator which line of their
-            // config to go and look at; "no rule covers write /ws/x" tells
-            // them there is no line to look at and they have to write one.
-            // Collapsing them would leave the commonest case — a run that
-            // needed an answer — reading like a refusal somebody
-            // configured on purpose. `DeniedBy` is what carries that
-            // difference past the prose and into §4.1's object.
+            // Keep configured refusal distinct from an unanswered request. `DeniedBy` carries
+            // the difference into completion data so operators know whether to change an
+            // existing rule or add authority.
             let outcome = self
                 .run_tool(policy, policy_snapshot, turn, &mut pending[index])
                 .await?;
@@ -4389,7 +4353,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 }
                 // Boundary refusals happen before an effect. Return the refusal
                 // to the model for reads, writes and exec alike; a user or
-                // rule denial still ends the turn below (regression case).
+                // rule denial still ends the turn below.
                 ToolOutcome::Refused { denial } if denial.authority() == Authority::Boundary => {
                     let call = &pending[index];
                     self.journal.append(
@@ -4729,18 +4693,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 .await
                 .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
         }
-        // A log this build wrote cannot fail here: the guard in `drain` refuses
-        // a reused call id before it is ever appended. A log written before
-        // that guard existed can, and there is nothing to do about it from
-        // here — the log is never rewritten, so the run ends visibly at the
-        // provider's exit code rather than resuming a session with a hole in
-        // it (ADR §6).
+        // Ingress rejects reused call IDs before append. Older logs containing
+        // them fail visibly rather than being rewritten or silently truncated.
         let rebuilt = self.rebuild_history();
         let (history, repairs) = match rebuilt {
             Ok(rebuilt) => rebuilt,
-            // `Provider` is the exit even though the history on disk is what
-            // broke and no provider was asked: §4.3's exit 4 is "the run could
-            // not get a generation", and this run cannot.
+            // Use provider termination when generation cannot be obtained, even if durable
+            // history validation failed before contacting the provider.
             Err(malformed) => {
                 tracing::warn!(%malformed, "the stored history cannot be rebuilt into a request");
                 return self.refuse(
@@ -4755,9 +4714,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         };
         let conversation = self.with_system(history);
         if !repairs.is_empty() {
-            // Not a durable event: whether a repair becomes one is
-            // `POTENTIALS.md` P2, and it is waiting on a decision rather than
-            // on an implementation.
+            // Record the refusal cause before settling the turn.
             tracing::warn!(
                 ?repairs,
                 "the resumed history was repaired before it could be sent"
@@ -5628,10 +5585,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
     /// `Unclassified` here rather than chosen five times: `ErrorKind`
     /// classifies a provider's own answer and there is none to classify.
     ///
-    /// The `ExitReason` stays the caller's, because these refusals are four
-    /// different exit codes (`CLI.md` §4.3). What they share is the order — the
-    /// reason is in the log *before* the turn ends — so a session says why it
-    /// stopped and not only that it did.
+    /// What they share is the order — the reason is in the log *before* the turn ends —
+    /// so a session says why it stopped and not only that it did.
     fn refuse(
         &mut self,
         turn: TurnId,
@@ -6167,10 +6122,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             .map(|_| ())
                     }
                 }
-                // A reused id ends the generation before anything runs (ADR
-                // §6). Not appended, because a `ToolCallStarted` the loop has
-                // already decided not to dispatch is a call the log says was
-                // made and no result will ever answer.
+                // Reject reused call IDs before execution and append. A rejected call
+                // must not leave an unanswered `ToolCallStarted` in durable history.
                 AiEvent::ToolCall { call_id, .. }
                     if visibility == GenerationVisibility::Conversation
                         && seen.contains(&call_id) =>
@@ -6652,15 +6605,13 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
 
     /// Authorise and run one call prepared from its captured catalogue.
     ///
-    /// A *failure* comes back as `Answered { ok: false, .. }` and is logged as
+    /// A *failure* comes back as `Answered { ok: false,.. }` and is logged as
     /// a failed tool result rather than raised. The model is the audience: it
     /// asked for something that did not happen, and the only useful thing to
     /// do is tell it why.
     ///
-    /// A *refusal by policy* is not that, and this is where the two parted
-    /// company. A denial is a question — "may this happen?" — and answering it
-    /// on the model's behalf is the thing `CLI.md` §4.4 forbids in a run with
-    /// nobody to ask. It comes back typed, and the caller decides.
+    /// A *refusal by policy* is not that, and this is where the two parted company. It
+    /// comes back typed, and the caller decides.
     async fn run_tool(
         &mut self,
         policy: &PolicyEngine,
@@ -7944,12 +7895,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             .await)
     }
 
-    /// §7: *every decision is appended, asked or not.*
-    ///
-    /// So this fires for a call the rules waved through as well as for one
-    /// they refused. `PermissionRequested` is appended when mode settlement
-    /// raises the canonical question, before either a human answer or the
-    /// headless unanswerable result.
+    /// Record every permission decision, including automatic rule decisions. Persist the
+    /// canonical permission request before human settlement or a headless unanswered result.
     async fn decided(
         &mut self,
         turn: TurnId,
@@ -8227,11 +8174,8 @@ struct Drained {
     failure: Option<StoreError>,
     cancelled: bool,
     /// A provider `call_id` this session had already used, if one arrived.
-    ///
-    /// See the tool-use-history ADR §6. Held rather than raised so the stream
-    /// still drains and the attempt still settles — it is already paid for —
-    /// and separate from `failure`, which is *our* store breaking, because
-    /// `CLI.md` §4.3 gives those two different exits.
+    /// Hold the error while draining and settling the paid attempt. Keep it
+    /// separate from storage failure so callers can report the correct cause.
     corrupt: Option<String>,
     /// The classification of the last error this generation reported, if it
     /// reported one.

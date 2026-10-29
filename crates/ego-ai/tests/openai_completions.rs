@@ -151,11 +151,8 @@ fn fields_that_have_nothing_to_say_are_omitted() {
     );
 }
 
-/// The round trip that used to be unbuildable: an assistant turn that called
-/// two tools, and the results answering them. OpenAI wants the calls attached
-/// to the assistant message and each result in its own `tool` message naming
-/// the id — a shape `Message` could not express at all before
-/// `docs/guides/providers.md`.
+/// The round trip includes an assistant message with two tool calls and
+/// separate `tool` results that each name the call id.
 #[test]
 fn a_tool_round_trip_reaches_the_wire_in_the_shape_the_schema_asks_for() {
     let mut req = golden_request();
@@ -804,15 +801,9 @@ fn a_refusal_is_the_answer_and_not_a_missing_one() {
 /// The schema has `content`, `refusal`, `tool_calls`, `role` and the
 /// deprecated `function_call` in a streaming delta — and no reasoning text at
 /// all. Reasoning appears only as a count in `completion_tokens_details`.
-///
-/// This test asserted the opposite until the shared-shape ADR §4 settled the
-/// question the other way, and the sentence it used to carry — "this format
-/// guessing at one would be inventing a contract" — was right about *guessing*
-/// and wrong about *reading*. Both spellings the family uses are read, for
-/// every member, with nothing consulted about who sent them; a member that
-/// sends neither is unaffected, which is what makes this uniform rather than a
-/// branch. The measured cost of not reading them is in
-/// `tests/ollama_reasoning.rs`: 117 of 118 output tokens billed and dropped.
+/// Read both reasoning spellings uniformly. A member sending neither stays
+/// unaffected. `tests/ollama_reasoning.rs` shows the content lost if reasoning
+/// usage is counted but its output text is discarded.
 #[test]
 fn both_of_the_familys_reasoning_spellings_are_read_and_neither_is_invented() {
     const VENDOR: &str = "data: {\"choices\":[{\"index\":0,\"delta\":\

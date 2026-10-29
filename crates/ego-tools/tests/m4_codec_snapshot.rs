@@ -1,4 +1,4 @@
-//! contract for M4 S1's one-way codec and snapshot migration.
+//! One-way codec and snapshot migration contract.
 
 use ego_core::event::id::{Seq, SessionId};
 use ego_core::state::SessionState;
@@ -34,7 +34,7 @@ fn write_fixture(root: &Path, id: &SessionId, bytes: &[u8]) -> std::path::PathBu
     path
 }
 
-mod regression_case {
+mod codec_snapshot {
     use super::*;
 
     #[test]

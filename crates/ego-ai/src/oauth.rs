@@ -32,11 +32,9 @@ const USER_CODE_GRANT: &str = "urn:ietf:params:oauth:grant-type:user_code";
 
 /// The only client identity ego ever sends.
 ///
-/// One constant rather than a literal per request, because the rule it carries
-/// is a single rule: ego names ego, on every flow and every provider, and a
-/// vendor's own client string is an operator's `[auth.<provider>.headers]`
-/// decision (`docs/guides/providers.md` §7.8). A second spelling here is
-/// how the first exception gets in.
+/// One constant keeps the client identity consistent across flows and
+/// providers. Vendor client identity overrides belong in the operator's
+/// `[auth.<provider>.headers]` configuration.
 pub const EGO_USER_AGENT: &str = concat!("ego/", env!("CARGO_PKG_VERSION"));
 
 /// The built-in flow table. The enum is closed deliberately: adding a row is
@@ -434,12 +432,9 @@ impl BuiltInFlow {
                 grant: "Copilot token exchange".to_string(),
             });
         }
-        // The four Copilot Chat identity headers Pi freezes here — the
-        // extension's `user-agent`, its editor and plugin versions, and the
-        // `vscode-chat` integration id — are gone: ego is not VS Code and does
-        // not say it is. What replaces them is ego's own name and nothing else.
-        // GitHub may gate this exchange on a client it recognises; that is a
-        // measurement to report, not a reason to send Microsoft's.
+        // Use ego's identity, not the Copilot Chat extension's editor/plugin
+        // versions or integration id. If GitHub rejects that identity, report the
+        // refusal rather than impersonating the extension.
         Ok(HttpRequest {
             url: parse("https://api.github.com/copilot_internal/v2/token")?,
             method: Method::Get,

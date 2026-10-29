@@ -1,21 +1,18 @@
 //! Snapshots: bounded replay, so resuming a long session does not mean
 //! reducing its entire log.
 //!
-//! See `plans/m0a-contracts.md` Step 7 and `ARCHITECTURE.md` §5. A snapshot
-//! is a serialised [`SessionState`] plus the `seq` it was taken at; resuming
+//! A snapshot is a serialised [`SessionState`] plus the `seq` it was taken at; resuming
 //! means loading it and applying only the events after that `seq`.
 //!
 //! ## The snapshot is a cache, and is treated like one
 //!
-//! The log is the authority (`ARCHITECTURE.md` §1: state is a reduction over
-//! an append-only log). A snapshot is derived data that merely saves work,
-//! so every failure to trust one — missing, unreadable, wrong version, wrong
-//! session, inconsistent with the log — degrades to a full replay rather
-//! than to an error. [`resume`] never fails *because* a snapshot was bad;
-//! it only fails if the log itself cannot be read.
+//! A snapshot is derived data that merely saves work, so every failure to trust one —
+//! missing, unreadable, wrong version, wrong session, inconsistent with the log —
+//! degrades to a full replay rather than to an error. [`resume`] never fails *because* a
+//! snapshot was bad; it only fails if the log itself cannot be read.
 //!
 //! That is not defensive over-engineering, it is the direct consequence of
-//! regression case: `JsonlStore::recover` truncates a torn tail, so a snapshot
+//! `JsonlStore::recover` truncates a torn tail, so a snapshot
 //! taken at seq 50 can legitimately outlive a repair that left the log
 //! ending at seq 47. Trusting it would resurrect events that were
 //! deliberately discarded — a snapshot that is *ahead* of its log is the
@@ -41,16 +38,11 @@ use serde::{Deserialize, Serialize};
 /// parsed optimistically, because a snapshot is a cache and replaying the log
 /// is always correct.
 ///
-/// v2: `SessionState` gained the attempt ledger and lifecycle
-/// (`docs/architecture.md`). A v1 snapshot
-/// has no fields for them, so it is discarded and the log is replayed — a
-/// cache miss, not data loss, which is precisely what this constant buys.
+/// v2: `SessionState` gained attempt accounting and lifecycle fields.
+/// A v1 cache lacks them, so discard it and replay the log.
 ///
-/// v3: `ItemState` gained `seq`, `kind`, `call_id` and `args`, so that a
-/// tool-use history can be rebuilt from the reduced state at all
-/// (`docs/architecture.md`). They are required
-/// fields — an item with no author or no position is not a fact anything can
-/// default — so a v2 snapshot cannot be read, and does not need to be.
+/// v3: `ItemState` gained required `seq`, `kind`, `call_id` and `args`.
+/// Older caches cannot supply those facts and are rebuilt from the log.
 ///
 /// v4: completed tool items carry a structured `ToolResult` rather than
 /// flattening their evidence into `ItemState.text`. The event log is the
@@ -123,7 +115,7 @@ pub enum SnapshotRejection {
     /// Belongs to a different session — a copied or misfiled snapshot.
     WrongSession,
     /// The snapshot is ahead of the log: it includes events the log no
-    /// longer has. The ordinary case is a tail repair (regression case) that
+    /// longer has. The ordinary case is a tail repair  that
     /// truncated events a snapshot had already absorbed.
     AheadOfLog { snapshot: Seq, log: Seq },
     /// The log does not contain the event immediately after `source_seq`,

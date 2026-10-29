@@ -1,4 +1,4 @@
-//! contract for regression case: one versioned usage report over one ledger.
+//! contract for one versioned usage report over one ledger.
 
 use ego_core::usage::USAGE_REPORT_VERSION;
 use serde_json::Value;
@@ -94,7 +94,7 @@ fn usage_text_and_json_are_deterministic_projections_of_the_same_report() {
     let report = json_report(&json);
     // The table is the report read out loud, not a second report: every role
     // JSON carries is reachable in text, and JSON keeps all seven either way.
-    // regression case hid the silent ones behind `--all-roles`, because a fixture
+    // hid the silent ones behind `--all-roles`, because a fixture
     // that only ever ran a main turn should not print five empty rows.
     let all_roles = seeded_usage(["--all-roles"]);
     assert_eq!(all_roles.code, Some(0), "stderr: {}", all_roles.stderr);

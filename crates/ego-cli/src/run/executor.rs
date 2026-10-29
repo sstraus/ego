@@ -1100,10 +1100,10 @@ impl RunExecutor for CliRunExecutor {
 }
 
 #[cfg(test)]
-mod regression_case_tests;
+mod defaults_tests;
 
 #[cfg(test)]
-mod regression_case_tests {
+mod settlement_tests {
     use super::*;
 
     // Catches: widening known-failure settlement to include a lost exchange.

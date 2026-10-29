@@ -1,11 +1,6 @@
 //! Markdown, rendered by the harness — because nobody else can.
 //!
-//! The captures behind
-//! `docs/architecture.md` settle
-//! what would otherwise be a matter of taste. A model emits
-//! `**Step 13.5 spedito** (` a9b84ad `)`; what reaches the terminal is
-//! `ESC[1mStep 13.5 spedito ESC[22m ( ESC[38;2;174;185;213ma9b84ad ESC[39m )`.
-//! Two rules, and they are rules rather than preferences:
+//! Markdown rendering separates style from literal text. Two rules:
 //!
 //! - `**strong**` is **weight and no colour**.
 //! - `` `code` `` is **colour and no weight**.
@@ -394,10 +389,7 @@ impl Renderer {
                 self.push_style(|style| style.with_fg(Palette::LINK).underline());
             }
             Tag::Image { dest_url, .. } => {
-                // No image path exists: TUIC decodes `alacritty_terminal`,
-                // which implements neither the kitty graphics protocol nor
-                // sixel (ADR §4). The alternative to naming the image is
-                // silently dropping it.
+                // Without image protocol support, name the image instead of dropping it.
                 self.text("🖼 ");
                 self.link = Some(dest_url.to_string());
                 self.push_style(|style| style.with_fg(Palette::LINK).underline());
@@ -779,8 +771,7 @@ mod tests {
         assert!(!out.contains('~'));
     }
 
-    /// Every construct at `Depth::None` is the text and nothing else — the
-    /// property `CLI.md` §4.5 turns on.
+    /// At `Depth::None`, every construct renders as plain text.
     #[test]
     fn nothing_escapes_at_depth_none() {
         let source = "# h\n\n**b** *i* `c` [l](http://x) ~~s~~\n\n> q\n\n- i\n\n| a |\n|---|\n| 1 |\n\n---\n";

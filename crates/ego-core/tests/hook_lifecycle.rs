@@ -1,4 +1,4 @@
-//! contract for lifecycle production at the real core owners (M4 S7).
+//! Lifecycle production contract at the real core owners.
 
 mod common;
 
@@ -587,7 +587,7 @@ impl ego_core::generation_model_source::GenerationModelSource for GeneratorSourc
                     default_reasoning_effort: None,
                 },
                 metering: Metering::Unmetered {
-                    revision: MeteringRevision("regression_case".to_owned()),
+                    revision: MeteringRevision("hook-lifecycle-ZVP".to_owned()),
                 },
                 pricing_unavailable: None,
                 rates: None,

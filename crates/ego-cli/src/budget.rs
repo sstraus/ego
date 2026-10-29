@@ -1,42 +1,9 @@
-//! `--budget`: the one place a ceiling written on a command line becomes a
-//! ceiling the run can be stopped by.
+//! Compose resolved budgets with process-owned rate sources. Monetary ceilings use `BudgetGate`
+//! before generation; token ceilings are checked between generations. Both CLI and config use
+//! `ego_core::ceiling::Budget` and shared configuration precedence.
 //!
-//! `CLI.md` §3 spells it as "'2.5$' or '400k' tokens → exit 5 when hit", which
-//! is two ceilings in one flag, and they are enforced in two places for a
-//! reason that is not going to change:
-//!
-//! - **Money goes to [`BudgetGate`]**, which is the only thing that can refuse
-//!   a generation *before* it is paid for. That is where a spending cap
-//!   belongs; anything checked afterwards is a report, not a cap.
-//! - **Tokens go to a between-generation ceiling** inside `TurnLoop`, because
-//!   nothing in the workspace can price a token count against a limit
-//!   expressed in tokens without inventing a rate.
-//!
-//! ## Where a ceiling comes from
-//!
-//! Not from here. `docs/architecture.md` §4:
-//! `CLI.md:296-299` makes an administrator's `/etc/ego/config.toml` "the only
-//! source of ceilings", so `--budget` is not parsed on the side — it is
-//! written into the flags layer (`config::flags_layer`) as the `budget` key
-//! and resolved by ordinary precedence, then clamped by any `system` layer's
-//! own. A flag parsed here would be a second precedence rule, and the layer
-//! it would silently outrank is the administrator's.
-//!
-//! What is left in this file is the two things that are genuinely process
-//! knowledge: turning a *resolved* ceiling into the gate a run generates
-//! under, and finding the rates that ceiling will rest on. The grammar itself
-//! is `ego_core::ceiling::Budget`, shared with the config key so the two
-//! surfaces cannot drift.
-//!
-//! ## Why the table lookup is here and not in a library
-//!
-//! [`TableSource`] is the only place in the workspace where the three crates
-//! that own the pieces meet. `ego-tools` owns the cache because it owns
-//! `StoreIo`; `ego-ai` owns the fetch and the decode because it owns `Http`;
-//! `ego-core` owns the types and opens nothing. None of the three may depend
-//! on another, and §6 drew the split that way on purpose — so the composition
-//! belongs to the binary that already holds all three, beside the ceiling that
-//! is the reason to perform it at all.
+//! This process boundary supplies the cache, clock, transport, and egress posture. Libraries
+//! receive those dependencies rather than reading process globals or opening files implicitly.
 
 use std::fmt;
 use std::path::Path;
@@ -53,25 +20,10 @@ use ego_core::event::time::Timestamp;
 use ego_tools::pricing::{CacheError, Cached, PricingCache};
 use ego_tools::store::StoreIo;
 
-/// The gate this run generates under.
-///
-/// **The one function that turns a resolved ceiling into a [`BudgetGate`].**
-/// A run with only a token ceiling still gets a gate — the loop cannot run
-/// without one — and that gate is [`unlimited`](BudgetGate::unlimited),
-/// because the ceiling such a run is actually subject to is checked at the
-/// generation boundary instead.
-///
-/// `clamped_from` is the higher figure an administrator's ceiling reduced,
-/// when one did. It is passed rather than dropped because §4 requires the
-/// clamp be *stated, not silent*: the gate carries it into
-/// `CeilingEffect::Binds`, so a run under a reduced ceiling says which figure
-/// binds and which one was asked for.
-///
-/// `CLI.md` §7: hard ceilings come only from an administrator's `/etc/ego`,
-/// and "ego itself imposes none". Until `Ledger::Unlimited` existed the
-/// honest-sounding way to impose nothing was the largest amount `Amount` can
-/// represent, which made "nobody set a budget" indistinguishable from
-/// "somebody set an absurd one".
+/// Construct the gate from resolved ceilings. Token-only runs use an unlimited money ledger and
+/// enforce tokens at generation boundaries. Preserve `clamped_from` so reporting distinguishes
+/// the requested limit from the administrator's binding cap. An absent limit is not a
+/// largest-representable amount.
 pub fn gate(
     ceilings: &Ceilings,
     clamped_from: Option<Money>,
@@ -84,14 +36,8 @@ pub fn gate(
     }
 }
 
-/// Everything §5's third rate source needs, which a run with no ceiling never
-/// builds.
-///
-/// A struct rather than six parameters because five of the six are the *same*
-/// fact from different angles — where the cache lives, what time it is, how
-/// old is too old, whether egress is allowed, and what to ask if it is — and a
-/// caller that could pass them separately could pass one run's clock with
-/// another run's posture.
+/// Capture third-party rate dependencies together: cache location, clock, age bound, egress
+/// posture, and fetch transport must belong to the same run.
 pub struct TableSource<'a> {
     pub io: &'a dyn StoreIo,
     pub ego_home: &'a Path,
@@ -100,10 +46,8 @@ pub struct TableSource<'a> {
     /// distinguish a forbidden fetch from a failed online exchange.
     pub offline: bool,
     pub now: Timestamp,
-    /// How old a table may be and still bound a ceiling.
-    ///
-    /// Supplied, because §6 makes it configurable and this file is not where a
-    /// policy is decided. `ego_tools::pricing::MAX_AGE` is the default.
+    /// Maximum usable table age, supplied by the caller. `ego_tools::pricing::MAX_AGE` is the
+    /// default.
     pub max_age: Duration,
 }
 
@@ -185,27 +129,9 @@ impl fmt::Display for NoRates {
 impl std::error::Error for NoRates {}
 
 impl TableSource<'_> {
-    /// The rates this run's ceiling will rest on, or the reason there are
-    /// none.
-    ///
-    /// §5's order, first hit wins, and the gate in front of all of it:
-    ///
-    /// 1. **No ceiling that needs rates?** Nothing is consulted — no file is
-    ///    opened and no socket. That is §7's first row and it is a privacy
-    ///    property rather than an optimisation: an ordinary run contacts
-    ///    nobody but the model provider, and a run whose row is metered by
-    ///    policy rather than per token gets the same answer, because a limit
-    ///    that admits every generation cannot be changed by any table.
-    /// 2. **Already resolved?** An operator's own figures, or the provider's
-    ///    published ones, are never second-guessed by a third party's summary.
-    /// 3. Otherwise the cache, and the network only if the cache cannot
-    ///    answer.
-    ///
-    /// The fetch is attempted **only** when nothing usable is cached, which
-    /// makes §7's fifth row — "online, fetch fails, cache fresh" — unreachable
-    /// rather than unhandled. That row distinguishes itself from the fourth
-    /// only in a design that revalidates on every priced run, and this one
-    /// does not: a fresh table is used as it stands.
+    /// Resolve rates only when the ceiling needs them. Prefer already resolved rates; otherwise
+    /// use a fresh cache and fetch only when it cannot answer. No required rate lookup means no
+    /// pricing file or socket access. A fresh cache is not revalidated on every run.
     pub async fn rates(
         &self,
         model: &ResolvedModel,

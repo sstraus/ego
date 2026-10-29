@@ -1,12 +1,8 @@
 //! The one inbound listener: bind, accept, and establish who connected.
 //!
-//! `docs/architecture.md`
-//! separates the endpoint from the protocol. [`ego_core::endpoint`] decides
-//! which endpoint kinds exist and which authentication each compels; this crate
-//! is the thin impure half that opens one and answers *who is on the other
-//! end*. It owns no protocol and cannot reach one: A2A serves `hyper` over the
-//! stream it yields and ACP serves `ByteStreams` over the same stream, and
-//! neither binds anything.
+//! [`ego_core::endpoint`] defines endpoint kinds and authentication. This
+//! crate binds streams and establishes peer identity without owning a
+//! protocol. A2A and ACP consume the admitted streams instead of binding them.
 //!
 //! **The local endpoint is authenticated by the operating system.** On Unix,
 //! the socket lives in a directory the current user alone may enter and every

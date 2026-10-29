@@ -1,14 +1,5 @@
-//! `Glob`: the one wildcard matcher in the grammar.
-//!
-//! A path segment and an `exec` token are the same shape — a run of literal
-//! characters with `*` standing for "any run, including none" — and they are
-//! matched by the same code, because two implementations of one wildcard is
-//! how `src/*.rs` and `cargo-*` start disagreeing about what `*` means.
-//!
-//! What differs between them is only how the *text* becomes pieces: a path
-//! segment has no escapes (§5 lists two constructs and no third), while an
-//! `exec` token honours `\` (§6). So the callers build the pieces and this
-//! module owns what they mean.
+//! One wildcard matcher for path segments and exec tokens. Callers parse their different escape
+//! syntax into pieces; this module defines shared matching semantics.
 
 /// One run of a wildcard pattern. Canonical form alternates: no two `Lit`s
 /// and no two `Star`s are ever adjacent, so `a**b` and `a*b` are one value
@@ -77,15 +68,9 @@ impl Glob {
         matches!(self.pieces.as_slice(), [Piece::Star])
     }
 
-    /// Match the whole of `text`, with no case folding and no Unicode
-    /// normalisation — the comparison is against what the platform's own
-    /// `canonicalize` returned, exactly (§5).
-    ///
-    /// The two-pointer form and not a recursion over pieces: a recursion
-    /// branches at every wildcard and costs exponentially on operator-
-    /// supplied input, which is the same objection §4 raises to regular
-    /// expressions. This backtracks to the most recent wildcard only, which
-    /// is `O(pattern × text)`.
+    /// Match the whole canonical text without case folding or Unicode normalization. Backtrack
+    /// only to the latest wildcard, giving O(pattern × text) rather than exponential recursive
+    /// branching.
     pub fn matches(&self, text: &str) -> bool {
         let pattern = self.flattened();
         let text: Vec<char> = text.chars().collect();
@@ -184,14 +169,8 @@ pub enum Elem<'a> {
     Rest,
 }
 
-/// Match a sequence pattern against a sequence.
-///
-/// A table rather than the obvious recursion. A `Rest` can begin at any
-/// offset, so recursing branches at every one of them and a pattern with
-/// several costs exponentially — inside a security decision, on operator-
-/// supplied input. §4 refuses regular expressions partly for unbounded
-/// matching cost, and accepting it here through the back door would be the
-/// same mistake with a smaller vocabulary. This is `O(pattern × target)`.
+/// Match sequence patterns with a table. A recursive branch at each rest wildcard can grow
+/// exponentially on operator input; this implementation is O(pattern × target).
 pub fn matches_sequence(pattern: &[Elem<'_>], target: &[&str]) -> bool {
     // `reach[j]`: the pattern consumed so far accounts for exactly the first
     // `j` items of `target`.

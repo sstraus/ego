@@ -1,4 +1,4 @@
-//! contract for the ACP operator seat (regression case, criterion 1).
+//! contract for the ACP operator seat.
 //!
 //! The wire half lives in `ego-acp`; this is the half that decides what a
 //! host may be offered at all. The rules it has to keep: never offer a model
@@ -126,7 +126,7 @@ fn observation(confinement: Confinement) -> ExecObservation {
         Confinement::Off => ExecCaps::empty(),
     };
     ExecObservation::new(
-        BackendIdentity::new("fixture", "regression_case"),
+        BackendIdentity::new("fixture", "controls-PXT"),
         capabilities,
         PolicyDigest::try_from("0000000000000000000000000000000000000000000000000000000000000000")
             .expect("a valid fixture policy digest"),
@@ -137,7 +137,7 @@ fn missing(confinement: Confinement) -> MissingExecCaps {
     ExecRequirements::new(confinement.required_caps())
         .check(ExecCaps::empty())
         .expect_err("the fixture deliberately lacks confinement capabilities")
-        .from_backend(BackendIdentity::new("fixture", "regression_case"))
+        .from_backend(BackendIdentity::new("fixture", "controls-PXT"))
 }
 
 fn admit_all(seat: &AcpSessionControls, session: SessionId) {

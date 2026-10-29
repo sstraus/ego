@@ -1,4 +1,4 @@
-//! regression case's public process demonstration for compaction and skill authority.
+//! public process demonstration for compaction and skill authority.
 //!
 //! One home/workspace pair is shared by the source run, compaction process, and
 //! target resume process. The provider sees the requests, while the filesystem
@@ -12,13 +12,13 @@ use support::{FIXTURE_SESSION_ID, MODEL, Places, Plan, Reply, Stub};
 
 const RAW_ARGUMENTS: &str = "SOURCE-RAW-ARGUMENTS";
 const TARGET_ARGUMENTS: &str = "TARGET-RAW-ARGUMENTS";
-const CHECKPOINT_MARKER: &str = "REGRESSION-MARKER-UNIQUE-MARKER";
+const CHECKPOINT_MARKER: &str = "CHECKPOINT-IMR-UNIQUE-MARKER";
 const SOURCE_SKILL: &str = "alpha";
 const TARGET_SKILL: &str = "beta";
 
 fn skill_file(name: &str, body: &str) -> String {
     format!(
-        "---\nname: {name}\ndescription: regression case process fixture\nuser-invocable: true\ndisable-model-invocation: true\n---\n{body}\n"
+        "---\nname: {name}\ndescription: process fixture\nuser-invocable: true\ndisable-model-invocation: true\n---\n{body}\n"
     )
 }
 

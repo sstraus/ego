@@ -1,10 +1,6 @@
 //! What one ACP session's workspace offers to be trusted with.
-//!
-//! The seat that asks lives in `ego-acp`, because asking is a protocol act.
-//! Which files the answer is *about* lives here, because the trust ADR gives
-//! `ego-cli` "which paths are probed, the reads that build the inventory".
-//!
-//! The adapter uses the same per-root ledger as the terminal seat.
+//! `ego-acp` owns the protocol human seat. This adapter owns inventory reads
+//! and uses the same per-root trust ledger as the terminal seat.
 
 use std::path::PathBuf;
 

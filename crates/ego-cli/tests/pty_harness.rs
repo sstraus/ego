@@ -1,4 +1,4 @@
-//! Linux rb terminal bytes recorded while regression case timed out after early Ctrl-D.
+//! Terminal bytes recorded during an early Ctrl-D timeout.
 
 #![cfg(not(windows))]
 

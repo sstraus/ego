@@ -2,11 +2,9 @@
 //! themselves. Executable authority invalidates a decision; instructions do
 //! not.
 //!
-//! See `docs/architecture.md`.
-//! `ego-core` owns what each fact means and whether a stored answer still
-//! applies. This module owns trust inventory reads and the separate locked
-//! documents under `$EGO_HOME`. Records live outside the workspace on purpose:
-//! a project file must never be able to write the decision that admits it.
+//! `ego-core` decides trust inventory meaning and whether a stored answer
+//! still applies. This module owns reads and separately locked documents
+//! under `$EGO_HOME`, outside the workspace so a project cannot admit itself.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -1770,7 +1768,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod regression_case {
+mod portable_skill_trust {
     use super::*;
 
     #[test]

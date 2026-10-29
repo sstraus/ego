@@ -1,11 +1,10 @@
 //! `Lease`: one writer per session, backed by an advisory OS lock plus a
 //! PID/heartbeat record for stale-lease takeover.
 //!
-//! See `plans/m0a-contracts.md` Step 5 and `ARCHITECTURE.md` §5. The lock
-//! file's on-disk shape (`{"pid": <u32>, "heartbeat": <millis>}`) is
-//! documented on `ego_tools::store::lease`'s module doc comment; several
-//! tests here construct it by hand to exercise the contended branch
-//! deterministically, exactly as that module's doc comment describes.
+//! The lock file's on-disk shape (`{"pid": <u32>, "heartbeat": <millis>}`) is documented
+//! on `ego_tools::store::lease`'s module doc comment; several tests here construct it by
+//! hand to exercise the contended branch deterministically, exactly as that module's doc
+//! comment describes.
 
 use std::io::Write;
 use std::time::Duration;

@@ -197,7 +197,7 @@ fn recorded_flat_skill_calls_admit_instructions_with_empty_arguments() {
     use support::{Reply, text, tool_call};
 
     let fixtures: serde_json::Value =
-        serde_json::from_str(include_str!("fixtures/652-recorded-skill-calls.json")).unwrap();
+        serde_json::from_str(include_str!("fixtures/recorded-skill-calls.json")).unwrap();
     let mut failures = Vec::new();
     for fixture in fixtures.as_array().unwrap() {
         let arguments = &fixture["payload"];

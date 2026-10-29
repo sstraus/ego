@@ -23,8 +23,8 @@ use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::sync::Notify;
 use tokio::task::JoinSet;
 
-const ACP_TOKEN: &str = "regression case-token";
-const A2A_TOKEN: &str = "regression case-token";
+const ACP_TOKEN: &str = "listener-test-acp-token";
+const A2A_TOKEN: &str = "listener-test-a2a-token";
 const EMPTY_CAPABILITIES_WARNING: &str = "no effective confinement";
 
 struct ChildGuard {
@@ -146,7 +146,7 @@ impl ConnectTo<Agent> for SessionClient {
                 let initialized = connection
                     .send_request(
                         v1::InitializeRequest::new(ProtocolVersion::V1)
-                            .client_info(v1::Implementation::new("ego-regression case", "0")),
+                            .client_info(v1::Implementation::new("ego-listener-test-cli", "0")),
                     )
                     .block_task()
                     .await?;
@@ -188,7 +188,7 @@ async fn initialize_websocket(address: &str, client: SessionClient) -> Result<()
         .map_err(|error| Error::internal_error().data(error.to_string()))?;
     request.headers_mut().insert(
         "authorization",
-        HeaderValue::from_static("Bearer regression case-token"),
+        HeaderValue::from_static("Bearer listener-test-acp-token"),
     );
     let (websocket, response) = async_tungstenite::tokio::connect_async(request)
         .await

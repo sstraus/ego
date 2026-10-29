@@ -13,7 +13,7 @@ fn busy_tasks_survives_escape_once() {
 }
 
 fn busy_tasks_contract(interrupt: bool) {
-    let (reply, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING\n");
+    let (reply, gate) = gated_paced_line("TASKS-MNB-RUNNING\n");
     let stub = Stub::start(Plan {
         completions: vec![reply],
         ..Plan::default()
@@ -32,7 +32,7 @@ fn busy_tasks_contract(interrupt: bool) {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"hold turn\r").expect("turn");
     input.flush().expect("flush");
-    until(&reader, &mut output, b"REGRESSION-MARKER-RUNNING");
+    until(&reader, &mut output, b"TASKS-MNB-RUNNING");
     let help_start = output.len();
     input.write_all(b"/help\r").expect("help during held turn");
     input.flush().expect("help flush");
@@ -84,13 +84,13 @@ fn busy_compact_names_automatic_compaction_in_a_real_pty() {
     let gate = ReleaseGate::new();
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(support::costing("REGRESSION-MARKER", 244796, 4)),
+            Reply::Sse(support::costing("PRESSURE-BJM", 244796, 4)),
             Reply::GatedPaced {
                 head: String::new(),
                 tail: text(checkpoint),
                 gate: Arc::clone(&gate),
             },
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("RECOVERED-BJM")),
         ],
         context_length: Some(272000),
         ..Plan::default()
@@ -109,7 +109,7 @@ fn busy_compact_names_automatic_compaction_in_a_real_pty() {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"finish this task\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+    until_normalized(&reader, &mut output, start, "PRESSURE-BJM");
     let deadline = Instant::now() + PROGRESS_DEADLINE;
     while stub.generations().len() < 2 {
         assert!(
@@ -133,7 +133,7 @@ fn busy_compact_names_automatic_compaction_in_a_real_pty() {
     let busy_output = normalized(&output[start..]);
     record_slash_capture(&output, 24, 100);
     gate.release();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+    until_normalized(&reader, &mut output, start, "RECOVERED-BJM");
     until_mcp_composer_is_idle(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();

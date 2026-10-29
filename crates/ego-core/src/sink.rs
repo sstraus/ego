@@ -1,10 +1,8 @@
 //! Where a [`PublicEvent`] goes the moment it becomes durable.
 //!
-//! See `CLI.md` §4.2 — "one event per line, **live**". Live is the contract,
-//! not a quality of the implementation: a batch handed over when the turn
-//! ends is a different promise wearing the same flag, and a caller watching
-//! `--output jsonl` for a long tool call would see nothing at all until it
-//! finished.
+//! Live is the contract, not a quality of the implementation: a batch handed over when
+//! the turn ends is a different promise wearing the same flag, and a caller watching
+//! `--output jsonl` for a long tool call would see nothing at all until it finished.
 //!
 //! ## Why the port is infallible
 //!
@@ -57,9 +55,8 @@ pub trait EventSink: Send + Sync {
 
     /// Take one event, with the reduction it produced.
     ///
-    /// Called once per event, after it is durable and after it has been folded
-    /// — so `state` always *includes* `event`, never precedes it. See
-    /// `docs/architecture.md`.
+    /// Called only after the event is durable and reduced, so `state` includes
+    /// `event` rather than preceding it.
     ///
     /// Most sinks ignore `state`: a line of JSONL is the event and nothing
     /// else. It is here for the consumer that cannot work without it — ACP's
@@ -105,9 +102,7 @@ impl<T: EventSink + ?Sized> EventSink for &T {
 
 /// A sink that keeps everything, for a caller that wants the batch after all.
 ///
-/// The batch is not wrong — an ACP host, and `CLI.md` §4.1's single result
-/// object, both want one — it is only wrong as the *sole* path. Making it a
-/// sink the caller chooses puts the memory it costs on the caller who asked
+/// Making it a sink the caller chooses puts the memory it costs on the caller who asked
 /// for it, instead of on every session for its whole life.
 #[derive(Debug, Default)]
 pub struct CollectingSink {

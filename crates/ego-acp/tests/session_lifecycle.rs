@@ -1,4 +1,4 @@
-//! router contract for regression case's durable ACP v1 session surface.
+//! router contract for durable ACP v1 session surface.
 //!
 //! Every request crosses the pinned SDK's real JSON-RPC router. The fixture is
 //! deliberately restartable: separate routers share only the durable store,
@@ -17,19 +17,19 @@ use futures::{SinkExt, StreamExt};
 
 mod support;
 
-const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
-const OTHER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
-const WRONG_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/regression case");
+const ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/workspace");
+const OTHER_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/other");
+const WRONG_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/wrong");
 #[cfg(not(windows))]
 const MCP_COMMAND: &str = "/bin/true";
 #[cfg(windows)]
 const MCP_COMMAND: &str = r"C:\Windows\System32\cmd.exe";
-const regression_case_PHASE_TIMEOUT: Duration = Duration::from_secs(1);
+const PHASE_TIMEOUT: Duration = Duration::from_secs(1);
 
-async fn regression_case_phase<T>(name: &str, operation: impl Future<Output = T>) -> T {
-    tokio::time::timeout(regression_case_PHASE_TIMEOUT, operation)
+async fn bounded_phase<T>(name: &str, operation: impl Future<Output = T>) -> T {
+    tokio::time::timeout(PHASE_TIMEOUT, operation)
         .await
-        .unwrap_or_else(|_| panic!("regression case phase timed out: {name}"))
+        .unwrap_or_else(|_| panic!("phase timed out: {name}"))
 }
 
 struct Connected {
@@ -715,15 +715,15 @@ async fn fresh_controller_resume_reattaches_cancelling_and_releases_registry_aft
 }
 
 #[tokio::test]
-async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt() {
+async fn delayed_recovery_watcher_cannot_finish_a_newer_prompt() {
     let fixture = support::DurableAcpFixture::new();
     let session = fixture.seed_running_session(ROOT);
     fixture.enable_running_recovery();
     fixture.park_recovery_watcher();
     let mut connection = Connected::new(fixture.router());
-    regression_case_phase("initialize", connection.initialize()).await;
+    bounded_phase("initialize", connection.initialize()).await;
 
-    let (loaded, _) = regression_case_phase(
+    let (loaded, _) = bounded_phase(
         "load running W1",
         connection.request(
             "session/load",
@@ -736,18 +736,18 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
     )
     .await;
     assert!(loaded.get("result").is_some(), "W1 load failed: {loaded}");
-    regression_case_phase(
+    bounded_phase(
         "park recovery W1 watcher",
         fixture.recovery_watcher_parked(),
     )
     .await;
-    regression_case_phase(
+    bounded_phase(
         "settle recovered W1 execution",
         fixture.wait_for_run_status(&session, RunStatus::Settled),
     )
     .await;
 
-    let (closed, _) = regression_case_phase(
+    let (closed, _) = bounded_phase(
         "close and remove W1",
         connection.request(
             "session/close",
@@ -757,7 +757,7 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
     .await;
     assert!(closed.get("result").is_some(), "close failed: {closed}");
 
-    let (reattached, _) = regression_case_phase(
+    let (reattached, _) = bounded_phase(
         "reattach terminal W1",
         connection.request(
             "session/load",
@@ -776,11 +776,11 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
     assert_eq!(fixture.run_status(&session), RunStatus::Settled);
 
     // `session/prompt` installs its registration and CancelKey before this
-    // third execution spawn (serve.rs:1381-1407). Since regression case the
+    // third execution spawn (serve.rs:1381-1407). Since the
     // continuation reattaches and settles on its own, so W2 is held inside
     // submit: the delayed W1 watcher must land while W2 is genuinely running.
     fixture.block_next_turn();
-    let _prompt = regression_case_phase(
+    let _prompt = bounded_phase(
         "send newer W2 prompt",
         connection.send_request(
             "session/prompt",
@@ -791,17 +791,17 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
         ),
     )
     .await;
-    regression_case_phase("spawn newer W2 execution", fixture.w2_execution_spawned()).await;
-    regression_case_phase("hold newer W2 inside submit", fixture.turn_began()).await;
+    bounded_phase("spawn newer W2 execution", fixture.w2_execution_spawned()).await;
+    bounded_phase("hold newer W2 inside submit", fixture.turn_began()).await;
 
     fixture.release_recovery_watcher();
-    regression_case_phase(
+    bounded_phase(
         "finish delayed W1 watcher",
         fixture.recovery_watcher_finished(),
     )
     .await;
 
-    let (second, _) = regression_case_phase(
+    let (second, _) = bounded_phase(
         "refuse second prompt while W2 is busy",
         connection.request(
             "session/prompt",
@@ -816,7 +816,7 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
         .get("error")
         .unwrap_or_else(|| panic!("a delayed W1 watcher admitted a second prompt: {second}"));
 
-    regression_case_phase(
+    bounded_phase(
         "cancel newer W2 prompt",
         connection.notify(
             "session/cancel",
@@ -824,13 +824,13 @@ async fn regression_case_delayed_recovery_watcher_cannot_finish_a_newer_prompt()
         ),
     )
     .await;
-    let _ = regression_case_phase(
+    let _ = bounded_phase(
         "observe cancellation notification barrier",
         connection.request("session/list", serde_json::json!({ "cwd": ROOT })),
     )
     .await;
     let durable_status = fixture.run_status(&session);
-    regression_case_phase("abort ACP connection cleanup", connection.abort()).await;
+    bounded_phase("abort ACP connection cleanup", connection.abort()).await;
 
     assert_eq!(
         second_error["code"], -32600,
@@ -1450,9 +1450,9 @@ async fn close_then_fresh_router_load_or_resume_continues_the_terminal_session()
     for method in ["session/load", "session/resume"] {
         let fixture = support::DurableAcpFixture::new();
         let mut first = Connected::new(fixture.router());
-        regression_case_phase("initialize first router", first.initialize()).await;
-        let (session, _) = regression_case_phase("create terminal session", first.new_session(ROOT)).await;
-        let (first_prompt, _) = regression_case_phase(
+        bounded_phase("initialize first router", first.initialize()).await;
+        let (session, _) = bounded_phase("create terminal session", first.new_session(ROOT)).await;
+        let (first_prompt, _) = bounded_phase(
             "complete first terminal prompt",
             first.request(
                 "session/prompt",
@@ -1464,7 +1464,7 @@ async fn close_then_fresh_router_load_or_resume_continues_the_terminal_session()
         )
         .await;
         assert_eq!(first_prompt["result"]["stopReason"], "end_turn");
-        let (closed, _) = regression_case_phase(
+        let (closed, _) = bounded_phase(
             "close terminal session",
             first.request(
                 "session/close",
@@ -1473,11 +1473,11 @@ async fn close_then_fresh_router_load_or_resume_continues_the_terminal_session()
         )
         .await;
         assert!(closed.get("result").is_some(), "close failed: {closed}");
-        regression_case_phase("finish first router", first.finish()).await;
+        bounded_phase("finish first router", first.finish()).await;
 
         let mut fresh = Connected::new(fixture.router());
-        regression_case_phase("initialize fresh router", fresh.initialize()).await;
-        let (reattached, _) = regression_case_phase(
+        bounded_phase("initialize fresh router", fresh.initialize()).await;
+        let (reattached, _) = bounded_phase(
             "load or resume terminal session",
             fresh.request(
                 method,
@@ -1493,7 +1493,7 @@ async fn close_then_fresh_router_load_or_resume_continues_the_terminal_session()
             reattached.get("result").is_some(),
             "{method} failed after close: {reattached}"
         );
-        let (continued, _) = regression_case_phase(
+        let (continued, _) = bounded_phase(
             "complete continuation prompt",
             fresh.request(
                 "session/prompt",
@@ -1506,7 +1506,7 @@ async fn close_then_fresh_router_load_or_resume_continues_the_terminal_session()
         .await;
         assert_eq!(continued["result"]["stopReason"], "end_turn", "{continued}");
         assert_eq!(fixture.run_status(&session), RunStatus::Settled);
-        regression_case_phase("finish fresh router", fresh.finish()).await;
+        bounded_phase("finish fresh router", fresh.finish()).await;
     }
 }
 
@@ -1558,26 +1558,26 @@ async fn immediate_cancel_after_admitted_continuation_preserves_durable_cancella
             }),
         )
         .await;
-    regression_case_phase("continuation reaches submit", fixture.turn_began()).await;
+    bounded_phase("continuation reaches submit", fixture.turn_began()).await;
     fresh
         .notify(
             "session/cancel",
             serde_json::json!({ "sessionId": session.clone() }),
         )
         .await;
-    regression_case_phase(
+    bounded_phase(
         "cancel notification barrier",
         fresh.request("session/list", serde_json::json!({ "cwd": ROOT })),
     )
     .await;
     fixture.release_turn();
     let (cancelled, _) =
-        regression_case_phase("answer cancelled continuation", fresh.response(prompt)).await;
+        bounded_phase("answer cancelled continuation", fresh.response(prompt)).await;
     assert_eq!(
         cancelled["result"]["stopReason"], "cancelled",
         "{cancelled}"
     );
-    regression_case_phase(
+    bounded_phase(
         "durable cancellation settlement",
         fixture.wait_for_run_status(&session, RunStatus::Cancelled),
     )
@@ -1598,13 +1598,13 @@ async fn exact_acp_continuation_replay_does_not_repeat_attach_or_submit() {
     connection
         .send_request_with_id(41, "session/prompt", params.clone())
         .await;
-    let (first, _) = regression_case_phase("complete first ACP prompt", connection.response(41)).await;
+    let (first, _) = bounded_phase("complete first ACP prompt", connection.response(41)).await;
     assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
     let effects_after_first = fixture.executor_effect_counts();
     connection
         .send_request_with_id(41, "session/prompt", params)
         .await;
-    let (replay, _) = regression_case_phase("complete exact ACP replay", connection.response(41)).await;
+    let (replay, _) = bounded_phase("complete exact ACP replay", connection.response(41)).await;
     assert!(replay.get("result").is_some(), "replay failed: {replay}");
     assert_eq!(fixture.executor_effect_counts(), effects_after_first);
     connection.finish().await;
@@ -1617,7 +1617,7 @@ async fn a_prompt_whose_settlement_durability_is_uncertain_is_answered_not_orpha
     connection.initialize().await;
     let (session, _) = connection.new_session(ROOT).await;
     fixture.fail_next_settlement_publication("settlement durability uncertain");
-    let (answer, _) = regression_case_phase(
+    let (answer, _) = bounded_phase(
         "answer an uncertain settlement",
         connection.request(
             "session/prompt",
@@ -1651,7 +1651,7 @@ async fn a_reused_request_id_carrying_a_new_prompt_is_new_work_not_a_replay() {
             }),
         )
         .await;
-    let (first, _) = regression_case_phase("answer the first prompt", connection.response(41)).await;
+    let (first, _) = bounded_phase("answer the first prompt", connection.response(41)).await;
     assert_eq!(first["result"]["stopReason"], "end_turn", "{first}");
     let (attached, submitted, observed) = fixture.executor_effect_counts();
 
@@ -1667,7 +1667,7 @@ async fn a_reused_request_id_carrying_a_new_prompt_is_new_work_not_a_replay() {
             }),
         )
         .await;
-    let (second, _) = regression_case_phase("answer the reused id", connection.response(41)).await;
+    let (second, _) = bounded_phase("answer the reused id", connection.response(41)).await;
     assert_eq!(second["result"]["stopReason"], "end_turn", "{second}");
     assert_eq!(
         fixture.executor_effect_counts(),
@@ -1714,7 +1714,7 @@ async fn attach_and_submit_failures_return_typed_responses_without_hanging() {
         )
         .await;
     fixture.fail_next_attach("attach provider failed");
-    let (attach_failure, _) = regression_case_phase(
+    let (attach_failure, _) = bounded_phase(
         "typed attach failure",
         fresh.request(
             "session/prompt",
@@ -1737,7 +1737,7 @@ async fn attach_and_submit_failures_return_typed_responses_without_hanging() {
     connection.initialize().await;
     let (session, _) = connection.new_session(ROOT).await;
     fixture.fail_next_submit("submit provider failed");
-    let (submit_failure, _) = regression_case_phase(
+    let (submit_failure, _) = bounded_phase(
         "typed submit failure",
         connection.request(
             "session/prompt",
@@ -2007,7 +2007,7 @@ async fn result_resume_reuses_the_idle_acp_turn_and_reports_admission_failure() 
         )
         .unwrap();
     assert_eq!(
-        regression_case_phase("resume completion", resumed).await.unwrap(),
+        bounded_phase("resume completion", resumed).await.unwrap(),
         Ok(())
     );
     assert_eq!(fixture.executor_effect_counts().1, 1);
@@ -2016,7 +2016,7 @@ async fn result_resume_reuses_the_idle_acp_turn_and_reports_admission_failure() 
         .resume(&session.into(), "report-two".into(), "Verify".into())
         .unwrap();
     assert!(
-        regression_case_phase("resume failure", failed)
+        bounded_phase("resume failure", failed)
             .await
             .unwrap()
             .is_err()
@@ -2040,7 +2040,7 @@ async fn result_resume_busy_turn_queues_one_consolidated_pending_turn() {
             serde_json::json!({"sessionId":session, "prompt":[{"type":"text","text":"start"}]}),
         )
         .await;
-    regression_case_phase("original turn began", fixture.turn_began()).await;
+    bounded_phase("original turn began", fixture.turn_began()).await;
     let first = notices
         .resume(
             &session.clone().into(),
@@ -2058,9 +2058,9 @@ async fn result_resume_busy_turn_queues_one_consolidated_pending_turn() {
     );
     fixture.release_turn();
     assert!(connection.response(prompt).await.0["result"].is_object());
-    assert_eq!(regression_case_phase("first report", first).await.unwrap(), Ok(()));
+    assert_eq!(bounded_phase("first report", first).await.unwrap(), Ok(()));
     assert_eq!(
-        regression_case_phase("second report", second).await.unwrap(),
+        bounded_phase("second report", second).await.unwrap(),
         Ok(())
     );
     assert_eq!(
@@ -2127,7 +2127,7 @@ async fn delete_refuses_a_prompt_preparing_its_first_run_even_with_force() {
             serde_json::json!({"sessionId":session, "prompt":[{"type":"text","text":"start"}]}),
         )
         .await;
-    regression_case_phase(
+    bounded_phase(
         "first prompt preparation",
         fixture.executor.preparation_started(),
     )

@@ -1,4 +1,4 @@
-//! Vocabulary-only contract for regression case.
+//! Vocabulary-only contract for.
 
 use std::path::PathBuf;
 

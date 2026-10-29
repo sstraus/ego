@@ -1,9 +1,7 @@
 //! Reopening a session that was killed mid-turn.
 //!
-//! `tests/faults.rs` proves `recover()` repairs each kill point correctly.
-//! What is proved here is about *composition*: what `open_writer` does on the
-//! way in, and what it costs to skip it — see
-//! `docs/architecture.md`.
+//! `tests/faults.rs` checks individual recovery points. These tests check
+//! that writer opening composes recovery before reading or appending.
 
 use std::path::PathBuf;
 use std::time::Duration;

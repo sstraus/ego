@@ -1,4 +1,4 @@
-//! Regression contract for regression case: write rules cover same-file edits.
+//! Regression Write rules cover same-file edits.
 
 mod support;
 

@@ -1,7 +1,7 @@
 //! The accounting contract: exact money, priced generations, and the
 //! cumulative session cost.
 //!
-//! See `ARCHITECTURE.md` §3.1 and the mdkb decision `ego-acp-usage-verdict`.
+//! Exact monetary accounting without floating-point domain values.
 //!
 //! ## No floating-point money in the domain
 //!
@@ -404,11 +404,8 @@ impl std::str::FromStr for Amount {
 impl Serialize for Amount {
     /// As a decimal *string*, not a JSON number.
     ///
-    /// A JSON number is exactly the trap this type exists to avoid: most
-    /// readers parse one into an `f64` and the exactness is gone before the
-    /// value is ever used. A string survives any reader intact and keeps the
-    /// log human-readable, which is a stated goal of the JSONL format
-    /// (`ARCHITECTURE.md` §5).
+    /// A JSON number is exactly the trap this type exists to avoid: most readers parse
+    /// one into an `f64` and the exactness is gone before the value is ever used.
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(self)
     }
@@ -507,35 +504,17 @@ impl FxQuote {
 #[serde(transparent)]
 pub struct PricingRevision(pub String);
 
-/// Where the rates that priced a reservation came from.
-///
-/// Not decoration: a ceiling enforced against rates an operator wrote down
-/// and one enforced against nothing at all are materially different
-/// guarantees, and a consumer that cannot tell them apart cannot report
-/// honestly on either. See `2026-08-21-a-run-with-no-ceiling.md` §5 and
-/// §Consequences.
-///
-/// **Exactly the sources that exist.** A bounded run first uses an operator's
-/// quote, then the cached third-party table from story `regression`; `None`
-/// records that no lookup was needed. Every variant has a producer. The
-/// provider-published source was removed with its sole xAI API-key resolver by
-/// Story `regression`, because a variant nothing can produce is a claim the code
-/// cannot back.
-///
-/// **The wire form is the variant's name** (`#[serde(tag = "source")]`), so an
-/// arm added between two others changes no encoding any consumer has already
-/// seen. That is why [`PUBLIC_EVENT_VERSION`](crate::public::PUBLIC_EVENT_VERSION)
-/// does not move for it: the constant tracks the shape a consumer parses, and
-/// a consumer that never met a newly added source cannot have parsed it
-/// differently before.
+/// Rate provenance for reservation bounds. Operator quotes take priority over cached
+/// third-party rates; `None` records no needed lookup. Each source has a producer. Tagged
+/// variant names preserve existing encodings when a new source is added.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum RateSource {
     /// Nobody looked any up. The ordinary case for a run with no ceiling, and
     /// a *property* rather than an omission: no third party was contacted.
     None,
-    /// Explicit operator configuration, which may hold a negotiated rate no
-    /// public table knows about. First in §5's order for that reason.
+    /// Explicit operator rates can represent negotiated prices and take priority over public
+    /// tables.
     Operator,
     /// A cached third-party table — litellm's — naming what it believes the
     /// provider charges.
@@ -561,26 +540,18 @@ pub enum RateSource {
 /// Which metering policy established that a row has no per-token price at
 /// all.
 ///
-/// Beside [`PricingRevision`], opaque for the same reason, and deliberately
-/// *not* the same type. A `PricingRevision` names a price list; a
-/// subscription and a locally served model have none, and labelling their
-/// figures as though a table produced them is the confusion
-/// `docs/architecture.md` §4 refused. This
-/// names the policy that says "not metered in currency" — which is
-/// checkable, where a fabricated all-zero price list is not.
+/// A metering policy revision is not a price-list revision. Subscriptions
+/// and locally served models need no fabricated all-zero price list to
+/// attribute their unmetered policy.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MeteringRevision(pub String);
 
 /// A provider's declaration that it states the charge for a request itself.
 ///
-/// Three facts rather than one string, because a figure is only re-derivable
-/// from a captured response if you know *where on the wire* it was read.
-/// `field` is data — the name of a place — never something anything
-/// dispatches on: `ego-core` cannot name a wire format
-/// (`docs/architecture.md` §8), and every
-/// decoder that can read a cost feeds the same
-/// [`AiEvent::ProviderCost`](crate::generator::port::AiEvent::ProviderCost).
+/// A reported cost is reproducible only with its wire location and unit.
+/// `field` is attribution data, not a dispatch key. All decoders feed the
+/// same [`AiEvent::ProviderCost`](crate::generator::port::AiEvent::ProviderCost).
 ///
 /// The same value is carried by the resolution-time
 /// [`SettlementSource::ProviderReported`](crate::budget::SettlementSource)
@@ -708,14 +679,12 @@ pub enum UnknownCost {
     /// The quote prices everything it was asked to, but the model does not
     /// say how many tokens there could be, so there is no quantity to price.
     ///
-    /// Distinct from [`NoPricingQuote`](Self::NoPricingQuote), which this
-    /// case used to be reported as, because they send an operator to two
-    /// different places: a missing quote means "configure pricing", a missing
-    /// ceiling means "this model's capabilities were never resolved". The
-    /// confusion is worst exactly where it matters most — a free local model
-    /// has a complete, honest, all-zero quote, so being told its *price* is
-    /// unknown sends the reader hunting for a table that is already there.
-    /// `ARCHITECTURE.md` §3.2 requires a denial to name the fact that moved.
+    /// Distinct from [`NoPricingQuote`](Self::NoPricingQuote), which this case used to be
+    /// reported as, because they send an operator to two different places: a missing
+    /// quote means "configure pricing", a missing ceiling means "this model's
+    /// capabilities were never resolved". The confusion is worst exactly where it matters
+    /// most — a free local model has a complete, honest, all-zero quote, so being told
+    /// its *price* is unknown sends the reader hunting for a table that is already there.
     UnstatedCeiling { ceiling: Ceiling },
     /// The provider returned no usage for this generation, so the quantity
     /// to price is itself missing.
@@ -794,10 +763,7 @@ pub enum TokenCategory {
 
 /// The cost of one wire attempt.
 ///
-/// `CostDelta`, never `cost`: `ARCHITECTURE.md` §3.1 produces a
-/// per-generation figure while ACP wants a cumulative session total, and a
-/// field named `cost` on an event would be read as the latter. The
-/// cumulative total is [`CumulativeCost`], derived by the reducer.
+/// The cumulative total is [`CumulativeCost`], derived by the reducer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "cost", rename_all = "snake_case")]
 pub enum CostDelta {

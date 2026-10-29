@@ -744,7 +744,7 @@ impl StatusSegmentName {
             Self::Mode => 3,
             Self::Effort | Self::Fast => 4,
             // An untrusted `trust` segment outranks every convenience but the
-            // context share: regression case rules that the context field is never
+            // context share: rules that the context field is never
             // the one width pressure removes while another optional field
             // remains, so trust goes first once only the two are left.
             Self::Trust => 5,

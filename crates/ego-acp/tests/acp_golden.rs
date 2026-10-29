@@ -1,11 +1,9 @@
 //! `SessionUpdate` projection: golden fixtures for `ego-acp::project`
 //! against ACP protocol v1 and v2.
 //!
-//! See `ARCHITECTURE.md` §7, `plans/m0a-contracts.md` Step 9 and
-//! `crates/ego-acp/src/project.rs`'s module doc comment for the full
-//! reasoning behind every mapping. Fixtures live in `tests/golden/` as
-//! committed data files, matching `ego-core/tests/public_golden.rs`'s
-//! pattern, so a projection change shows up as a reviewable data-file diff.
+//! Fixtures live in `tests/golden/` as committed data files, matching
+//! `ego-core/tests/public_golden.rs`'s pattern, so a projection change shows up as a
+//! reviewable data-file diff.
 //!
 //! ## Fixture provenance
 //!
@@ -1063,20 +1061,10 @@ mod acp_golden {
         ));
     }
 
-    /// The accepted M0a limitation, pinned deliberately rather than left as
-    /// an unremarked absence in the v1 golden: an assistant message that
-    /// never streamed is **lost entirely** from the v1 transcript, while v2
-    /// carries it.
-    ///
-    /// This is turn 2 of `fixture_log` — the user says "thanks" and the
-    /// assistant replies "You're welcome" with no preceding
-    /// `AssistantDelta`. A v1 client sees the prompt and then silence.
-    ///
-    /// If a future change makes v1 emit something here, this test fails and
-    /// forces a decision rather than letting the behaviour drift: see
-    /// `project.rs`'s "Known limitation" section for why neither branch is
-    /// universally correct and why the fix belongs to the M0b transport
-    /// adapter, which alone knows what a given client already rendered.
+    /// Pins the v1 projection limitation: an assistant message with no preceding delta is
+    /// omitted, while v2 carries it. Turn 2 of `fixture_log` exercises this case. The transport
+    /// adapter owns knowledge of what the client already rendered; see the known limitation in
+    /// `project.rs`.
     #[test]
     fn v1_loses_a_final_message_that_never_streamed() {
         let item = item_id(ITEM_ASSISTANT_2);

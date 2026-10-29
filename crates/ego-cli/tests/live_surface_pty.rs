@@ -122,8 +122,8 @@ fn ego_composer_keeps_bracketed_paste_with_lf_in_one_draft() {
 fn composer_newline_contract(draft: &[u8]) {
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
-            Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
+            Reply::Sse(text("NEWLINE-BWF-ANSWER")),
+            Reply::Sse(text("NEWLINE-BWF-ANSWER")),
         ],
         ..Plan::default()
     });
@@ -155,10 +155,10 @@ fn composer_newline_contract(draft: &[u8]) {
         let start = output.len();
         input.write_all(b"\r").expect("submit CR");
         input.flush().expect("submit flush");
-        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+        until_normalized(&reader, &mut output, start, "NEWLINE-BWF-ANSWER");
         until_prompt_from(&reader, &mut output, start);
     } else {
-        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+        until_normalized(&reader, &mut output, start, "NEWLINE-BWF-ANSWER");
         until_prompt_from(&reader, &mut output, start);
         input.write_all(b"\x03").expect("discard partial draft");
         input.flush().expect("discard flush");
@@ -183,17 +183,17 @@ fn composer_newline_contract(draft: &[u8]) {
 
 // Catches: dropping turn-local effects kills a detached command before the next REPL turn.
 #[test]
-fn regression_detached_exec_survives_the_launching_repl_turn() {
+fn detached_exec_detached_exec_survives_the_launching_repl_turn() {
     let arguments = serde_json::json!({
-        "argv": ["/bin/sh", "-c", "while [ ! -f release ]; do sleep 0.05; done; printf DETACHED-DONE > completed; printf DETACHED-DONE"],
+        "argv": ["/bin/sh", "-c", "while [ ! -f release ]; do sleep 0.05; done; printf DETACHED-TLZ-DONE > completed; printf DETACHED-TLZ-DONE"],
         "background": true,
         "timeout_ms": 15000
     });
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(tool_call("DETACHED", "exec", &arguments.to_string())),
-            Reply::Sse(text("DETACHED-LAUNCHED")),
-            Reply::Sse(text("DETACHED-NEXT-TURN")),
+            Reply::Sse(tool_call("detached-TLZ", "exec", &arguments.to_string())),
+            Reply::Sse(text("DETACHED-TLZ-LAUNCHED")),
+            Reply::Sse(text("DETACHED-TLZ-NEXT-TURN")),
         ],
         ..Plan::default()
     });
@@ -218,11 +218,11 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"start the detached command\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "DETACHED-LAUNCHED");
+    until_normalized(&reader, &mut output, start, "DETACHED-TLZ-LAUNCHED");
     until_mcp_composer_is_idle(&reader, &mut output);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    until_prompt_after_reply(&reader, &mut output, b"DETACHED-NEXT-TURN");
+    until_prompt_after_reply(&reader, &mut output, b"DETACHED-TLZ-NEXT-TURN");
     let completion = std::fs::read_to_string(&completed).ok();
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
@@ -230,13 +230,13 @@ fn regression_detached_exec_survives_the_launching_repl_turn() {
     assert!(status.success(), "REPL exit: {status:?}");
     assert_eq!(
         completion.as_deref(),
-        Some("DETACHED-DONE"),
+        Some("DETACHED-TLZ-DONE"),
         "detached command was killed when its launching REPL turn ended"
     );
     let generations = stub.generations();
     let history = generations.last().expect("next generation")["messages"].to_string();
     assert!(
-        history.contains("exited code 0") && history.contains("DETACHED-DONE"),
+        history.contains("exited code 0") && history.contains("DETACHED-TLZ-DONE"),
         "next turn lost detached settlement: {history}"
     );
 }
@@ -255,15 +255,15 @@ fn background_exec_id(output: &[u8]) -> String {
 #[test]
 fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     let arguments = serde_json::json!({
-        "argv": ["/bin/sh", "-c", "printf REGRESSION-MARKER > started; while [ ! -f release ]; do sleep 0.05; done; printf DETACHED-DONE > completed; printf DETACHED-DONE"],
+        "argv": ["/bin/sh", "-c", "printf STARTED-NFQ > started; while [ ! -f release ]; do sleep 0.05; done; printf DETACHED-TLZ-DONE > completed; printf DETACHED-TLZ-DONE"],
         "background": false,
         "timeout_ms": 15000
     });
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(tool_call("DETACHED", "exec", &arguments.to_string())),
-            Reply::Sse(text("DETACHED-LAUNCHED")),
-            Reply::Sse(text("DETACHED-NEXT-TURN")),
+            Reply::Sse(tool_call("detached-TLZ", "exec", &arguments.to_string())),
+            Reply::Sse(text("DETACHED-TLZ-LAUNCHED")),
+            Reply::Sse(text("DETACHED-TLZ-NEXT-TURN")),
         ],
         ..Plan::default()
     });
@@ -296,7 +296,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     input.write_all(b"\x02").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "background exec id:");
-    until_normalized(&reader, &mut output, start, "DETACHED-LAUNCHED");
+    until_normalized(&reader, &mut output, start, "DETACHED-TLZ-LAUNCHED");
     until_mcp_composer_is_idle(&reader, &mut output);
     let mark = output.len();
     input.write_all(b"/tasks\r").unwrap();
@@ -309,7 +309,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     until_local_action_completed(&reader, &mut output, mark, "tasks", PROGRESS_DEADLINE);
     places.file("release", "continue\n");
     let completed = places.workspace_path().join("completed");
-    until_prompt_after_reply(&reader, &mut output, b"DETACHED-NEXT-TURN");
+    until_prompt_after_reply(&reader, &mut output, b"DETACHED-TLZ-NEXT-TURN");
     let completion = std::fs::read_to_string(&completed).ok();
     let mark = output.len();
     input.write_all(b"/tasks\r").unwrap();
@@ -328,7 +328,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
     assert!(status.success(), "REPL exit: {status:?}");
     assert_eq!(
         completion.as_deref(),
-        Some("DETACHED-DONE"),
+        Some("DETACHED-TLZ-DONE"),
         "detached command was killed when its launching REPL turn ended"
     );
     let generations = stub.generations();
@@ -343,7 +343,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
         "settlement not announced"
     );
     assert!(
-        history.contains("exited code 0") && history.contains("DETACHED-DONE"),
+        history.contains("exited code 0") && history.contains("DETACHED-TLZ-DONE"),
         "next turn lost detached settlement: {history}"
     );
 }
@@ -352,7 +352,7 @@ fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
 #[test]
 fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     let arguments = serde_json::json!({
-        "argv": ["/bin/sh", "-c", "echo $$ > child-pid; printf STARTED > started; while [ ! -f release ]; do sleep 0.05; done; printf REGRESSION-MARKER"],
+        "argv": ["/bin/sh", "-c", "echo $$ > child-pid; printf STARTED > started; while [ ! -f release ]; do sleep 0.05; done; printf SETTLED-MWY"],
         "background": false,
         "timeout_ms": 15000
     });
@@ -363,14 +363,14 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     let gate = support::ReleaseGate::new();
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(tool_call("regression_case", "exec", &arguments.to_string())),
+            Reply::Sse(tool_call("notice-MWY", "exec", &arguments.to_string())),
             Reply::GatedPaced {
                 head: String::new(),
-                tail: tool_call("regression_case", "exec", &wait.to_string()),
+                tail: tool_call("wait-MWY", "exec", &wait.to_string()),
                 gate: Arc::clone(&gate),
             },
-            Reply::Sse(text("REGRESSION-MARKER-DONE")),
-            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+            Reply::Sse(text("LAUNCH-TURN-MWY-DONE")),
+            Reply::Sse(text("NEXT-TURN-MWY-DONE")),
         ],
         ..Plan::default()
     });
@@ -405,7 +405,7 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     until_normalized(&reader, &mut output, start, "background exec id:");
     places.file("release", "continue\n");
     gate.release();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DONE");
+    until_normalized(&reader, &mut output, start, "LAUNCH-TURN-MWY-DONE");
     let answer_end = output.len();
     until_prompt_from(&reader, &mut output, answer_end);
     drain_until_quiet(&reader, &mut output);
@@ -415,7 +415,7 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     let next = output.len();
     input.write_all(b"next turn\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, next, "REGRESSION-MARKER-DONE");
+    until_normalized(&reader, &mut output, next, "NEXT-TURN-MWY-DONE");
     until_prompt_from(&reader, &mut output, next);
     drain_until_quiet(&reader, &mut output);
     let next_output = normalized(&output[next..]);
@@ -424,7 +424,7 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
     let status = session.quit(input);
     assert!(status.success(), "REPL exit: {status:?}");
     assert!(
-        launch_history.contains("exited code 0") && launch_history.contains("REGRESSION-MARKER"),
+        launch_history.contains("exited code 0") && launch_history.contains("SETTLED-MWY"),
         "child did not settle inside launching turn: {launch_history}"
     );
     assert_eq!(
@@ -449,7 +449,7 @@ fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
         "user notice exposed model tail headings: {launch_output}"
     );
     assert!(
-        launch_output.contains("REGRESSION-MARKER"),
+        launch_output.contains("SETTLED-MWY"),
         "user notice lost the useful command output: {launch_output}"
     );
 }
@@ -623,20 +623,20 @@ fn across_root_picker_contract(case: &str) {
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call("target-read", "read", r#"{"path":"notes.md"}"#)),
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("ROOT-SWITCH-ANSWER-OKQ")),
         ],
         ..Plan::default()
     });
     let ego = Ego::against(&stub);
-    ego.file("AGENTS.md", "# REGRESSION-MARKER\n");
-    ego.file("notes.md", "REGRESSION-MARKER\n");
+    ego.file("AGENTS.md", "# ROOT-CURRENT-OKQ\n");
+    ego.file("notes.md", "FILE-CURRENT-OKQ\n");
     let current = std::fs::canonicalize(ego.workspace_path()).unwrap();
     let target = current.join("target");
     let older = current.join("older");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::create_dir_all(&older).unwrap();
-    std::fs::write(target.join("AGENTS.md"), "# REGRESSION-MARKER\n").unwrap();
-    std::fs::write(target.join("notes.md"), "REGRESSION-MARKER\n").unwrap();
+    std::fs::write(target.join("AGENTS.md"), "# ROOT-TARGET-OKQ\n").unwrap();
+    std::fs::write(target.join("notes.md"), "FILE-TARGET-OKQ\n").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let older = std::fs::canonicalize(older).unwrap();
     let store = JsonlStore::new(ego.home_path().join("sessions"), current, Box::new(OsIo));
@@ -661,7 +661,7 @@ fn across_root_picker_contract(case: &str) {
                 Some(ItemId::new()),
                 EventKind::UserPrompt {
                     audio: Vec::new(),
-                    text: format!("REGRESSION-MARKER {label}"),
+                    text: format!("CROSS-ROOT-OKQ {label}"),
                     images: Vec::new(),
                     queued_prompt: None,
                 },
@@ -728,7 +728,7 @@ fn across_root_picker_contract(case: &str) {
         let start = output.len();
         input
             .write_all(if case == "history" {
-                b"/history REGRESSION-MARKER\r"
+                b"/history CROSS-ROOT-OKQ\r"
             } else {
                 b"/sessions\r"
             })
@@ -782,7 +782,7 @@ fn across_root_picker_contract(case: &str) {
         let start = output.len();
         input.write_all(b"read notes\r").unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+        until_normalized(&reader, &mut output, start, "ROOT-SWITCH-ANSWER-OKQ");
         let requests = stub.generations();
         let instructions = requests[0]["messages"]
             .as_array()
@@ -792,14 +792,14 @@ fn across_root_picker_contract(case: &str) {
             .map(|message| message.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(instructions.contains("REGRESSION-MARKER"), "{instructions}");
-        assert!(!instructions.contains("REGRESSION-MARKER"), "{instructions}");
+        assert!(instructions.contains("ROOT-TARGET-OKQ"), "{instructions}");
+        assert!(!instructions.contains("ROOT-CURRENT-OKQ"), "{instructions}");
         let request = requests.last().unwrap().to_string();
         assert!(
-            request.contains("REGRESSION-MARKER") && !request.contains("REGRESSION-MARKER"),
+            request.contains("FILE-TARGET-OKQ") && !request.contains("FILE-CURRENT-OKQ"),
             "{request}"
         );
-        assert!(request.contains("REGRESSION-MARKER Orchid cross-root"));
+        assert!(request.contains("CROSS-ROOT-OKQ Orchid cross-root"));
     }
     if case != "list" {
         until_prompt_from(&reader, &mut output, start);
@@ -1084,9 +1084,9 @@ fn sessions_picker_empty_workspace_has_an_explicit_cancelable_state() {
 fn sessions_picker_contract(populated: bool) {
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(text("REGRESSION-MARKER")),
-            Reply::Sse(text("REGRESSION-MARKER")),
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("SAVED-CONTEXT-LCE")),
+            Reply::Sse(text("OTHER-CONTEXT-LCE")),
+            Reply::Sse(text("PICKED-ANSWER-LCE")),
         ],
         ..Plan::default()
     });
@@ -1189,7 +1189,7 @@ fn sessions_picker_contract(populated: bool) {
         let answer = output.len();
         input.write_all(b"recall selected context\r").unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, answer, "REGRESSION-MARKER");
+        until_normalized(&reader, &mut output, answer, "PICKED-ANSWER-LCE");
         assert!(
             stub.generations()
                 .last()
@@ -1232,13 +1232,13 @@ fn successor_accepts_next_turn(action: &str) {
     let failing = action == "admission-failure";
     let gate = support::ReleaseGate::new();
     let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
-    let mut replies = vec![Reply::Sse(text("REGRESSION-MARKER-ANSWER"))];
+    let mut replies = vec![Reply::Sse(text("SOURCE-DZP-ANSWER"))];
     if action == "compact" {
         replies.push(Reply::Sse(text(checkpoint)));
     }
     replies.extend([
-        Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
-        Reply::Sse(text("REGRESSION-MARKER-ANSWER")),
+        Reply::Sse(text("TARGET-DZP-ANSWER")),
+        Reply::Sse(text("RESUMED-DZP-ANSWER")),
     ]);
     let stub = Stub::start(Plan {
         completions: replies,
@@ -1264,7 +1264,7 @@ fn successor_accepts_next_turn(action: &str) {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"first prompt\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+    until_normalized(&reader, &mut output, start, "SOURCE-DZP-ANSWER");
     let start = output.len();
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
@@ -1346,7 +1346,7 @@ fn successor_accepts_next_turn(action: &str) {
         std::fs::remove_dir(&log).unwrap();
         std::fs::rename(&saved, &log).unwrap();
     } else {
-        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+        until_normalized(&reader, &mut output, start, "TARGET-DZP-ANSWER");
         let start = output.len();
         until_prompt_from(&reader, &mut output, start);
     }
@@ -1390,7 +1390,7 @@ fn successor_accepts_next_turn(action: &str) {
     let start = output.len();
     input.write_all(b"resume prompt\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+    until_normalized(&reader, &mut output, start, "RESUMED-DZP-ANSWER");
     let start = output.len();
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
@@ -5902,18 +5902,18 @@ fn bounded_exit(mut child: Box<dyn portable_pty::Child + Send + Sync>) -> portab
 // Catches: a missing model default terminating interactive startup before the
 // existing reasoning picker can obtain a real operator choice.
 #[test]
-fn regression_case_missing_default_opens_effort_picker_and_generates_with_choice() {
-    regression_case_terminal(false);
+fn missing_default_opens_effort_picker_and_generates_with_choice() {
+    effort_picker_terminal(false);
 }
 
 // Catches: a displayed provider refusal surviving idle EOF as a second error
 // after the resume hint, and incorrectly making an ordinary exit fail.
 #[test]
-fn regression_case_provider_refusal_is_not_repeated_after_idle_eof() {
-    regression_case_terminal(true);
+fn provider_refusal_is_not_repeated_after_idle_eof() {
+    effort_picker_terminal(true);
 }
 
-fn regression_case_terminal(provider_refuses: bool) {
+fn effort_picker_terminal(provider_refuses: bool) {
     let stub = Stub::start(Plan {
         completions: vec![if provider_refuses {
             Reply::Status(400)
@@ -5998,7 +5998,7 @@ fn regression_case_terminal(provider_refuses: bool) {
 // Catches: headless startup reaching a human picker or silently inventing Off
 // when the selected row states accepted efforts but no default.
 #[test]
-fn regression_case_headless_missing_default_keeps_thinking_remedy() {
+fn headless_missing_default_keeps_thinking_remedy() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub)
         .without_fixture_thinking()
@@ -8791,8 +8791,8 @@ fn ctrl_z_stops_ego_with_a_cooked_terminal_and_sigcont_restores_raw_mode_and_the
 fn a_running_exec_is_not_charged_the_time_ego_spent_suspended() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    // Catches the defect pi has: the suspended wall time counts against the
-    // tool timeout, so a command that finished is reported as timed out.
+    // Catches: suspended wall time counts against the tool timeout, causing
+    // a finished command to be reported as timed out.
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call(
@@ -8924,7 +8924,7 @@ fn ctrl_z_reports_that_windows_cannot_suspend_it() {
 
 // Catches: startup effort navigation or session-only selection publishes defaults before Enter.
 #[test]
-fn regression_startup_effort_navigation_and_escape_preserve_existing_config() {
+fn effort_picker_startup_effort_navigation_and_escape_preserve_existing_config() {
     let stub = Stub::start(Plan::default());
     let ego = Ego::against(&stub)
         .without_fixture_thinking()
@@ -8969,7 +8969,7 @@ fn regression_startup_effort_navigation_and_escape_preserve_existing_config() {
 
 // Catches: EOF repeats a provider refusal even when startup already has an explicit effort.
 #[test]
-fn regression_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
+fn effort_picker_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
     let stub = Stub::start(Plan {
         completions: vec![Reply::Status(400)],
         ..Plan::default()
@@ -9348,13 +9348,13 @@ fn esc_cancels_both_task_children_and_restores_one_idle_composer() {
 #[test]
 fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
     let arguments = serde_json::json!({
-        "argv": ["/bin/sh", "-c", "printf ready > ready; printf REGRESSION-MARKER-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
+        "argv": ["/bin/sh", "-c", "printf ready > ready; printf TASK-NFQ-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
         "timeout_ms": 15000
     });
     let mut session = modal_session_with(vec![
         Reply::Sse(tool_call("call-0", "exec", &arguments.to_string())),
         Reply::Sse(text(TOOL_TURN_DONE)),
-        Reply::Sse(text("REGRESSION-MARKER-SETTLED")),
+        Reply::Sse(text("CANCELLED-NFQ-SETTLED")),
     ]);
     session.press(b"start a long exec\r");
     session.wait("[d] details");
@@ -9370,7 +9370,7 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
     let id = background_exec_id(&session.output);
     session.press(b"/tasks\r");
     session.wait("running");
-    session.wait("REGRESSION-MARKER-OUTPUT");
+    session.wait("TASK-NFQ-OUTPUT");
     until_local_action_completed(
         &session.reader,
         &mut session.output,
@@ -9383,14 +9383,14 @@ fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
     until_prompt_after_reply(
         &session.reader,
         &mut session.output,
-        b"REGRESSION-MARKER-SETTLED",
+        b"CANCELLED-NFQ-SETTLED",
     );
     assert!(!session.ego.workspace_path().join("survived").exists());
     let (generations, _) = session.finish();
     assert_eq!(generations.len(), 3, "unexpected settlement continuation");
     let history = generations.last().expect("settlement generation")["messages"].to_string();
     assert!(
-        history.contains("cancelled") && history.contains("REGRESSION-MARKER-OUTPUT"),
+        history.contains("cancelled") && history.contains("TASK-NFQ-OUTPUT"),
         "cancellation lost its outcome or output: {history}"
     );
     assert_eq!(
@@ -9442,7 +9442,7 @@ for line in sys.stdin:
 // Catches: the MCP test accepts a real busy-composer repaint as turn completion.
 #[test]
 fn mcp_idle_wait_rejects_a_busy_composer_repaint() {
-    // Captured in high-parallelism run 6 of regression-load.log on rb.
+    // Captured in high-parallelism run 6 of fix-DUN-load.log on rb.
     let busy = b"\x1b[?25l\x1b[4;1H\x1b[JWorking 0s \xc2\xb7 Esc to interrupt\r\n> \x1b[?25h";
     assert!(
         !mcp_composer_is_idle(busy),
@@ -9719,24 +9719,22 @@ fn recorded_compaction_failure_new_prompt_rearms() {
 
 #[cfg(not(windows))]
 fn replay_recorded_compaction_failure(new_prompt: bool) {
-    let recording: serde_json::Value = serde_json::from_str(include_str!(
-        "fixtures/compaction/590-recorded-failure.json"
-    ))
-    .unwrap();
+    let recording: serde_json::Value =
+        serde_json::from_str(include_str!("fixtures/compaction/recorded-failure.json")).unwrap();
     let pressure = &recording["events"][0]["kind"];
     let recorded_error = recording["events"][5]["kind"]["message"].as_str().unwrap();
     let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(support::costing(
-                "REGRESSION-MARKER",
+                "PRESSURE-BMA",
                 pressure["used_tokens"].as_u64().unwrap() - 4,
                 4,
             )),
             // Replay the recorded HTTP-body failure through the real adapter.
             Reply::TruncatedSse,
             Reply::Sse(text(checkpoint)),
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("RECOVERED-BMA")),
         ],
         context_length: Some(pressure["window"].as_u64().unwrap()),
         ..Plan::default()
@@ -9766,11 +9764,11 @@ fn replay_recorded_compaction_failure(new_prompt: bool) {
         until_notice_prose(&reader, &mut output, start, "Retry with '/compact'");
         until_prompt_from(&reader, &mut output, start);
         assert_eq!(stub.generations().len(), 2, "finite retries exhausted");
-        input.write_all(b"REGRESSION-MARKER\r").unwrap();
+        input.write_all(b"NEW-PROMPT-BMA\r").unwrap();
         input.flush().unwrap();
     }
     let recovered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+        until_normalized(&reader, &mut output, start, "RECOVERED-BMA");
     }));
     if let Err(failure) = recovered {
         let _ = input.write_all(b"/quit\r");
@@ -9787,11 +9785,11 @@ fn replay_recorded_compaction_failure(new_prompt: bool) {
         4,
         "one failed checkpoint, one successful checkpoint"
     );
-    assert!(requests[2].to_string().contains("REGRESSION-MARKER"));
+    assert!(requests[2].to_string().contains("PRESSURE-BMA"));
     assert!(requests[3].to_string().contains("Continue the task."));
     if new_prompt {
         assert_eq!(
-            requests[2].to_string().matches("REGRESSION-MARKER").count(),
+            requests[2].to_string().matches("NEW-PROMPT-BMA").count(),
             1,
             "fresh work must reach checkpoint history exactly once"
         );
@@ -9829,11 +9827,11 @@ fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
     let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(support::costing("REGRESSION-MARKER", 245352, 4)),
+            Reply::Sse(support::costing("PRESSURE-OYO", 245352, 4)),
             Reply::TruncatedSse,
             Reply::TruncatedSse,
             Reply::Sse(text(checkpoint)),
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("RETRIED-OYO")),
         ],
         context_length: Some(272000),
         ..Plan::default()
@@ -9928,7 +9926,7 @@ fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
     until_successor_receipt_ready(&reader, &mut output, retry_start, "compact", &stub);
     input.write_all(b"continue the task\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, retry_start, "REGRESSION-MARKER");
+    until_normalized(&reader, &mut output, retry_start, "RETRIED-OYO");
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
@@ -9939,7 +9937,7 @@ fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
         "two failed checkpoints and one successful explicit retry"
     );
     assert!(
-        requests[3].to_string().contains("REGRESSION-MARKER"),
+        requests[3].to_string().contains("PRESSURE-OYO"),
         "retry preserves source history"
     );
     assert!(
@@ -9954,7 +9952,7 @@ fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
 fn failed_compaction_preparation_does_not_loop_refusals() {
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(support::costing("REGRESSION-MARKER", 245352, 4)),
+            Reply::Sse(support::costing("PRESSURE-GHL", 245352, 4)),
             Reply::Status(400),
         ],
         context_length: Some(272000),
@@ -10049,14 +10047,14 @@ fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
     let gate = ReleaseGate::new();
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(support::costing("REGRESSION-MARKER", 244796, 4)),
+            Reply::Sse(support::costing("PRESSURE-HUP", 244796, 4)),
             Reply::GatedPaced {
                 head: String::new(),
                 tail: text(checkpoint),
                 gate: gate.clone(),
             },
-            Reply::Sse(text("REGRESSION-MARKER")),
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("RECOVERED-HUP")),
+            Reply::Sse(text("WAKE-DELIVERED-HUP")),
         ],
         context_length: Some(272000),
         ..Plan::default()
@@ -10080,30 +10078,30 @@ fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"finish this task\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+    until_normalized(&reader, &mut output, start, "PRESSURE-HUP");
     let deadline = Instant::now() + Duration::from_secs(10);
     while stub.generations().len() < 2 {
         assert!(Instant::now() < deadline, "checkpoint did not start");
         thread::sleep(Duration::from_millis(10));
     }
     let wake_start = output.len();
-    input.write_all(b"REGRESSION-MARKER").unwrap();
+    input.write_all(b"WAKE-SOURCE-WORK-HUP").unwrap();
     input.flush().unwrap();
     // Observe the buffer before Enter: closed busy admission clears it when
     // handing the submitted line back to the driver for the successor.
-    until_normalized(&reader, &mut output, wake_start, "REGRESSION-MARKER");
+    until_normalized(&reader, &mut output, wake_start, "WAKE-SOURCE-WORK-HUP");
     input.write_all(b"\r").unwrap();
     input.flush().unwrap();
     drain_until_quiet(&reader, &mut output);
     gate.release();
     until_normalized(&reader, &mut output, wake_start, "compacted session");
-    until_normalized(&reader, &mut output, wake_start, "REGRESSION-MARKER");
+    until_normalized(&reader, &mut output, wake_start, "RECOVERED-HUP");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !stub
         .generations()
         .iter()
         .skip(2)
-        .any(|request| request.to_string().contains("REGRESSION-MARKER"))
+        .any(|request| request.to_string().contains("WAKE-SOURCE-WORK-HUP"))
     {
         assert!(
             Instant::now() < deadline,
@@ -10118,10 +10116,10 @@ fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
     let delivered: Vec<_> = requests
         .iter()
         .skip(2)
-        .filter(|request| request.to_string().contains("REGRESSION-MARKER"))
+        .filter(|request| request.to_string().contains("WAKE-SOURCE-WORK-HUP"))
         .collect();
     assert_eq!(delivered.len(), 1, "wake must be delivered exactly once");
-    assert!(!delivered[0].to_string().contains("REGRESSION-MARKER"));
+    assert!(!delivered[0].to_string().contains("PRESSURE-HUP"));
     assert!(!normalized(&output).contains("more work arrived"));
 }
 
@@ -10142,13 +10140,13 @@ fn context_pressure_compaction_cancellation(interrupt: &[u8]) {
     let gate = ReleaseGate::new();
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(support::costing("REGRESSION-MARKER", 244796, 4)),
+            Reply::Sse(support::costing("PRESSURE-CANCEL-HUP", 244796, 4)),
             Reply::GatedPaced {
                 head: String::new(),
                 tail: text(checkpoint),
                 gate: gate.clone(),
             },
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("UNWANTED-SUCCESSOR-HUP")),
         ],
         context_length: Some(272000),
         ..Plan::default()
@@ -10172,7 +10170,7 @@ fn context_pressure_compaction_cancellation(interrupt: &[u8]) {
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"finish this task\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER");
+    until_normalized(&reader, &mut output, start, "PRESSURE-CANCEL-HUP");
     let deadline = Instant::now() + Duration::from_secs(10);
     while stub.generations().len() < 2 {
         assert!(Instant::now() < deadline, "checkpoint did not start");
@@ -10212,12 +10210,12 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
         let action = if clear { "clear" } else { "compact" };
         let mut completions = vec![Reply::Sse(support::tool_call(
             "context-transition", "context",
-            &serde_json::json!({"action":action,"reason":"verified first sub-task","handoff":"REGRESSION-MARKER"}).to_string(),
+            &serde_json::json!({"action":action,"reason":"verified first sub-task","handoff":"NEXT-SUBTASK-MYE"}).to_string(),
         ))];
         if !clear {
             completions.push(Reply::Sse(text(checkpoint)));
         }
-        completions.push(Reply::Sse(text("REGRESSION-MARKER-CONTINUED")));
+        completions.push(Reply::Sse(text("SUCCESSOR-MYE-CONTINUED")));
         // The successor keeps the independent goal check; success must still be verified.
         completions.push(Reply::Sse(text(
             r#"{"verdict":"achieved","reason":"next sub-task verified"}"#,
@@ -10249,9 +10247,9 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
         input.write_all(b"yes\r").unwrap();
         input.flush().unwrap();
         until_prompt_from(&reader, &mut output, start);
-        input.write_all(b"REGRESSION-MARKER\r").unwrap();
+        input.write_all(b"SOURCE-TRANSCRIPT-MYE\r").unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-CONTINUED");
+        until_normalized(&reader, &mut output, start, "SUCCESSOR-MYE-CONTINUED");
         // Require a fresh idle frame after the successor answer, not startup's frame.
         let completed = output.len();
         until_prompt_from(&reader, &mut output, completed);
@@ -10272,21 +10270,21 @@ fn model_context_compact_and_clear_continue_without_operator_prompt() {
         assert!(
             messages
                 .iter()
-                .all(|message| message["content"] != "REGRESSION-MARKER"),
+                .all(|message| message["content"] != "SOURCE-TRANSCRIPT-MYE"),
             "source prompt must not be replayed as a new request: {successor}"
         );
         if clear {
-            assert!(!successor.contains("REGRESSION-MARKER"), "{successor}");
+            assert!(!successor.contains("SOURCE-TRANSCRIPT-MYE"), "{successor}");
             assert!(checkpoints[0].get("latest_user_request").is_none());
         } else {
             assert_eq!(
-                checkpoints[0]["latest_user_request"], "REGRESSION-MARKER",
+                checkpoints[0]["latest_user_request"], "SOURCE-TRANSCRIPT-MYE",
                 "{successor}"
             );
         }
         assert!(
             successor.contains(if clear {
-                "REGRESSION-MARKER"
+                "NEXT-SUBTASK-MYE"
             } else {
                 "Continue the next sub-task."
             }),

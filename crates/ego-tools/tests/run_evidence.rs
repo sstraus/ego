@@ -1,4 +1,4 @@
-//! contracts for regression case: lease-held authoritative evidence.
+//! contracts for lease-held authoritative evidence.
 
 use ego_core::config::{ActiveProfileProvenance, ModelRef, OriginSet, Source};
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
@@ -1047,14 +1047,14 @@ fn history_search_skips_and_reports_unsupported_capabilities_session() {
     let store = std::sync::Arc::new(JsonlStore::new(root.path(), "/workspace", Box::new(OsIo)));
     let mut prompt = generation_started(AttemptRef::first(GenerationId::new()));
     prompt.kind = EventKind::UserPrompt {
-        text: "history-readable".to_owned(),
+        text: "history-readable-KDM".to_owned(),
         images: Vec::new(),
         audio: Vec::new(),
         queued_prompt: None,
     };
     store.append(&readable, &prompt).unwrap();
     for _ in 0..2 {
-        let output = store.history().search("history-readable").unwrap();
+        let output = store.history().search("history-readable-KDM").unwrap();
         assert!(output.len() <= 1024);
         let result: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(result["hits"][0]["id"], readable.to_string());

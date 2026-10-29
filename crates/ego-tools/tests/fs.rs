@@ -457,9 +457,7 @@ mod walking {
 
     #[test]
     fn scan_rooted_at_a_file_reports_not_a_directory() {
-        // The variant `docs/architecture.md`
-        // §6 removed for having no caller. This is the caller it said it
-        // would arrive with.
+        // Exercise the filesystem result variant through its real caller.
         let tree = Tree::new();
         let at = tree.file("main.rs", "fn main() {}");
         let os = OsFs;
@@ -862,18 +860,10 @@ fn set_mode(at: &Path, mode: u32) {
     fs::set_permissions(at, fs::Permissions::from_mode(mode)).expect("the mode is set");
 }
 
-/// The two behaviours the grammar ADR reasoned about and did not measure.
-///
-/// `docs/architecture.md` §5
-/// decides against case folding and against Unicode normalisation, and names
-/// both residuals as *unverified on this machine* — believed to fail closed,
-/// with one experiment each. These are those experiments. They belong here
-/// and not beside the grammar, because what is in question is not what the
-/// matcher does with a path but what `canonicalize` hands it in the first
-/// place, and only a real volume can answer that.
-///
-/// If either ever fails *open* — a pattern matching a path it does not spell
-/// — the ADR is wrong and needs amending rather than the code.
+/// Case and Unicode canonicalization behavior on real filesystems.
+/// Case folding and Unicode normalization are not grammar features. Real
+/// filesystem canonicalization may differ from pure matcher behavior; these
+/// checks must detect any result that widens permission unexpectedly.
 mod rule_matching_against_a_real_volume {
     use super::*;
     use ego_core::permit::rule::Rule;

@@ -1,8 +1,6 @@
-//! How an invocation ends: the exit codes of `CLI.md` §4.3 and the
-//! `exit_reason` words of §4.1, and how a turn's ending becomes a run's.
+//! Run termination preserves refusal authority.
 //!
-//! See `docs/architecture.md` and
-//! `plans/m0b-vertical-slice.md` Step 13.6.
+
 //!
 //! These are contract tests, not implementation tests: every assertion here
 //! quotes a ratified line of `CLI.md`. If one fails, either the mapping
@@ -39,10 +37,9 @@ fn every_exit_reason() -> Vec<ExitReason> {
 
 #[test]
 fn the_exit_codes_are_the_table_cli_md_publishes() {
-    // §4.3, verbatim:
-    //   0 done   1 task failed   2 usage error   3 permission needed
-    //   4 provider/network   5 budget or turn limit   124 timeout
-    //   130 SIGINT   143 SIGTERM
+    // Process outcome codes: 0 success, 1 task failure, 2 usage error, 3 permission or
+    // question, 4 provider/network, 5 budget or turn limit, 6 pause, 124 timeout, 130 SIGINT,
+    // 143 SIGTERM.
     let table: Vec<(RunTermination, u8)> = vec![
         (RunTermination::Done, 0),
         (RunTermination::TaskFailed, 1),
@@ -124,10 +121,8 @@ fn only_a_finished_run_exits_zero() {
 
 #[test]
 fn our_own_defect_never_tells_a_script_to_retry() {
-    // §4.3 separates 4 from 1 so a caller can retry the first and not the
-    // second. Fusing them — which is what a single `Error` variant did before
-    // this taxonomy — advertises "retry me" for our own bug, and a retry loop
-    // takes that literally.
+    // Keep provider failure distinct from task failure so retry loops do not treat an internal
+    // task defect as a transient network problem.
     assert_eq!(
         RunTermination::Failed {
             message: "a defect".to_string()
@@ -146,9 +141,7 @@ fn our_own_defect_never_tells_a_script_to_retry() {
 
 #[test]
 fn the_exit_reason_words_are_the_ones_cli_md_publishes() {
-    // §4.1: "done|budget|max_turns|timeout|permission|error". Six words, and
-    // all six are reachable — a word in a ratified contract that nothing can
-    // emit is a contract we only claim to meet.
+    // Every declared completion reason must have a reachable termination mapping.
     let words: Vec<(RunTermination, &str)> = vec![
         (RunTermination::Done, "done"),
         (RunTermination::BudgetExceeded, "budget"),
@@ -209,10 +202,7 @@ fn the_exit_reason_words_are_the_ones_cli_md_publishes() {
 
 #[test]
 fn the_two_limits_share_a_code_and_not_a_word() {
-    // The one place §4.1 and §4.3 cut differently, and the reason they are
-    // two functions rather than one: §4.3 gives both limits exit 5, §4.1
-    // gives them separate words. A caller that needs the distinction has
-    // somewhere to read it.
+    // Budget and turn limits share exit 5 but retain distinct completion reasons.
     assert_eq!(
         RunTermination::BudgetExceeded.exit_code(),
         RunTermination::MaxTurns.exit_code()
@@ -235,9 +225,8 @@ fn a_completed_turn_does_not_end_the_run() {
 
 #[test]
 fn every_other_way_a_turn_can_end_ends_the_run() {
-    // The gap this taxonomy closed: `ExitReason` had four variants and §4.3
-    // needed nine outcomes, so several endings had no run-level answer at
-    // all. This asserts there is no such hole left.
+    // Every termination has a run-level outcome; do not leave gaps between turn endings and
+    // process status.
     for reason in every_exit_reason() {
         if reason == ExitReason::Completed {
             continue;
@@ -252,9 +241,8 @@ fn every_other_way_a_turn_can_end_ends_the_run() {
 
 #[test]
 fn a_refused_call_carries_its_subject_all_the_way_to_exit_three() {
-    // §4.4: an unresolvable permission exits 3 "with the denied action in the
-    // JSON result". A 3 with no subject tells a script nothing it can act on,
-    // so the action travels with the outcome rather than being looked up.
+    // An unresolved permission exits 3 with its action in completion data so scripts can
+    // identify what requires admission.
     let termination = RunTermination::after_turn(
         ExitReason::PermissionRequired,
         Some(Denial {
@@ -277,12 +265,8 @@ fn a_refused_call_carries_its_subject_all_the_way_to_exit_three() {
 
 /// The fifth case, and the whole reason `by` exists.
 ///
-/// `CLI.md` §4.4's three opt-ins "act on different axes": the boundary wants
-/// `--sandbox` and explicitly not `--yolo`, a question nobody answered wants
-/// `--allow`, and a deny rule wants none of them — it wants the config layer
-/// edited. Every one of those is exit 3 and every one is the word
-/// `permission`, so if the two endings below were equal the distinction would
-/// exist nowhere a caller can read it.
+/// Every one of those is exit 3 and every one is the word `permission`, so if the two
+/// endings below were equal the distinction would exist nowhere a caller can read it.
 #[test]
 fn a_refusal_somebody_made_is_not_a_question_nobody_answered() {
     let refused = RunTermination::after_turn(
@@ -310,10 +294,8 @@ fn a_refusal_somebody_made_is_not_a_question_nobody_answered() {
 
 /// A deny rule's authority reaches exit 3 with the layer still on it.
 ///
-/// The one operational question an attribution answers is *can I change
-/// this*, and `2026-08-21-a-deny-that-names-who-can-lift-it.md` is the reason
-/// `RuleAuthority` carries `from` at all. A run that ends at exit 3 has no
-/// second invocation in which to show it, so it travels here or nowhere.
+/// `RuleAuthority` retains `from` so a refusal can tell the operator which
+/// source can change it before the run exits.
 #[test]
 fn a_rule_that_denied_reaches_exit_three_with_the_layer_that_owns_it() {
     let rule = Rule::load("read(**)").expect("a rule this build enforces");
@@ -350,12 +332,8 @@ fn a_rule_that_denied_reaches_exit_three_with_the_layer_that_owns_it() {
     }
 }
 
-/// The mode is its own authority and not a rule.
-///
-/// `plan` refuses every mutating op at §6 step 2, above the allow list, so
-/// there is no rule to grep for and no `ego rules revoke` to run. Recording
-/// `Rules { rules: [] }` instead would send an operator looking for a line
-/// nobody wrote.
+/// Plan's mutation refusal belongs to mode authority, above allow rules. Do not invent a rule
+/// ID or send operators searching for a rule nobody wrote.
 #[test]
 fn a_mode_that_forbade_it_names_the_mode_and_no_rule() {
     let termination = RunTermination::after_turn(
@@ -416,9 +394,8 @@ fn the_three_cancellation_causes_exit_differently() {
 
 #[test]
 fn a_deadline_is_a_timeout_and_not_an_error() {
-    // §4.1 spells a deadline `timeout`, distinctly from `error`: a scheduled
-    // job that reads `error` cannot tell "the model was slow" from "the
-    // provider is down", and those want different responses.
+    // A deadline is `timeout`, not generic `error`, so scheduled callers can distinguish it
+    // from provider failure.
     let termination = RunTermination::after_turn(ExitReason::Cancelled(CancelCause::Timeout), None)
         .expect("a cancelled turn ends the run");
     assert_eq!(termination.exit_reason(), "timeout");

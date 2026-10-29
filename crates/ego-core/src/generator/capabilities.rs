@@ -1,6 +1,5 @@
-//! `ModelCapabilities`: the versioned record ARCH §3.1 and I5
-//! (`docs/architecture.md`) require before treating a shared HTTP shape
-//! as equivalent conversation semantics.
+//! `ModelCapabilities`: versioned facts required before treating a shared
+//! HTTP shape as equivalent conversation semantics.
 //!
 //! A provider row is configuration, not proof two models behave the same in
 //! conversation. `ModelCapabilities` is resolved per generation and checked
@@ -292,8 +291,7 @@ pub enum CancelSemantics {
     Immediate,
 }
 
-/// Prompt/response cache retention, the cache retention setting (`docs/architecture.md`
-/// §2).
+/// Prompt/response cache retention settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheRetention {
@@ -304,16 +302,9 @@ pub enum CacheRetention {
 
 /// Which [`ThinkingLevel`]s a model accepts on the wire.
 ///
-/// Three states rather than an `Option`, decided in
-/// `docs/architecture.md` §4 after Codex refused
-/// the `Option` this repository first proposed. `None` would have had to mean
-/// "nothing stated, so send anything", and an absent field read as a
-/// permissive fact is the mistake
-/// `2026-08-21-what-a-model-resolves-to.md` §4 already refused twice: it is
-/// `/api/show`'s architecture context read as a served ceiling, and `:cloud`'s
-/// `auth: None` read as "not billed". A model that states nothing about
-/// `reasoning_effort` is not a model that accepts every level; it is a model
-/// nobody asked.
+/// Unknown reasoning support is not unrestricted support. Three states
+/// keep unstated capability knowledge distinct from an explicit supported set
+/// or unrestricted acceptance; absent facts must not widen a request.
 ///
 /// The distinction is load-bearing because the parameter is not advisory.
 /// `reasoning_effort` is always emitted — omitting it selects the schema's
@@ -354,11 +345,9 @@ pub enum Transport {
     WebSocket,
 }
 
-/// A versioned snapshot of what a model can do in conversation, resolved per
-/// generation and persisted in the run manifest (ARCH §3.1, I5). Every field
-/// here is one the I5 gap explicitly names: tool/schema limits, parallel
-/// tool calls, reasoning-state carryover, context/output ceilings, cancel
-/// semantics, cache behaviour, transport.
+/// Versioned conversation capabilities resolved per generation and persisted in the manifest:
+/// tool/schema limits, concurrency, reasoning carryover, context/output bounds, cancellation,
+/// cache behavior, and transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelCapabilities {
     /// Bumped whenever the field set or its meaning changes, so a persisted
@@ -932,18 +921,9 @@ impl ModelCapabilities {
         gaps
     }
 
-    /// Every way falling `req` back from a model with these capabilities to a
-    /// model with `target`'s would break — empty means the fallback is safe.
-    /// Never attempt a fallback without checking this first (ARCH §3.1): an
-    /// incompatible switch must be detected and reported, not silently
-    /// attempted.
-    ///
-    /// This is [`request_gaps`](Self::request_gaps) asked of the target, and
-    /// nothing else. The question "does `req` fit `target`" does not depend on
-    /// where `req` was going to go before — which is why `self` is unused, and
-    /// why the two are one function rather than two that can drift apart. The
-    /// name is kept because the *reason to ask* differs, and a call site that
-    /// says `fallback_gaps` is saying which of the two it means.
+    /// Report every request incompatibility before fallback. This delegates to the target's
+    /// request-gap check; compatibility depends on the request and target, not the previously
+    /// selected model.
     pub fn fallback_gaps(
         &self,
         target: &ModelCapabilities,

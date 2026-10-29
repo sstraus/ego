@@ -1,4 +1,4 @@
-//! contract for typed absence in the session generation controls (regression case).
+//! contract for typed absence in the session generation controls.
 //!
 //! An unconfigured model and an unresolved reasoning default are different
 //! from a concrete value. `chosen` is a separate operator-intent field: a

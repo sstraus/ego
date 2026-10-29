@@ -1,44 +1,11 @@
-//! Gemini's Interactions API: a conversation is a list of steps.
+//! Gemini Interactions represents conversation steps rather than role messages. Completion uses
+//! interaction status; `thinking_level` has no `off`.
 //!
-//! `docs/guides/providers.md` §3 chose this over the legacy
-//! `models:generateContent`, and §3.8 resolved the shape ego actually needs.
-//! The three facts that make this a mapping of its own rather than a variant
-//! of another:
+//! Every request states `store: false` and omits previous interaction identity because ego
+//! rebuilds history from its own log.
 //!
-//! - **A conversation is steps, not roles.** A user turn is a `user_input`
-//!   step and a prior answer a `model_output` step; a tool call and its result
-//!   are steps beside them rather than blocks inside a turn. There is no
-//!   `role` field anywhere in the request.
-//! - **There is no finish reason in this protocol at all.** The terminal
-//!   signal is the interaction's `status`, which is why [`ending`] reads a
-//!   status and the family's `consume_finish_reason` has no counterpart here.
-//! - **`thinking_level` has no `off`.** The floor is `minimal`, and omitting
-//!   the field selects a per-model default that thinks — so `Off` is refused
-//!   rather than translated into a request that bills for reasoning the caller
-//!   switched off.
-//!
-//! # Stateless, and it has to say so
-//!
-//! `store` defaults to **true** on this API and multi-turn is documented as
-//! `previous_interaction_id`. ego is stateless by construction: it rebuilds
-//! the whole history from its own log every turn. Worse, the stateful mode is
-//! *inexpressible* at this seam — [`WireFormat::build_request`] is a pure
-//! function of the request, and no `AiEvent` could carry an interaction id
-//! back out of [`decode`]. So every request states `store: false` and names no
-//! previous interaction, and that is a decision recorded rather than a default
-//! relied upon.
-//!
-//! # Usage is four summands, not a partition
-//!
-//! `total_thought_tokens` is a **separate summand** beside
-//! `total_output_tokens`, not a breakdown of it, and `total_tool_use_tokens`
-//! belongs to the input side. §3.3 checks the arithmetic against Google's own
-//! example. A decoder that treated thought tokens as a subset would
-//! under-report every reasoning turn.
-//!
-//! `step.stop` may restate the running total beside its per-step figure, and
-//! restating is not spending: usage is reported once, from the provider's last
-//! word.
+//! Thought tokens are a separate summand beside output tokens; tool-use tokens belong to input.
+//! Restated step totals are not new spending: emit usage from the provider's final report.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;

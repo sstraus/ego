@@ -1,4 +1,4 @@
-//! Listener-owned connection limits and shutdown contracts (regression case).
+//! Listener-owned connection limits and shutdown contracts.
 
 use std::time::Duration;
 

@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn long_prompt_echo_is_collapsed_in_the_live_terminal() {
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("REGRESSION-MARKER-ANSWER"))],
+        completions: vec![Reply::Sse(text("PROMPT-RFK-ANSWER"))],
         ..Plan::default()
     });
     let ego = Ego::against(&stub).conversing().args([
@@ -33,7 +33,7 @@ fn long_prompt_echo_is_collapsed_in_the_live_terminal() {
     input.write_all(prompt.as_bytes()).unwrap();
     input.write_all(b"\x1b[201~\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-ANSWER");
+    until_normalized(&reader, &mut output, start, "PROMPT-RFK-ANSWER");
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
     let collapsed = screen_rows(&output, 40, 120).join("\n");

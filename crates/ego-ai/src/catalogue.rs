@@ -1,8 +1,7 @@
 //! What `--model P/M` resolves to: an endpoint, what the model can do, and
 //! what it costs.
 //!
-//! See `docs/guides/providers.md`,
-//! `ARCHITECTURE.md` §3.1 and `CLI.md`'s `--model` contract.
+//! See the public provider guide at `docs/guides/providers.md`.
 //!
 //! Two sources, and the split is the whole design. A **hosted** model's
 //! pricing and capabilities are *supplied* — this repository writes down no
@@ -71,10 +70,8 @@ pub const OLLAMA: &str = "ollama";
 /// to nothing anyone can go and check. This string says exactly what was
 /// asserted and under what condition, which is checkable.
 ///
-/// A [`MeteringRevision`] and deliberately not a `PricingRevision`: there is
-/// no price list here to attribute anything to, and the all-zero quote this
-/// used to be spelled through claimed there was
-/// (`docs/guides/providers.md` §4).
+/// A [`MeteringRevision`], not a `PricingRevision`: no price list is involved.
+/// An all-zero quote would incorrectly claim a per-token price exists.
 pub const LOCAL_UNMETERED: &str = "ego/builtin/ollama-local-unmetered/v1";
 
 /// Model capabilities, billing arrangement and optional actual-usage rates
@@ -90,25 +87,17 @@ pub struct ResolvedModel {
     pub metering: Metering,
     /// What this build knows the row costs, which may be nothing.
     ///
-    /// Split from `metering` along the line
-    /// `docs/guides/providers.md` §3 draws: the
-    /// metering is a fact about the billing arrangement, the rates are a fact
-    /// about our knowledge, and a run that configured no ceiling looks no
-    /// rates up at all.
+    /// Metering describes the billing arrangement; rates describe our knowledge.
+    /// A run with no configured ceiling does not look rates up.
     pub rates: Option<ResolvedRates>,
 }
 
 /// A hosted model's facts, which nobody in this repository is in a position
 /// to know.
 ///
-/// **Capabilities stay required and rates do not**, and the asymmetry is the
-/// ruling's, not an oversight. operator ruled about prices: a run that asks for
-/// no ceiling needs none, so demanding one refuses a working run to buy
-/// nothing. The argument for supplied *capabilities* was always a separate
-/// one and survives intact — a context window written from memory is the same
-/// unverifiable claim a price is, and it feeds far more than the budget:
-/// `CLI.md` §4.1 publishes context occupancy from it, compaction triggers on
-/// it, and `fallback_gaps` compares it.
+/// Capabilities are required; rates are optional when no configured ceiling needs them.
+/// Context windows also drive occupancy, compaction and fallback compatibility, so
+/// guessing them would affect more than budgets.
 #[derive(Debug, Clone)]
 pub struct HostedModel {
     pub capabilities: ModelCapabilities,
@@ -185,15 +174,9 @@ impl<'de> Deserialize<'de> for ModelSlug {
 /// twice: `Builtin < System < User`, so a merge that keeps the greater
 /// authority per slug is the merge the layering describes.
 ///
-/// [`Builtin`](Self::Builtin) is not a configuration layer, which is why the
-/// name of this type is now a little wide for it. It is the catalogue
-/// compiled into the binary, and it exists because
-/// `docs/guides/providers.md`
-/// amended the ban on built-in facts: an installation with an API key and no
-/// files could not run a hosted model at all, and "write a `models.toml`
-/// first" is not an out-of-the-box path. It stays *below* both files, so
-/// nothing it says can override what an operator states — which is the
-/// property that made the amendment safe rather than a reversal.
+/// [`Builtin`](Self::Builtin) is the compiled catalogue, below system and user
+/// files. It permits initial hosted use without a model file and never
+/// overrides an operator-supplied model definition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SuppliedAuthority {
@@ -846,21 +829,17 @@ pub enum ResolveError {
     /// The mapping exists and works; the evidence that it works *against the
     /// provider* does not.
     ///
-    /// Deliberately not [`ProviderMappingUnavailable`], which renders "mapping
-    /// is not implemented". For a row waiting on conformance check five that
-    /// sentence is false in the one direction that matters: it sends an
-    /// operator to look for missing code, when what is missing is a sanitized
-    /// live recording only their own key can produce
-    /// (`docs/guides/providers.md`).
+    /// Unlike [`ProviderMappingUnavailable`], this names missing live evidence
+    /// for an implemented mapping, not missing code.
+    ///
+    /// [`ProviderMappingUnavailable`]: ResolveError::ProviderMappingUnavailable
     ///
     /// [`ProviderMappingUnavailable`]: ResolveError::ProviderMappingUnavailable
     LivePromotionPending { provider: String, mapping: String },
     /// A hosted model with no supplied **capabilities**.
     ///
-    /// Narrowed from "no pricing or capabilities" by
-    /// `docs/guides/providers.md` §3: pricing is no
-    /// longer required, and "cannot be bounded" is no longer the reason,
-    /// because a run that asked for no ceiling does not need bounding.
+    /// Pricing is not required when no monetary ceiling needs it; hosted
+    /// capabilities remain required.
     HostedModelNotConfigured { slug: String },
     /// A slug the provider has switched off.
     ///
@@ -1022,12 +1001,9 @@ pub fn unmetered() -> Metering {
 /// A row whose access is paid for by a flat fee, under the policy `revision`
 /// names.
 ///
-/// The revision is supplied because the policy is: this repository knows of
-/// no subscription it could name, and inventing a label for someone else's
-/// billing arrangement would be the same fabrication the all-zero quote was.
-/// An operator who pays a flat fee for a row supplies this the way they
-/// supply a [`HostedModel`] — the "explicitly operator-supplied, pinned
-/// source" slot of `docs/guides/providers.md` §7.
+/// The operator supplies the policy revision for the flat-fee arrangement,
+/// just as they supply a [`HostedModel`]. This code does not invent billing
+/// policy labels for someone else's subscription.
 ///
 /// This policy produces zero real per-token spend. A *monetary* `--budget`
 /// cannot constrain that row's own charges and says so through
@@ -1043,12 +1019,9 @@ pub fn subscription(revision: &str) -> Metering {
 
 /// A row metered in currency and settled from whatever table priced it.
 ///
-/// The ordinary hosted case. It takes no quote: under
-/// `docs/guides/providers.md` §3 the rates travel
-/// beside the metering rather than inside it, so "this row is billed in
-/// money" and "we hold rates for it" stay two separate assertions. A row with
-/// no rates is still this — the provider still charges — and settles as
-/// `UnknownCost::NoPricingQuote` rather than as a fabricated zero.
+/// Rates travel beside metering, not inside it. A row can be billed in money
+/// without known rates; it then settles as `UnknownCost::NoPricingQuote`,
+/// not as a fabricated zero.
 pub fn tabulated() -> Metering {
     Metering::Currency {
         settlement: SettlementSource::Quote,
@@ -1064,12 +1037,8 @@ pub(crate) fn metering_kind(metering: &Metering) -> MeteringKind {
     }
 }
 
-/// Rates an operator wrote down, the first of §5's three sources.
-///
-/// Named rather than constructed inline so the provenance and the quote are
-/// minted together: a `ResolvedRates` whose `source` disagreed with where its
-/// quote actually came from would make `MeteringSelected` publish a false
-/// statement about the strength of a guarantee.
+/// Operator-supplied rates, with provenance and quote constructed together so the metering
+/// event cannot attribute the figures to another source.
 pub fn operator_rates(quote: PricingQuote) -> ResolvedRates {
     ResolvedRates {
         quote,
@@ -1077,20 +1046,9 @@ pub fn operator_rates(quote: PricingQuote) -> ResolvedRates {
     }
 }
 
-/// Rates read out of the cached third-party table, the last of §5's three.
-///
-/// Beside [`operator_rates`] and minted the same way, for the same reason: the
-/// provenance and the figures are built together so they cannot describe two
-/// different sources.
-///
-/// This one has a second thing that must not drift.
-/// [`RateSource::Table`](ego_core::cost::RateSource::Table) carries the table
-/// revision — §10 puts it there so an operator can see *which* table their
-/// ceiling rests on — and the quote carries one too. They are taken from the
-/// quote rather than passed in separately, exactly as
-/// [`provider_reported`] takes its revision from the decoder: a signature that
-/// accepted both would be a signature that admits a caller pairing one table's
-/// prices with another table's name.
+/// Cached third-party rates, with provenance and figures constructed together. The table
+/// revision comes from the quote, preventing one table's prices from being paired with another
+/// table's identity.
 pub fn table_rates(quote: PricingQuote) -> ResolvedRates {
     ResolvedRates {
         source: RateSource::Table {
@@ -1154,15 +1112,10 @@ pub(crate) struct RetainedOpenRouterInventory {
 
 /// The refusal a row owes when it has not cleared the live-promotion gate.
 ///
-/// One function with three call sites — [`Catalogue::resolve`],
-/// [`Catalogue::static_request_profile`], and the CLI's listing projection —
-/// because "may this row be offered" must have exactly one answer everywhere
-/// a model is offered. `2026-09-03-public-provider-wires-require-live-promotion.md`
-/// assigns promotion to the catalogue ("The shared catalogue owns promotion
-/// and selectability from recorded evidence"), and a gate applied only where a
-/// request is finally built would let `ego models` list the row as available
-/// and a picker offer it, so the refusal would arrive after the choice instead
-/// of instead of it.
+/// [`Catalogue::resolve`], [`Catalogue::static_request_profile`] and the CLI
+/// listing share this gate so a row's selectability has one answer. Refusing
+/// only at request construction would let listings and pickers offer a row
+/// that cannot be used.
 ///
 /// It runs **before any credential is read**, on both paths. A row that cannot
 /// be selected at all should not cause a keychain prompt or a
@@ -1262,26 +1215,17 @@ impl Catalogue {
 
     /// Resolve any slug, by asking whatever its row says resolves it.
     ///
-    /// The one entry point, and the reason there is one:
-    /// `crates/ego-cli/src/model.rs` used to ask
-    /// `if slug.provider == catalogue::OLLAMA` and call one of two functions,
-    /// which is a caller that must know which providers are daemons in order
-    /// to resolve any of them. The row knows
-    /// (`docs/guides/providers.md`
-    /// §4), so the branch is gone and the second daemon costs a constructor
-    /// rather than an arm in another crate.
+    /// The provider row selects its resolver. Callers do not branch on provider
+    /// identity to decide whether resolution needs daemon discovery.
     ///
     /// The transport and the credential are taken by every call, including
     /// the ones that use neither. Making either optional would put the branch
     /// back — the caller would decide whether this resolution is the kind that
     /// needs a network or a key, which is the thing it must not know.
     ///
-    /// The credential is the one this run already resolved, passed rather than
-    /// read again: a resolver whose endpoint authenticates (xAI publishes
-    /// prices per key) must send the same credential the generation will, and
-    /// a second read of the environment could disagree with the first
-    /// (`docs/guides/providers.md`
-    /// §6).
+    /// Use the credential already resolved for this run. An authenticated rate
+    /// endpoint must receive the same credential as generation; a second
+    /// environment read could disagree with the first.
     pub async fn resolve(
         &self,
         slug: &ModelSlug,
@@ -1389,15 +1333,10 @@ impl Catalogue {
 /// Derived rather than configured twice: two URLs that must agree about which
 /// daemon they mean is two chances to point at different ones.
 ///
-/// **Not general, and the signature flatters it.** `set_path` is absolute, so
-/// this discards any prefix the base carries — correct for Ollama, whose
-/// control plane really does live at the host's root (`/api/tags`, `/api/ps`)
-/// while its openai-compatible surface lives under `/v1/`, and wrong for any
-/// provider served behind a path prefix. Ollama is the only caller and the
-/// only daemon with a control plane at all; a second one is the point at which
-/// this stops being a function and becomes the daemon resolver's business
-/// (`docs/guides/providers.md` §2
-/// names this as the one casualty of the base/path split).
+/// `set_path` discards base prefixes. This is correct for Ollama's root-level
+/// control plane (`/api/tags`, `/api/ps`) beside its `/v1/` compatible surface,
+/// not for a general provider behind a path prefix. Keep this helper scoped
+/// to that daemon's resolver.
 pub fn control_plane(row: &ProviderRow, path: &str) -> Result<Url, ResolveError> {
     let mut url = row.base().clone();
     url.set_path(path);

@@ -1,4 +1,4 @@
-//! contract for regression case: `ego usage` reads as a table, not a dump.
+//! `ego usage` reads as a table, not a dump.
 //!
 //! The versioned report is the machine contract and does not move. What moves
 //! is the human view: five zero role lines per session, each a `key=value`

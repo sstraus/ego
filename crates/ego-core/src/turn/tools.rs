@@ -1,10 +1,8 @@
 //! The tool half of the loop's dependencies: a registry and the raw
 //! filesystem a policy grant is exercised against.
 //!
-//! Kept as three stages rather than one `run(name, args)` future, for the
-//! reason `docs/architecture.md` gives for rejecting a
-//! `ToolRunner` port: M1 has to append a permission request *between*
-//! authorising and executing, and a single future has no such between.
+//! Keep preparation, authorization and execution separate so the turn can
+//! durably append a permission question between authorization and execution.
 
 use serde_json::Value;
 
@@ -810,12 +808,8 @@ impl<'a> Tools<'a> {
 
     /// Stage two: ask policy what this call may do.
     ///
-    /// Returns the typed [`Classification`], not prose. It used to flatten to
-    /// a `String`, which is the same defect as an `HttpError` flattened one
-    /// layer down: the value already names what it refused, and discarding the
-    /// type at the seam left the loop unable to tell "policy said no" from
-    /// "the tool broke". Those are different outcomes now — see `CLI.md` §4.4
-    /// and `docs/architecture.md`.
+    /// Return typed [`Classification`] so callers can distinguish policy
+    /// refusal from tool failure instead of parsing flattened prose.
     ///
     /// Three outcomes rather than two, and the third is the one the loop must
     /// not collapse: a call nobody in this run can answer is not a call that

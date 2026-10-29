@@ -1,4 +1,4 @@
-//! regression case: every fork entry point carries the source title and active goal.
+//! every fork entry point carries the source title and active goal.
 
 mod support;
 

@@ -1,9 +1,7 @@
-//! contract for regression case: the status row states the workspace posture.
+//! The status row states the workspace posture.
 //!
-//! A session that starts untrusted in silence — because nothing in the
-//! workspace was worth asking about, or because the answer was remembered —
-//! needs somewhere to say so. See
-//! `docs/architecture.md`.
+//! Sessions that begin untrusted without a prompt still need a visible
+//! workspace trust status.
 
 use ego_cli::repl::status::{
     SeatFacts, SelectionFacts, StatusLine, StatusSegmentName, SurfaceSnapshot,
@@ -55,7 +53,7 @@ fn the_row_names_the_posture_it_is_rendered_from() {
 #[test]
 fn a_trusted_posture_is_dropped_before_an_untrusted_one() {
     // Trusted is the uninteresting answer and never takes a cell; untrusted
-    // outlives every optional segment except the context share (regression case,
+    // outlives every optional segment except the context share (
     // see `status_readable.rs`), because a posture nobody can see is a
     // posture nobody checks.
     let names = [

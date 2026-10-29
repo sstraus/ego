@@ -1,10 +1,8 @@
 //! Tail repair and the crash kill-point matrix: what `JsonlStore::recover`
 //! must salvage from a session directory a crash left half-written.
 //!
-//! See `plans/m0a-contracts.md` Step 6 and `ARCHITECTURE.md` §5. This is the
-//! milestone's **storage gate**: if JSONL cannot survive this matrix, the
-//! plan's standing instruction is to flip to SQLite behind the same
-//! `SessionStore` trait.
+//! Inject damaged bytes into real files to exercise crash recovery rather than relying on
+//! a fake's model of partial writes.
 //!
 //! ## Why the faults are injected with `std::fs`, not a `FailingFs` fake
 //!
@@ -659,13 +657,9 @@ mod faults {
         // Hardware-bound, so on a slower disk or a shared runner it is
         // several times worse without testing anything more.
         //
-        // Durability is not lost from the file, only from this test: the
-        // twelve kill-point tests above stay on `OsIo` and are where the
-        // crash contract of `ARCHITECTURE.md` §5 is actually asserted. And
-        // `NonDurableOsIo` is `OsIo` with the barrier elided and nothing
-        // else changed — same tmp-write-then-`rename`, same `set_len` — so
-        // the sweep still meets real filesystem semantics rather than a
-        // fake's idea of them.
+        // The byte-cut sweep uses `NonDurableOsIo`: real rename and truncate semantics
+        // without barriers. It checks readable repaired bytes, not power-loss durability;
+        // dedicated durable cases retain barriers.
         let store = JsonlStore::new(dir.path(), "/ws", Box::new(NonDurableOsIo));
 
         for cut in 0..=full.len() {

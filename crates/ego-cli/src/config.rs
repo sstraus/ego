@@ -1,13 +1,5 @@
-//! Where the config layers of `CLI.md` §7 live, and how the command line
-//! becomes one of them.
-//!
-//! Only the *locations* are here. Parsing is `ConfigLayer::parse` and
-//! precedence is `config::resolve`, both pure and both in `ego-core`; this
-//! module knows which files to look in and what `EGO_HOME` means, which is
-//! process knowledge and belongs to the process.
-//!
-//! Invalid config is never skipped (§4.5): an unknown key is a hard error
-//! from the layer it was written in, with the key and the source named.
+//! Process-owned configuration locations and flag conversion. Core owns parsing and precedence.
+//! Invalid configuration is a hard error naming the key and source, never a skipped layer.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -43,7 +35,7 @@ const SYSTEM_CONFIG: &str = "/etc/ego/config.toml";
 /// that file there deliberately, so saying which one is broken is the help,
 /// not a leak.
 pub(crate) const SYSTEM_CONFIG_DIR: &str = "/etc/ego";
-/// Overrides `~/.ego` for the user layer (`CLI.md` §7).
+/// Override the default `~/.ego` user configuration location.
 const EGO_HOME: &str = "EGO_HOME";
 /// Environment overrides, between the flags and the project layers.
 const ENV_MODEL: &str = "EGO_MODEL";
@@ -224,9 +216,8 @@ async fn execute_inner(
                     out,
                 )?;
             } else if values.is_empty() {
-                // The ADR fixes an empty text `ls` as empty stdout, so the
-                // explanation goes to the diagnostic channel rather than
-                // becoming a row no reader of this format expects.
+                // An empty text listing has empty stdout. Explain it on stderr instead
+                // of adding a row that breaks the listing schema.
                 out.note(&empty_listing(
                     "no user configuration values are set",
                     "ego config set",
@@ -831,12 +822,8 @@ pub(crate) fn mcp_management() -> Result<McpManagementConfig, UsageError> {
     })
 }
 
-/// Read one layer, or nothing if the file is not there.
-///
-/// A file that exists and cannot be *read* is an error, not an absence: an
-/// unreadable `/etc/ego/config.toml` may be the layer carrying the ceilings,
-/// and running as though an administrator had configured nothing is the
-/// failure mode §4.5 was written against.
+/// Read a layer or return absence only when it does not exist. An unreadable existing system
+/// config may carry ceilings and must not be ignored.
 fn layer(source: Source, path: &Path) -> Result<Option<Sourced<ConfigLayer>>, UsageError> {
     match std::fs::read_to_string(path) {
         Ok(text) => ConfigLayer::parse(source, &text)
@@ -1383,10 +1370,8 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     if args.bare {
         toml.push_str("bare = true\n");
     }
-    // `--budget` is the flags layer of the ceiling, not a value parsed on the
-    // side. `2026-08-21-a-run-with-no-ceiling.md` §4: an administrator's
-    // system layer is the only source of non-relaxable ceilings, and it can
-    // only clamp a figure that went through the same resolution it did.
+    // `--budget` uses ordinary flags-layer resolution. Only the system layer
+    // supplies non-relaxable ceilings, so its clamp must see that same value.
     if let Some(cap) = args.max_output_tokens {
         toml.push_str(&format!("max_output_tokens = {cap}\n"));
     }
@@ -1429,15 +1414,9 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     // so the operator reads "the command line: invalid config in flags layer:
     // …" — two names for one place, neither wrong.
     //
-    // Two people have now found this and proposed the same fix: drop one of
-    // the two. Do not, in isolation. The flags layer is the only `Source` an
-    // operator never *writes* — there is no file to open — so the two halves
-    // are not redundant to a reader who does not already know that `flags` and
-    // "the command line" are the same layer. The fix worth making is to give
-    // `Source`'s `Display` a form that reads correctly in a sentence, which
-    // changes every config diagnostic and belongs with `Source::rank` going
-    // public (`docs/architecture.md`
-    // "Consequences"), not with whichever caller noticed it.
+    // Both source name and command-line explanation are intentional: flags have
+    // no source file an operator can open. Changing that presentation belongs
+    // with the shared `Source` display contract, not one diagnostic caller.
     let layer = ConfigLayer::parse(Source::Flags, &toml)
         .map_err(|err| UsageError(format!("the command line: {err}")))?;
     if layer
@@ -1479,7 +1458,7 @@ fn selection_flags(
     toml
 }
 
-/// The active profile: `--profile` beats `EGO_PROFILE`, per §7's precedence.
+/// Select the active profile: explicit `--profile` takes precedence over `EGO_PROFILE`.
 pub(crate) fn profile(args: &Args) -> Option<SelectedProfile> {
     args.profile.clone().map(|name| SelectedProfile {
         name,
@@ -1732,21 +1711,21 @@ mod tests {
         std::fs::create_dir(&ego).expect("profile fixture config directory");
         std::fs::write(
             ego.join("config.toml"),
-            r#"[profile.regression_case]
+            r#"[profile.startup_fixture]
 model = "startup/model"
 
-[profile.regression_case]
+[profile.request_fixture]
 model = "request/model"
 "#,
         )
         .expect("profile fixture config");
 
-        let startup = run_args("regression_case");
+        let startup = run_args("startup_fixture");
         let frozen = FrozenRunConfig::capture(workspace, &startup, Trust::Trusted)
             .expect("startup config must be captured");
-        assert_eq!(frozen.profile(), Some("regression_case"));
+        assert_eq!(frozen.profile(), Some("startup_fixture"));
 
-        let request = run_args("regression_case");
+        let request = run_args("request_fixture");
         let effective = frozen
             .resolve(&request)
             .expect("request profile must resolve");
@@ -1755,7 +1734,7 @@ model = "request/model"
         let active = effective
             .active_profile
             .expect("request profile provenance must be present");
-        assert_eq!(active.name, "regression_case");
+        assert_eq!(active.name, "request_fixture");
         assert_eq!(active.selected_by, Source::Flags);
         assert!(!active.definitions.is_empty());
         assert!(active.definitions.contains(Source::Project));

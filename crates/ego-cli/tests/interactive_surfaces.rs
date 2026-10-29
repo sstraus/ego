@@ -1,7 +1,5 @@
-//! Public process-target hook capture assertion for M4 S8.
-//!
-//! Registry-owned skill routing, rescan transactions, and private catalogue
-//! view tests live beside their owners in `src/repl` and `src/skill`.
+//! Public process-target hook capture. Private routing, rescan, and catalogue-view tests live
+//! beside their owners in `src/repl` and `src/skill`.
 
 use ego_core::config::Trust;
 use ego_core::event::hook::HookLifecycle;

@@ -1,6 +1,6 @@
-//! contract for regression case MCP protocol-facing CLI composition.
+//! contract for MCP protocol-facing CLI composition.
 //!
-//! These assertions are intentionally isolated from regression case: they exercise
+//! These assertions are isolated: they exercise
 //! the Login/Reload actions and `--mcp` attachment contract directly.
 
 use std::sync::Mutex;

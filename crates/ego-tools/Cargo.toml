@@ -15,12 +15,8 @@ ego-mcp.workspace = true
 fd-lock = "4.0.4"
 futures = "0.3.34"
 getrandom = "0.3.4"
-# `0.4` and not `0.4.20`, the version `docs/architecture.md` names: a caret range
-# lets the MSRV-aware resolver pick the newest release our declared floor
-# allows, instead of a number here having to be kept level with that floor by
-# hand. It held us at `0.4.19` while the workspace declared 1.86, because
-# `0.4.20` raised its own floor to 1.88; the workspace declares 1.88 now, so
-# the same line resolves forward on its own.
+# Use a caret range so the MSRV-aware resolver selects the newest allowed
+# release without manually keeping an exact version aligned with the floor.
 globset = "0.4"
 ignore = "0.4"
 jsonschema = { version = "0.49.9", default-features = false }

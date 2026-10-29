@@ -28,7 +28,7 @@ use tokio::task::JoinSet;
 #[cfg(unix)]
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
-const ACP_TOKEN: &str = "regression case-token";
+const ACP_TOKEN: &str = "listener-test-acp-token";
 
 /// A process guard that cannot leak a resident listener when an assertion
 /// fails. The test still talks to the child through the public binary seam;
@@ -241,13 +241,13 @@ impl ConnectTo<Agent> for InitializingClient {
         Client
             .builder()
             .connect_with(agent, async move |connection| {
-                let response = connection
-                    .send_request(
-                        v1::InitializeRequest::new(ProtocolVersion::V1)
-                            .client_info(v1::Implementation::new("ego-regression case-local", "0")),
-                    )
-                    .block_task()
-                    .await?;
+                let response =
+                    connection
+                        .send_request(v1::InitializeRequest::new(ProtocolVersion::V1).client_info(
+                            v1::Implementation::new("ego-listener-test-cli-local", "0"),
+                        ))
+                        .block_task()
+                        .await?;
                 assert_eq!(response.protocol_version, ProtocolVersion::V1);
                 self.ready.notify_one();
                 Ok(())
@@ -295,7 +295,7 @@ impl ConnectTo<Agent> for SessionClient {
                 let initialized = connection
                     .send_request(
                         v1::InitializeRequest::new(ProtocolVersion::V1)
-                            .client_info(v1::Implementation::new("ego-regression case", "0")),
+                            .client_info(v1::Implementation::new("ego-listener-test-cli", "0")),
                     )
                     .block_task()
                     .await?;
@@ -338,7 +338,7 @@ async fn initialize_websocket(address: &str, client: SessionClient) -> Result<()
         .map_err(|error| Error::internal_error().data(error.to_string()))?;
     request.headers_mut().insert(
         "authorization",
-        HeaderValue::from_static("Bearer regression case-token"),
+        HeaderValue::from_static("Bearer listener-test-acp-token"),
     );
     let (websocket, response) = async_tungstenite::tokio::connect_async(request)
         .await

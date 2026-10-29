@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use support::{Ego, Plan, ReleaseGate, Reply, Stub, paced, text};
 
-const CHILD: &str = "EGO_REGRESSION_PTY_CHILD";
+const CHILD: &str = "EGO_MODAL_FINISH_PTY_CHILD";
 const TEST: &str = "run::interactive_driver::modal_finish::finished_turn_inside_model_modal_accepts_the_next_prompt";
 const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -106,7 +106,7 @@ async fn finished_turn_inside_model_modal_accepts_the_next_prompt() {
         return;
     }
 
-    let Reply::Paced { head, tail, .. } = paced("REGRESSION-MARKER-FIRST-DONE\n\n", Duration::ZERO) else {
+    let Reply::Paced { head, tail, .. } = paced("MODAL-BIJ-FIRST-DONE\n\n", Duration::ZERO) else {
         unreachable!("paced reply");
     };
     let provider_gate = ReleaseGate::new();
@@ -117,7 +117,7 @@ async fn finished_turn_inside_model_modal_accepts_the_next_prompt() {
                 tail,
                 gate: Arc::clone(&provider_gate),
             },
-            Reply::Sse(text("REGRESSION-MARKER-NEXT-ACCEPTED")),
+            Reply::Sse(text("MODAL-BIJ-NEXT-ACCEPTED")),
         ],
         ..Plan::default()
     });
@@ -201,8 +201,8 @@ async fn finished_turn_inside_model_modal_accepts_the_next_prompt() {
     provider_gate.release();
     // The answer and output barrier finish before the idle call is gated.
     wait_file(&workspace.join("697-before-idle"));
-    press(b"retained-697-draft");
-    wait("> retained-697-draft", &mut screen);
+    press(b"retained-BIJ-draft");
+    wait("> retained-BIJ-draft", &mut screen);
     press(b"\x1bp");
     wait("Select model", &mut screen);
     ego.file("697-release", "release\n");
@@ -216,7 +216,7 @@ async fn finished_turn_inside_model_modal_accepts_the_next_prompt() {
             visible
                 .lines()
                 .last()
-                .is_some_and(|row| row.trim_end() == "> retained-697-draft")
+                .is_some_and(|row| row.trim_end() == "> retained-BIJ-draft")
         },
     );
     // Do not inspect a phase label: require a clear, editable composer and a
@@ -233,8 +233,8 @@ async fn finished_turn_inside_model_modal_accepts_the_next_prompt() {
                 .is_some_and(|row| row.trim_end() == ">")
         },
     );
-    press(b"fresh-697-prompt\r");
-    wait("REGRESSION-MARKER-NEXT-ACCEPTED", &mut screen);
+    press(b"fresh-BIJ-prompt\r");
+    wait("MODAL-BIJ-NEXT-ACCEPTED", &mut screen);
     press(b"/quit\r");
     let deadline = Instant::now() + DEADLINE;
     let status = loop {
@@ -258,7 +258,7 @@ async fn finished_turn_inside_model_modal_accepts_the_next_prompt() {
     assert!(
         messages
             .iter()
-            .any(|message| message["role"] == "user" && message["content"] == "fresh-697-prompt"),
+            .any(|message| message["role"] == "user" && message["content"] == "fresh-BIJ-prompt"),
         "the cleared draft must not contaminate the next provider prompt: {messages:?}"
     );
 }

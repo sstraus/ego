@@ -642,12 +642,8 @@ pub(crate) async fn fetch(
 /// This is the same rule `oauth::BuiltInFlow::classify` applies to the login
 /// half and `RunTermination::after_turn` applies to the mid-turn half.
 ///
-/// That subscriber now exists, and the "can drop it" is no longer advice:
-/// `ego::body` is off in every filter `ego-cli` builds unless an operator names
-/// the target, so `EGO_LOG=info` — the level someone sets to watch something
-/// else entirely — does not print this.
-/// `docs/guides/providers.md`
-/// §3a.
+/// `ego::body` is disabled in CLI filters unless the operator explicitly names
+/// that target, so `EGO_LOG=info` does not print request or response bodies.
 pub(crate) fn refusal(answer: &Exchange) -> String {
     tracing::warn!(
         target: "ego::body",

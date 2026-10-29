@@ -22,11 +22,9 @@
 //!
 //! **The transport is `hyper` directly, not `axum`.** See [`serve`].
 //!
-//! **The listener is not this crate's.** `ego-listen` binds, accepts and
-//! establishes who connected, and `ego_core::endpoint` decides which endpoint
-//! kinds exist and which authentication each compels. A2A serves `hyper` over
-//! the stream it is handed and ACP serves `ByteStreams` over the same one; see
-//! `docs/architecture.md`.
+//! `ego-listen` binds, accepts and establishes peer identity.
+//! `ego_core::endpoint` defines endpoint kinds and authentication. A2A serves
+//! `hyper` over the supplied stream; ACP serves `ByteStreams` over it.
 
 pub mod auth;
 pub mod card;

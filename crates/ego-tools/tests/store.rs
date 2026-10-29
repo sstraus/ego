@@ -1,7 +1,7 @@
 //! `JsonlStore`: append/read roundtrip, manifest cataloguing and atomicity,
 //! the turn-boundary fsync policy, and per-line read failures.
 //!
-//! See `plans/m0a-contracts.md` Step 4 and `ARCHITECTURE.md` §3.3 / §5.
+//! Session-store append/read, catalogue, atomicity and durability contracts.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -169,12 +169,8 @@ mod store {
         ev_at(seq, turn, kind, 1_000)
     }
 
-    /// The on-disk directory a `JsonlStore` puts a session's files under
-    /// (`ARCHITECTURE.md` §5: `<root>/<session-id>/`). `SessionId`'s field
-    /// is private with no accessor, so — exactly like `JsonlStore` itself —
-    /// this reads the id out through its derived `Serialize` impl, which
-    /// (being a single-field tuple struct) serialises transparently as the
-    /// inner `Uuid`'s plain string form.
+    /// Derive the session directory from the serialized session id, matching the store's
+    /// own directory convention.
     fn session_dir_name(id: &SessionId) -> String {
         match serde_json::to_value(id).expect("SessionId always serialises") {
             serde_json::Value::String(s) => s,

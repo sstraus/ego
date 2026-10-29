@@ -55,7 +55,7 @@ fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_g
     let currency = CurrencyCode::new("USD").expect("currency");
     let root = Arc::new(SharedBudgetGate::new(BudgetGate::unlimited(currency)));
     let metering = Metering::Unmetered {
-        revision: MeteringRevision("regression_case".to_owned()),
+        revision: MeteringRevision("shared-runtime-ZVP".to_owned()),
     };
     let request = GenRequest {
         web_search: None,
@@ -143,7 +143,7 @@ fn provider_reservation_is_admitted_before_pending_io_without_holding_a_budget_g
 
 fn admitted_stream(root: &SharedBudgetGate, model: &str) -> (AttemptStream, GateId) {
     let metering = Metering::Unmetered {
-        revision: MeteringRevision("regression_case".to_owned()),
+        revision: MeteringRevision("shared-runtime-ZVP".to_owned()),
     };
     let request = GenRequest {
         web_search: None,

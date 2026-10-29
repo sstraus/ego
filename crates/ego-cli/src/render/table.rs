@@ -1,8 +1,7 @@
 //! Tables laid out in cells, and a table that will not fit turned into
 //! something that will.
 //!
-//! `docs/architecture.md` §3. The
-//! two decisions worth restating where the code is:
+//! Two decisions determine this module's layout:
 //!
 //! **Width is measured, never assumed.** A model emits a markdown table with
 //! no idea how wide the window is; alignment is entirely the renderer's job,
@@ -450,9 +449,7 @@ mod tests {
         assert!(widths.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
-    /// The decision the ADR spends a paragraph on: below the floor the table
-    /// becomes a list rather than losing columns. Truncating would delete what
-    /// the model said.
+    /// Below the width floor, render a list rather than deleting table columns.
     #[test]
     fn a_table_too_narrow_to_draw_becomes_a_list_and_keeps_every_value() {
         let table = Table {

@@ -1,6 +1,5 @@
 //! The `Generator` port: the one seam `ego-core` uses to talk to a model.
 //!
-//! See `ARCHITECTURE.md` §2 ("ports belong to the consumer") and §3.1.
 //! `ego-ai` implements this trait; `ego-core` never opens a socket itself.
 
 use std::fmt;
@@ -57,11 +56,8 @@ pub enum AiEvent {
     /// [`ReasoningDelta`](Self::ReasoningDelta). No separate boundary event
     /// and no index field — ordering is already `ItemState::seq`'s.
     ReasoningState(ReasoningState),
-    /// The model decided to call a tool, with fully assembled arguments.
-    /// Provider streams typically deliver a tool call's arguments as JSON
-    /// fragments; assembling those fragments into one JSON string is
-    /// `ego-ai`'s job (`WireFormat::parse_stream`, ARCH §3.1) — by the time
-    /// an `AiEvent` reaches `ego-core`, `args` is complete.
+    /// A fully assembled model tool call. `ego-ai` joins streamed JSON fragments before core
+    /// receives complete arguments.
     ToolCall {
         call_id: String,
         name: String,
@@ -99,14 +95,10 @@ pub enum AiEvent {
     /// `saturating_add` and folded into a context-occupancy proxy, and a
     /// currency figure has no business in either.
     ///
-    /// This is the one landing site for every provider that states a cost.
-    /// OpenRouter's `usage.cost` and xAI's `usage.cost_in_usd_ticks` differ
-    /// in the unit, the field name and the decoder that reads them; they do
-    /// not differ past this port, and nothing downstream of it can tell which
-    /// produced a given figure except by reading the
-    /// [`ProviderCostRevision`](crate::cost::ProviderCostRevision) that the
-    /// *metering* carries. Adding a third decoder must not change this file.
-    /// See `docs/architecture.md` §8.
+    /// All provider-reported cost decoders feed this event. Wire units and
+    /// field names are normalized before crossing the port; metering retains
+    /// [`ProviderCostRevision`](crate::cost::ProviderCostRevision) attribution.
+    /// Adding another decoder must not change this interface.
     ProviderCost { cost: Money },
     /// The transport's reading of whether the request bytes reached the
     /// provider.

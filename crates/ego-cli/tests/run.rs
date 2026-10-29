@@ -1,8 +1,7 @@
 //! The binary, run as a process.
 //!
-//! `CLI.md` §4.1–4.5 is a contract about a *program*: an exit status, two
-//! streams and what is on each. None of that is observable from inside the
-//! program, so every test here spawns `ego` and reads what the shell would.
+//! These tests spawn the program to observe exit status and both output streams at the
+//! actual process boundary.
 
 mod support;
 
@@ -46,18 +45,8 @@ impl Places {
     }
 }
 
-/// The number `CLI.md` §4.1's own example object carries.
-///
-/// The document showed `"v": 1` from the bootstrap commit until the day this
-/// was written, while the binary emitted `PUBLIC_EVENT_VERSION` — 5 by then.
-/// Nothing noticed, because the assertions above compared the report against a
-/// literal `5` rather than against the document, so the two ends of the binding
-/// were both the code. A reader following §4.1 to learn the shape was told a
-/// version no build has ever written.
-///
-/// This is the missing link, not a second copy: the example is read out of
-/// `CLI.md` and compared to the constant the binary uses. Changing one without
-/// the other fails here.
+/// Bind the JSON example in `CLI.md` to `PUBLIC_EVENT_VERSION`, not a second literal that can
+/// drift alongside it.
 #[test]
 fn the_version_in_the_document_is_the_version_the_binary_writes() {
     let doc = include_str!("../../../CLI.md");
@@ -104,7 +93,7 @@ cache_write = "0.0000015625"
 output = "0.00001"
 "#;
 
-/// regression case — catches: CLI stderr substitutes a capability summary for
+/// catches: CLI stderr substitutes a capability summary for
 /// an HTTP Invalid cause, or disagrees with the ACP turnFailed projection.
 #[test]
 fn http_400_usage_cause_matches_cli_stderr_and_acp_turn_failed() {
@@ -162,7 +151,7 @@ sandbox = "off"
     host.finish();
 }
 
-// --- the happy path, and §4.1's object ---
+// Successful JSON completion, field by field.
 
 /// The shape of every test below it: a run reaches the model, the answer lands
 /// on stdout, and the process exits 0.
@@ -183,14 +172,8 @@ fn a_run_that_finishes_writes_its_answer_to_stdout_and_exits_zero() {
     assert_eq!(finished.stdout.trim(), "It is done.");
 }
 
-/// The same run without the word `run` in it.
-///
-/// `ego "…"` is the conversational surface, and it is the surface `CLI.md`
-/// §2.1 describes rather than a spelling of `ego run`: the argument seeds the
-/// first turn and the loop then asks for another line. Here there is no
-/// terminal to ask, so the session ends after the turn it was seeded with —
-/// which is exactly the property that makes it testable without a pty, and the
-/// one that would otherwise leave a CI runner holding a prompt forever.
+/// A positional interactive prompt seeds the first turn. With no terminal for another line,
+/// execution settles rather than leaving CI waiting for input.
 #[test]
 fn a_session_seeded_from_argv_runs_its_turn_and_ends_when_nobody_is_there() {
     let stub = Stub::start(Plan::default());
@@ -273,10 +256,8 @@ fn a_session_can_be_seeded_from_a_pipe_the_way_a_run_is() {
     assert_eq!(finished.stdout.trim(), "It is done.");
 }
 
-/// §4.1's object, field by field — and the rule §4.2 states about it: one error
-/// field. `ok` and `exit_reason` are read off the same `RunTermination`, so
-/// there is no second status to contradict the first the way Claude's
-/// `subtype:"success"` beside `is_error:true` does.
+/// Derive completion status fields from the same termination value so success and error cannot
+/// contradict each other.
 #[test]
 fn a_json_run_writes_one_object_whose_success_and_reason_cannot_disagree() {
     let stub = Stub::start(Plan {
@@ -307,7 +288,7 @@ fn a_json_run_writes_one_object_whose_success_and_reason_cannot_disagree() {
     assert!(report["session"].is_string());
     assert_eq!(report["cost"]["state"], "known");
 
-    let object = report.as_object().expect("§4.1 publishes an object");
+    let object = report.as_object().expect("completion publishes an object");
     for invented in ["is_error", "subtype", "status", "error"] {
         assert!(
             !object.contains_key(invented),
@@ -346,7 +327,9 @@ fn a_json_run_that_was_refused_says_not_ok_and_names_what_was_refused() {
     let report = finished.report();
     assert_eq!(report["ok"], false);
     assert_eq!(report["exit_reason"], "permission");
-    let denied = report["denied"].as_str().expect("§4.4 requires the action");
+    let denied = report["denied"]
+        .as_str()
+        .expect("permission refusal requires the action");
     assert!(
         denied.contains("write") && denied.contains("notes.md"),
         "a script handed exit 3 and no subject has been told nothing: {denied}"
@@ -381,10 +364,10 @@ fn a_json_run_that_was_not_refused_carries_no_denied_key() {
     );
 }
 
-// --- §4.2, jsonl ---
+// Live JSONL output.
 
-/// One `PublicEvent` per line, and the terminal event carries the end of the
-/// turn — so §4.2 needs no summary object of its own.
+/// One public event per line; turn completion carries the ending without a second summary
+/// object.
 #[test]
 fn a_jsonl_run_writes_one_public_event_per_line() {
     let stub = Stub::start(Plan::default());
@@ -471,9 +454,8 @@ fn an_event_reaches_stdout_before_the_turn_that_produced_it_ends() {
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
 }
 
-/// Feature detection by name (§4.2), derived from what the run actually has
-/// rather than from a hand-written list — so `--no-tools` removes a capability
-/// the same way it removes the tools.
+/// Derive feature detection from the actual run capabilities, including removal under
+/// `--no-tools`.
 #[test]
 fn session_started_advertises_only_the_capabilities_this_run_has() {
     let stub = Stub::start(Plan::default());
@@ -524,10 +506,8 @@ fn session_started_advertises_only_the_capabilities_this_run_has() {
 
 // --- instructions ---
 
-/// §4.4/§4.5: a headless run is untrusted, an untrusted workspace runs bare,
-/// and bare means the instruction port is **not called** — not called and
-/// answering nothing, but never asked. An `AGENTS.md` a repository ships is
-/// therefore not read, which is the hole behind Gemini's RCE.
+/// Untrusted headless execution is bare and never calls the instruction port. Repository
+/// instructions cannot be read before admission.
 #[test]
 fn a_headless_run_does_not_read_the_instruction_file_a_repository_ships() {
     let stub = Stub::start(Plan::default());
@@ -720,8 +700,7 @@ fn the_two_ways_to_name_the_same_instruction_file_describe_it_identically() {
     assert_eq!(absolute, ".", "and so does the absolute spelling of it");
 }
 
-/// An instruction file the operator named and that is not there refuses the
-/// run. `CLI.md` §4.4: invalid config is never skipped silently.
+/// An instruction file the operator named and that is not there refuses the run.
 ///
 /// It used to exit 0 with an empty stderr, having quietly run with no
 /// instructions at all — the same silently vacuous flag `--budget` was fixed
@@ -840,7 +819,7 @@ fn a_system_prompt_given_on_the_command_line_claims_no_file() {
     );
 }
 
-// --- §4.3, every exit code, produced by the process ---
+// Process-level exit-code outcomes.
 
 /// Exit 1: the run worked and the task did not. `--schema` is what makes this
 /// reachable — without it nothing in the loop can report "the answer was wrong"
@@ -905,7 +884,7 @@ fn a_schema_mismatch_is_re_prompted_and_the_validated_document_is_the_result() {
     assert_eq!(stub.generations().len(), 2);
 }
 
-/// regression case: a pre-turn catalogue refusal reaches the terminal scrubbed.
+/// a pre-turn catalogue refusal reaches the terminal scrubbed.
 ///
 /// The mid-turn half has been collapsed to a fixed string by
 /// `RunTermination::after_turn` since it was written; the pre-turn half relayed
@@ -993,12 +972,8 @@ fn a_command_line_that_cannot_be_honoured_exits_two_saying_why() {
 
 // --- the permission flags, now that there is a subsystem behind them -------
 //
-// These five used to be in the loop above, refused by name because their
-// contract did not exist. `CLI.md` §4.5's rule was working: an accepted
-// `--allow` that enforced nothing would have looked like a permission
-// boundary. The reason expired when the engine landed, and the tests invert
-// rather than disappear — "is refused" becomes "is accepted and does what it
-// says", which is a larger claim and needs more than one test to carry it.
+// Permission flags must enforce real behavior after parsing. Accepting a rule while
+// ignoring it would present a false permission boundary.
 
 /// The end-to-end one. A flag on the command line changes what a tool is
 /// allowed to do, and the refusal names the rule that did it.
@@ -1037,7 +1012,9 @@ fn a_deny_rule_on_the_command_line_stops_a_tool_and_names_the_rule() {
     assert_eq!(finished.code, Some(3), "stderr: {}", finished.stderr);
     let report = finished.report();
     assert_eq!(report["exit_reason"], "permission");
-    let denied = report["denied"].as_str().expect("§4.4 requires the action");
+    let denied = report["denied"]
+        .as_str()
+        .expect("permission refusal requires the action");
     assert!(
         denied.contains("notes.md"),
         "the denial must name what it denied: {denied}"
@@ -1051,11 +1028,8 @@ fn a_deny_rule_on_the_command_line_stops_a_tool_and_names_the_rule() {
         "and must not quote what it refused to read: {denied}"
     );
 
-    // The same fact as a key rather than as prose, and one thing more: the
-    // *layer*. `2026-08-21-a-deny-that-names-who-can-lift-it.md` exists
-    // because the only operational question an attribution answers is "can I
-    // change this", and a run that ends at exit 3 has no second invocation in
-    // which to show it. The rule came from `--deny`, so the layer is `flags`.
+    // The denial attribution includes the rule's layer so the operator can
+    // tell whether it is changeable. This rule came from `--deny`, hence `flags`.
     let by = &report["denied_by"];
     assert_eq!(by["by"], "rules");
     let rules = by["rules"]
@@ -1330,7 +1304,7 @@ fn a_run_with_no_rule_flags_leaves_the_config_files_rules_alone() {
     );
     let denied = finished.report()["denied"]
         .as_str()
-        .expect("§4.4 requires the action")
+        .expect("permission refusal requires the action")
         .to_string();
     assert!(
         denied.contains("notes.md") && denied.contains("denied by r"),
@@ -1339,11 +1313,8 @@ fn a_run_with_no_rule_flags_leaves_the_config_files_rules_alone() {
 }
 
 /// A rule that is not a rule is a usage error, before any turn runs.
-///
-/// This is what proves the flag's argument reaches `Rule::load` rather than
-/// being carried as text nobody parsed until it was too late to say so. The
-/// teaching message for `bash(...)` is §2 of the rule ADR, and getting it from
-/// a flag is the evidence that a flag and a config file go through one parser.
+/// A malformed flag rule must reach `Rule::load` and produce the same
+/// explanation as configuration input, not remain unparsed text.
 #[test]
 fn a_flag_rule_that_is_not_a_rule_is_refused_before_the_run() {
     let finished = Ego::nowhere()
@@ -1366,22 +1337,8 @@ fn a_flag_rule_that_is_not_a_rule_is_refused_before_the_run() {
     );
 }
 
-/// The third instance of `--no-color`'s defect, found by auditing for it.
-///
-/// `-v` sits in the same `CLI.md` §3.1 row as `--no-color`, which spends four
-/// lines explaining that it was marked **yes** while being parsed and read by
-/// nothing. `-v` was beside it, still parsed and still read by nothing:
-/// `Args::verbose` has no reader anywhere in the workspace.
-///
-/// It is refused rather than implemented, and the distinction from `--sandbox`
-/// is worth having. `--sandbox` now has a complete runtime/configuration
-/// contract; `-v` still waits on a separate decision.
-/// `-v` waits on a **decision**: §4.7 says exactly what `-q` suppresses and
-/// nothing anywhere says what `-v` adds. The obvious candidate — turning up
-/// `tracing`, which the whole workspace is already instrumented for — is not
-/// obvious at all once R12 is read, because this build installs no subscriber
-/// and adding one puts a second writer on a stream `note` and `Announce`
-/// already own.
+/// Verbose is a recognized refusal, not an accepted no-op. Diagnostics use `EGO_LOG` and
+/// `EGO_LOG_FILE`, separate from run arguments.
 #[test]
 fn the_flag_whose_meaning_was_never_decided_is_refused_by_name() {
     for spelling in ["-v", "--verbose"] {
@@ -1435,10 +1392,8 @@ fn the_neighbour_in_the_same_row_still_does_its_job() {
     assert_eq!(finished.stdout.trim(), "It is done.");
 }
 
-/// §6a: an `exec(...)` rule reaches the real process producer. A configured
-/// argv-native execution path must either
-/// execute under its admitted policy or fail closed before the provider/tool
-/// event, never parse and silently ignore the rule.
+/// An `exec(...)` rule reaches the real argv-native producer. Admitted execution must either
+/// run under policy or fail closed before provider/tool effects.
 #[test]
 fn an_exec_rule_reaches_the_real_process_path() {
     let stub = Stub::start(Plan {
@@ -1623,8 +1578,8 @@ fn an_unknown_mode_is_refused_and_names_the_modes_that_exist() {
     }
 }
 
-/// The one applicability conflict §4.5 puts in the matrix rather than in the
-/// loader, because from a resolved posture alone the two are the same value.
+/// Reject conflicting applicability before loading, where the two options would already have
+/// collapsed to one resolved value.
 #[test]
 fn bare_and_instructions_contradict_each_other_and_are_refused_by_name() {
     let ego = Ego::nowhere();
@@ -1649,8 +1604,7 @@ fn bare_and_instructions_contradict_each_other_and_are_refused_by_name() {
     );
 }
 
-/// The mutually-exclusive session group of §4.5, enforced by clap and reported
-/// in clap's own words rather than paraphrased into a second voice.
+/// Clap enforces mutually exclusive session choices and reports the conflict directly.
 #[test]
 fn the_session_flags_are_a_mutually_exclusive_group() {
     let finished = Ego::nowhere()
@@ -1672,11 +1626,8 @@ fn the_session_flags_are_a_mutually_exclusive_group() {
     );
 }
 
-/// Exit 3, reached the only way a headless run can reach it: a tool asked for
-/// permission to write inside the workspace, and there is nobody to ask.
-/// Boundary refusals instead return to the model (regression). This is
-/// also §4.4's proof — the process is given no stdin at all, so a run that
-/// prompted would hang here and the test would never finish.
+/// An uncovered in-workspace write reaches exit 3 without stdin. A headless run that attempted
+/// a permission prompt would hang instead of settling.
 #[test]
 fn a_permission_nobody_can_grant_exits_three_without_ever_prompting() {
     let places = Places::new();
@@ -1790,10 +1741,8 @@ fn a_money_budget_stops_the_next_request_after_real_response_spend_crosses_it() 
     );
 }
 
-/// Exit 5, the token half, and §4.5's named collision: **budget beats
-/// schema-retry**. The first turn does not validate and would be re-prompted;
-/// the ceiling is checked first, so the re-prompt never runs and the run ends
-/// `budget` rather than `error`.
+/// Token budget exhaustion wins before a schema re-prompt, ending with `budget` rather than
+/// running another turn.
 #[test]
 fn a_token_budget_beats_a_schema_retry_and_exits_five() {
     let stub = Stub::start(Plan {
@@ -1827,8 +1776,7 @@ fn a_token_budget_beats_a_schema_retry_and_exits_five() {
     );
 }
 
-/// Also exit 5, and a different word in §4.1: `max_turns` and `budget` share a
-/// code and do not share a reason.
+/// `max_turns` and `budget` share exit 5 but retain different completion reasons.
 #[test]
 fn a_run_that_reaches_max_turns_exits_five_saying_max_turns() {
     let stub = Stub::start(Plan {
@@ -1883,10 +1831,8 @@ fn a_run_that_outlives_its_timeout_exits_124() {
     assert_eq!(finished.report()["exit_reason"], "timeout");
 }
 
-/// Exit 130 and exit 143: the two signals §4.3 gives codes to. Cancellation is
-/// cooperative first — the turn is told to stop and unwinds, writing how it
-/// ended — so the code comes from the same `after_turn` mapping every other
-/// ending goes through.
+/// SIGINT and SIGTERM unwind cooperatively and record termination before the shared exit
+/// mapping returns 130 or 143.
 #[test]
 #[cfg(unix)]
 fn the_two_signals_with_a_documented_code_produce_it() {
@@ -1994,7 +1940,7 @@ fn assert_operator_prompt(stub: &Stub, expected: &str) {
     assert_eq!(sent, expected);
 }
 
-// --- §4.5, the parse contract ---
+// Parse-time lifecycle contract.
 
 /// `--` is reserved for prompt disambiguation, and it is honoured before the
 /// subcommand is decided — so `ego -- run` prompts the word "run" rather than
@@ -2017,7 +1963,7 @@ fn the_separator_makes_the_word_run_a_prompt() {
     assert_operator_prompt(&stub, "run");
 }
 
-/// §2's stdin contract: `-` makes stdin the prompt.
+/// `-` explicitly makes stdin the prompt.
 #[test]
 fn a_dash_reads_the_prompt_from_stdin() {
     let stub = Stub::start(Plan::default());
@@ -2061,9 +2007,8 @@ fn piped_input_beside_an_argument_arrives_fenced_and_labelled() {
     );
 }
 
-/// §4.5: stdout is protocol-clean in json and jsonl modes. Everything that is
-/// *about* the run rather than *of* it goes to stderr — including the tool
-/// diagnostics text mode prints.
+/// JSON and JSONL stdout contain only protocol output. Diagnostics, including tool reports, go
+/// to stderr.
 #[test]
 fn stdout_carries_the_protocol_and_stderr_carries_the_diagnostics() {
     let stub = Stub::start(Plan {
@@ -2167,13 +2112,8 @@ fn quiet_drops_the_tool_reports_and_keeps_the_answer() {
 
 // --- a ceiling that does not do what its spelling says ---
 
-/// `CLI.md` §5 calls `--budget` a **hard cap**. On a row that is not metered in
-/// currency it is not a cap at all: every reservation is zero, so the gate
-/// admits until the provider refuses. `PublicEvent::MeteringSelected`'s own doc
-/// says the operator "has to be told it does not bind — a silently vacuous flag
-/// is not an acceptable way to deliver that", and until this test existed the
-/// default output mode was exactly that: the fact rode the event, and the only
-/// sink that rendered the event was `--output json/jsonl`.
+/// Text output must explain a monetary budget that cannot bind the selected metering
+/// arrangement. The operator must not infer a hard cap from a silently ineffective flag.
 ///
 /// Measured before it was written: `ego run … --budget '5$' -m ollama/…`
 /// against a real daemon exited 0 with an empty stderr.
@@ -2229,11 +2169,7 @@ fn a_money_budget_that_cannot_bind_says_so_once_and_leaves_stdout_clean() {
     );
 }
 
-/// `-q` is presentation — §1.3 pairs it with `--no-color` and calls it "quiet
-/// progress". A guarantee the operator asked for and did not get is not
-/// progress, so this one warning survives it. Without this test the obvious
-/// tidying (fold the arm in beside the tool reports, which *are* gated) would
-/// put the flag's silence back where it was.
+/// Quiet mode suppresses progress, not a warning that a requested guarantee was unavailable.
 #[test]
 fn quiet_does_not_silence_a_budget_that_cannot_bind() {
     let stub = Stub::start(Plan::default());
@@ -2290,17 +2226,11 @@ fn a_money_budget_that_binds_is_not_announced() {
 
 // --- both providers, end to end ---
 
-/// The hosted path, with the pricing and the credential an operator really
-/// supplies. `models.toml` is the *configuring* the model-resolution ADR says
-/// the hosted path waits on: without it `Catalogue::with_hosted` has no caller
-/// and this slug could only ever refuse.
+/// Exercise a hosted model with supplied capabilities, rates and credential.
 ///
-/// Run with a ceiling, because that is what makes the supplied rates apply:
-/// `2026-08-21-a-run-with-no-ceiling.md` §5 consults no rate source unless a
-/// ceiling needs one. The pair below — this and
-/// `a_hosted_run_with_no_ceiling_consults_no_rates_and_reports_no_cost` — is
-/// that gate made falsifiable. The budget is deliberately far above the
-/// worst case so it admits and the test stays about the rates.
+/// Use a ceiling so supplied rates are consulted. The paired no-ceiling test
+/// checks that rate lookup is skipped. This limit is above worst-case spend
+/// so the test remains about rates rather than admission.
 #[test]
 fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
     let stub = Stub::start(Plan::default());
@@ -2337,22 +2267,8 @@ fn a_hosted_model_resolves_from_supplied_facts_and_a_real_credential() {
     );
 }
 
-/// The other half of §5's gate, and the ordinary invocation: the same
-/// `models.toml`, the same credential, no `--budget`.
-///
-/// The run works and is bounded by nothing (§1), and its cost comes back
-/// `unknown` rather than as a figure — because no rate source was consulted,
-/// which is what §5 says happens when no ceiling needs one. `unknown` is the
-/// point: the ADR's §Failure semantics chooses it over a fabricated zero,
-/// which is the one answer that would read as *free*. Tokens are still
-/// counted and still reported, so nothing is lost that was actually measured.
-///
-/// Today this gates one source, an operator's own file, and leaks nothing
-/// either way. It is the same predicate that will gate the provider pricing
-/// endpoint and the fetched third-party table, and §7's first row — "no fetch
-/// is attempted, offline or not" — is a property of *this* check rather than
-/// of the fetch code. A gate added only once there is something to leak
-/// through has already been wrong once.
+/// Without a money ceiling, do not consult rates. Unknown response cost stays unknown while
+/// measured tokens are reported.
 #[test]
 fn a_hosted_run_with_no_ceiling_consults_no_rates_and_reports_no_cost() {
     let stub = Stub::start(Plan::default());
@@ -2390,11 +2306,8 @@ fn a_hosted_run_with_no_ceiling_consults_no_rates_and_reports_no_cost() {
     );
 }
 
-/// And a token ceiling does not drag a price lookup in behind it. §9: the
-/// token ceiling is the only ceiling that needs no rates, no fetch and no
-/// network, which is why it is what an air-gapped operator reaches for. A
-/// gate written as "any ceiling at all" would look right on every other test
-/// and be wrong here.
+/// A token-only ceiling needs no pricing lookup, file fetch, or network. An `any ceiling` check
+/// would incorrectly request rates here.
 #[test]
 fn a_token_ceiling_alone_still_consults_no_rates() {
     let stub = Stub::start(Plan::default());
@@ -2424,15 +2337,9 @@ fn a_token_ceiling_alone_still_consults_no_rates() {
     );
 }
 
-/// Without the credential, the refusal names the remedy — before a request is
-/// built, sent, and charged to somebody's rate limit.
-///
-/// It named an environment *variable* while this test ran on the `openai` row,
-/// whose credential is a plain `BearerFromEnv`. Story `regression` moved it to
-/// `anthropic`, which accepts a subscription token as well as an API key and
-/// so cannot honestly name one variable — it names the command that settles
-/// either. The claim under test is unchanged and is the one that matters: the
-/// refusal tells the operator what to do, and arrives before the request.
+/// Missing Anthropic credentials name the authentication remedy before request construction.
+/// The provider supports more than one credential form, so the command is more accurate than
+/// naming one environment variable.
 #[test]
 fn a_hosted_model_without_its_credential_names_the_remedy() {
     let stub = Stub::start(Plan::default());
@@ -2488,10 +2395,8 @@ fn a_credential_set_to_whitespace_is_refused_like_a_missing_one() {
     );
 }
 
-/// With the credential and no supplied facts, the refusal is the one the ADR
-/// ratified: a hosted model cannot be bounded from figures this build does not
-/// have. Refusing is not a gap — a remembered rate would mint a reservation
-/// below what the provider really charges.
+/// A hosted model with no supplied capabilities must refuse rather than
+/// construct a request or budget reservation from guessed facts.
 #[test]
 fn a_hosted_model_with_no_supplied_facts_refuses_rather_than_guessing() {
     let stub = Stub::start(Plan::default());
@@ -2814,9 +2719,8 @@ fn ls_jsonl_writes_one_session_per_line() {
     }
 }
 
-/// `kill → ego resume` — `ARCHITECTURE.md` §8's third M0b exit criterion.
-/// A second turn continues the session the first one wrote, chosen with no id
-/// at all, and the session id in the report is the proof it is the same one.
+/// A second turn continues the session the first one wrote, chosen with no id at all, and
+/// the session id in the report is the proof it is the same one.
 #[test]
 fn resume_with_no_id_continues_this_workspaces_latest_session() {
     let places = Places::new();
@@ -2984,28 +2888,9 @@ fn a_usage_error_still_goes_to_stderr_and_exits_two() {
     assert!(refused.stderr.contains("--nonsense"), "{}", refused.stderr);
 }
 
-/// The out-of-the-box hosted path: a key, and nothing else.
-///
-/// Story `regression`'s whole problem statement in one run. Before the builtin
-/// catalogue, the equivalent hosted invocation answered "no capabilities are
-/// configured" — a true sentence about a product nobody could start,
-/// because the repository shipped neither `/etc/ego/models.toml`
-/// nor `$EGO_HOME/models.toml` and the only cure was to write one by hand.
-///
-/// It ran on an older OpenAI Sol row until story `regression` moved that row to
-/// Responses and made it unselectable pending live evidence. The claim is the
-/// same one, made on the row that can still be selected.
-///
-/// **The absence of `home_file("models.toml", …)` is the assertion.** Every
-/// other hosted test in this file writes `ANTHROPIC_FACTS` into the home first;
-/// this one deliberately does not, so the capabilities the request is
-/// assembled from can only have come from the layer compiled into the binary.
-/// Adding a `models.toml` here would make it pass for the old reason and prove
-/// nothing.
-///
-/// It asserts the request *body*, not the exit code: reaching request assembly
-/// is the criterion, and a run can exit non-zero for reasons downstream of the
-/// thing being proved.
+/// Build a hosted request with a key and builtin capabilities, without a home models file.
+/// Assert the request body: a nonzero downstream exit does not disprove assembly, and adding
+/// supplied capabilities would invalidate the builtin-source check.
 #[test]
 fn a_hosted_model_runs_from_the_builtin_catalogue_with_no_models_toml() {
     let stub = Stub::start(Plan::default());

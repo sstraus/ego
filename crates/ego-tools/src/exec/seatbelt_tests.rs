@@ -721,12 +721,12 @@ fn workspace_apple_python_reaches_external_script_denial_without_opening_var() {
     let output = run(
         &backend,
         "/usr/bin/python3",
-        &["-c".as_ref(), "print('REGRESSION-MARKER')".as_ref()],
+        &["-c".as_ref(), "print('APPLE-RUNTIME-VPX')".as_ref()],
     );
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(output.stdout, b"REGRESSION-MARKER\n");
+    assert_eq!(output.stdout, b"APPLE-RUNTIME-VPX\n");
     let script = base.join("outside.py");
-    fs::write(&script, "print('REGRESSION-MARKER')\n").unwrap();
+    fs::write(&script, "print('OUTSIDE-SCRIPT-VPX')\n").unwrap();
     let output = run(&backend, "/usr/bin/python3", &[script.as_os_str()]);
     assert!(
         !output.status.success(),
@@ -735,7 +735,7 @@ fn workspace_apple_python_reaches_external_script_denial_without_opening_var() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(script.to_str().unwrap()), "{stderr}");
     assert!(stderr.contains("Operation not permitted"), "{stderr}");
-    assert!(!String::from_utf8_lossy(&output.stdout).contains("REGRESSION-MARKER"));
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("OUTSIDE-SCRIPT-VPX"));
     let listing = run(&backend, "/bin/ls", &["/private/var/select".as_ref()]);
     assert!(
         !listing.status.success(),

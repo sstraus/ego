@@ -1,8 +1,5 @@
-//! contract for command and HTTP hook adapters (M4 S5).
-//!
-//! Adapters delegate effects to existing process and guarded HTTP owners.
-//! Assertions observe prepared calls, typed owner results, and delivery
-//! certainty rather than adapter-local flags.
+//! Command and HTTP hook adapter contracts through existing process and guarded transport
+//! owners. Observe prepared calls and typed results, not adapter-local flags.
 
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};

@@ -1,11 +1,8 @@
 //! The resolved ruleset: rules paired with the layers that carry them.
 //!
-//! `docs/architecture.md` decision 2.
-//! [`PermCfg`](super::PermCfg) stays the *layer* schema — what one file
-//! deserialises into. This is the *resolved* form, and the difference is the
-//! whole point: by the time `resolve` has merged six layers, the question
-//! "which file do I edit to lift this" has no answer left in a bare
-//! `Vec<Rule>`.
+//! [`PermCfg`](super::PermCfg) is the per-file schema; this is the resolved
+//! form. Retain rule origins through layer merging so refusals can name
+//! which configuration the operator must change.
 
 use super::layer::PermCfg;
 use super::source::Source;
@@ -93,13 +90,9 @@ impl From<OriginSet> for Vec<Source> {
     }
 }
 
-/// A resolved rule and every layer that carries it.
-///
-/// `origins` is non-empty and deduplicated, and it is *every* layer rather
-/// than the winning one — decision 5. Keeping only the winner would discard
-/// the fact that answers the operator's immediate next question ("I deleted
-/// my line and it is still denied"), at identical cost, which is the deferred
-/// refactoring debt `AGENTS.md:22-37` forbids.
+/// A resolved rule and every layer carrying it. Origins are non-empty and
+/// deduplicated. Retain all layers so removing one copy can still explain a
+/// surviving decision from another source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcedRule {
     rule: Rule,
@@ -196,12 +189,9 @@ impl SourcedRule {
 
     /// The layer whose copy an operator cannot get around — decision 1.
     ///
-    /// **Authority order differs from merge precedence.**
-    /// [`Source::rank`] orders layers for *merging*, lowest first, so `flags`
-    /// beats everything and wins a value. Authority over a deny runs the
-    /// other way: `system` is the layer nothing above can lift (`CLI.md` §7,
-    /// "non-relaxable deny/budget ceilings — the only source of ceilings"), so
-    /// the most authoritative origin is the lowest-ranked one.
+    /// Rule attribution authority differs from ordinary merge precedence. Flags win
+    /// ordinary values; origins must still identify every rule source that can enforce a
+    /// denial.
     ///
     /// Built-in defaults are least authoritative, below operator rules.
     /// Two orderings over one enum is exactly the

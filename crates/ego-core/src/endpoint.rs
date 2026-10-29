@@ -1,12 +1,7 @@
 //! Who may reach this process, decided before a socket exists.
 //!
-//! Every surface ego served before this one — `ego acp`, `ego mcp-server` —
-//! speaks over stdio to a parent that already had the right to run it, so
-//! "who may connect" was never a question ego had to answer. An inbound
-//! endpoint makes it one, and
-//! `docs/architecture.md`
-//! puts the answer here, above every host protocol, rather than once inside
-//! each of them.
+//! Inbound endpoints need a peer-admission policy independent of the served
+//! protocol. This module owns that policy; adapters consume admitted streams.
 //!
 //! The module is policy and holds no I/O: it decides which endpoint kinds
 //! exist, which are refused, and which authentication each kind compels. The

@@ -1,7 +1,7 @@
 //! The `SessionStore` port: append, read and list durable sessions.
 //!
-//! See `ARCHITECTURE.md` §3.3 and §5. The trait lives here; the filesystem
-//! implementation lives in `ego-tools`, because `ego-core` opens no files.
+//! The trait lives here; the filesystem implementation lives in `ego-tools`, because
+//! `ego-core` opens no files.
 
 use std::path::PathBuf;
 
@@ -130,9 +130,7 @@ impl SessionProfiles {
     }
 }
 
-/// The catalogue entry for one session (`ARCHITECTURE.md` §5's
-/// `manifest.json` fields: `id, workspace_root, model, created, updated,
-/// title, lineage`).
+/// Per-session storage metadata.
 ///
 /// This is the port-level shape: every `SessionStore` implementation
 /// reports `list()` results through it, regardless of how it durably
@@ -143,14 +141,9 @@ impl SessionProfiles {
 /// neither. A run admission projects its selected model, while a
 /// `SessionTitleChanged` event projects the optional display title.
 ///
-/// `workspace_root` is **not** among them, and used to be. The reason it was
-/// optional — that `append` cannot learn a workspace — stopped being true
-/// when the log header started carrying one at `CODEC_VERSION` 5: the store
-/// does not learn it from an event, it writes it once at session birth and
-/// reads it back from the header. An `Option` here would be a state no store
-/// in this build can produce, handed to `ego ls` and `ego resume` to write
-/// dead branches for. See
-/// `docs/architecture.md` §1.
+/// `workspace_root` is required: the store records it once at session birth
+/// and reads it from the header. An optional value would expose a state
+/// no current store can produce.
 ///
 /// `created` and `updated` are never optional: both come from the durable
 /// entry timestamps and the header authored at session birth.
@@ -178,13 +171,9 @@ fn is_zero(value: &u32) -> bool {
 
 /// A `SessionStore` failure.
 ///
-/// Deliberately small: this is the Step 4 contract (append/read/list on a
-/// healthy store), not the tail-repair or writer-lease vocabulary later
-/// steps add — see `plans/m0a-contracts.md` Steps 5-7. `WrongSession` is the
-/// one addition and is neither of those: it is a store saying it does not
-/// serve that session at all, which any implementation scoped to a subset of
-/// sessions can say (see
-/// `docs/architecture.md` §3).
+/// The append/read/list error vocabulary includes `WrongSession` so a
+/// store scoped to a subset can refuse a session it does not serve.
+/// Tail repair and writer leases have their own errors.
 #[derive(Debug)]
 pub enum StoreError {
     /// The underlying I/O failed: open, read, write, fsync or rename.
@@ -199,19 +188,13 @@ pub enum StoreError {
     MissingHeader,
     /// The log's first line is a header and will not decode as one.
     ///
-    /// Distinct from [`MissingHeader`](StoreError::MissingHeader) because the
-    /// remedy is different — the header is *there* and damaged, so the
-    /// records under it are probably fine — and because tail repair must
-    /// treat the two identically only in one respect: neither may cost a
-    /// byte. See `docs/architecture.md`
-    /// §1.
+    /// Distinct from [`MissingHeader`](StoreError::MissingHeader): a damaged
+    /// header may still precede intact records. Neither condition permits
+    /// tail repair to discard those records.
     UnreadableHeader { reason: String },
     /// The log's header names a codec version this build does not implement.
-    ///
-    /// Refused rather than read as though it were ours: nothing compared `v`
-    /// before, so a log from a future build decoded as the current version
-    /// and its records were interpreted under rules that were never used to
-    /// write them (ADR §3).
+    /// Reject unsupported codec versions instead of interpreting future records
+    /// under rules that did not write them.
     UnsupportedLog { found: u32 },
     /// `read` was asked for a session with no durable log.
     NotFound,
@@ -274,9 +257,7 @@ pub struct SessionWriterLease<'a> {
     pub writer: Box<dyn SessionStore + 'a>,
 }
 
-/// Durable session storage: append events, read them back, and catalogue
-/// sessions. `ARCHITECTURE.md` §3.3; `JsonlStore`, the filesystem
-/// implementation, lives in `ego-tools`, because this crate opens no files.
+/// Durable session storage: append events, read them back, and catalogue sessions.
 pub trait SessionStore: Send + Sync {
     /// Acquire the existing session writer lease before reading journal state.
     /// Stores without a writer authority fail closed on continuation admission.

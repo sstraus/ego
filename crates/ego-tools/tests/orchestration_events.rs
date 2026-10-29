@@ -14,7 +14,7 @@ fn recorded_mail_and_result_file_materialize_one_durable_card_within_sixty_secon
     std::fs::create_dir_all(&results).unwrap();
     let page: InboxPage = serde_json::from_str(MAIL).unwrap();
     assert_eq!(page.messages.len(), 1);
-    let result = results.join("example-coordinator-fixture.md");
+    let result = results.join("example-coordinator-example-result.md");
     std::fs::write(&result, &page.messages[0].content).unwrap();
     let stamp = results.join(".watch-stamp");
     std::fs::write(&stamp, "observer must not consume Claude's stamp").unwrap();

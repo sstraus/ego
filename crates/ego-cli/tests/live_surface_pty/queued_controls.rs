@@ -1,7 +1,7 @@
 use super::*;
 
 fn start(ego: &Ego) -> (PtySession, PtyWriter, mpsc::Receiver<Vec<u8>>) {
-    let command = match std::env::var_os("EGO_REGRESSION_BINARY") {
+    let command = match std::env::var_os("EGO_QUEUED_CONTROLS_BINARY") {
         Some(binary) => ego.pty_command_with_program(binary),
         None => ego.pty_command(),
     };
@@ -39,12 +39,12 @@ fn journal(ego: &Ego) -> String {
 }
 
 // Catches: Up refuses to withdraw a queued prompt when the first composer line
-// already contains a draft (the empty-buffer gate in regression case).
+// already contains a draft (the empty-buffer gate).
 #[test]
 fn up_with_nonempty_first_line_withdraws_queued_prompt() {
-    let (initial, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING");
+    let (initial, gate) = gated_paced_line("RECALL-ZAW-RUNNING");
     let stub = Stub::start(Plan {
-        completions: vec![initial, Reply::Sse(text("REGRESSION-MARKER-DONE"))],
+        completions: vec![initial, Reply::Sse(text("RECALL-ZAW-DONE"))],
         ..Plan::default()
     });
     let ego = Ego::against(&stub).conversing().args([
@@ -61,7 +61,7 @@ fn up_with_nonempty_first_line_withdraws_queued_prompt() {
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\rinitial\r").unwrap();
     input.flush().unwrap();
-    until(&reader, &mut output, b"REGRESSION-MARKER-RUNNING");
+    until(&reader, &mut output, b"RECALL-ZAW-RUNNING");
     let queued = output.len();
     input.write_all(b"withdraw this queued prompt\r").unwrap();
     input.flush().unwrap();
@@ -88,7 +88,7 @@ fn up_with_nonempty_first_line_withdraws_queued_prompt() {
     );
     // Always release and reap the real child, including the pre-fix failure.
     gate.release();
-    until_prompt_after_reply(&reader, &mut output, b"REGRESSION-MARKER-DONE");
+    until_prompt_after_reply(&reader, &mut output, b"RECALL-ZAW-DONE");
     drain_until_quiet(&reader, &mut output);
     let visible = screen_rows(&output, 24, 100).join("\n");
     input.write_all(b"\x15/quit\r").unwrap();
@@ -99,7 +99,7 @@ fn up_with_nonempty_first_line_withdraws_queued_prompt() {
         input.flush().unwrap();
     }
     assert!(session.quit(input).success());
-    if let Some(path) = std::env::var_os("EGO_REGRESSION_CAPTURE") {
+    if let Some(path) = std::env::var_os("EGO_QUEUED_CONTROLS_CAPTURE") {
         std::fs::write(path, &output).expect("retain PTY bytes");
     }
     assert_eq!(
@@ -127,8 +127,8 @@ fn up_with_nonempty_first_line_withdraws_queued_prompt() {
 // FIFO has been consumed, throughout the next still-running generation.
 #[test]
 fn esc_interrupt_status_clears_during_the_next_generation() {
-    let (initial, first_gate) = gated_paced_line("regression_case-FIRST");
-    let (next, next_gate) = gated_paced_line("regression_case-NEXT");
+    let (initial, first_gate) = gated_paced_line("STATUS-IUW-FIRST");
+    let (next, next_gate) = gated_paced_line("STATUS-IUW-NEXT");
     let stub = Stub::start(Plan {
         completions: vec![initial, next],
         ..Plan::default()
@@ -147,7 +147,7 @@ fn esc_interrupt_status_clears_during_the_next_generation() {
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\rinitial\r").unwrap();
     input.flush().unwrap();
-    until(&reader, &mut output, b"regression_case-FIRST");
+    until(&reader, &mut output, b"STATUS-IUW-FIRST");
     let queued = output.len();
     input.write_all(b"deliver this next\r").unwrap();
     input.flush().unwrap();
@@ -162,7 +162,7 @@ fn esc_interrupt_status_clears_during_the_next_generation() {
     input.flush().unwrap();
     until_normalized(&reader, &mut output, interrupted, "interrupt pending");
     first_gate.release();
-    until(&reader, &mut output, b"regression_case-NEXT");
+    until(&reader, &mut output, b"STATUS-IUW-NEXT");
     drain_until_quiet(&reader, &mut output);
     let visible = screen_rows(&output, 24, 100).join("\n");
     let consumed = journal(&ego);
@@ -211,9 +211,9 @@ fn ctrl_enter_steers_queued_prompts_before_the_composer_line() {
 }
 
 fn steer_queued(composer: Option<&str>) {
-    let (initial, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING");
+    let (initial, gate) = gated_paced_line("STEER-ZAW-RUNNING");
     let stub = Stub::start(Plan {
-        completions: vec![initial, Reply::Sse(text("REGRESSION-MARKER-DONE"))],
+        completions: vec![initial, Reply::Sse(text("STEER-ZAW-DONE"))],
         ..Plan::default()
     });
     let ego = Ego::against(&stub).conversing().args([
@@ -230,7 +230,7 @@ fn steer_queued(composer: Option<&str>) {
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\rinitial\r").unwrap();
     input.flush().unwrap();
-    until(&reader, &mut output, b"REGRESSION-MARKER-RUNNING");
+    until(&reader, &mut output, b"STEER-ZAW-RUNNING");
     for prompt in ["queued first", "queued second"] {
         let offset = output.len();
         input.write_all(prompt.as_bytes()).unwrap();
@@ -261,7 +261,7 @@ fn steer_queued(composer: Option<&str>) {
     }
     let expedited = journal(&ego);
     gate.release();
-    until_prompt_after_reply(&reader, &mut output, b"REGRESSION-MARKER-DONE");
+    until_prompt_after_reply(&reader, &mut output, b"STEER-ZAW-DONE");
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
@@ -353,9 +353,9 @@ fn steer_queued(composer: Option<&str>) {
 // or retracts a prompt while Up should move inside a multiline draft.
 #[test]
 fn repeated_up_withdraws_images_and_text_without_replaying_them_on_resume() {
-    let (initial, gate) = gated_paced_line("REGRESSION-MARKER-RUNNING");
+    let (initial, gate) = gated_paced_line("IMAGES-ZAW-RUNNING");
     let stub = Stub::start_concurrent(Plan {
-        completions: vec![initial, Reply::Sse(text("REGRESSION-MARKER-DONE"))],
+        completions: vec![initial, Reply::Sse(text("RESUMED-ZAW-DONE"))],
         tags_refusal: Some((
             200,
             serde_json::json!({
@@ -382,7 +382,7 @@ fn repeated_up_withdraws_images_and_text_without_replaying_them_on_resume() {
     until_prompt_from(&reader, &mut output, 0);
     input.write_all(b"initial\r").unwrap();
     input.flush().unwrap();
-    until(&reader, &mut output, b"REGRESSION-MARKER-RUNNING");
+    until(&reader, &mut output, b"IMAGES-ZAW-RUNNING");
     let offset = output.len();
     input.write_all(b"image queued first").unwrap();
     input
@@ -478,7 +478,7 @@ fn repeated_up_withdraws_images_and_text_without_replaying_them_on_resume() {
     until_prompt_from(&reader, &mut output, 0);
     input.write_all(b"fresh prompt after resume\r").unwrap();
     input.flush().unwrap();
-    until_prompt_after_reply(&reader, &mut output, b"REGRESSION-MARKER-DONE");
+    until_prompt_after_reply(&reader, &mut output, b"RESUMED-ZAW-DONE");
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());

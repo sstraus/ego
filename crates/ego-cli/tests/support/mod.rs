@@ -323,12 +323,8 @@ pub fn text(content: &str) -> String {
     costing(content, 10, 4)
 }
 
-/// The same, reporting the usage a test needs it to.
-///
-/// The counts are a *parameter* because two of `CLI.md`'s contracts are about
-/// them and neither can be reached with a fixed transcript: `usage` in §4.1's
-/// object, and §4.5's "budget beats schema-retry" — which needs a turn
-/// expensive enough that the next one crosses a ceiling.
+/// Parameterize fixture usage so tests can exercise reported accounting and budget exhaustion
+/// before a schema retry.
 pub fn costing(content: &str, prompt_tokens: u64, completion_tokens: u64) -> String {
     let escaped = serde_json::to_string(content).expect("a string is serialisable");
     let total = prompt_tokens + completion_tokens;
@@ -713,21 +709,9 @@ fn json(stream: &mut TcpStream, value: &serde_json::Value) -> std::io::Result<()
     stream.flush()
 }
 
-/// Re-spell one complete chat-completions transcript as Anthropic Messages.
-///
-/// The reply builders above speak one dialect, and after story `regression` the
-/// hosted row these tests select is `anthropic`, which speaks another. The
-/// alternative was a second spelling of every fixture at all fifty-odd call
-/// sites, where the *semantics* — this answer, these tokens, this tool call —
-/// are what each test is actually asserting on and are identical in both.
-/// So the transcript is written once and rendered per endpoint.
-///
-/// It translates a **whole** transcript, never a fragment, which is why
-/// [`Reply::Paced`] has no Messages form: `message_start` must carry
-/// `input_tokens`, and the chat dialect does not report them until the final
-/// chunk. No hosted test paces its stub — every one of them uses
-/// `Plan::default()` — so this refuses loudly rather than inventing a figure a
-/// budget assertion would then read back as fact.
+/// Translate complete Chat Completions fixtures into Anthropic Messages while keeping semantic
+/// assertions shared. Paced fragments cannot be translated honestly because Messages needs
+/// input usage before Chat Completions reports it; refuse rather than invent counts.
 fn as_messages(chat: &str) -> String {
     let mut text = String::new();
     let mut tools: Vec<serde_json::Value> = Vec::new();
@@ -961,8 +945,8 @@ pub struct Ego {
     /// Kept alive for as long as the invocation is described, so a builder
     /// that owns its directories does not delete them before it runs.
     keep: Vec<tempfile::TempDir>,
-    /// Which of `CLI.md` §2's commands this invocation runs. `run` unless a
-    /// test says otherwise, because almost every test here is about a turn.
+    /// `run` unless a test says otherwise, because almost every test here is about a
+    /// turn.
     subcommand: String,
     args: Vec<String>,
     env: HashMap<String, String>,
@@ -1117,14 +1101,9 @@ impl Ego {
                 "OPENAI_BASE_URL".to_string(),
                 format!("http://{}", stub.address),
             );
-            // The hosted row these tests select. `openai` moved to Responses
-            // and is unselectable pending live evidence
-            // (`2026-09-03-public-provider-wires-require-live-promotion.md`),
-            // so `anthropic` carries the offline hosted assertions: it is the
-            // selectable row that settles the same way, from a supplied rate
-            // table rather than a provider-reported total. `OPENAI_BASE_URL`
-            // stays set so the openai row still points at loopback and a test
-            // that reaches it by mistake cannot leave this machine.
+            // Use a selectable hosted row with supplied rates for offline assertions.
+            // Keep `OPENAI_BASE_URL` on loopback too, so an accidental OpenAI selection
+            // cannot leave the test machine.
             env.insert(
                 "ANTHROPIC_BASE_URL".to_string(),
                 format!("http://{}", stub.address),

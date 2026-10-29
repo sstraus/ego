@@ -1,7 +1,6 @@
 //! Strict config schema, precedence resolution and the trust gate.
 //!
-//! See `plans/m0a-contracts.md` Step 12 and
-//! `ARCHITECTURE.md`.
+//! Configuration schema and precedence contracts.
 
 use ego_core::ceiling::{Budget, Ceilings};
 use ego_core::config::{
@@ -394,14 +393,9 @@ fn config_precedence_is_independent_of_slice_order() {
     );
 }
 
-// --- ceilings (`2026-08-21-a-run-with-no-ceiling.md` §4) ---------------
+// --- ceilings ---
 
-/// The gap this closes against a published contract. `CLI.md:296-299`
-/// promises an administrator a `budget` key on `/etc/ego/config.toml` and
-/// calls the system layer "the only source of ceilings" — and every layer is
-/// `deny_unknown_fields`, so until the key existed, writing the ceiling
-/// `CLI.md` promises produced `ConfigError::UnknownKey`. The promise could
-/// not be kept by anybody.
+/// Configuration keys must be accepted by the owning schema, not merely documented.
 #[test]
 fn config_a_budget_key_is_a_known_key_in_every_layer() {
     let base = ConfigLayer::parse(Source::System, "budget = \"5$\"\n").expect("a known key");
@@ -450,10 +444,9 @@ fn config_a_higher_layer_may_raise_its_own_ceiling() {
     assert!(!effective.clamped.any(), "nobody capped anything");
 }
 
-/// The construction the deny ceiling already uses, one field over: a
-/// `system` ceiling is gathered outside the ordinary merge and re-applied
-/// after, so no higher-precedence layer can raise it. `min` and not "system
-/// wins" — `CLI.md:311` binds everyone to the administrator's *maximum*.
+/// The construction the deny ceiling already uses, one field over: a `system` ceiling is
+/// gathered outside the ordinary merge and re-applied after, so no higher-precedence
+/// layer can raise it.
 #[test]
 fn config_a_system_ceiling_cannot_be_raised_by_flags() {
     let layers = [
@@ -478,7 +471,7 @@ fn config_a_system_ceiling_cannot_be_raised_by_flags() {
     assert_eq!(
         effective.clamped.money,
         amount("20", "USD"),
-        "and what was asked for is reported, because §4 requires the clamp be stated"
+        "report the requested limit as well as the binding clamp"
     );
 }
 
@@ -577,9 +570,7 @@ fn config_a_system_profile_tightens_the_ceiling_it_names() {
     assert_eq!(effective.clamped.money, amount("10", "USD"));
 }
 
-/// Nothing imposes a ceiling. `CLI.md:296-299` — "ego itself imposes none" —
-/// so a resolution with nobody writing one produces two absences and not two
-/// defaults.
+/// Nothing imposes a ceiling.
 #[test]
 fn config_no_layer_writing_a_budget_leaves_no_ceiling_at_all() {
     let layers = [layer(
@@ -597,13 +588,8 @@ fn config_no_layer_writing_a_budget_leaves_no_ceiling_at_all() {
 
 /// The ceiling **survives the merge**. It does not decide anything.
 ///
-/// This test was called `config_system_deny_ceiling_cannot_be_relaxed_by_flags`
-/// and that name is now a claim it does not check. "Cannot be relaxed" was
-/// true of `resolve` while `resolve` ended with
-/// `allow.retain(|e| !deny.contains(e))`, and that line is gone
-/// (`docs/architecture.md` §6): whether a
-/// deny beats an allow is now decided per call, by the engine, against a
-/// canonical `PreparedCall`.
+/// Deny/allow precedence is decided per canonical `PreparedCall`, not by
+/// removing equal strings during configuration resolution.
 ///
 /// So the property did not lose its test — it changed owner. The owner is
 /// `tests/permit.rs`'s
@@ -652,12 +638,8 @@ fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
     // two wins: that is decided per call, against a canonical `PreparedCall`,
     // by the engine.
     //
-    // This assertion used to read `!allow.contains(...)`, satisfied by an
-    // `allow.retain(|e| !deny.contains(e))` at the end of `resolve`. It passed
-    // for a reason that does not generalise — the two strings happened to be
-    // equal. Change the allow to `list(src/**)` and the retain kept it,
-    // while the deny it violates sat right beside it in the same `Effective`.
-    // See `docs/architecture.md` §6.
+    // A rule merge must retain semantically overlapping patterns even when
+    // their text differs. Per-call policy decides denial precedence.
     assert!(carries(&effective.permissions.allow, "list(**)"));
 }
 
@@ -907,9 +889,8 @@ fn config_bare_flag_forces_bare_even_when_trusted() {
 
 // -- Instruction discovery (AGENTS.md) ----------------------------------
 //
-// The pure half: which files, in what order, and — the part that matters —
-// that an untrusted workspace's files are never *touched*. See
-// `docs/architecture.md`.
+// Pure discovery checks paths and ordering without touching files from
+// an untrusted workspace.
 
 mod instructions {
     use std::cell::RefCell;
@@ -1018,8 +999,8 @@ mod instructions {
         assert_eq!(texts(&set.loaded), ["the rules"]);
     }
 
-    /// An explicit file *replaces* the ambient set rather than adding to it
-    /// (ADR §9): no `AGENTS.md` is even looked for.
+    /// An explicit instruction file replaces ambient discovery; no `AGENTS.md`
+    /// is searched for.
     #[test]
     fn instructions_an_explicit_file_replaces_the_ambient_set() {
         let io = Fake::new(vec![
@@ -1613,10 +1594,8 @@ mod instructions {
 
 // --- rules are parsed by the layer, not carried as text -----------------
 
-/// A rule reaches `Effective` as a [`Rule`], so whatever consumes it cannot
-/// choose its own parser. `CLI.md:29-31` promises one language across four
-/// surfaces, and one language means one parser: a second one is how the config
-/// path and the frontmatter path start disagreeing about what a string means.
+/// A rule reaches `Effective` as a [`Rule`], so whatever consumes it cannot choose its
+/// own parser.
 #[test]
 fn config_permission_rules_arrive_parsed_and_not_as_strings() {
     let layer = ConfigLayer::parse(
@@ -1699,9 +1678,7 @@ fn config_a_project_network_allow_loads_as_a_parsed_rule_with_project_source() {
     assert_eq!(entry.authority(), Source::Project);
 }
 
-/// A `[profile.NAME]` table's rules go through the same parser. A profile that
-/// could smuggle an unparsed rule past the check would be a second surface,
-/// which is the thing §9 exists to prevent.
+/// Profile rules pass through the shared parser rather than bypassing validation.
 #[test]
 fn config_profile_rules_are_parsed_by_the_same_parser() {
     let err = ConfigLayer::parse(
@@ -1724,7 +1701,7 @@ fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
     // denial. The old skip kept whichever origin arrived first, which is the
     // user's: the one line an operator can delete without effect.
     //
-    // `docs/architecture.md`.
+
     let overlapping = || PermCfg {
         judge: None,
         allow: vec![],

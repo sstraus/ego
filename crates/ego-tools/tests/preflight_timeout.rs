@@ -1,12 +1,9 @@
 #![cfg(unix)]
 
 //! contract for the protocol-neutral secret-child adapter.
-//!
-//! Credential commands remain owned by `ego-cli`, while process-group
-//! ownership and bounded cleanup belong to `ego-tools`. This test names the
-//! final secret-child seam expected by the preflight ADR. It deliberately does
-//! not use the ordinary tool executor: tool evidence and null stdin are not
-//! valid for a secret-bearing protocol.
+//! Credential commands are owned by `ego-cli`; process groups and bounded
+//! cleanup belong to `ego-tools`. Secret-bearing subprocesses must not use
+//! ordinary tool evidence or the tool executor's null-stdin contract.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

@@ -1,82 +1,12 @@
-//! The per-session writer lease.
+//! Per-session advisory writer lease. PID and heartbeat live in the lock file,
+//! not the manifest, avoiding manifest rewrites at heartbeat frequency.
 //!
-//! See `ARCHITECTURE.md` §5 and `plans/m0a-contracts.md` Step 5. One writer
-//! per session: a CLI and an ACP connection attached to the same session
-//! must not interleave records into one log.
-//!
-//! ## Where liveness data lives (ratified)
-//!
-//! The PID and heartbeat that back stale-lease detection live in the lock
-//! file's own contents, **not** in `manifest.json`. regression case deliberately
-//! rewrites the manifest only at session creation and turn boundaries,
-//! because `StoreIo::replace_atomic` is a tmp+rename and streamed deltas
-//! arrive many times a second; a heartbeat written into the manifest would
-//! force that same tmp+rename at heartbeat frequency and destroy the
-//! cadence 005 just established, and it would make liveness — transient
-//! runtime state — part of the catalogue entry every `list()` deserialises.
-//!
-//! ## What the OS-level lock already gives us, and what it does not
-//!
-//! `fd-lock` (`flock` on Unix, `LockFileEx` on Windows) ties the lock to
-//! the *open file description*, which the kernel releases unconditionally
-//! when every descriptor referencing it closes — including on a crash,
-//! `SIGKILL` included, since process teardown closes all of a process's
-//! descriptors. For the ordinary crash case, that already gives correct
-//! single-writer semantics for free: [`Lease::acquire`]'s contended branch
-//! (`ErrorKind::WouldBlock`) is reachable *only* when some open descriptor
-//! genuinely still holds the lock right now, which on a local filesystem
-//! implies a live holder. The PID/heartbeat recorded here therefore is not
-//! what rescues the ordinary crash — `flock`'s own kernel-enforced release
-//! does — and this module's report to the story tracker says so explicitly
-//! rather than implying otherwise in a doc comment.
-//!
-//! What the PID/heartbeat *is* for, and what this implementation actually
-//! covers:
-//!
-//! - **A useful `LeaseHeld { pid }` error.** `flock` contention alone does
-//!   not reveal who holds the lock; reading the file's own recorded PID is
-//!   how [`Lease::acquire`] reports it.
-//! - **PID-reuse protection for a genuinely dead holder.** If a process
-//!   dies, the kernel releases its `flock` immediately, so a *new*
-//!   `try_write` on a truly abandoned lock simply succeeds — no staleness
-//!   logic is even reached. The staleness path in [`Lease::acquire`]
-//!   ([`is_stale`]) exists for the residual case that path leaves
-//!   unhandled: a caller's `is_alive` check reports a PID as dead while an
-//!   OS-level lock on that file is nonetheless still contended (for
-//!   example, a caller supplying a liveness probe that races or is wrong).
-//!   Requiring *both* "not alive" and "heartbeat older than `stale_after`"
-//!   before taking over is this module's defence against a false "dead"
-//!   verdict: a live-but-quiet holder (long-running turn, no heartbeat
-//!   renewal implemented yet — see below) is still protected as long as
-//!   `is_alive` correctly reports it as alive.
-//! - **What this module does *not* cover:** filesystems where `flock` is
-//!   not reliably kernel-enforced (NFS is the classic case; the plan
-//!   already flags NFS session directories as a reason to revisit this
-//!   design, not something this milestone handles) — there, a contended
-//!   lock might not mean a live holder, and this module cannot tell the
-//!   difference. Nor does it renew a held lease's heartbeat over its
-//!   lifetime: the heartbeat is written once, at acquisition. A
-//!   long-running holder is protected from wrongful takeover only by its
-//!   `is_alive` check reporting true, not by a fresh heartbeat — renewal
-//!   is future work, not attempted here.
-//!
-//! ## No OS-backed liveness probe ships in this crate
-//!
-//! [`Lease::acquire`] takes the current PID, the current time and a
-//! liveness predicate as plain parameters — nothing here reads
-//! `std::process::id()` or the wall clock, so a test can present a lock
-//! file naming a PID that is definitively not alive and a heartbeat
-//! definitively in the past without racing a real process or a real clock.
-//! This crate deliberately does not also ship a real, OS-backed
-//! implementation of that predicate: checking whether an arbitrary PID is
-//! alive needs either an FFI call (`kill(pid, 0)` on Unix,
-//! `OpenProcess`/`CloseHandle` on Windows) or a process-inspection
-//! dependency, and the workspace denies `unsafe_code` outright while
-//! `ego-tools`'s `Cargo.toml` carries no such dependency. Adding either is
-//! outside this file's ownership. Until a real predicate is wired in
-//! (wherever that unsafe/dependency boundary is judged to belong), callers
-//! must supply their own; that wiring is explicitly out of scope for this
-//! story.
+//! Kernel locks release when the owning descriptors close, including on a crash.
+//! Contention reports the recorded PID. Takeover requires both a dead PID verdict
+//! and an old heartbeat; a live quiet process remains protected by the liveness probe.
+//! Heartbeat is recorded at acquisition, not renewed. Callers supply PID, time,
+//! and liveness observations; this module performs no OS process inspection.
+//! Filesystems without reliable advisory locking are outside this guarantee.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -146,21 +76,10 @@ impl From<io::Error> for LeaseError {
     }
 }
 
-/// A held per-session writer lease, backed by an advisory OS lock
-/// (`fd-lock`) on a lock file at a caller-chosen path (`ARCHITECTURE.md`
-/// §5: `<session-dir>/session.lock`). See the module doc comment for the
-/// durability protocol this implements and its documented limits.
-///
-/// Released by dropping: this struct owns the locked [`File`], and closing
-/// its descriptor releases the OS-level lock. Drop also removes this holder
-/// from the optional host PID index, unless a newer binding replaced it.
-/// The lock file itself is deliberately
-/// left in place on release rather than removed: an unlink here could race
-/// a *new* holder that has already taken the path over (see
-/// [`Lease::acquire`]'s takeover path, which replaces rather than rewrites
-/// in place precisely so the old holder's descriptor keeps pointing at an
-/// orphaned inode instead of the live one) — deleting blind could destroy
-/// a legitimately active lease file out from under its new owner.
+/// Per-session advisory writer lease on a caller-chosen path, normally
+/// `<session-dir>/session.lock`. See the module durability protocol and limits. Dropping
+/// releases the locked file descriptor and owned PID binding. Do not unlink the lock path on
+/// release: a newer holder may already own its replacement inode.
 pub struct Lease {
     // Kept alive for its `Drop` impl, which is what releases the
     // underlying advisory lock; never read again after acquisition.

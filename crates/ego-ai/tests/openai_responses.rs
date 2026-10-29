@@ -1,12 +1,8 @@
 //! The public OpenAI Responses mapping, and the Chat endpoint it replaced.
 //!
-//! `docs/guides/providers.md`
-//! asks for two different things and this file proves both. One is that the
-//! public row speaks the public Responses contract. The other is negative and
-//! is the reason the ADR was written: that **nothing** of the private Codex
-//! backend, and nothing of the Chat mapping this row used to select, survives
-//! on it. A positive test alone would pass just as happily against a body that
-//! also carried a Codex identity.
+//! These tests check both the public Responses body and the absence of
+//! private Codex identity and Chat mapping fields. A positive shape check
+//! alone would miss a body carrying unintended extra identity headers.
 
 use base64::Engine;
 use ego_ai::http::HttpResponse;
@@ -100,12 +96,8 @@ fn store_is_explicitly_false_rather_than_omitted() {
 }
 
 /// Nothing private to the Codex backend appears in a public request.
-///
-/// The named fields and headers are the ones `openai_codex_responses` and the
-/// `openai-codex` row really carry, so this is a guard against the concrete
-/// leak the ADR describes rather than a spell-check: "Reuse private Codex
-/// Responses — imports private endpoint, identity, and body semantics into a
-/// public API."
+/// The forbidden fields and headers are concrete Codex contract values.
+/// Public OpenAI must not inherit its private endpoint, identity or semantics.
 #[test]
 fn no_codex_private_bytes_reach_the_public_request() {
     let row = ProviderRow::openai();

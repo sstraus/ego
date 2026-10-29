@@ -1,4 +1,4 @@
-//! contract for regression case: overflow settles explicitly and compacts from idle.
+//! Overflow settles explicitly and compacts from idle.
 
 use ego_core::compact::Checkpoint;
 use ego_core::generator::attempt::{DeliveryCertainty, Outcome, UsageReport};

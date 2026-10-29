@@ -1,0 +1,248 @@
+{
+  "session": "00000000-0000-4000-8000-000000010028",
+  "peer": "parity-2021",
+  "events": [
+    {
+      "env": {
+        "seq": 1654,
+        "id": "00000000-0000-4000-8000-00000001002b",
+        "turn": "00000000-0000-4000-8000-00000001002a",
+        "item": null,
+        "parent": null,
+        "ts": 949110038034,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "ContextWindowUpdated",
+        "used_tokens": 245356,
+        "provenance": "generation_boundary",
+        "window": 272000
+      }
+    },
+    {
+      "env": {
+        "seq": 1661,
+        "id": "00000000-0000-4000-8000-00000001002c",
+        "turn": "00000000-0000-4000-8000-00000001002a",
+        "item": null,
+        "parent": null,
+        "ts": 949110039409,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "Error",
+        "message": "Measured context pressure requires a clean-session compaction before continuing.",
+        "error_kind": "context_overflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1662,
+        "id": "00000000-0000-4000-8000-00000001002d",
+        "turn": "00000000-0000-4000-8000-00000001002a",
+        "item": null,
+        "parent": null,
+        "ts": 949110039410,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": "ContextOverflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1663,
+        "id": "00000000-0000-4000-8000-00000001002f",
+        "turn": "00000000-0000-4000-8000-000000010029",
+        "item": null,
+        "parent": null,
+        "ts": 949110039821,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "HookLifecycleReached",
+        "occurrence": {
+          "lifecycle": "PreCompact",
+          "owner": {
+            "kind": "request",
+            "request": "00000000-0000-4000-8000-00000001002e"
+          }
+        },
+        "subject": {
+          "scope": "session"
+        },
+        "plan": []
+      }
+    },
+    {
+      "env": {
+        "seq": 1664,
+        "id": "00000000-0000-4000-8000-000000010033",
+        "turn": "00000000-0000-4000-8000-000000010030",
+        "item": null,
+        "parent": null,
+        "ts": 949110039863,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "GenerationStarted",
+        "attempt": {
+          "generation": "00000000-0000-4000-8000-000000010031",
+          "attempt": "00000000-0000-4000-8000-000000010032"
+        },
+        "role": "compaction"
+      }
+    },
+    {
+      "env": {
+        "seq": 1665,
+        "id": "00000000-0000-4000-8000-000000010034",
+        "turn": "00000000-0000-4000-8000-000000010030",
+        "item": null,
+        "parent": null,
+        "ts": 949110114699,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "Error",
+        "message": "the response stream failed: HTTP response body failed",
+        "error_kind": "transient"
+      }
+    },
+    {
+      "env": {
+        "seq": 1667,
+        "id": "00000000-0000-4000-8000-000000010035",
+        "turn": "00000000-0000-4000-8000-000000010030",
+        "item": null,
+        "parent": null,
+        "ts": 949110114706,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "00000000-0000-4000-8000-000000010031",
+          "attempt": "00000000-0000-4000-8000-000000010032"
+        },
+        "outcome": {
+          "stop": "error",
+          "delivery": "possibly_sent",
+          "usage": "missing"
+        }
+      }
+    },
+    {
+      "env": {
+        "seq": 1668,
+        "id": "00000000-0000-4000-8000-000000010036",
+        "turn": "00000000-0000-4000-8000-000000010030",
+        "item": null,
+        "parent": null,
+        "ts": 949110114709,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": "Provider"
+      }
+    },
+    {
+      "env": {
+        "seq": 1670,
+        "id": "00000000-0000-4000-8000-000000010039",
+        "turn": "00000000-0000-4000-8000-000000010037",
+        "item": "00000000-0000-4000-8000-000000010038",
+        "parent": null,
+        "ts": 949110114771,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "UserPrompt",
+        "text": "[TUIC] child agent 115c2f01 is now idle"
+      }
+    },
+    {
+      "env": {
+        "seq": 1672,
+        "id": "00000000-0000-4000-8000-00000001003a",
+        "turn": "00000000-0000-4000-8000-000000010037",
+        "item": null,
+        "parent": null,
+        "ts": 949110114786,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "Error",
+        "message": "Measured context pressure requires a clean-session compaction before continuing.",
+        "error_kind": "context_overflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1673,
+        "id": "00000000-0000-4000-8000-00000001003b",
+        "turn": "00000000-0000-4000-8000-000000010037",
+        "item": null,
+        "parent": null,
+        "ts": 949110114786,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": "ContextOverflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1750,
+        "id": "00000000-0000-4000-8000-00000001003e",
+        "turn": "00000000-0000-4000-8000-00000001003c",
+        "item": "00000000-0000-4000-8000-00000001003d",
+        "parent": null,
+        "ts": 949111830080,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "UserPrompt",
+        "text": "Please stop the processes you started and report the result."
+      }
+    },
+    {
+      "env": {
+        "seq": 1752,
+        "id": "00000000-0000-4000-8000-00000001003f",
+        "turn": "00000000-0000-4000-8000-00000001003c",
+        "item": null,
+        "parent": null,
+        "ts": 949111830097,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "Error",
+        "message": "Measured context pressure requires a clean-session compaction before continuing.",
+        "error_kind": "context_overflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1753,
+        "id": "00000000-0000-4000-8000-000000010040",
+        "turn": "00000000-0000-4000-8000-00000001003c",
+        "item": null,
+        "parent": null,
+        "ts": 949111830099,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": "ContextOverflow"
+      }
+    }
+  ]
+}

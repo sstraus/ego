@@ -242,17 +242,11 @@ impl ChildResultEvidence {
 /// wired through a seven-argument constructor that needed
 /// `#[allow(clippy::too_many_arguments)]` to compile.
 ///
-/// `AGENTS.md`'s hexagonal rule admits a port at a *proven external boundary*.
-/// None of the six was one: they did not vary independently, no second adapter
-/// ever implemented one without the others, and every fake implemented all of
-/// them together. Six names bought no substitutability and cost four extra
-/// `Arc<dyn>` indirections plus an argument list long enough to trip a lint.
-/// The boundary that is real is this one — the host process holding the
-/// parent's journal, blobs, artifacts and configuration — and it is named once.
+/// These operations share one host-process boundary: the parent's journal,
+/// blobs, artifacts and configuration. Splitting them into ports that cannot
+/// vary independently would add indirection without substitutability.
 ///
-/// The rule of thumb this enacts, recorded in
-/// `docs/architecture.md`: one
-/// real implementation and one fake is not a boundary, it is a function.
+
 pub trait ChildHost: Send + Sync {
     /// The parent's durable record of one subagent invocation.
     fn read_journal(

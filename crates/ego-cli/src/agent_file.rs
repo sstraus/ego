@@ -1,4 +1,4 @@
-//! The strict, versioned agent-file input of `CLI.md` §5.
+//! Strict, versioned agent-file input.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;

@@ -1,14 +1,8 @@
-//! contracts for the CLI's measured ACP confinement adapter (regression case).
-//!
-//! The router already owns the protocol ordering and `AcpSessionControls`
-//! already owns the ceiling/offer policy. These tests cover the missing outer
-//! composition: the CLI adapter must measure through `RunEffectPorts`, retain
-//! the observation for the durable session, and expose typed missing-capability
-//! refusals to the existing controls port.
-//!
-//! The adapter name and constructor below are deliberately the smallest
-//! fixture-facing API accepted by the story ADR. They remain compile-until
-//! the CLI composition wires the real `SessionConfinementAdmission` port.
+//! contracts for the CLI's measured ACP confinement adapter.
+//! The CLI adapter measures through `RunEffectPorts`, retains confinement
+//! observations for the durable session and reports typed capability refusals
+//! through the existing controls port. Router ordering and ceiling policy
+//! remain owned by their existing collaborators.
 
 #![cfg(any(target_os = "linux", target_os = "macos"))]
 

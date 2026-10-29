@@ -1,9 +1,7 @@
 //! The generated artifacts, bound to the parser that generates them.
 //!
-//! `CLI.md` §4: "CLI reference and completions are generated from the same
-//! final clap definitions and snapshot-tested… hand-maintained parallel
-//! command lists are not release evidence." Two things have to hold for that
-//! sentence to mean anything, and one of them is easy to forget.
+//! Reference and completions derive from the same final clap definitions. The tests check
+//! that generated artifacts remain synchronized.
 //!
 //! The easy one is the snapshot: the file on disk equals what the generator
 //! produces now. The one that is easy to forget is the *inventory* — the

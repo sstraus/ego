@@ -1,10 +1,7 @@
 //! `ego`, the binary — argv, stdout, the process exit.
 //!
-//! `ARCHITECTURE.md` §3: this crate owns the command line, the two output
-//! streams, signal handling and the process's exit status. It owns no
-//! accounting, no projection and no exit-code table: each of those is a value
-//! it reads from `ego-core`, which is what keeps an ACP host and this binary
-//! saying the same thing about the same run.
+//! This crate owns CLI composition, streams, signals and process exit. Core owns
+//! accounting, projection and exit-code values shared with protocol hosts.
 //!
 //! A library beside the binary so the parse and the assembly can be tested as
 //! functions, and the *process* — exit codes, stdout, signals — can be tested
@@ -65,7 +62,7 @@ pub mod schema;
 pub mod session;
 pub mod setup;
 mod setup_proposals;
-#[allow(dead_code)] // Connected to the turn service by M4 S6 after admission is green.
+#[allow(dead_code)] // Connected to generation through the admitted turn service.
 pub(crate) mod skill;
 pub mod status_provider;
 pub mod trust;

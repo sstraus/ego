@@ -18,7 +18,7 @@ fn boss_portable_layout_lists_once_and_invokes_admitted_body() {
     );
     let source = ego.file(
         ".agents/skills/foo/SKILL.md",
-        "---\nname: foo\ndescription: Portable fixture\n---\nPORTABLE-474-BODY $ARGUMENTS\n",
+        "---\nname: foo\ndescription: Portable fixture\n---\nPORTABLE-XVL-BODY $ARGUMENTS\n",
     );
     std::fs::create_dir_all(ego.workspace_path().join(".claude/skills")).unwrap();
     std::os::unix::fs::symlink(
@@ -42,7 +42,7 @@ fn boss_portable_layout_lists_once_and_invokes_admitted_body() {
     let invoked = places
         .ego(&stub)
         .conversing()
-        .run_pty("/skills invoke foo REGRESSION-MARKER");
+        .run_pty("/skills invoke foo CHECK-XVL");
     assert_eq!(invoked.code, Some(0), "{}", invoked.stderr);
     let requests = stub.generations();
     assert_eq!(requests.len(), 1);
@@ -53,7 +53,7 @@ fn boss_portable_layout_lists_once_and_invokes_admitted_body() {
             .iter()
             .any(|message| message["content"]
                 .as_str()
-                .is_some_and(|text| text.contains("REGRESSION-MARKER-BODY REGRESSION-MARKER"))),
+                .is_some_and(|text| text.contains("PORTABLE-XVL-BODY CHECK-XVL"))),
         "{}",
         requests[0]
     );

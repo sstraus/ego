@@ -200,7 +200,7 @@ Deterministic adapter tests do not establish every host's behavior or UI renderi
 Sources: [ACP composition](../../crates/ego-cli/src/acp.rs),
 [ACP adapter crate](../../crates/ego-acp/src/),
 [permission adapter](../../crates/ego-cli/src/acp_permission.rs), and
-[host tests](../../crates/ego-cli/tests/regression_case.rs).
+[host tests](../../crates/ego-cli/tests/tuicommander_host.rs).
 
 ## Session profile ceiling
 

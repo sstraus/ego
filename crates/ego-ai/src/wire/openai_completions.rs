@@ -1,75 +1,13 @@
-//! The `openai-completions` wire format: `POST /chat/completions`, streamed.
+//! Chat Completions mapping for the published request and stream contract. Compatible branding
+//! alone does not establish compatibility.
 //!
-//! The shape behind OpenAI, OpenRouter, Groq, Together, Fireworks, DeepSeek,
-//! and local daemons that advertise an
-//! "OpenAI-compatible" endpoint
-//! (`ARCHITECTURE.md` §3.1). Every field name, enum spelling and nullability
-//! below was read from `openai/openai-openapi` rather than recalled — the
-//! constraint `plans/m0b-vertical-slice.md` Step 9 puts on this step, because
-//! a golden pinned from memory pins the memory, not the contract.
+//! Usage categories form a partition: uncached input excludes cached and cache-write tokens.
+//! Reasoning extension fields are decoded uniformly by field name, not provider identity.
+//! `content_filter` is an error; a gateway's `end_turn` is accepted as completion.
 //!
-//! # What the schema settled, and what it ruled out
-//!
-//! - **The usage breakdown is a partition, not overlapping subsets.** OpenAI's
-//!   own aggregate schema says `input_tokens` is "including cached and
-//!   cache-write tokens" while `input_uncached_tokens` is "excluding
-//!   cache-write tokens", and both published examples add up exactly
-//!   (400+100+500=1000; 1800+200+3000=5000). So `uncached = prompt_tokens −
-//!   cached_tokens − cache_write_tokens`, and
-//!   [`Usage::total_tokens`](ego_core::state::Usage::total_tokens) comes back
-//!   to `prompt + completion` with nothing counted twice. Subtracting only
-//!   `cached_tokens` — the obvious reading, and the one the per-request schema
-//!   alone would leave you with — would double-count every cache-write token.
-//! - **There is no reasoning text in *OpenAI's* schema.** The streaming delta
-//!   has `content`, `refusal`, `tool_calls`, `role` and `function_call`, and
-//!   nothing else; reasoning appears only as a *count*
-//!   (`completion_tokens_details.reasoning_tokens`).
-//!
-//!   But this format serves a family, and other members of it do stream the
-//!   text — as `reasoning` or as `reasoning_content`, in the same `delta`
-//!   object. Those are not a different row's problem: `ARCHITECTURE.md`'s
-//!   wire decision §4 rules that an extension field is decoded
-//!   **opportunistically and uniformly for every member**, because the field
-//!   *name* is the contract and the vendor is not. A member that never sends
-//!   it simply leaves the field absent, so there is nothing to branch on and
-//!   no provider identity to consult.
-//!
-//!   `Delta` decodes both names, so this is where
-//!   [`AiEvent::ReasoningDelta`] gets its first producer in the workspace.
-//!   The measured cost of not decoding them is in
-//!   `tests/ollama_reasoning.rs`: 117 of 118 output tokens billed and
-//!   dropped. **The tokens are still not separable** — this family's usage
-//!   chunk has no `completion_tokens_details` on the rows that send reasoning
-//!   — and that half stays open as `POTENTIALS.md` P24.
-//! - **`finish_reason` has five spellings**, and one of them —
-//!   `content_filter` — has no [`StopReason`] to land on. It is reported as
-//!   [`StopReason::Error`] with a named [`AiEvent::Error`] beside it rather
-//!   than mapped onto `Stop`, which would claim a filtered answer finished
-//!   normally.
-//!
-//!   `consume_finish_reason` maps a sixth, `end_turn`, which is *not* in the
-//!   schema and arrives anyway: a gateway passing its upstream's reason
-//!   through untranslated. Decoded for the whole family and not for the row
-//!   that sends it, on the same rule as the reasoning fields above — the
-//!   string is the contract and the vendor is not.
-//!
-//! # The one event ordering rule
-//!
-//! **`Stop` is last, always, exactly once.** Not at the `finish_reason` chunk,
-//! where it would arrive before the usage chunk that follows it — OpenAI sends
-//! usage *after* the choice that ends the turn and before `data: [DONE]`. So
-//! the finish reason is remembered when it arrives and emitted when the byte
-//! stream ends, whatever ended it.
-//!
-//! Which gives the truncation table a single line: **the `finish_reason` is
-//! the answer.** If it arrived, the generation ended the way it says, and a
-//! stream cut afterwards costs only the usage report — which
-//! [`UsageReport::Missing`](ego_core::generator::attempt::UsageReport) already
-//! charges pessimistically, and which OpenAI's own schema warns about ("If the
-//! stream is interrupted, you may not receive the final usage chunk"). If it
-//! never arrived, the generation ended in `Error`, and the error says which of
-//! the ways it was: cut mid-frame, ended between frames, or `[DONE]` with
-//! nothing before it.
+//! Emit `Stop` once, last, after any usage chunk. A received finish reason determines
+//! completion even if later usage is lost; without a finish reason, truncation is an error.
+//! Missing usage remains explicitly unknown and is charged pessimistically.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -92,13 +30,8 @@ use super::sse::SseDecoder;
 use super::{RequestRefused, RequestTarget, WireFormat};
 
 /// The `openai-completions` mapping, as a value a profile can name.
-///
-/// A unit struct: everything that varies between the providers speaking this
-/// shape — the address, the credential, whether a monetary total is stated —
-/// is on the profile and arrives as a parameter, so there is nothing left for
-/// an instance to hold. That emptiness is the ADR §4 claim made structural: a
-/// mapping with no per-provider state has nowhere to keep a per-provider
-/// branch.
+/// A unit struct: address, credential and cost behavior arrive as parameters
+/// from the row. The mapping holds no provider-specific state.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct OpenAiCompletions;
 
@@ -155,11 +88,9 @@ pub const PATH: &str = "chat/completions";
 
 /// A `GenRequest` this format cannot express without lying about it.
 ///
-/// Every variant is a case where the alternative would be to drop something
-/// the caller asked for and send the request anyway. `docs/guides/providers.md`
-/// I5 is about exactly that: a shared HTTP shape is not equivalent semantics,
-/// and a silent mistranslation is worse than a refusal because nothing
-/// downstream can tell it happened.
+/// Each error prevents silently dropping requested behavior. A shared HTTP
+/// shape does not guarantee equivalent semantics, and downstream code
+/// cannot detect a request that has already been mistranslated.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
     /// The request carries reasoning state, and this format has nowhere to put
@@ -203,13 +134,9 @@ impl From<Inexpressible> for RequestRefused {
 /// Everything in this family's request body that does not depend on which
 /// member is being addressed.
 ///
-/// Split out because exactly one member's body differs, in exactly one field:
-/// Ollama reads `max_tokens` and discards `max_completion_tokens`
-/// (`docs/guides/providers.md` §8).
-/// §4 place 3 makes that an adapter difference and offers no third option, so
-/// the difference is carried by *which mapping serialises this*, and never by
-/// a flag one shared mapping reads. `pub(crate)` for that reason and no other:
-/// [`super::ollama`] is the second serialiser, not a second copy.
+/// Ollama reads `max_tokens` instead of `max_completion_tokens`. The
+/// [`super::ollama`] serializer shares this projection and changes that field,
+/// without a provider flag in the common mapping.
 #[derive(Debug, Serialize)]
 pub(crate) struct CommonRequest<'a> {
     model: &'a str,
@@ -256,18 +183,10 @@ struct StreamOptions {
     /// usage. Without it the settlement has no figures at all and every
     /// generation reconciles at its pessimistic bound.
     ///
-    /// **One member of this family calls the field deprecated, and it is sent
-    /// anyway.** OpenRouter states that this flag and its own
-    /// `usage: {include: true}` "are deprecated and have no effect", returning
-    /// full usage automatically. That is not a reason to drop it:
-    /// `ChatCompletionStreamOptions.include_usage` is undeprecated on the
-    /// contract *this mapping is derived from*, where it is the only way usage
-    /// arrives at all, while Ollama honours it.
-    /// OpenRouter retired a **precondition, not a spelling** — nothing
-    /// succeeded it — so there is no second spelling to be carrying, which is
-    /// the shape `AGENTS.md` forbids. Audited in
-    /// `docs/guides/providers.md` §3 and guarded by
-    /// `tests/deprecated_spellings.rs`.
+    /// OpenRouter treats this flag as inert and returns full usage automatically.
+    /// Keep it because the originating Chat Completions contract requires it for
+    /// usage reporting and Ollama honors it. `tests/deprecated_spellings.rs`
+    /// checks contract-specific field retirement.
     include_usage: bool,
 }
 
@@ -653,11 +572,8 @@ pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, Inex
 
 /// A complete HTTP request for `req` against `target`.
 ///
-/// The target's headers come from the provider row — the auth header above all
-/// — because credentials are not this module's to know
-/// (`ARCHITECTURE.md` §3.1), and its base is joined with [`PATH`] here rather
-/// than carried whole by the row, because a path is a fact about the API shape
-/// and the row is not allowed to know one.
+/// The target carries the row's headers and base; the mapping joins its own [`PATH`].
+/// Credentials and provider identity stay outside wire-format decisions.
 pub fn build_request(
     target: &RequestTarget<'_>,
     req: &GenRequest,
@@ -739,18 +655,11 @@ struct Delta {
     /// Reasoning text, spelling one. Ollama sends this
     /// (`tests/goldens/ollama_reasoning_high.sse`, measured), and so does
     /// OpenRouter.
-    ///
-    /// Not in `openai/openai-openapi`, and read anyway: the shared-shape ADR
-    /// §4 rules that an extension field is decoded opportunistically and
-    /// uniformly for every member of the family, because the *field name* is
-    /// the contract and the vendor is not. A member that never sends it
-    /// leaves it absent, which decodes to `None` and changes nothing — so
-    /// there is no branch here, and nothing to consult a provider id about.
+    /// Decode extension fields uniformly by field name, not provider identity.
+    /// Absent fields remain `None` and do not change other members' behavior.
     #[serde(default)]
     reasoning: Option<String>,
-    /// Reasoning text, spelling two. The retired xAI Chat schema supplied the
-    /// original evidence for this opportunistic extension (`POTENTIALS.md`
-    /// P24); that evidence is archival and no current xAI row uses this wire.
+    /// Reasoning text, spelling two.
     ///
     /// Two fields and not one aliased field: `#[serde(alias)]` would decode
     /// either name into one slot and silently keep the last one written if a
@@ -849,13 +758,8 @@ fn map_usage(usage: &WireUsage) -> Option<Usage> {
         // wrote nothing at an extended retention.
         cache_write_extended_tokens: 0,
         output_tokens: usage.completion_tokens,
-        // Read where it is published and left unknown where it is not — the
-        // same opportunistic, uniform decode the sibling ADR §4 rules for
-        // every extension field, with no provider id anywhere near it.
-        // OpenRouter fills this in. The retired xAI Chat fixtures did too;
-        // that evidence is archival. Ollama sends no
-        // `completion_tokens_details` at all, and `None` says so rather than
-        // claiming it reasoned for nothing.
+        // Read reasoning usage where present; otherwise keep it unknown.
+        // An absent `completion_tokens_details` must not become zero reasoning cost.
         web_search_requests: 0,
         reasoning_tokens: usage
             .completion_tokens_details
@@ -917,12 +821,8 @@ enum Incomplete {
 #[derive(Debug, Default)]
 pub struct StreamDecoder {
     /// How this provider states the money it will charge, when it states it.
-    ///
-    /// Carried by the provider row, not chosen here: this format is spoken by
-    /// OpenAI, OpenRouter, Groq and local daemons, and only some report a cost.
-    /// A `match` on the provider id
-    /// in this file would be exactly the special case the metering ADR §8
-    /// forbids.
+    /// The provider row supplies the cost decoder. Shared wire code does not
+    /// branch on which providers report monetary totals.
     cost: Option<Arc<dyn ProviderCost>>,
     /// The last figure the cost decoder read, held rather than forwarded, for
     /// the same reason `usage` below is: a stated cost is a total for the
@@ -1274,15 +1174,8 @@ impl StreamDecoder {
             // Deprecated in the schema, still emitted by older gateways, and
             // the same event: the model stopped in order to call something.
             "function_call" => StopReason::ToolUse,
-            // Anthropic's spelling of `stop`, reaching this wire because a
-            // gateway passes its upstream's reason through untranslated
-            // rather than mapping it (survey row 45; the retired xAI Chat
-            // recording is the archival measured case). It is not this
-            // format's vocabulary and it arrives in
-            // this format's stream anyway, which is the whole reason the
-            // table is widened here rather than made conditional on a
-            // provider id — a `match` on the row inside a wire format is what
-            // the sibling ADR §5's name-absence test forbids.
+            // Gateways can pass upstream `end_turn` through unchanged. Normalize that
+            // spelling uniformly rather than switching on provider identity.
             //
             // Widening is safe in the direction that matters: `end_turn` has
             // exactly one meaning wherever it is minted, so no row that does

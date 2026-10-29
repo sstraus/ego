@@ -1,4 +1,4 @@
-//! The argument grammar: `CLI.md` §3 and the parse half of §4.5.
+//! The CLI argument grammar and parse-time lifecycle checks.
 //!
 //! The literal `--` boundary is separated before command dispatch. Clap then
 //! owns option/value boundaries, including hidden diagnostic spellings. Only
@@ -48,14 +48,12 @@ pub enum Invocation {
     Checkpoint(CheckpointArgs),
     /// Transient read-only setup diagnostics, outside the ordinary run pipeline.
     Setup(SetupArgs),
-    /// `ego run [PROMPT]` — the headless one-shot of `CLI.md` §2.
+    /// `ego run [PROMPT]`: headless one-shot execution.
     Run(Box<Args>),
-    /// `ego resume [ID] [PROMPT]` — the same run against a session that
-    /// already exists. One [`Args`] and not a second shape: everything after
-    /// "which session" is identical, and a `ResumeArgs` would be the parallel
-    /// implementation `AGENTS.md`'s reuse rule forbids.
+    /// `ego resume [ID] [PROMPT]` uses the same run arguments as a new session.
+    /// Only session selection differs, so both commands share [`Args`].
     Resume(Box<Args>),
-    /// `ego resume ID --name ...|--goal-operation ...` — durable metadata only.
+    /// `ego resume ID --name...|--goal-operation...` — durable metadata only.
     SessionMetadata(Box<SessionMetadataArgs>),
     /// `ego ls` — the catalogue, this workspace's by default.
     Ls(Box<LsArgs>),
@@ -78,30 +76,22 @@ pub enum Invocation {
     A2a(Box<A2aArgs>),
     /// `ego mcp-server` — serve scoped ego runs over MCP on stdio.
     McpServer(Box<McpServerArgs>),
-    /// `ego [PROMPT]`, or promptless `ego resume [ID]` — the interactive
-    /// session of `CLI.md` §6.
+    /// `ego [PROMPT]` or promptless `ego resume [ID]`: an interactive session.
     ///
     /// One [`Args`] again, and for [`Invocation::Resume`]'s reason: a prompt
     /// given on the command line is the first thing said, not a different
     /// mode, and everything else a session needs to resolve is the same.
     Interactive(Box<Args>),
-    /// `--help` or `--version`: the question was answered, and there is
-    /// nothing to run.
-    ///
-    /// A success and not a [`UsageError`], which is what it used to be. clap
-    /// reports both through `Err`, and treating every `Err` the same sent help
-    /// to *stderr* behind an `ego:` prefix and exited 2 — the code `CLI.md`
-    /// §4.3 defines as "usage error". Asking what a command does is not
-    /// misusing it, and a script that pipes `--help` got an empty stdout.
+    /// Help and version answer successfully without starting a run. Clap reports these through
+    /// its error channel, but they belong on stdout with exit 0, not a usage-error prefix and
+    /// exit 2.
     Answered(String),
 }
 
 /// A refusal decided before any turn exists.
 ///
-/// One type and not several, because every one of them is `CLI.md` §4.3's
-/// exit 2 and the caller turns it into `RunTermination::UsageError` at a
-/// single place. The message is the whole product: a script that gets 2 and
-/// no sentence has been told nothing.
+/// Usage errors share one type and become `RunTermination::UsageError` in one place. The
+/// diagnostic message must explain the invalid invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageError(pub String);
 
@@ -113,8 +103,7 @@ impl std::fmt::Display for UsageError {
 
 impl std::error::Error for UsageError {}
 
-/// A flag `CLI.md` §3 documents that this build cannot honour, and the
-/// subsystem it is waiting on.
+/// A recognized flag this build refuses, with its supported alternative.
 ///
 /// **Not a convenience.** Each entry names a component that does not exist —
 /// not a switch someone has not got round to reading. A `--allow` that parsed
@@ -125,26 +114,14 @@ struct Unavailable {
     waiting_on: &'static str,
 }
 
-/// The applicability matrix of `CLI.md` §4.5.
-///
-/// `ARCHITECTURE.md`'s milestone table (line 424 onwards) is the source for
-/// every `waiting_on` here: these are subsystems, and the sentence says which.
+/// Unsupported legacy flags and their supported alternatives.
 const UNAVAILABLE: &[Unavailable] = &[Unavailable {
     flags: &["-v", "--verbose"],
-    waiting_on: "nothing, and it is not coming. The capability it used to \
-                     wait on now exists — `EGO_LOG` installs a subscriber for \
-                     the `tracing` events this build emits, and `EGO_LOG_FILE` \
-                     collects them — but it is deliberately not a flag. \
-                     `CLI.md` §3 is the argument grammar of a *run*, and a \
-                     diagnostic level changes nothing a run does and is \
-                     recorded in none of its evidence; regression case froze this \
-                     table with verbose excluded, and reading the environment \
-                     is what lets the capability ship without amending it. See \
-                     `docs/decisions/\
-                     2026-09-07-diagnostics-get-a-destination-before-a-switch.md`",
+    waiting_on: "diagnostic logging is configured with EGO_LOG and EGO_LOG_FILE, \
+                 not a run flag. See docs/guides/troubleshooting.md",
 }];
 
-/// The commands of `CLI.md` §2 this build implements.
+/// Commands implemented by this build.
 ///
 /// The dispatch below reads this rather than matching three literals, so the
 /// list is a value a test can hold — and the test it exists for is the one
@@ -182,39 +159,28 @@ pub const BUILT: &[&str] = &[
     "worktree",
 ];
 
-/// A command `CLI.md` §2 documents that this build does not implement, and the
-/// subsystem it is waiting on.
+/// A documented command not implemented by this build, with the missing subsystem.
 ///
-/// Empty, because `ego doctor` was the last one and story `regression` built it.
-/// Every command `CLI.md` §2 documents is now in [`BUILT`].
+/// Empty: all currently documented commands are implemented in [`BUILT`].
 ///
-/// It ships empty rather than being deleted, for the reason [`RETIRED`] ships
-/// empty. The subcommand twin of [`UNAVAILABLE`]: in the first availability
-/// table `run` was the only implemented named command, so every other
-/// documented command fell through to the *interactive* refusal below — which
-/// told someone who typed `ego resume` that the permission dialog was missing.
-/// True, and about a surface they had not asked for. `CLI.md` §3.1 states the
-/// standard for flags ("refused **by name**, with the subsystem it waits on")
-/// and nothing had applied it one level up. The next command documented before
-/// it is written wants that refusal already there, not invented under deadline.
+/// Keep named command refusals separate from interactive-session refusals. Otherwise a
+/// caller asking for a headless command could receive an unrelated terminal-capability
+/// explanation.
 ///
 /// A tuple rather than a struct, matching [`RETIRED`], because both halves are
 /// needed by the test that binds this table to the document.
 ///
-/// `waiting_on` is sourced from `ARCHITECTURE.md` §8's milestone table where it
-/// places the work, and from the code where it does not — a subsystem that
-/// table does not place still gets a reason, never a milestone invented for it.
+/// Every unavailable command names a concrete missing subsystem, not an invented
+/// milestone.
 pub const UNBUILT: &[(&str, &str)] = &[];
 
 /// A flag that was removed, and what replaced it.
 ///
-/// Empty, because nothing has been retired yet. It ships anyway, with its own
-/// test: `CLI.md` §4.3 says a retired flag errors by name with its
-/// replacement, and the moment that rule is easiest to forget is the first
-/// retirement — when there is no mechanism, only a note in a changelog.
+/// Empty because no flags are retired. A future retirement must name its replacement
+/// rather than silently ignore the input.
 pub const RETIRED: &[(&str, &str)] = &[];
 
-/// Every `CLI.md` §2 command as one clap tree.
+/// The command set as one clap tree.
 ///
 /// Argv is not parsed through this. The top level is a hand-written dispatch
 /// because `ego PROMPT` has to mean a prompt and not an unknown subcommand,
@@ -239,10 +205,8 @@ pub fn root_command() -> clap::Command {
         .name("ego")
         .version(env!("CARGO_PKG_VERSION"))
         .about("Run an agent, from one command line.")
-        // `ego help` is not in the command inventory `CLI.md` §2 documents, and
-        // building the tree would otherwise invent it — putting a subcommand in
-        // the reference and the completions that the real parser answers by
-        // treating "help" as a prompt.
+        // Do not invent a `help` subcommand: the parser treats unrecognized command text
+        // as a prompt. Help flags remain available.
         .disable_help_subcommand(true)
         .subcommand(named("run", headless_run_command()))
         .subcommand(named("resume", resume_command()))
@@ -417,9 +381,8 @@ fn resume_command() -> clap::Command {
 
 /// Where the prompt comes from when it is not on the command line.
 ///
-/// `CLI.md` §2's stdin contract, which is explicit: `-` reads the prompt from
-/// stdin, and with *both* an argv prompt and piped stdin, stdin is appended
-/// as a delimited context block.
+/// `-` explicitly reads the prompt from stdin. When argv and piped context are both
+/// present, stdin is appended as a delimited context block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stdin {
     /// `-` was given: stdin *is* the prompt.
@@ -428,7 +391,7 @@ pub enum Stdin {
     Ambient,
 }
 
-/// How the run reports itself (`CLI.md` §4).
+/// The run's output format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
 #[value(rename_all = "lowercase")]
 pub enum Output {
@@ -449,12 +412,8 @@ impl std::fmt::Display for Output {
     }
 }
 
-/// Which durable session a run writes (`CLI.md` §3, "Session").
-///
-/// One value rather than independent durable flags, because §4.5 calls them a
-/// mutually-exclusive group and a group is a thing the type can *be*, not a
-/// rule someone has to remember to check. The recognized `--ephemeral`
-/// spelling is refused before this value is built.
+/// One durable-session selection value encodes mutually exclusive choices. The recognized
+/// `--ephemeral` spelling is refused before construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionChoice {
     /// A fresh session, written under the store root.
@@ -466,13 +425,9 @@ pub enum SessionChoice {
     /// `ego resume [ID]`: a session that **already exists** — the one named,
     /// or the most recently updated one belonging to this workspace.
     ///
-    /// Not [`Id`](SessionChoice::Id), and the difference is the whole point.
-    /// `--session-id` is documented as a caller-supplied id and creates the
-    /// session when it is not there; routing `resume` through it would make a
-    /// mistyped id succeed by silently starting an empty session, so the
-    /// caller who asked to continue something would get a new thing wearing
-    /// its name. See
-    /// `docs/architecture.md` §3.
+    /// Unlike [`Id`](SessionChoice::Id), resume must refuse a missing session.
+    /// Routing it through create-if-absent selection would silently replace a
+    /// mistyped session id with an empty session.
     Resume(Option<String>),
 }
 
@@ -485,7 +440,7 @@ pub enum SessionChoice {
 /// and the command that lists them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LsArgs {
-    /// Every session in the store, not just this workspace's (`CLI.md` §2).
+    /// All stored sessions, not just the current workspace's.
     pub all: bool,
     pub session_dir: Option<PathBuf>,
     pub directory: Option<PathBuf>,
@@ -640,11 +595,9 @@ pub struct DoctorArgs {
 /// no `--output` to choose. Naming `listen` opts into the shared inbound
 /// endpoint and its finite process-owned limits.
 ///
-/// `sandbox` is a ceiling and not a default. A connected host picks its own
-/// confinement per session and can only pick something at least this strong
-/// (`docs/architecture.md`).
-/// `None` means the operator named none, and the resolved configuration
-/// stands.
+/// `sandbox` is a ceiling, not a default. Connected hosts may choose only
+/// confinement at least this strong. `None` leaves resolved configuration
+/// in control.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AcpArgs {
     pub session_dir: Option<PathBuf>,
@@ -891,17 +844,15 @@ pub struct Args {
     pub instructions: Option<PathBuf>,
     pub bare: bool,
     pub trust_workspace: bool,
-    /// The permission mode (`ARCHITECTURE.md` §3.4 axis 1).
+    /// Permission mode, independent of operating-system confinement.
     ///
     /// One field, not three, for the same reason [`SessionChoice`] is one
     /// field: `--plan` and `--yolo` are spellings of `--mode`, and three
     /// booleans would be three ways to say something that can only be one
     /// value — plus a fourth state, all-false, that means nothing.
     pub mode: Option<Mode>,
-    /// Permission rules, in the grammar of
-    /// `2026-08-21-a-rule-that-means-exactly-one-thing.md`. Carried as text
-    /// and parsed by `Rule::load` inside the config layer, so a flag and a
-    /// config file go through exactly one parser.
+    /// Permission rules remain text until `Rule::load` parses them in the
+    /// configuration layer, so flags and files use the same grammar.
     pub allow: Vec<String>,
     pub deny: Vec<String>,
     /// Answers that settle pending questions while resuming this session.
@@ -1272,10 +1223,7 @@ fn rules_clap_or_answer(tokens: &[String]) -> Result<Parsed<RulesCommand>, Usage
 
 /// `ego --help`: the command set, from the tables the refusals read.
 ///
-/// Deliberately short. It names what this build has and points at `CLI.md` §2
-/// for the rest rather than reprinting every row of "waiting on", because a
-/// caller who types one of them is told which subsystem it waits on by
-/// the refusal itself — which is where that sentence is already maintained.
+/// Keep the overview short; per-command refusals already explain unavailable behavior.
 fn overview(program: &str) -> String {
     let mut text = format!(
         "ego {} — an agent you run from a terminal.\n\nUsage:\n  {program} [OPTIONS] [PROMPT]\n  {program} <COMMAND> [OPTIONS]\n\nInteractive:\n  {program} -m ollama/qwen3\n\nCommands:\n",
@@ -1341,25 +1289,17 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
     };
     let (head, tail) = split_at_separator(argv);
 
-    // A documented command answers for itself, before the fallback below can
-    // answer for it. Only an exact first token counts: §2's first line is
-    // `ego [PROMPT]`, so a word that is not on this list is a prompt, and
-    // refusing every unrecognised token would turn a prompt into a typo.
+    // Dispatch only an exact documented first token as a command. Other text remains an
+    // interactive prompt, not an unknown-command error.
     if let Some(first) = head.first()
         && let Some(refusal) = unbuilt_refusal(&program, first, UNBUILT)
     {
         return Err(refusal);
     }
 
-    // `ego --help` on its own, which reached the interactive refusal below and
-    // therefore told someone looking for the command set about the permission
-    // dialog. There is no top-level clap command to render — §2's first line is
-    // `ego [PROMPT]`, so the four built commands are dispatched by hand — so
-    // this is written out, from the same table the refusals read.
-    //
-    // Exactly these argument vectors and no more. A `head` with anything else
-    // in it may be a flag carrying `--help` as its value, which is clap's
-    // question to answer and not one a scan here can answer correctly.
+    // Render bare help from the command inventory before interactive fallback. Match only
+    // complete help argument vectors; a help-like option value belongs to clap, not a token
+    // scan.
     if let [only] = head.as_slice() {
         match only.as_str() {
             "--help" | "-h" => return Ok(Invocation::Answered(overview(&program))),
@@ -1373,11 +1313,10 @@ pub fn parse(argv: Vec<String>) -> Result<Invocation, UsageError> {
         }
     }
 
-    // No subcommand is the interactive session of `CLI.md` §6, not an error.
-    // What is left is parsed by exactly the `run` grammar, because a session
-    // resolves a model, a workspace and a ruleset the same way a one-shot
-    // does — the difference is who supplies the prompts, and that is a
-    // difference in driver rather than in grammar.
+    // What is left is parsed by exactly the `run` grammar, because a session resolves a
+    // model, a workspace and a ruleset the same way a one-shot does — the difference is
+    // who supplies the prompts, and that is a difference in driver rather than in
+    // grammar.
     let subcommand = match head.first().map(String::as_str) {
         Some(name) if BUILT.contains(&name) => Some(name.to_string()),
         _ => None,
@@ -1989,13 +1928,9 @@ fn managed_config_key(
 /// `ego resume [ID] [PROMPT]` becomes the same [`Args`] a run produces, with
 /// [`SessionChoice::Resume`] in place of the session group.
 ///
-/// **The first positional is an id only if it is one.** `CLI.md` §2 spells
-/// both positionals optional, so `ego resume "next step"` has to mean the
-/// latest session and that prompt — deciding by position alone would make it a
-/// malformed-id complaint. When a *second* positional is present the first was
-/// unambiguously meant as an id, so a word that is not one is refused rather
-/// than silently demoted to a prompt that would then have a stray argument
-/// after it.
+/// An optional first positional is a session id only if it parses as one. With two
+/// positionals, the first must be an id; otherwise a lone string may be the prompt for
+/// the latest session.
 fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
     let ResumeCommand {
         id,

@@ -1,4 +1,4 @@
-//! Behavioral contract for regression case's CLI configuration and control surfaces.
+//! Behavioral contract for CLI configuration and control surfaces.
 
 use std::process::Command;
 

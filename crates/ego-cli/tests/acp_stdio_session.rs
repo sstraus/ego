@@ -1,4 +1,4 @@
-//! Real ACP session and guarded child lifecycle (regression case).
+//! Real ACP session and guarded child lifecycle.
 #![cfg(unix)]
 mod support;
 

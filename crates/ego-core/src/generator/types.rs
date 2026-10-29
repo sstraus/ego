@@ -2,9 +2,8 @@
 //! `Message`, `ContentBlock`, `ToolDescriptor`, `StopReason`, `ErrorKind`,
 //! `ThinkingLevel`, `ReasoningState`.
 //!
-//! See `ARCHITECTURE.md` §3.1 and `docs/architecture.md` §2 (the pi taxonomy this
-//! borrows from), and `docs/architecture.md` for why
-//! a message is a list of blocks rather than a string plus an optional id.
+//! Messages contain typed content blocks; the conversation model does not
+//! encode a message as plain text with a second optional identity path.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -488,15 +487,9 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// Reasoning effort, the supported effort scale (`docs/architecture.md` §2) plus `Off`: pi actually
-/// carries two related types (`ThinkingLevel` without `off`, and
-/// `ModelThinkingLevel` adding it for per-model defaults). A `GenRequest`
-/// needs to be able to say "no thinking" as well as an effort level, and the
-/// plan asks for one `ThinkingLevel` type, so this merges the two rather than
-/// introducing a second type the acceptance criteria doesn't ask for.
-/// The ordering is the effort ordering, not an accident of declaration: it is
-/// derived, and the variants are written from least to most so that deriving
-/// it says something true.
+/// Reasoning effort, including explicit `Off`. A `GenRequest` can request
+/// no thinking or a supported effort level. Variants are ordered from least
+/// to most effort so the derived ordering has the same meaning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
@@ -524,15 +517,11 @@ impl ThinkingLevel {
     }
 }
 
-/// Why a generation stopped, the supported effort scale (`docs/architecture.md` §2) minus `Pending`.
+/// The terminal reason a generation stopped.
 ///
-/// The one deliberate deviation from pi, decided in
-/// `docs/architecture.md`: a `Pending` state
-/// means "no terminal state yet", which is the *absence* of the answer this
-/// type exists to give. Every variant here is terminal, so an
-/// [`Outcome`](super::attempt::Outcome) cannot be built around a value that
-/// says nothing ended — and it can be durable without a guard, because a
-/// decoded `StopReason` has no non-terminal spelling to decode into.
+/// Every variant is terminal. An [`Outcome`](super::attempt::Outcome) cannot
+/// contain a value meaning nothing has ended, so durable decoding needs no
+/// non-terminal-state guard.
 ///
 /// "Not finished yet" is expressed by not having a `StopReason`: the stream
 /// is still running, or `AttemptStream::terminal` is `None`.
@@ -551,8 +540,7 @@ pub enum StopReason {
     Error,
     /// The generation was cancelled.
     Aborted,
-    /// The provider deferred delivery of the result (fetched later, not
-    /// streamed) — `docs/architecture.md` §2's `DeferredHandle`.
+    /// The provider deferred delivery; the result is fetched later, not streamed.
     Deferred,
 }
 
@@ -564,12 +552,8 @@ pub enum StopReason {
 /// repository does not do. The adapter maps its provider's spelling onto
 /// these; the mapping is data, and the branch stays in core.
 ///
-/// Carrying the provider's own code as a string beside the message was
-/// rejected for the reason that a string only helps if something matches on
-/// it, and the only thing that would is `turn/` — matching on a provider's
-/// spelling in `turn/` being exactly what
-/// `docs/architecture.md` §5's
-/// name-absence test exists to forbid.
+/// Provider codes are normalized at the wire boundary. Matching provider
+/// spellings inside `turn/` would violate the provider-neutral core boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
@@ -915,9 +899,8 @@ impl From<Conversation> for Vec<Message> {
     }
 }
 
-/// A tool the model may call: name, description and JSON Schema for its
-/// parameters — the same shape `Tool::descriptor` returns (ARCH §3.2), so a
-/// `GenRequest` can be built directly from a tool registry.
+/// Tool name, description, and parameter schema, directly usable from registry descriptors in a
+/// generation request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDescriptor {
     pub name: String,
@@ -960,9 +943,8 @@ pub struct GenRequest {
     /// Transient provider-cache policy and prefix boundary; never journaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<PromptCache>,
-    /// The model to generate with, as a provider-catalogue id (e.g.
-    /// `"claude-opus-5"`). `ego-core` treats this as an opaque string; the
-    /// catalogue and provider table live in `ego-ai` (ARCH §3.1).
+    /// Provider-catalogue model ID, opaque to core. `ego-ai` owns provider and catalogue
+    /// interpretation.
     pub model: String,
     /// The history, already checked. A `Conversation` and not a
     /// `Vec<Message>` so that an unvalidated history cannot reach a

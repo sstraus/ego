@@ -13,8 +13,8 @@ fn goal_visibility_transcript() -> String {
                 "goal",
                 r#"{"objective":"Verify artifact 527"}"#,
             )),
-            Reply::Sse(text("REGRESSION-MARKER")),
-            Reply::Sse(text("REGRESSION-MARKER")),
+            Reply::Sse(text("FIRST-WORK-ZYY")),
+            Reply::Sse(text("LAST-WORK-ZYY")),
         ],
         ..Plan::default()
     });
@@ -117,7 +117,7 @@ fn goal_visibility_exhaustion_names_objective_condition_and_actions() {
 #[test]
 fn goal_visibility_needs_operator_blocks_without_spending_allowance() {
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("REGRESSION-MARKER"))],
+        completions: vec![Reply::Sse(text("WAITING-WORK-ZYY"))],
         ..Plan::default()
     });
     let places = support::Places::new();

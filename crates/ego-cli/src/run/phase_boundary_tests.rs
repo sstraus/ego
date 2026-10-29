@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 use super::test_support as support;
 use support::{Plan, Reply, Stub, text, tool_call};
 
-const CHILD: &str = "EGO_REGRESSION_PHASE_CHILD";
+const CHILD: &str = "EGO_PHASE_TEST_PHASE_CHILD";
 
 fn child_case(test: &str, case: &str, plan: Plan) -> Stub {
     let stub = Stub::start(plan);

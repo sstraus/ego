@@ -144,9 +144,8 @@ impl EventSink for AcpSink {
     }
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
-        // The complete entry point includes reduced usage and tool progress.
-        // That is why `publish` carries the reduction. See
-        // `docs/architecture.md`.
+        // The complete entry point includes reduced usage and tool progress,
+        // so `publish` carries the reduction.
         let mut updates = Vec::new();
         {
             let mut generation = self

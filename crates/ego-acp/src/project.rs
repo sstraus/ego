@@ -1,10 +1,9 @@
 //! Projection of `ego-core`'s public event stream onto ACP `SessionUpdate`
 //! values.
 //!
-//! See `ARCHITECTURE.md` §7. Projection functions only — no transport, no
-//! server, no state of our own. The types come from the real
-//! `agent-client-protocol-schema` crate rather than hand-rolled mirrors, so a
-//! schema bump is a compile error instead of a silently stale golden.
+//! Projection functions only — no transport, no server, no state of our own. The types
+//! come from the real `agent-client-protocol-schema` crate rather than hand-rolled
+//! mirrors, so a schema bump is a compile error instead of a silently stale golden.
 //!
 //! ## The input is [`PublicEvent`], not `DomainEvent`
 //!
@@ -96,11 +95,9 @@
 //! - **emit nothing** (what this does) — a message that never streamed is lost
 //!   from the v1 transcript entirely.
 //!
-//! This is a real, accepted limitation, pinned by a test named for it rather
-//! than left as an unremarked absence in the golden. It is not fixable inside
-//! this module: correctness depends on what a given *client view* received,
-//! and only the connection knows that. `ARCHITECTURE.md` §7 already classes
-//! ACP adapters as lossy projections.
+//! This is a real, accepted limitation, pinned by a test named for it rather than left as
+//! an unremarked absence in the golden. It is not fixable inside this module: correctness
+//! depends on what a given *client view* received, and only the connection knows that.
 //!
 //! `ItemDelta { kind: Tool }`'s v1 `None` is the same shape of limitation: v1
 //! has no append primitive for tool-call content, and `ToolCallUpdate.content`
@@ -396,11 +393,8 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         // durable log and in the CLI's exit code; flattening it here is a
         // projection, which is what this module is.
         ExitReason::Cancelled(_) => v2::StopReason::Cancelled,
-        // Deliberately *not* folded into `Cancelled` with the causes above: a
-        // cancelled turn is over and a paused one is waiting, and a host that
-        // read them as the same word would either offer no way to resume or
-        // offer one that cannot work. See
-        // `docs/architecture.md`.
+        // A cancelled turn is over; a paused turn is waiting. Keeping them distinct
+        // lets a host offer resume only when resumption is possible.
         ExitReason::Paused => v2::StopReason::Other("_paused".to_string()),
         ExitReason::Provider => v2::StopReason::Other("_provider".to_string()),
         ExitReason::ContextOverflow => v2::StopReason::Other("_context_overflow".to_string()),

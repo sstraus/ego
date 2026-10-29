@@ -1,8 +1,6 @@
 //! The permission rule grammar.
 //!
-//! `docs/architecture.md`. Test
-//! names are prefixed `rule_` so `cargo test -p ego-core rule` selects them:
-//! cargo's filter matches the test path, not the file name.
+//! Test names use `rule_` so Cargo's path filter can select this group.
 
 use std::path::{Path, PathBuf};
 
@@ -37,7 +35,7 @@ fn list(root: &str) -> Op {
     }
 }
 
-// --- §1, §2: heads name effects ----------------------------------------
+// Heads name effects.
 
 #[test]
 fn rule_every_head_parses_and_reports_itself() {
@@ -58,11 +56,7 @@ fn rule_every_head_parses_and_reports_itself() {
 
 #[test]
 fn rule_a_tool_name_as_a_head_is_refused_and_names_the_effect_instead() {
-    // The correction to `CLI.md:102`, and the reason it is an error rather
-    // than an alias: an alias is a second spelling, and either the two share
-    // an ID — so `rules ls` renders one of them back as something the
-    // operator did not write — or they do not, and `revoke` on one leaves the
-    // other standing.
+    // Permission-rule grammar and matching contracts.
     let denied = err("bash(git *)");
 
     assert!(
@@ -151,11 +145,11 @@ fn rule_something_that_is_not_head_of_pattern_is_refused() {
     }
 }
 
-// --- §5: the AST is the rule, the text is a spelling of it -------------
+// The AST is the rule; text is its spelling.
 
 #[test]
 fn rule_two_spellings_of_one_predicate_are_one_rule_with_one_id() {
-    // The property `ARCHITECTURE.md:245` asks for by name.
+    // Equivalent rule spellings have equivalent matching behavior.
     let cases = [
         ("read( src/** )", "read(src/**)"),
         ("read(./src/lib.rs)", "read(src/lib.rs)"),
@@ -264,7 +258,7 @@ fn rule_a_relative_pattern_is_anchored_at_match_time_not_at_write_time() {
     assert_eq!(rule.id(), id, "matching does not change the identity");
 }
 
-// --- §5: what the two constructs mean -----------------------------------
+// Wildcard construct semantics.
 
 #[test]
 fn rule_a_single_star_does_not_cross_a_slash() {
@@ -309,7 +303,7 @@ fn rule_a_path_outside_the_root_matches_no_relative_rule() {
     assert!(parse("read(/etc/passwd)").matches(&read("/etc/passwd"), &root()));
 }
 
-// --- §2: the heads are separate authorities ----------------------------
+// Heads represent separate authorities.
 
 #[test]
 fn rule_a_read_rule_does_not_cover_a_list_of_the_same_path() {
@@ -342,7 +336,7 @@ fn rule_a_call_is_matched_one_operation_at_a_time() {
     assert!(!parse("read(src/**)").matches(&ops[1], &root()));
 }
 
-// --- §6: exec patterns are token vectors -------------------------------
+// Exec patterns are token vectors.
 
 #[test]
 fn rule_an_exec_pattern_is_tokenised_once_at_parse_time() {
@@ -432,13 +426,11 @@ fn rule_an_exec_pattern_is_never_rendered_back_into_a_shell_string() {
     assert_eq!(parse("exec(echo (hi))").to_string(), "exec(echo (hi))");
 }
 
-// --- §5: endpoints are parsed authorities, not URLs --------------------
+// Endpoints are parsed authorities, not URLs.
 
 #[test]
 fn rule_the_p19_confusion_is_unspellable() {
-    // `net(127.0.0.1@evil.com)` is the destination confusion `POTENTIALS.md`
-    // P19 records. It is a parse error rather than a rule that quietly means
-    // the wrong host.
+    // It is a parse error rather than a rule that quietly means the wrong host.
     for raw in [
         "net(127.0.0.1@evil.com)",
         "net(http://api.github.com)",
@@ -524,7 +516,7 @@ fn rule_a_wildcard_in_a_host_is_only_the_leading_subdomain_marker() {
     assert!(any.matches("anything.example", 443));
 }
 
-// --- §3: the one identity predicate ------------------------------------
+// Identity predicates.
 
 #[test]
 fn rule_a_tool_rule_names_a_server_and_a_tool() {
@@ -562,7 +554,7 @@ fn rule_exec_net_and_tool_match_no_operation_that_exists_today() {
     }
 }
 
-// --- §8: stable rule ids ------------------------------------------------
+// Stable rule IDs.
 
 #[test]
 fn rule_an_id_carries_its_grammar_generation_and_round_trips() {
@@ -636,7 +628,7 @@ fn rule_different_predicates_have_different_ids() {
     );
 }
 
-// --- §6a: every published head is enforceable at load -------------------
+// Published heads must be enforceable at load.
 
 /// Network and tool heads now name operations produced by this build. Their
 /// canonical rendering and IDs therefore survive the same round trip as the
@@ -717,14 +709,8 @@ fn rule_load_admits_every_head_that_names_an_operation_that_exists() {
     }
 }
 
-/// A host whose last label is a number is an **address**, and a broken address
-/// is refused rather than demoted to a name.
-///
-/// Falling through to `Host::Name("256.1.1.1")` would store a rule that can
-/// never match any destination, held by an operator who believes they named an
-/// address — §2's worst failure mode reached by a typo. The transport agrees:
-/// WHATWG makes `http://256.1.1.1/` an invalid URL, and
-/// `ego-ai/tests/endpoint_agreement.rs` pins the two together.
+/// An invalid numeric address must not become a name whose rule never matches. WHATWG transport
+/// parsing rejects it too; endpoint-agreement tests pin both sides.
 #[test]
 fn rule_a_host_that_looks_like_a_broken_address_is_not_quietly_a_name() {
     for spelling in [
@@ -758,24 +744,10 @@ fn rule_a_host_that_looks_like_an_address_and_is_one_still_parses() {
     }
 }
 
-/// §9's structural half: the head grammar is decomposed in exactly one place.
-///
-/// `Rule::parse`'s doc comment claims "there is no second one, in this crate
-/// or any other". That was a sentence with nothing holding it, which is the
-/// shape a claim takes right before it stops being true.
-///
-/// **Why a source scan is sound here rather than best-effort.** `parse::split`
-/// is `pub` inside a *private* module and is not re-exported, so the compiler
-/// already guarantees that every possible caller lives under this one
-/// directory. The scan is not searching for callers it might miss; it is
-/// enumerating a set the type system has already closed.
-///
-/// **What it does not cover, stated so nobody reads more into a green test.**
-/// `Rule`'s variants are public and so are `PathPattern::parse`,
-/// `ArgvPattern::parse` and `Endpoint::parse`, so another crate can build
-/// `Rule::Read(PathPattern::parse("**")?)` and never touch the head grammar or
-/// §6a's enforceability check. This test says the head is split once. It does
-/// not say a `Rule` can only be made by splitting one.
+/// The head grammar is split in one place. The parser's private module closes the caller set,
+/// making this source scan exhaustive for that function. Public AST constructors can still
+/// build rules without splitting text; this does not claim otherwise or replace enforceability
+/// checks.
 #[test]
 fn rule_the_head_grammar_has_exactly_one_caller() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/permit/rule");

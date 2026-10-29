@@ -1,12 +1,9 @@
 //! The provider-neutral conversation: what a valid tool-use history is, and
 //! what happens to one that a crash left half-finished.
 //!
-//! See `docs/architecture.md`. The invariants tested
-//! here are the ones *every* wire format shares — a result answers an earlier
-//! call, exactly once, and no call is left hanging. Rules only one provider
-//! has (Anthropic's grouping and ordering; chat-completions' encodability)
-//! stay in the wire formats and are not tested here, because the two
-//! providers disagree and a core-level answer would be wrong for one of them.
+//! Shared conversation invariants: a result answers an earlier call exactly
+//! once, and no call remains hanging. Provider-specific grouping and wire
+//! encodability belong to the respective mappings.
 
 use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
 use ego_core::event::id::{EventId, GenerationId, ItemId, Producer, Seq, TurnId};
@@ -459,7 +456,7 @@ mod rebuild {
         );
     }
 
-    /// `POTENTIALS.md` P21, answered at the only cost worth paying.
+    /// Conversation repairs preserve call/result ordering and refuse corruption.
     ///
     /// The synthesized answer is the harness talking to a model that is about
     /// to decide whether to repeat a call nobody knows the outcome of, and
@@ -541,13 +538,9 @@ mod rebuild {
         );
     }
 
-    /// A log that already contains two calls under one provider id — written
-    /// before the ingress guard existed, or by something that is not this
-    /// build. The rebuild refuses it (ADR §6): §4's repairs complete a history
-    /// the harness itself tore, and this is not that. Truncating from the
-    /// duplicate would drop the `UserPrompt` of every turn after it on *every*
-    /// future rebuild, because the log is never rewritten — a permanent silent
-    /// amputation, not a one-time repair.
+    /// Pre-existing duplicate provider call IDs are refused. Truncating them
+    /// on every rebuild would silently discard later user turns from an
+    /// unchanged log, not repair a torn tail.
     #[test]
     fn duplicate_call_ids_are_not_repaired_lossily() {
         let mut log = Log::new();
@@ -717,11 +710,11 @@ mod rebuild {
         );
     }
 
-    /// The shape of a turn is a claim about what the model did, and two calls
-    /// issued at once are one decision. Rebuilt one call at a time they become
-    /// five turns where three happened — a conversation in which the model saw
-    /// the first answer before choosing the second, which is not what it did
-    /// and invites a different continuation. See `POTENTIALS.md` P22.
+    /// The shape of a turn is a claim about what the model did, and two calls issued at
+    /// once are one decision. Rebuilt one call at a time they become five turns where
+    /// three happened — a conversation in which the model saw the first answer before
+    /// choosing the second, which is not what it did and invites a different
+    /// continuation.
     #[test]
     fn two_calls_from_one_generation_rebuild_as_the_single_turn_they_were() {
         let mut log = Log::new();

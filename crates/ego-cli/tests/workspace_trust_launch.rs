@@ -4,9 +4,9 @@ use support::{Places, Plan, Reply, Stub, text};
 
 fn fixture() -> (Places, Stub) {
     let places = Places::new();
-    places.file("AGENTS.md", "# REGRESSION-MARKER-INSTRUCTIONS\n");
+    places.file("AGENTS.md", "# TRUST-ROR-INSTRUCTIONS\n");
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("REGRESSION-MARKER-OK")); 4],
+        completions: vec![Reply::Sse(text("TRUST-ROR-OK")); 4],
         ..Plan::default()
     });
     (places, stub)
@@ -30,7 +30,7 @@ fn yolo_preserves_the_trust_question_and_remembered_refusal() {
         assert!(
             !generation["messages"]
                 .to_string()
-                .contains("REGRESSION-MARKER-INSTRUCTIONS")
+                .contains("TRUST-ROR-INSTRUCTIONS")
         );
     }
 }
@@ -69,7 +69,7 @@ fn explicit_workspace_trust_replaces_refusal_and_is_remembered() {
         assert!(
             generation["messages"]
                 .to_string()
-                .contains("REGRESSION-MARKER-INSTRUCTIONS")
+                .contains("TRUST-ROR-INSTRUCTIONS")
         );
     }
 }
@@ -93,15 +93,15 @@ fn explicit_workspace_trust_rejects_bare_without_effects() {
 #[test]
 fn headless_workspace_grant_loads_project_skill_and_is_remembered() {
     let places = Places::new();
-    places.file("AGENTS.md", "# REGRESSION-MARKER-INSTRUCTIONS\n");
+    places.file("AGENTS.md", "# TRUST-ROR-INSTRUCTIONS\n");
     let stub = Stub::start(Plan {
         installed: vec!["qwen3".to_owned(), "project".to_owned()],
-        completions: vec![Reply::Sse(text("REGRESSION-MARKER-OK")); 4],
+        completions: vec![Reply::Sse(text("TRUST-XRA-OK")); 4],
         ..Plan::default()
     });
     places.file(
         ".ego/skills/headless/SKILL.md",
-        "---\nname: headless\ndescription: REGRESSION-MARKER\n---\nProject skill body.\n",
+        "---\nname: headless\ndescription: HEADLESS-PROJECT-SKILL-XRA\n---\nProject skill body.\n",
     );
     places.file(".ego/config.toml", "model = \"ollama/project\"\n");
     places
@@ -145,7 +145,7 @@ fn headless_workspace_grant_loads_project_skill_and_is_remembered() {
         );
         let request = generation["messages"].to_string();
         assert_eq!(
-            request.contains("REGRESSION-MARKER-INSTRUCTIONS"),
+            request.contains("TRUST-ROR-INSTRUCTIONS"),
             admitted,
             "{request}"
         );
@@ -158,7 +158,7 @@ fn headless_workspace_grant_loads_project_skill_and_is_remembered() {
         )
         .unwrap();
         assert_eq!(
-            events.contains("REGRESSION-MARKER"),
+            events.contains("HEADLESS-PROJECT-SKILL-XRA"),
             admitted,
             "{events}"
         );
@@ -174,7 +174,7 @@ fn external_import_disclosure_requires_content_bound_workspace_consent() {
     let home = places.home_path();
     let operator = home.join("projects/policies/POLICY.md");
     std::fs::create_dir_all(operator.parent().unwrap()).unwrap();
-    std::fs::write(&operator, "REGRESSION-MARKER-ORIGINAL").unwrap();
+    std::fs::write(&operator, "EXTERNAL-POLICY-STY-ORIGINAL").unwrap();
     places.file("AGENTS.md", "@~/projects/policies/POLICY.md\n");
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(text("OK")); 5],
@@ -200,11 +200,11 @@ fn external_import_disclosure_requires_content_bound_workspace_consent() {
         assert_eq!(
             stub.generations()[index]["messages"]
                 .to_string()
-                .contains("REGRESSION-MARKER-ORIGINAL"),
+                .contains("EXTERNAL-POLICY-STY-ORIGINAL"),
             expected
         );
     }
-    std::fs::write(&operator, "REGRESSION-MARKER-CHANGED").unwrap();
+    std::fs::write(&operator, "EXTERNAL-POLICY-STY-CHANGED").unwrap();
     let result = places
         .ego(&stub)
         .args([
@@ -221,7 +221,7 @@ fn external_import_disclosure_requires_content_bound_workspace_consent() {
     assert!(
         !stub.generations()[3]["messages"]
             .to_string()
-            .contains("REGRESSION-MARKER")
+            .contains("EXTERNAL-POLICY-STY")
     );
 }
 
@@ -234,7 +234,7 @@ fn explicit_instruction_file_external_import_survives_explicit_workspace_grant()
     let selected = places.file("selected.md", "@~/shared.md\n");
     std::fs::write(
         places.home_path().join("shared.md"),
-        "REGRESSION-MARKER",
+        "EXPLICIT-EXTERNAL-STY",
     )
     .unwrap();
     let stub = Stub::start(Plan {
@@ -260,7 +260,7 @@ fn explicit_instruction_file_external_import_survives_explicit_workspace_grant()
     assert!(
         requests[0]["messages"]
             .to_string()
-            .contains("REGRESSION-MARKER"),
+            .contains("EXPLICIT-EXTERNAL-STY"),
         "explicitly granted import omitted from provider request; diagnostics: {}",
         result.stderr
     );
@@ -274,7 +274,7 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
     places.file(".git/HEAD", "ref: refs/heads/fixture\n");
     let skill = places.file(
         ".agents/skills/foo/SKILL.md",
-        "---\nname: foo\ndescription: portable fixture\n---\nFIRST-REGRESSION-MARKER\n",
+        "---\nname: foo\ndescription: portable fixture\n---\nFIRST-PORTABLE-XVL\n",
     );
     let nested = places
         .file("nested/.keep", "")
@@ -289,7 +289,7 @@ fn portable_only_workspace_prompts_and_ancestor_edits_keep_trust() {
         if index == 2 {
             std::fs::write(
                 &skill,
-                "---\nname: foo\ndescription: changed portable fixture\n---\nSECOND-REGRESSION-MARKER\n",
+                "---\nname: foo\ndescription: changed portable fixture\n---\nSECOND-PORTABLE-XVL\n",
             )
             .unwrap();
         }
@@ -335,7 +335,7 @@ fn parent_relative_selected_file_keeps_approved_external_imports() {
     places.file("selected.md", "@~/shared.md\n");
     std::fs::write(
         places.home_path().join("shared.md"),
-        "REGRESSION-MARKER",
+        "RELATIVE-EXTERNAL-STY",
     )
     .unwrap();
     let stub = Stub::start(Plan {
@@ -361,7 +361,7 @@ fn parent_relative_selected_file_keeps_approved_external_imports() {
     assert!(
         requests[0]["messages"]
             .to_string()
-            .contains("REGRESSION-MARKER"),
+            .contains("RELATIVE-EXTERNAL-STY"),
         "parent-relative selection lost approved import: {}",
         result.stderr
     );

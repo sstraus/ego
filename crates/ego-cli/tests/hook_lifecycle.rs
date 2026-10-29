@@ -1,8 +1,5 @@
-//! contract for CLI lifecycle ownership in M4 S7.
-//!
-//! The model picker, generation source, compaction command, and prompt
-//! adapter are the production owners exercised here. No CLI lifecycle wrapper
-//! is created in the test.
+//! CLI lifecycle contract at the real model picker, generation source, compaction command, and
+//! prompt adapter. Do not introduce a test-only lifecycle wrapper.
 
 mod support;
 
