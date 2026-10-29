@@ -1124,6 +1124,70 @@ fn explicit_dcr_persists_client_identity_and_rejects_cross_issuer_registration()
 }
 
 #[test]
+fn atlassian_dcr_public_client_ignores_unrequested_secret_without_persisting_or_sending_it() {
+    // Catches rejection of an unrequested secret despite explicit public auth.
+    // Registration fields retain the recorded shape; identity and observation values are synthetic.
+    let fixture =
+        br#"{"client_id":"<redacted client id>","client_id_issued_at":1009843200,"client_name":"Example OAuth client","client_profile":"ai.dcr3p","client_secret":"<redacted: nonempty secret returned>","client_secret_expires_at":0,"disabled":false,"redirect_uris":["http://127.0.0.1:9999/callback"],"token_endpoint_auth_method":"none"}"#;
+    let http = OAuthHttp::with_responses([
+        McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#),
+        McpHttpResponse::json(200, br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","registration_endpoint":"https://issuer.example.test/register"}"#),
+        McpHttpResponse::json(201, fixture),
+        McpHttpResponse::json(200, br#"{"access_token":"synthetic-access","token_type":"Bearer","scope":""}"#),
+    ]);
+    let redirect: url::Url = "http://127.0.0.1:9999/callback".parse().unwrap();
+    let config = McpHttpConfig::new(
+        "https://mcp.example.test/mcp".parse::<url::Url>().unwrap(),
+        McpHttpAuth::Oauth,
+        false,
+    )
+    .unwrap();
+    let request = McpLoginRequest::new(
+        "remote".parse().unwrap(),
+        config,
+        redirect.clone(),
+        McpClientMetadata::dynamic(redirect).unwrap(),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap();
+    let credentials = Arc::new(RecordingCredentials::new());
+    let interaction = Arc::new(RecordingInteraction {
+        captured: Mutex::new(None),
+    });
+    futures::executor::block_on(login(
+        request,
+        http.clone(),
+        interaction.clone(),
+        credentials.clone(),
+    ))
+    .expect("explicit public registration ignores an unrequested secret");
+    let captured = interaction.captured.lock().unwrap();
+    let authorization = captured
+        .as_ref()
+        .expect("public client reached authorization");
+    let query: HashMap<_, _> = authorization.authorization_url().query_pairs().collect();
+    assert_eq!(query["client_id"], "<redacted client id>");
+    assert_eq!(query["code_challenge_method"], "S256");
+    assert!(!query.contains_key("client_secret"));
+    let calls = http.calls.lock().unwrap();
+    assert_eq!(calls.len(), 4);
+    let form: HashMap<_, _> = url::form_urlencoded::parse(&calls[3].5).collect();
+    assert_eq!(form["client_id"], "<redacted client id>");
+    assert!(!form.contains_key("client_secret"));
+    for call in calls.iter() {
+        assert!(!String::from_utf8_lossy(&call.5).contains("<redacted: nonempty secret returned>"));
+    }
+    assert_eq!(*credentials.puts.lock().unwrap(), 1);
+    let values = credentials.values.lock().unwrap();
+    let stored = values.values().next().unwrap();
+    let wire: serde_json::Value =
+        serde_json::from_slice(stored.strip_prefix(b"ego:mcp:token-bundle:v1\n").unwrap()).unwrap();
+    assert_eq!(wire["client_id"], "<redacted client id>");
+    assert!(wire.get("client_secret").is_none());
+    assert!(!String::from_utf8_lossy(stored).contains("<redacted: nonempty secret returned>"));
+}
+
+#[test]
 fn dcr_omitted_auth_method_without_secret_completes_public_login() {
     // Catches the live missing-field failure before authorization can start.
     // Synthetic boundary response, not a captured registration credential body.
@@ -1183,9 +1247,15 @@ fn dcr_confidential_or_mismatched_responses_never_authorize_or_store_credentials
             "http://127.0.0.1:9999/callback",
         ),
         (
-            "explicit none with secret",
+            "explicit public method with secret cannot rebind redirect",
             r#", "token_endpoint_auth_method":"none", "client_secret":"synthetic-secret""#,
             "public-client",
+            "http://127.0.0.1:9998/callback",
+        ),
+        (
+            "explicit public method with secret cannot omit identity",
+            r#", "token_endpoint_auth_method":"none", "client_secret":"synthetic-secret""#,
+            " ",
             "http://127.0.0.1:9999/callback",
         ),
         (
