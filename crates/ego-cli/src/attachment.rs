@@ -565,6 +565,45 @@ mod tests {
     use ego_tools::store::SessionBlobStore;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+    // Catches: requiring both GIF version signatures rejects either supported variant.
+    #[test]
+    fn media_type_accepts_both_gif_versions() {
+        let actual = [b"GIF87a", b"GIF89a"].map(|header| media_type(header));
+        assert_eq!(actual, [Some(ImageMediaType::Gif); 2]);
+    }
+
+    // Catches: accepting either RIFF or WEBP alone misclassifies other containers.
+    #[test]
+    fn media_type_requires_riff_and_webp_tags() {
+        let actual = [b"RIFF\x04\x00\x00\x00WAVE", b"NOPE\x04\x00\x00\x00WEBP"]
+            .map(|header| media_type(header));
+        assert_eq!(actual, [None; 2]);
+    }
+
+    // Catches: an inverted length guard reads past a truncated RIFF header.
+    #[test]
+    fn media_type_rejects_every_truncated_webp_header() {
+        let header = b"RIFF\x04\x00\x00\x00WEBP";
+        let actual: Vec<_> = (0..12)
+            .map(|length| media_type(&header[..length]))
+            .collect();
+        assert_eq!(actual, vec![None; 12]);
+        assert_eq!(media_type(header), Some(ImageMediaType::Webp));
+    }
+
+    // Catches: inverted WEBP tag equality admits a RIFF header with a mismatched tag.
+    #[test]
+    fn media_type_rejects_each_mismatched_webp_tag_byte() {
+        let actual: Vec<_> = (8..12)
+            .map(|offset| {
+                let mut header = *b"RIFF\x04\x00\x00\x00WEBP";
+                header[offset] = b'?';
+                media_type(&header)
+            })
+            .collect();
+        assert_eq!(actual, vec![None; 4]);
+    }
+
     // Catches: HTTPS acquisition downgrades to plaintext or publishes bytes before TLS validation.
     #[tokio::test]
     async fn https_attachment_rejects_plaintext_peer_without_publishing_a_blob() {
