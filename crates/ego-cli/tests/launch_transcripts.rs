@@ -114,6 +114,17 @@ fn readable(raw: &str) -> String {
             line.trim()
         };
         let mut line = undouble(line);
+        // The real temporary root is wrapped at 79 cells before it is
+        // redacted. Join this fixture's split question before identifying
+        // modal redraws; otherwise the redraw starts with `[y/N]`, not Trust.
+        if lines
+            .last()
+            .is_some_and(|last| last == "Trust project files in <workspace>?")
+            && (line == "[y/N]" || line.starts_with("[y/N] "))
+        {
+            let question = lines.pop().expect("the wrapped trust question");
+            line = format!("{question} {line}");
+        }
         let mut repainted_modal = false;
         if line.starts_with("Trust project files")
             && let Some((_, redrawn_banner)) = line.split_once(" Project files offered for trust:")
@@ -372,6 +383,42 @@ fn readable_keeps_the_last_complete_trust_modal_frame() {
     assert_eq!(
         readable(raw),
         "εgo: ego <version>\nProject files offered for trust:\n- <workspace>/AGENTS.md\nYes: load project instructions, configuration, skills, hooks and MCP server declarations.\nNo: continue without project files.\nTrust project files in <workspace>? [y/N] yes\n"
+    );
+}
+
+// Catches: the path-dependent wrap before [y/N] hides a modal repaint boundary.
+#[test]
+fn readable_keeps_the_last_wrapped_trust_modal_frame() {
+    // Recorded after escape stripping and redaction from rb queue
+    // 970eb349894e2cf3, master 67ed09908d, first run (also failed all 19 others).
+    let recorded = include_str!("goldens/launch/trust-wrapped-repaint.txt");
+    let trusted = include_str!("goldens/launch/trusted.txt");
+    let expected = trusted
+        .strip_prefix("# trusted: first launch\n")
+        .expect("first launch heading")
+        .split_once("\n# trusted: next launch")
+        .expect("next launch heading")
+        .0;
+    assert_eq!(readable(recorded), expected);
+}
+
+// Catches: joining a wrapped trust hint also swallows real answer rows.
+#[test]
+fn readable_joins_only_the_wrapped_trust_question() {
+    for answer in ["yes", "no"] {
+        assert_eq!(
+            readable(&format!(
+                "Trust project files in <workspace>?\r\n[y/N] {answer}\r\nanswer\r\n[y/N] is literal answer text\r\n"
+            )),
+            format!(
+                "Trust project files in <workspace>? [y/N] {answer}\nanswer\n[y/N] is literal answer text\n"
+            ),
+        );
+    }
+    let changed = "Trust project files in <workspace>?\n[y/N] never\n";
+    assert_eq!(
+        readable(changed),
+        "Trust project files in <workspace>? [y/N] never\n",
     );
 }
 
