@@ -1070,6 +1070,81 @@ mod store {
         assert!(entries.iter().all(Result::is_ok));
     }
 
+    // Catches: omitting the initial run cursor hides another store's append and reuses its position.
+    #[test]
+    fn leased_append_after_other_store_model_selection_preserves_physical_positions() {
+        use ego_core::config::ModelRef;
+        let dir = tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let session = SessionId::new();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        let prompt = |seq, text: &str| {
+            ev(
+                seq,
+                turn,
+                EventKind::UserPrompt {
+                    audio: Vec::new(),
+                    text: text.into(),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            )
+        };
+        store
+            .append(&session, &prompt(seq.next(), "before lease"))
+            .unwrap();
+        let opened = store.open_writer(&session, evidence_lease()).unwrap();
+        opened
+            .writer
+            .append(&session, &prompt(seq.next(), "before model selection"))
+            .unwrap();
+        // A separate store shares events.lock, but not the writer's in-memory cursor.
+        let other = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        other
+            .record_model_selection(&session, ModelRef("ollama/selected".into()))
+            .unwrap();
+        opened
+            .writer
+            .append(&session, &prompt(seq.next(), "after model selection"))
+            .unwrap();
+
+        let bytes = std::fs::read(log_path(dir.path(), &session)).unwrap();
+        let positions: Vec<_> = bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .filter_map(|line| match decode_line(line).unwrap() {
+                StoreLine::Record(record) => Some(record.seq.get()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(positions, [1, 2, 3, 4]);
+        assert_eq!(
+            store.selected_model(&session).unwrap(),
+            Some(ModelRef("ollama/selected".into()))
+        );
+        let entries = block_on(store.read(&session).unwrap().collect::<Vec<_>>());
+        let prompts: Vec<_> = entries
+            .iter()
+            .map(|entry| entry.as_ref().unwrap())
+            .filter_map(|entry| match entry {
+                SessionEntry::Event(event) => match &event.kind {
+                    EventKind::UserPrompt { text, .. } => Some(text.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            prompts,
+            [
+                "before lease",
+                "before model selection",
+                "after model selection"
+            ]
+        );
+    }
+
     // Catches: a published append with a failed durability barrier reuses its position.
     #[test]
     fn leased_append_revalidates_after_failed_fsync() {
