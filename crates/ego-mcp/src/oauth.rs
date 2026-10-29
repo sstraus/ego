@@ -657,14 +657,16 @@ pub async fn login<'a>(
             ) -> Result<bool, D::Error> {
                 serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
             }
-            fn requested_public_auth_method() -> String {
-                "none".to_owned()
+            fn explicit_auth_method<'de, D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<Option<String>, D::Error> {
+                String::deserialize(deserializer).map(Some)
             }
             #[derive(Deserialize)]
             struct Registered {
                 client_id: String,
-                #[serde(default = "requested_public_auth_method")]
-                token_endpoint_auth_method: String,
+                #[serde(default, deserialize_with = "explicit_auth_method")]
+                token_endpoint_auth_method: Option<String>,
                 #[serde(default, deserialize_with = "field_present")]
                 client_secret: bool,
                 redirect_uris: Vec<Url>,
@@ -673,10 +675,16 @@ pub async fn login<'a>(
             // Interoperability exception for publishwith.ai, not RFC compliance:
             // RFC 7591 §2 defaults omission to client_secret_basic, unusable without
             // a secret. Retain our requested public method only when no secret is
-            // returned; §3.2.1 still requires checking explicit metadata bindings.
+            // returned. An explicit none confirms public authentication even if
+            // the issuer supplies an unrequested secret: discard its value and
+            // never persist or send it. Explicit metadata bindings still apply.
             if registered.client_id.trim().is_empty()
-                || registered.client_secret
-                || registered.token_endpoint_auth_method != "none"
+                || (registered.token_endpoint_auth_method.is_none() && registered.client_secret)
+                || registered
+                    .token_endpoint_auth_method
+                    .as_deref()
+                    .unwrap_or("none")
+                    != "none"
                 || registered.redirect_uris != [request.redirect_uri.clone()]
             {
                 return Err(McpError::new(
