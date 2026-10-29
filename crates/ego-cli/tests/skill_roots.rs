@@ -29,9 +29,9 @@ fn boss_portable_layout_lists_once_and_invokes_admitted_body() {
     .unwrap();
     let listing = places.ego(&stub).conversing().run_pty("/skills details");
     assert_eq!(listing.code, Some(0), "{}", listing.stderr);
+    let retained = support::terminal_transcript(listing.stdout.as_bytes(), 24, 80);
     assert_eq!(
-        listing
-            .stdout
+        retained
             .lines()
             .filter(|line| line.trim() == "/foo")
             .count(),
