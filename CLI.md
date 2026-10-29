@@ -677,8 +677,12 @@ at most N additional attempts on the same resolved model after a `Transient`
 failure that emitted no content. An attempt with only opaque reasoning state
 and parsed tools proven unrun may retry once per candidate generation, within
 that same allowance. Pending tool items close as not run before the retry.
-Visible text, visible reasoning, and provider content of unknown effect never
-retry. Explicit `--retry 0` also forbids opaque/unrun recovery.
+On interactive and ACP seats, visible narration without parsed tools, visible
+reasoning or unknown-effect provider content may also retry once per candidate
+generation. Opaque reasoning state does not disqualify narration. The partial
+text is marked `[interrupted]` in the transcript and is not appended to the retry
+request. Headless text, visible reasoning and provider content of unknown effect
+still block retry. Explicit `--retry 0` also forbids both recovery exceptions.
 Each retry uses exponential backoff of 1, 2, 4 … seconds (at most 120),
 with up to 25% downward jitter, or the provider's `Retry-After` without jitter.
 `Retry-After` accepts delta seconds and HTTP-date; `retry-after-ms` takes precedence.

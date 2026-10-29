@@ -11427,6 +11427,150 @@ mod turn {
             );
         }
 
+        // Catches: narration recovery escapes its seat, cap, cancellation or unsafe-content boundaries.
+        #[test]
+        fn narration_retry_preserves_seat_allowance_and_output_safety() {
+            let horizon = Some(ego_core::turn::PROVIDER_RECOVERY_HORIZON);
+            for (name, interactive, retry, recovery, cancel_wait, opaque, extra, expected) in [
+                ("finite cap", true, 6, None, false, true, None, 2),
+                ("text only", true, 6, None, false, false, None, 2),
+                ("horizon cap", true, 6, horizon, false, true, None, 2),
+                ("zero", true, 0, None, false, true, None, 1),
+                ("headless", false, 6, None, false, true, None, 1),
+                ("cancel wait", true, 6, None, true, true, None, 1),
+                (
+                    "visible reasoning",
+                    true,
+                    6,
+                    None,
+                    false,
+                    true,
+                    Some(AiEvent::ReasoningDelta {
+                        text: "thinking".into(),
+                    }),
+                    1,
+                ),
+                (
+                    "unrun tool mixed with text",
+                    true,
+                    6,
+                    None,
+                    false,
+                    true,
+                    Some(AiEvent::ToolCall {
+                        call_id: "not-run".into(),
+                        name: "write".into(),
+                        args: "{}".into(),
+                    }),
+                    1,
+                ),
+                (
+                    "hidden provider effects",
+                    true,
+                    6,
+                    None,
+                    false,
+                    true,
+                    Some(AiEvent::ProviderContent {
+                        state: ReasoningState {
+                            blob: "unknown effect".into(),
+                            dialect: "fixture".into(),
+                        },
+                        visible: false,
+                    }),
+                    1,
+                ),
+                (
+                    "visible provider effects",
+                    true,
+                    6,
+                    None,
+                    false,
+                    true,
+                    Some(AiEvent::ProviderContent {
+                        state: ReasoningState {
+                            blob: "unknown effect".into(),
+                            dialect: "fixture".into(),
+                        },
+                        visible: true,
+                    }),
+                    1,
+                ),
+            ] {
+                let trace = GenerationTrace::default();
+                let mut script = regression_case_narration();
+                if !opaque {
+                    script.retain(|event| !matches!(event, AiEvent::ReasoningState(_)));
+                }
+                if let Some(extra) = extra {
+                    script.insert(0, extra);
+                }
+                let source = Arc::new(
+                    ScriptedGenerationSource::new((0..3).map(|_| {
+                        Ok(profile(
+                            "ollama/primary-model",
+                            false,
+                            script.clone(),
+                            &trace,
+                            Some(1_024),
+                        ))
+                    }))
+                    .with_trace(trace.clone()),
+                );
+                let fx = Fixture::new(vec![]);
+                let cancel = CancelToken::new();
+                let pause = Arc::new(RecordedPause {
+                    cancel_on_wait: cancel_wait.then(|| cancel.clone()),
+                    ..Default::default()
+                });
+                let (_ingress, mut control) = ego_core::turn::interactive_control();
+                let outcome = run_retrying_controlled(
+                    &fx,
+                    source,
+                    retry,
+                    pause.clone(),
+                    cancel,
+                    interactive.then_some(&mut control),
+                    recovery,
+                );
+                assert_eq!(trace.requests.lock().unwrap().len(), expected, "{name}");
+                assert_eq!(
+                    pause.delays.lock().unwrap().len(),
+                    usize::from(expected == 2 || cancel_wait),
+                    "{name}"
+                );
+                assert_eq!(
+                    outcome.exit_reason,
+                    if cancel_wait {
+                        ExitReason::Cancelled(ego_core::event::domain::CancelCause::Host)
+                    } else {
+                        ExitReason::Provider
+                    },
+                    "{name}"
+                );
+                let events = fx.store.events();
+                let markers = events
+                    .iter()
+                    .filter(|event| {
+                        matches!(&event.kind,
+                    EventKind::AssistantDelta { text } if text == "\n\n[interrupted]")
+                    })
+                    .count();
+                assert_eq!(
+                    markers,
+                    usize::from(expected == 2),
+                    "{name}: only retried narration gets a marker"
+                );
+                assert!(
+                    events.iter().all(|event| !matches!(
+                        &event.kind,
+                        EventKind::ToolCallCompleted { ok: true, .. }
+                    )),
+                    "{name}: failed tools never run"
+                );
+            }
+        }
+
         // Recorded events, not invented provider fixtures: regression case retained the live JSONL slices.
         fn regression_case_attempts() -> Vec<(&'static str, Vec<AiEvent>)> {
             [
