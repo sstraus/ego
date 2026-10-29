@@ -116,7 +116,7 @@ fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let width = capabilities.width;
     let depth = capabilities.depth;
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
-    let heading = header(call, &args, width);
+    let heading = header(call, &args, width, depth);
 
     let body = body(call, &args, width);
     let mut rows = vec![heading.clone()];
@@ -373,7 +373,7 @@ fn keep_end(text: &str, budget: usize) -> String {
 /// The header row. The target gives way to width; the mark, the verb, the
 /// outcome and the duration do not, because a row that loses its outcome to
 /// a narrow terminal has lost the only thing it was for.
-fn header(call: &Finished<'_>, args: &Value, width: usize) -> Line {
+fn header(call: &Finished<'_>, args: &Value, width: usize, depth: Depth) -> Line {
     let parts = parts(call, args, width);
     let mark = if call.ok { "✓" } else { "✗" };
     let colour = if call.ok {
@@ -399,19 +399,22 @@ fn header(call: &Finished<'_>, args: &Value, width: usize) -> Line {
     };
     let fixed = Line::plain(format!("{lead}{stat}{notes}")).width();
     let room = width.saturating_sub(fixed);
-    let target = if Line::plain(parts.target.as_str()).width() <= room {
-        parts.target.clone()
+    let mut target = if call.name == "exec" {
+        super::shell::command(args, &parts.target, depth)
     } else {
-        let kept = Line::plain(parts.target.as_str())
-            .truncate_to(room.saturating_sub(1))
-            .text();
-        format!("{kept}…")
+        Line::plain(parts.target)
     };
+    if target.width() > room {
+        target = target.truncate_to(room.saturating_sub(1));
+        target.push(Span::plain("…"));
+    }
 
     let mut line = Line::empty();
     line.push(Span::new(mark, Style::fg(colour)));
     line.push(Span::plain(lead[mark.len()..].to_owned()));
-    line.push(Span::plain(target));
+    for span in target.spans {
+        line.push(span);
+    }
     line.push(Span::plain(stat));
     line.push(Span::new(notes, Style::fg(Palette::NOTE)));
     line.truncate_to(width)
@@ -555,6 +558,223 @@ mod tests {
 
     fn header_of(record: &ToolRecord) -> &str {
         record.rows.lines().next().expect("a header row")
+    }
+
+    #[test]
+    fn exec_command_syntax_colours_survive_layout_without_colouring_the_prefix() {
+        // Catches: parsing the quoted display paints the entire raw script as a string.
+        let args = r#"{"argv":["bash","-lc","echo --flag \"text\" $VAR | cat"]}"#;
+        let result = record(
+            &call("exec", args, true, ""),
+            Capabilities {
+                depth: Depth::TrueColor,
+                ..at(160)
+            },
+        );
+        for token in [
+            "\x1b[38;2;155;181;204mecho\x1b[0m",
+            "\x1b[38;2;217;190;129m--flag\x1b[0m",
+            "\x1b[38;2;151;207;167m\"text\"\x1b[0m",
+            "\x1b[38;2;174;185;213m$VAR\x1b[0m",
+            "\x1b[38;2;150;173;209m|\x1b[0m",
+        ] {
+            assert!(
+                result.rows.contains(token),
+                "missing {token:?}: {:?}",
+                result.rows
+            );
+        }
+        assert!(result.rows.starts_with("\x1b[38;2;151;207;167m✓\x1b[0m $ "));
+    }
+
+    #[test]
+    fn exec_syntax_preserves_old_display_at_every_depth() {
+        // Catches: projection changes shell quoting, controls, Unicode, or header layout.
+        let args = serde_json::json!({"argv": ["/bin/echo", "", "it's", "a|b", "$HOME", "é界", "a\nb\t\u{1b}"]}).to_string();
+        let expected = "✓ $ /bin/echo '' 'it'\\''s' 'a|b' '$HOME' 'é界' 'a\\nb\\t\\u{1b}' · exit 0 · (timeout 2m) · 1.5s";
+        for (args, expected) in [
+            (args.as_str(), expected),
+            (
+                r#"{"argv":["bash","-lc","echo --flag \"text\" $VAR | cat"]}"#,
+                "✓ $ bash -lc 'echo --flag \"text\" $VAR | cat' · exit 0 · (timeout 2m) · 1.5s",
+            ),
+        ] {
+            for depth in [Depth::None, Depth::TrueColor, Depth::Ansi256, Depth::Ansi16] {
+                let result = record(
+                    &call("exec", args, true, ""),
+                    Capabilities { depth, ..at(200) },
+                );
+                assert_eq!(
+                    ego_core::permit::terminal_output_safe(&result.rows),
+                    expected,
+                    "{depth:?}"
+                );
+                match depth {
+                    Depth::None => assert!(!result.rows.contains('\x1b')),
+                    Depth::TrueColor => assert!(result.rows.contains("38;2;")),
+                    Depth::Ansi256 => {
+                        assert!(result.rows.contains("38;5;"));
+                        assert!(!result.rows.contains("38;2;"));
+                    }
+                    Depth::Ansi16 => {
+                        assert!(result.rows.contains('\x1b'));
+                        assert!(!result.rows.contains("38;"));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exec_script_projection_keeps_apostrophe_and_control_encoding() {
+        // Catches: source offsets are used directly after shell-word escaping expands them.
+        let args = serde_json::json!({"argv": ["bash", "-lc", "echo 'hi'\n"]}).to_string();
+        let result = record(
+            &call("exec", &args, true, ""),
+            Capabilities {
+                depth: Depth::TrueColor,
+                ..at(160)
+            },
+        );
+        assert_eq!(
+            ego_core::permit::terminal_output_safe(&result.rows),
+            r#"✓ $ bash -lc 'echo '\''hi'\''\n' · exit 0 · (timeout 2m) · 1.5s"#
+        );
+        assert!(
+            result
+                .rows
+                .contains("\x1b[38;2;151;207;167m'\\''hi'\\''\x1b[0m"),
+            "{:?}",
+            result.rows
+        );
+    }
+
+    #[test]
+    fn exec_nested_expansions_override_strings_without_swallowing_commands() {
+        // Catches: broad string/expansion ranges swallow nested command and variable roles.
+        let args = r#"{"argv":["bash","-lc","printf \"a $HOME $(id)\" > out # note"]}"#;
+        let result = record(
+            &call("exec", args, true, ""),
+            Capabilities {
+                depth: Depth::TrueColor,
+                ..at(160)
+            },
+        );
+        for token in [
+            "\x1b[38;2;151;207;167m\"a \x1b[0m",
+            "\x1b[38;2;174;185;213m$HOME\x1b[0m",
+            "\x1b[38;2;155;181;204mid\x1b[0m",
+            "\x1b[38;2;150;173;209m>\x1b[0m",
+            "\x1b[38;2;153;153;153m# note\x1b[0m",
+        ] {
+            assert!(
+                result.rows.contains(token),
+                "missing {token:?}: {:?}",
+                result.rows
+            );
+        }
+    }
+
+    #[test]
+    fn exec_invalid_raw_script_has_no_partial_target_colours() {
+        // Catches: shell-word wrapper quoting hides errors in the raw script.
+        for script in ["echo --flag 'unterminated", "echo ok |", "if then"] {
+            let args = serde_json::json!({"argv": ["bash", "-lc", script]}).to_string();
+            let result = record(
+                &call("exec", &args, true, ""),
+                Capabilities {
+                    depth: Depth::TrueColor,
+                    ..at(200)
+                },
+            );
+            let target = result.shell_progress.unwrap();
+            for span in target
+                .spans
+                .iter()
+                .skip(1)
+                .take(target.spans.len().saturating_sub(2))
+            {
+                assert_eq!(span.style, Style::PLAIN, "{script}: {span:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn exec_truncation_and_live_retruncate_retain_command_colours() {
+        // Catches: converting a styled target to text before narrowing drops its colours.
+        let args = r#"{"argv":["git","--no-pager","log","an-operand-long-enough-to-truncate"]}"#;
+        let result = record(
+            &call("exec", args, true, ""),
+            Capabilities {
+                depth: Depth::TrueColor,
+                ..at(52)
+            },
+        );
+        assert!(result.rows.contains("\x1b[38;2;155;181;204mgit\x1b[0m"));
+        assert!(
+            result
+                .rows
+                .contains("\x1b[38;2;217;190;129m--no-pager\x1b[0m l…"),
+            "{:?}",
+            result.rows
+        );
+        assert_eq!(
+            ego_core::permit::terminal_output_safe(&result.rows),
+            "✓ $ git --no-pager l… · exit 0 · (timeout 2m) · 1.5s"
+        );
+        let live = result.shell_progress.unwrap();
+        assert!(
+            live.truncate_to(10)
+                .render(Depth::TrueColor)
+                .contains("\x1b[38;2;155;181;204mgit\x1b[0m")
+        );
+        assert!(live.wrap(12).iter().any(|line| {
+            line.render(Depth::TrueColor)
+                .contains("\x1b[38;2;155;181;204mgit\x1b[0m")
+        }));
+    }
+
+    #[test]
+    fn exec_direct_arguments_do_not_become_shell_operators_or_expansions() {
+        // Catches: parsing literal argv turns data into fake shell syntax.
+        let args = r#"{"argv":["echo","--flag","a|b","$HOME"]}"#;
+        let result = record(
+            &call("exec", args, true, ""),
+            Capabilities {
+                depth: Depth::TrueColor,
+                ..at(160)
+            },
+        );
+        for literal in ["'a|b'", "'$HOME'"] {
+            assert!(
+                result
+                    .rows
+                    .contains(&format!("\x1b[38;2;151;207;167m{literal}\x1b[0m")),
+                "{:?}",
+                result.rows
+            );
+        }
+        assert!(!result.rows.contains("38;2;150;173;209"));
+        assert!(!result.rows.contains("38;2;174;185;213"));
+    }
+
+    #[test]
+    fn exec_shell_fallback_clears_wrapper_for_oversize_and_unknown_dialect() {
+        // Catches: fallback leaves misleading interpreter/flag colours behind.
+        for argv in [
+            vec!["bash".to_owned(), "-lc".to_owned(), "x".repeat(65537)],
+            vec!["fish".to_owned(), "-c".to_owned(), "echo $HOME".to_owned()],
+        ] {
+            let args = serde_json::json!({"argv": argv}).to_string();
+            let result = record(
+                &call("exec", &args, true, ""),
+                Capabilities {
+                    depth: Depth::TrueColor,
+                    ..at(160)
+                },
+            );
+            assert_eq!(result.rows.matches("\x1b[").count(), 4, "{:?}", result.rows);
+        }
     }
 
     #[test]

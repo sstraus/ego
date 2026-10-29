@@ -1313,6 +1313,8 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "tree-sitter",
+ "tree-sitter-bash",
  "unicode-segmentation",
  "unicode-width",
  "url",
