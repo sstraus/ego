@@ -95,6 +95,24 @@ printf '%s\n' 'Summarize what a coding agent does in one sentence.' | \
 Headless runs do not prompt for trust or permissions. They start untrusted and
 bare by default. See [automation](docs/guides/automation.md) before enabling effects.
 
+## Commands
+
+Use `ego COMMAND --help` for exact arguments, or see the [command language](CLI.md).
+
+| Commands | Purpose |
+| --- | --- |
+| `ego run` | Run a prompt headlessly |
+| `ego resume`, `ego continue` | Continue durable work |
+| `ego fork`, `ego compact` | Branch or reduce conversation context |
+| `ego ls`, `ego rm`, `ego usage` | Inspect stored sessions, remove one, or inspect usage |
+| `ego export`, `ego checkpoint` | Export a session or inspect file recovery points |
+| `ego models`, `ego auth` | Inspect models and manage provider login |
+| `ego config`, `ego roots`, `ego rules` | Manage configuration and authority |
+| `ego hooks`, `ego mcp` | Inspect hooks and manage MCP connections |
+| `ego doctor`, `ego setup` | Diagnose the environment and review setup proposals |
+| `ego acp`, `ego a2a`, `ego mcp-server` | Serve host protocols |
+| `ego orchestrator`, `ego worktree` | Inspect orchestration or retained worktrees |
+
 ## Configuration and features
 
 - Use `ego models` to inspect available models and capabilities.

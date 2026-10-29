@@ -1056,7 +1056,7 @@ fn recorded_stdout_only_exec_expands_once_in_pty() {
         "background: pid=12345",
         "log=/workspace/",
         "wake=/workspace/",
-        "background:",
+        "background: completion notification will follow",
     ] {
         assert_eq!(expanded.matches(marker).count(), 1, "{expanded}");
     }

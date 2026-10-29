@@ -245,8 +245,6 @@ impl ChildResultEvidence {
 /// These operations share one host-process boundary: the parent's journal,
 /// blobs, artifacts and configuration. Splitting them into ports that cannot
 /// vary independently would add indirection without substitutability.
-///
-
 pub trait ChildHost: Send + Sync {
     /// The parent's durable record of one subagent invocation.
     fn read_journal(

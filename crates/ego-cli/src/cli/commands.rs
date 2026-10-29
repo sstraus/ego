@@ -328,8 +328,6 @@ pub(super) struct Shape {
 /// Its own struct rather than a field, because the ceiling belongs to the
 /// process that serves runs and not to the protocol it happens to speak:
 /// `ego a2a` is the same question and flattens the same two lines.
-///
-
 #[derive(Debug, ClapArgs)]
 pub(super) struct Ceiling {
     /// The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included.

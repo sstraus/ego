@@ -31,10 +31,10 @@ fn surface(used: Option<u64>) -> SurfaceSnapshot {
         SeatFacts::new(
             QueueStatus::default(),
             0,
-            "~/projects/example",
+            "~/work/projects/demo",
             Trust::Trusted,
         ),
-        Some(GitFacts::new("feat/configurable-embedder", true)),
+        Some(GitFacts::new("feat/example-configuration", true)),
     )
 }
 
@@ -55,7 +55,7 @@ fn compact_layout_keeps_selection_and_context_at_sixty_columns() {
     let wide = StatusLine::render(&snapshot, SEGMENTS, 120);
     assert_eq!(
         wide.text(),
-        "gpt-6-sol · medium · yolo ▰▰▱▱▱▱▱▱▱▱ 58k/272k $0.66 ~/G/p/mdkb ⎇ feat/configurable-embedder●"
+        "gpt-6-sol · medium · yolo ▰▰▱▱▱▱▱▱▱▱ 58k/272k $0.66 ~/w/p/demo ⎇ feat/example-configuration●"
     );
     for character in wide.text().chars() {
         assert!(u32::from(character) <= 0xffff);
@@ -119,15 +119,15 @@ fn context_colour_uses_exact_thresholds_and_obeys_no_colour() {
 fn cwd_abbreviates_components_but_not_a_home_prefix_collision() {
     let home = std::env::var("HOME").unwrap();
     let mut snapshot = surface(None);
-    snapshot.set_cwd(format!("{home}/projects/example"));
+    snapshot.set_cwd(format!("{home}/work/projects/demo"));
     assert_eq!(
         StatusLine::render(&snapshot, &[S::Cwd], 120).text(),
-        "~/G/p/mdkb"
+        "~/w/p/demo"
     );
-    snapshot.set_cwd(format!("{home}-other/Gits/mdkb"));
+    snapshot.set_cwd(format!("{home}-other/work/demo"));
     let line = StatusLine::render(&snapshot, &[S::Cwd], 120);
     assert!(!line.text().starts_with('~'));
-    assert!(line.text().ends_with("/G/mdkb"));
+    assert!(line.text().ends_with("/w/demo"));
     snapshot.set_cwd(&home);
     assert_eq!(StatusLine::render(&snapshot, &[S::Cwd], 120).text(), "~");
 }
