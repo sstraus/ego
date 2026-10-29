@@ -1473,6 +1473,124 @@ mod tests {
         assert_eq!(fixture.asked.get(), 2);
     }
 
+    // Catches: subtracting the command read sentinel drops the final admitted byte.
+    #[test]
+    fn trust_survivor_command_final_admitted_byte_requires_a_new_answer() {
+        let fixture = Fixture::new();
+        let mut bytes = vec![b'a'; TRUST_DIGEST_MAX_BYTES];
+        fixture.write(
+            ".ego/commands/review.md",
+            std::str::from_utf8(&bytes).unwrap(),
+        );
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
+        bytes[TRUST_DIGEST_MAX_BYTES - 1] = b'b';
+        fixture.write(
+            ".ego/commands/review.md",
+            std::str::from_utf8(&bytes).unwrap(),
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2);
+    }
+
+    // Catches: multiplying by the sentinel ignores the first byte over the command limit.
+    #[test]
+    fn trust_survivor_command_first_excess_byte_requires_a_new_answer() {
+        let fixture = Fixture::new();
+        let mut bytes = vec![b'a'; TRUST_DIGEST_MAX_BYTES + 1];
+        fixture.write(
+            ".ego/commands/review.md",
+            std::str::from_utf8(&bytes).unwrap(),
+        );
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
+        bytes[TRUST_DIGEST_MAX_BYTES] = b'b';
+        fixture.write(
+            ".ego/commands/review.md",
+            std::str::from_utf8(&bytes).unwrap(),
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2);
+    }
+
+    // Catches: an inverted Unix mode check persists false executable authority.
+    #[cfg(unix)]
+    #[test]
+    fn trust_survivor_program_modes_are_truthful_in_the_saved_answer() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Fixture::new();
+        fixture.write(
+            ".ego/config.toml",
+            "[mcp.servers.local]\ntransport='stdio'\ncommand='./server'\n",
+        );
+        fixture.write("server", "#!/bin/sh\n");
+        let root = fs::canonicalize(fixture.workspace.path()).unwrap();
+        for (mode, executable) in [
+            (0o600, false),
+            (0o700, true),
+            (0o610, true),
+            (0o601, true),
+            (0o644, false),
+        ] {
+            fs::set_permissions(root.join("server"), fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(
+                resolve_headless(&root, Some(fixture.home.path()), &Silent, true),
+                Trust::Trusted
+            );
+            let stored: serde_json::Value =
+                serde_json::from_slice(&fs::read(fixture.home.path().join("trust.json")).unwrap())
+                    .unwrap();
+            assert_eq!(
+                stored["workspaces"][root.display().to_string()]["executable_surface"]["programs"]
+                    ["server"]["executable"],
+                executable,
+                "mode {mode:o} must be recorded as actual execution authority"
+            );
+        }
+    }
+
+    // Catches: using the workspace scope hides an Explicit file's external import inside it.
+    #[test]
+    fn trust_survivor_explicit_sibling_import_is_disclosed_and_reapproved() {
+        let fixture = Fixture::new();
+        fixture.write("selected/rules.md", "@../shared.md\n@local.md\n");
+        fixture.write("selected/local.md", "local rules\n");
+        fixture.write("shared.md", "first shared rules\n");
+        let root = fs::canonicalize(fixture.workspace.path()).unwrap();
+        let selected = root.join("selected/rules.md");
+        let shared = root.join("shared.md");
+        let ask = |answer| {
+            resolve_selected(
+                &root,
+                Some(fixture.home.path()),
+                &Silent,
+                false,
+                Some(&selected),
+                |context| {
+                    fixture.asked.set(fixture.asked.get() + 1);
+                    assert!(
+                        context
+                            .contains("External instructions offered for disclosure to the model:"),
+                        "{context}"
+                    );
+                    assert!(context.contains(&shared.display().to_string()), "{context}");
+                    assert!(
+                        !context.contains(&root.join("selected/local.md").display().to_string()),
+                        "local imports do not need external disclosure: {context}"
+                    );
+                    Some(answer)
+                },
+            )
+        };
+        assert_eq!(ask(Trust::Trusted), Trust::Trusted);
+        assert_eq!(ask(Trust::Untrusted), Trust::Trusted);
+        assert_eq!(fixture.asked.get(), 1);
+        fixture.write("shared.md", "second shared rules\n");
+        assert_eq!(ask(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2);
+    }
+
     #[test]
     fn changing_a_referenced_hook_program_requires_a_new_answer() {
         let fixture = Fixture::new();
