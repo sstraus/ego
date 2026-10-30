@@ -452,3 +452,30 @@ pub fn execute(action: &WorktreeAction) -> Result<String, String> {
     };
     serde_json::to_string_pretty(&receipt).map_err(error)
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    // Catches: a fork-inherited open file description keeps a dropped launch active.
+    #[test]
+    fn inherited_descriptor_does_not_extend_worktree_lease_lifetime() {
+        let home = tempfile::tempdir().unwrap();
+        let repository = LocalRepository::new(home.path().to_owned());
+        fs::create_dir_all(repository.directory()).unwrap();
+        let id = Uuid::new_v4();
+        let lease = repository.lease(id).unwrap();
+        // dup and fork share the same kernel open file description. Keep the
+        // duplicate alive to hold the pre-exec child interval deterministically.
+        let inherited = lease.try_clone().unwrap();
+        assert!(repository.lease(id).is_err(), "live owner must exclude cleanup");
+        drop(lease);
+        let replacement = repository
+            .lease(id)
+            .expect("owner drop must release the lock while the duplicate is alive");
+        drop(inherited);
+        assert!(repository.lease(id).is_err(), "old child must not release new owner");
+        drop(replacement);
+        assert!(repository.lease(id).is_ok(), "replacement drop must release its lock");
+    }
+}
