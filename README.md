@@ -163,11 +163,13 @@ permission mode does not remove a sandbox or an administrator's ceilings.
 
 ## Status and platforms
 
-Release `0.4.0` is tagged publicly at `9f86288` (2026-10-30). See the
+Version `0.4.1` is prepared locally; see its [release notes](docs/release-notes/0.4.1.md).
+It is not yet tagged or published. Release `0.4.0` is tagged publicly at
+`9f86288` (2026-10-30). See the
 [release notes](docs/release-notes/0.4.0.md) for changes since `0.3.0`. The version is
 defined once in
 `[workspace.package]` in `Cargo.toml`; all workspace packages inherit it and are
-not published to crates.io. The release version is `0.4.0`; normal landings increment
+not published to crates.io. The source version is `0.4.1`; normal landings increment
 the patch version by one (`0.0.1`). Run `ego --version` to identify an installed
 build. The command references describe this checkout, not a promise about a future release.
 

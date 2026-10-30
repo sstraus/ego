@@ -13,7 +13,7 @@ exclude = ["vendor/process-wrap", "vendor/reedline", "vendor/crossterm"]
 resolver = "3"
 
 [workspace.package]
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 # Above edition 2024's own floor of 1.85 for three things, each of which was
 # the binding constraint in turn:
