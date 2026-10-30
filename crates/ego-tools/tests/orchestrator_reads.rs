@@ -247,3 +247,10 @@ fn brief_uses_guarded_reads_and_matches_the_reference_child_and_unread_sets() {
         stamp_before
     );
 }
+
+// Catches: merely running under TUIC advertises private coordinator integrations.
+#[test]
+fn portable_defaults_do_not_offer_unconfigured_coordinator_tools() {
+    let home = tempfile::tempdir().unwrap();
+    assert!(tools(Some(std::ffi::OsStr::new("socket")), home.path()).is_empty());
+}

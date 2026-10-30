@@ -1305,6 +1305,16 @@ mod tests {
         assert_eq!(asked.get(), 2);
     }
 
+    // Catches: an unconfigured home layout silently loads another repository's rules.
+    #[test]
+    fn portable_defaults_do_not_discover_home_layout_rules() {
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("Gits/project");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(tree.path().join("Gits/AGENTS.md"), "unrelated rules").unwrap();
+        assert_eq!(instruction_discovery_root(&workspace, tree.path()).unwrap(), fs::canonicalize(workspace).unwrap());
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_home_discovers_shared_instructions() {

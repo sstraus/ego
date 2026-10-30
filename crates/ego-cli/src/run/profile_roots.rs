@@ -197,3 +197,17 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod portable_defaults {
+    use super::*;
+    // Catches: a home folder name grants read-write reach without user configuration.
+    #[test]
+    fn portable_defaults_do_not_grant_home_layout_roots() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tree.path().join("Gits")).unwrap();
+        let mut effective = ego_core::config::resolve(&[], ego_core::config::Trust::Untrusted, None).unwrap();
+        defaults(&mut effective, tree.path());
+        assert!(effective.roots.is_empty());
+    }
+}
