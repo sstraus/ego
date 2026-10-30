@@ -151,8 +151,9 @@ impl From<io::Error> for LeaseError {
 /// §5: `<session-dir>/session.lock`). See the module doc comment for the
 /// durability protocol this implements and its documented limits.
 ///
-/// Released by dropping: this struct owns the locked [`File`], and closing
-/// its descriptor releases the OS-level lock. Drop also removes this holder
+/// Released by dropping: on Unix, drop explicitly unlocks the open file
+/// description so a descriptor inherited by a concurrent child cannot extend
+/// the lease. The owned [`File`] is then closed. Drop also removes this holder
 /// from the optional host PID index, unless a newer binding replaced it.
 /// The lock file itself is deliberately
 /// left in place on release rather than removed: an unlink here could race
@@ -162,8 +163,8 @@ impl From<io::Error> for LeaseError {
 /// orphaned inode instead of the live one) — deleting blind could destroy
 /// a legitimately active lease file out from under its new owner.
 pub struct Lease {
-    // Kept alive for its `Drop` impl, which is what releases the
-    // underlying advisory lock; never read again after acquisition.
+    // Owns the advisory lock until drop explicitly unlocks it on Unix
+    // and closes the file on every platform.
     #[allow(dead_code)]
     lock: RwLock<File>,
     path: PathBuf,
@@ -188,6 +189,15 @@ impl Drop for Lease {
             && fs::read(path).is_ok_and(|current| current == *contents)
         {
             let _ = fs::remove_file(path);
+        }
+        // Unix flock follows the open file description, including duplicates in
+        // children forked by other threads. Closing only our descriptor would
+        // leave their inherited copies holding this lease until exec or exit.
+        // Re-entering our own lock succeeds; dropping its guard explicitly
+        // unlocks that description before the owned file is closed.
+        #[cfg(unix)]
+        if let Ok(guard) = self.lock.try_write() {
+            drop(guard);
         }
     }
 }
@@ -313,9 +323,8 @@ impl Lease {
                 // resource beyond the `&mut RwLock` it borrows, so
                 // forgetting it leaks nothing — the `RwLock<File>` moved
                 // into the returned `Lease` still owns the real
-                // descriptor, and closing that on `Lease`'s own drop is
-                // what actually releases the lock (see the struct doc
-                // comment).
+                // descriptor. `Lease`'s own drop releases the lock (see
+                // the struct doc comment).
                 std::mem::forget(guard);
                 true
             }
@@ -457,6 +466,46 @@ fn take_over(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Catches: an inherited descriptor keeps the writer locked after its owner drops.
+    #[cfg(unix)]
+    #[test]
+    fn inherited_descriptor_does_not_extend_lease_lifetime() {
+        for kind in ["writer", "probe", "takeover"] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("session.lock");
+            let now = Timestamp::from_millis(1_000);
+            let first = Lease::acquire(&path, 111, now, Duration::ZERO, &|_| true).unwrap();
+            let mut lease = match kind {
+                "writer" => first,
+                "probe" => {
+                    drop(first);
+                    Lease::probe(&path).unwrap().unwrap()
+                }
+                "takeover" => Lease::acquire(&path, 222, now, Duration::ZERO, &|_| false)
+                    .expect("dead holder past grace permits replacement"),
+                _ => unreachable!(),
+            };
+            // Like fork, try_clone retains the same open file description.
+            let guard = lease.lock.try_write().unwrap();
+            let inherited = guard.try_clone().unwrap();
+            std::mem::forget(guard);
+            assert!(matches!(
+                Lease::acquire(&path, 333, now, Duration::ZERO, &|_| true),
+                Err(LeaseError::LeaseHeld { .. })
+            ));
+            drop(lease);
+            let reopened = Lease::acquire(&path, 333, now, Duration::ZERO, &|_| true)
+                .unwrap_or_else(|error| panic!("{kind}: owner drop must release lease: {error}"));
+            drop(inherited);
+            // Closing an inherited descriptor must not release the new owner's lock.
+            assert!(matches!(
+                Lease::acquire(&path, 444, now, Duration::ZERO, &|_| true),
+                Err(LeaseError::LeaseHeld { pid: 333 })
+            ));
+            drop(reopened);
+        }
+    }
 
     fn contents(pid: u32, heartbeat_millis: u64) -> LockContents {
         LockContents {
