@@ -1,4 +1,7 @@
 # nothing-to-trust: first launch
+⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄
+⠀⢴⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇
+⠀⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀
 εgo: ego <version>
 εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3
@@ -11,6 +14,9 @@ a launch transcript
 εgo: To resume: 'ego resume <session>'
 
 # nothing-to-trust: next launch
+⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄
+⠀⢴⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇
+⠀⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀
 εgo: ego <version>
 εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3

@@ -289,6 +289,16 @@ subject to the active session authority. See [skills](docs/integrations/skills.m
 
 ## 6. Interactive surface
 
+Interactive startup shows the selected three-row εgo braille logo directly above
+the application name and version, before configuration,
+trust, provider, or MCP notices. It reports the selected model, effective posture,
+and key hints after admission. Startup notices remain visible; `--quiet` keeps
+its existing announcement policy. The logo requires interactive stdin and TTY stdout
+and at least 17 observed terminal columns. It keeps the same glyphs without SGR
+when colour is disabled (including `NO_COLOR`); narrow terminals keep the identity
+line only. Headless and protocol modes do not show the logo. The name does not
+require a resolved model.
+
 Use `/help` for slash commands, `/model` for model selection, `/mode` for permission
 mode, and `/config perimeter` for the actual admitted boundary. Shift+Tab cycles
 permission modes without submitting the draft. `/quit` exits without deleting

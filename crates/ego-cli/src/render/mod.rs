@@ -32,6 +32,7 @@ pub mod permission_diff;
 pub(crate) mod prompt_echo;
 pub(crate) mod replay;
 mod shell;
+pub(crate) mod startup_logo;
 pub mod stream;
 pub mod style;
 pub mod table;

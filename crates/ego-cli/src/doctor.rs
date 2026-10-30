@@ -9,11 +9,14 @@
 //!
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use ego_core::config::Trust;
 use ego_core::health::{
-    HealthDetail, HealthItem, HealthItemId, HealthProbe, HealthSection, HealthSnapshot,
-    HealthStatus, RedactionRefusal, VisibleRoots,
+    HealthDetail, HealthItem, HealthItemId, HealthProbe, HealthSection, HealthSectionReport,
+    HealthSnapshot, HealthStatus, RedactionRefusal, VisibleRoots,
 };
 use ego_core::hook::HookCatalogue;
 use ego_core::run::RunTermination;
@@ -50,8 +53,7 @@ pub fn observed_with_width(workspace: PathBuf, width: usize) -> String {
 /// the process working directory to reach this would be a test that cannot run
 /// beside another one.
 pub fn snapshot(workspace: PathBuf, home: Option<PathBuf>, roots: &VisibleRoots) -> HealthSnapshot {
-    let perimeter = crate::perimeter::observe(&workspace, home.as_deref(), None).ok();
-    snapshot_with_perimeter(workspace, home, roots, perimeter.as_ref())
+    snapshot_with_perimeter(workspace, home, roots, None)
 }
 
 /// Inspect an existing session without re-resolving its admitted perimeter.
@@ -107,60 +109,113 @@ fn snapshot_with_perimeter(
     roots: &VisibleRoots,
     perimeter: Option<&crate::perimeter::Perimeter>,
 ) -> HealthSnapshot {
-    let configuration = Configuration;
-    let credentials = Credentials { home };
-    let sessions = SessionStore {
-        workspace: workspace.clone(),
-        home: credentials.home.clone(),
-    };
-    let sandbox = Sandbox { perimeter };
-    let catalogue = Catalogue;
-    let mcp = Mcp;
-    let skills = Skills { workspace };
-    let hooks = Hooks;
-    let acp = Acp;
-    let probes: [&dyn HealthProbe; 9] = [
-        &configuration,
-        &credentials,
-        &sessions,
-        &sandbox,
-        &catalogue,
-        &mcp,
-        &skills,
-        &hooks,
-        &acp,
+    let probes: Vec<Box<dyn HealthProbe + Send>> = vec![
+        Box::new(Configuration),
+        Box::new(Credentials { home: home.clone() }),
+        Box::new(SessionStore {
+            workspace: workspace.clone(),
+            home: home.clone(),
+        }),
+        Box::new(Sandbox {
+            workspace: workspace.clone(),
+            home,
+            perimeter: perimeter.cloned(),
+        }),
+        Box::new(Catalogue),
+        Box::new(Mcp),
+        Box::new(Skills { workspace }),
+        Box::new(Hooks),
+        Box::new(Acp),
     ];
-    let mut snapshot = HealthSnapshot::observe(&probes, roots);
-    let item = match perimeter {
-        Some(perimeter) => {
-            // The 2026-10-04 amendment names admitted roots only in this item.
-            // The typed constructor does not alter any probe's visible roots.
-            HealthItem::new(
-                HealthItemId::probe("sandbox.perimeter"),
-                if perimeter.measured_capabilities().is_some() {
-                    HealthStatus::Ok
-                } else {
-                    HealthStatus::NotChecked
-                },
-                HealthDetail::perimeter(perimeter),
-                HealthDetail::fixed("the admitted perimeter"),
-            )
-        }
-        None => HealthItem::new(
-            HealthItemId::probe("sandbox.perimeter"),
-            HealthStatus::Error,
-            HealthDetail::fixed("the effective perimeter could not be resolved or admitted"),
-            HealthDetail::fixed("configuration resolution"),
-        ),
-    };
-    if let Some(section) = snapshot
-        .sections
-        .iter_mut()
-        .find(|section| section.section == HealthSection::Sandbox)
-    {
-        section.items.push(item);
+    observe_bounded(probes, roots, Duration::from_secs(2))
+}
+
+// A blocked filesystem read cannot safely be killed in-process. Partition the
+// worker budget by section so repeated slow reads cannot starve other diagnoses.
+static ACTIVE_PROBES: [AtomicUsize; 9] = [const { AtomicUsize::new(0) }; 9];
+const MAX_ACTIVE_PROBES: usize = 32;
+
+struct ProbePermit(&'static AtomicUsize);
+
+impl Drop for ProbePermit {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
-    snapshot
+}
+
+fn probe_error(section: HealthSection, detail: &'static str) -> HealthSectionReport {
+    HealthSectionReport::new(
+        section,
+        vec![HealthItem::new(
+            HealthItemId::probe("doctor.probe"),
+            HealthStatus::Error,
+            HealthDetail::fixed(detail),
+            HealthDetail::fixed("the read-only doctor probe"),
+        )],
+    )
+}
+
+/// One shared deadline, not nine serial timeouts. Workers own all their inputs,
+/// so returning a partial diagnosis never leaves a borrowed session dangling.
+fn observe_bounded(
+    probes: Vec<Box<dyn HealthProbe + Send>>,
+    roots: &VisibleRoots,
+    budget: Duration,
+) -> HealthSnapshot {
+    let deadline = Instant::now() + budget;
+    let pending = probes
+        .into_iter()
+        .map(|probe| {
+            let section = probe.section();
+            let (send, receive) = mpsc::sync_channel(1);
+            let active = &ACTIVE_PROBES[section as usize];
+            let admitted =
+                active.fetch_add(1, Ordering::AcqRel) < MAX_ACTIVE_PROBES / ACTIVE_PROBES.len();
+            let permit = ProbePermit(active);
+            if admitted {
+                let roots = roots.clone();
+                // Builder reports resource exhaustion instead of panicking and
+                // suppressing the other eight sections.
+                let _ = std::thread::Builder::new()
+                    .name("ego-doctor".into())
+                    .spawn(move || {
+                        let _permit = permit;
+                        let _ = send.send(probe.observe(&roots));
+                    });
+            }
+            (section, receive, admitted)
+        })
+        .collect::<Vec<_>>();
+    HealthSnapshot::new(pending.into_iter().map(|(section, receive, admitted)| {
+        if !admitted {
+            return probe_error(
+                section,
+                "probe not started: previous doctor reads are still running",
+            );
+        }
+        // Check the queue first: a preceding timed-out probe must not hide a
+        // later result that already arrived before the shared deadline.
+        let result = receive.try_recv().or_else(|error| match error {
+            mpsc::TryRecvError::Empty => {
+                receive.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            }
+            mpsc::TryRecvError::Disconnected => Err(mpsc::RecvTimeoutError::Disconnected),
+        });
+        match result {
+            Ok(Ok(items)) => HealthSectionReport::new(section, items),
+            Ok(Err(refusal)) => {
+                HealthSectionReport::new(section, vec![HealthItem::refused(section, &refusal)])
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => probe_error(
+                section,
+                "probe timed out: the two-second doctor budget was exhausted",
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => probe_error(
+                section,
+                "probe failed: worker could not start or stopped without a result",
+            ),
+        }
+    }))
 }
 
 /// Read the facts and print them.
@@ -442,15 +497,24 @@ impl HealthProbe for SessionStore {
             ]);
         };
         let root = crate::session::sessions_in(home);
-        // Listing reads the manifest and the directory; it takes no lease and
-        // repairs nothing, which is what makes it legal here.
+        // Replay reads authoritative logs without leases or repairs. Count rejected
+        // sessions in the snapshot, never on stderr after a timeout returns.
         let store = crate::session::jsonl(root, self.workspace.clone());
-        let item = match crate::catalogue::listing(&store, &self.workspace, true) {
+        use ego_core::store::session_store::SessionStore as _;
+        let mut unreadable = 0usize;
+        let item = match store.list_readable(&mut |_, _| unreadable += 1) {
             Ok(metas) => fact(
                 HealthItemId::probe("sessions.listing"),
-                HealthStatus::Ok,
+                if unreadable == 0 {
+                    HealthStatus::Ok
+                } else {
+                    HealthStatus::Warning
+                },
                 "sessions.listing",
-                format!("{} durable session(s) readable", metas.len()),
+                format!(
+                    "{} durable session(s) readable; {unreadable} unreadable",
+                    metas.len()
+                ),
                 "the session store",
                 roots,
             )?,
@@ -468,17 +532,51 @@ impl HealthProbe for SessionStore {
     }
 }
 
-struct Sandbox<'a> {
-    perimeter: Option<&'a crate::perimeter::Perimeter>,
+struct Sandbox {
+    workspace: PathBuf,
+    home: Option<PathBuf>,
+    perimeter: Option<crate::perimeter::Perimeter>,
 }
 
-impl HealthProbe for Sandbox<'_> {
+impl HealthProbe for Sandbox {
     fn section(&self) -> HealthSection {
         HealthSection::Sandbox
     }
 
     fn observe(&self, roots: &VisibleRoots) -> Result<Vec<HealthItem>, RedactionRefusal> {
-        if let Some(capabilities) = self.perimeter.and_then(|view| view.measured_capabilities()) {
+        let perimeter = self.perimeter.clone().or_else(|| {
+            crate::perimeter::observe(&self.workspace, self.home.as_deref(), None).ok()
+        });
+        let mut items = self.capabilities(perimeter.as_ref(), roots)?;
+        items.push(match perimeter {
+            Some(perimeter) => HealthItem::new(
+                HealthItemId::probe("sandbox.perimeter"),
+                if perimeter.measured_capabilities().is_some() {
+                    HealthStatus::Ok
+                } else {
+                    HealthStatus::NotChecked
+                },
+                HealthDetail::perimeter(&perimeter),
+                HealthDetail::fixed("the admitted perimeter"),
+            ),
+            None => HealthItem::new(
+                HealthItemId::probe("sandbox.perimeter"),
+                HealthStatus::Error,
+                HealthDetail::fixed("the effective perimeter could not be resolved or admitted"),
+                HealthDetail::fixed("configuration resolution"),
+            ),
+        });
+        Ok(items)
+    }
+}
+
+impl Sandbox {
+    fn capabilities(
+        &self,
+        perimeter: Option<&crate::perimeter::Perimeter>,
+        roots: &VisibleRoots,
+    ) -> Result<Vec<HealthItem>, RedactionRefusal> {
+        if let Some(capabilities) = perimeter.and_then(|view| view.measured_capabilities()) {
             return Ok(vec![HealthItem::new(
                 HealthItemId::probe("sandbox.capabilities"),
                 if capabilities == ego_core::permit::ExecCaps::empty() {
@@ -780,5 +878,141 @@ impl HealthProbe for Acp {
             )),
         }
         Ok(items)
+    }
+}
+
+#[cfg(test)]
+mod bounded_tests {
+    use super::*;
+
+    struct Blocked {
+        section: HealthSection,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl HealthProbe for Blocked {
+        fn section(&self) -> HealthSection {
+            self.section
+        }
+
+        fn observe(&self, _: &VisibleRoots) -> Result<Vec<HealthItem>, RedactionRefusal> {
+            let _ = self.release.recv();
+            Ok(vec![])
+        }
+    }
+
+    #[test]
+    fn slow_first_probe_does_not_hide_completed_later_sections_or_multiply_deadlines() {
+        let (release_first, first) = mpsc::channel();
+        let (release_second, second) = mpsc::channel();
+        let started = Instant::now();
+        let snapshot = observe_bounded(
+            vec![
+                Box::new(Blocked {
+                    section: HealthSection::Configuration,
+                    release: first,
+                }),
+                Box::new(Blocked {
+                    section: HealthSection::SessionStore,
+                    release: second,
+                }),
+                Box::new(Acp),
+            ],
+            &VisibleRoots::default(),
+            Duration::from_millis(100),
+        );
+        drop((release_first, release_second));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "serial waits exceeded the shared deadline"
+        );
+        assert_eq!(snapshot.sections.len(), 9);
+        assert_eq!(snapshot.sections[0].status(), HealthStatus::Error);
+        assert_eq!(snapshot.sections[2].status(), HealthStatus::Error);
+        assert_eq!(snapshot.sections[8].status(), HealthStatus::Ok);
+        assert!(
+            !snapshot.sections[8].items.is_empty(),
+            "a completed later probe was discarded"
+        );
+    }
+
+    #[test]
+    fn failed_probe_stays_redacted_and_does_not_suppress_later_results() {
+        struct Refused;
+        impl HealthProbe for Refused {
+            fn section(&self) -> HealthSection {
+                HealthSection::Skills
+            }
+            fn observe(&self, _: &VisibleRoots) -> Result<Vec<HealthItem>, RedactionRefusal> {
+                Err(RedactionRefusal {
+                    probe: "skills.test",
+                    reason: ego_core::health::RedactionReason::PathOutsideVisibleRoots,
+                })
+            }
+        }
+        let snapshot = observe_bounded(
+            vec![Box::new(Refused), Box::new(Acp)],
+            &VisibleRoots::default(),
+            Duration::from_secs(2),
+        );
+        assert_eq!(snapshot.exit_code(), 1);
+        assert!(text(&snapshot).contains("doctor.redaction_refused"));
+        assert!(!snapshot.sections[8].items.is_empty());
+    }
+
+    #[test]
+    fn repeated_slow_session_reads_do_not_starve_fast_acp_diagnosis() {
+        // Repeated /doctor calls must not let one stuck store consume every
+        // worker slot and turn unrelated healthy sections into errors.
+        let mut releases = Vec::new();
+        for _ in 0..32 {
+            let (release, wait) = mpsc::channel();
+            releases.push(release);
+            let _ = observe_bounded(
+                vec![Box::new(Blocked {
+                    section: HealthSection::SessionStore,
+                    release: wait,
+                })],
+                &VisibleRoots::default(),
+                Duration::from_millis(1),
+            );
+        }
+        let snapshot = observe_bounded(
+            vec![Box::new(Acp)],
+            &VisibleRoots::default(),
+            Duration::from_secs(2),
+        );
+        drop(releases);
+        assert_eq!(
+            snapshot.sections[8].status(),
+            HealthStatus::Ok,
+            "blocked session reads exhausted the worker cap for the fast ACP section"
+        );
+        assert!(
+            snapshot.sections[8]
+                .items
+                .iter()
+                .any(|item| item.id.to_string() == "acp.protocol")
+        );
+    }
+
+    #[test]
+    fn repeated_blocked_probes_are_refused_instead_of_spawning_unbounded_workers() {
+        let mut releases = Vec::new();
+        let probes = (0..MAX_ACTIVE_PROBES + 1)
+            .map(|_| {
+                let (release, wait) = mpsc::channel();
+                releases.push(release);
+                Box::new(Blocked {
+                    section: HealthSection::SessionStore,
+                    release: wait,
+                }) as Box<dyn HealthProbe + Send>
+            })
+            .collect();
+        let snapshot =
+            observe_bounded(probes, &VisibleRoots::default(), Duration::from_millis(100));
+        drop(releases);
+        assert!(text(&snapshot).contains("previous doctor reads are still running"));
+        assert_eq!(snapshot.exit_code(), 1);
     }
 }

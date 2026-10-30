@@ -397,9 +397,13 @@ fn readable_keeps_the_last_wrapped_trust_modal_frame() {
         .expect("next launch heading")
         .0;
     // Preserve the historical capture byte-for-byte. That launch predates
-    // removal of the implicit home root, so its expected frame still carries
-    // the retired warning; current launch goldens must not carry it.
-    let expected = expected.replacen(
+    // the startup logo and removal of the implicit home root. Start its
+    // expected frame at identity and retain the retired warning; current
+    // launch goldens must carry the logo and must not carry that warning.
+    let identity = expected
+        .find("εgo: ego <version>\n")
+        .expect("the historical frame starts at identity");
+    let expected = expected[identity..].replacen(
         "εgo: sandbox is off;",
         "εgo: ~/Gits does not exist; file access is limited to the workspace\nεgo: sandbox is off;",
         1,
