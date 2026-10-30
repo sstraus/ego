@@ -1222,8 +1222,7 @@ fn explicit_dcr_persists_client_identity_and_rejects_cross_issuer_registration()
 fn atlassian_dcr_public_client_ignores_unrequested_secret_without_persisting_or_sending_it() {
     // Catches rejection of an unrequested secret despite explicit public auth.
     // Registration fields retain the recorded shape; identity and observation values are synthetic.
-    let fixture =
-        br#"{"client_id":"<redacted client id>","client_id_issued_at":1009843200,"client_name":"Example OAuth client","client_profile":"ai.dcr3p","client_secret":"<redacted: nonempty secret returned>","client_secret_expires_at":0,"disabled":false,"redirect_uris":["http://127.0.0.1:9999/callback"],"token_endpoint_auth_method":"none"}"#;
+    let fixture = br#"{"client_id":"<redacted client id>","client_id_issued_at":1009843200,"client_name":"Example OAuth client","client_profile":"ai.dcr3p","client_secret":"<redacted: nonempty secret returned>","client_secret_expires_at":0,"disabled":false,"redirect_uris":["http://127.0.0.1:9999/callback"],"token_endpoint_auth_method":"none"}"#;
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(200, br#"{"resource":"https://mcp.example.test/mcp","authorization_servers":["https://issuer.example.test"]}"#),
         McpHttpResponse::json(200, br#"{"authorization_endpoint":"https://issuer.example.test/authorize","token_endpoint":"https://issuer.example.test/token","issuer":"https://issuer.example.test","registration_endpoint":"https://issuer.example.test/register"}"#),
