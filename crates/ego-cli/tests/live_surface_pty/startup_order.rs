@@ -225,8 +225,18 @@ fn quiet_tty_start_prints_no_identity_or_logo() {
     let result = ego.run_pty_to_exit();
     assert_eq!(result.code, Some(2), "{}", result.stdout);
     assert!(result.stdout.contains("config.toml"), "{}", result.stdout);
-    assert!(!result.stdout.contains(concat!("ego ", env!("CARGO_PKG_VERSION"))), "{}", result.stdout);
-    assert!(!normalized(result.stdout.as_bytes()).contains("⢀⡴"), "{}", result.stdout);
+    assert!(
+        !result
+            .stdout
+            .contains(concat!("ego ", env!("CARGO_PKG_VERSION"))),
+        "{}",
+        result.stdout
+    );
+    assert!(
+        !normalized(result.stdout.as_bytes()).contains("⢀⡴"),
+        "{}",
+        result.stdout
+    );
 }
 
 // Catches: the same OR mutation prints startup identity with piped stdin.
@@ -236,7 +246,10 @@ fn piped_stdin_start_prints_no_identity_or_logo() {
     assert_eq!(result.code, Some(2), "{} {}", result.stdout, result.stderr);
     let shown = format!("{}{}", result.stdout, result.stderr);
     assert!(shown.contains("config.toml"), "{shown}");
-    assert!(!shown.contains(concat!("ego ", env!("CARGO_PKG_VERSION"))), "{shown}");
+    assert!(
+        !shown.contains(concat!("ego ", env!("CARGO_PKG_VERSION"))),
+        "{shown}"
+    );
     assert!(!shown.contains("⢀⡴"), "{shown}");
 }
 
@@ -246,19 +259,22 @@ fn plain_flag_start_has_no_sgr() {
     let result = startup_gate_refusal().arg("--plain").run_pty_to_exit();
     assert_eq!(result.code, Some(2), "{}", result.stdout);
     assert!(result.stdout.contains("config.toml"), "{}", result.stdout);
-    let (startup, _) = result.stdout.split_once(concat!("ego ", env!("CARGO_PKG_VERSION")))
+    let (startup, _) = result
+        .stdout
+        .split_once(concat!("ego ", env!("CARGO_PKG_VERSION")))
         .expect("startup identity proves the interactive driver ran");
     assert!(startup.contains("⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄"), "{startup:?}");
-    assert!(!startup.contains("\x1b["), "plain startup contains terminal styling: {startup:?}");
+    assert!(
+        !startup.contains("\x1b["),
+        "plain startup contains terminal styling: {startup:?}"
+    );
 }
 
 // Refuse immediately after the real startup block, before terminal-editor or
 // provider output can hide which stage emitted an escape sequence. The malformed
 // user file is read by keyboard admission, not a mocked driver state.
 fn startup_gate_refusal() -> Ego {
-    let ego = Ego::nowhere()
-        .conversing()
-        .env("TERM", "xterm-256color");
+    let ego = Ego::nowhere().conversing().env("TERM", "xterm-256color");
     ego.home_file("config.toml", "model = [\n");
     ego
 }
