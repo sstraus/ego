@@ -254,7 +254,7 @@ mod tests {
                 Capabilities {
                     width,
                     depth: super::super::Depth::TrueColor,
-                    osc: super::super::OscProfile::Standard,
+                    osc: super::super::OscProfile::Tuic,
                     ..Capabilities::plain()
                 },
             );
