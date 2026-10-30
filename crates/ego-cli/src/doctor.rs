@@ -960,6 +960,40 @@ mod bounded_tests {
     }
 
     #[test]
+    fn repeated_slow_session_reads_do_not_starve_fast_acp_diagnosis() {
+        // Repeated /doctor calls must not let one stuck store consume every
+        // worker slot and turn unrelated healthy sections into errors.
+        let mut releases = Vec::new();
+        for _ in 0..32 {
+            let (release, wait) = mpsc::channel();
+            releases.push(release);
+            let _ = observe_bounded(
+                vec![Box::new(Blocked {
+                    section: HealthSection::SessionStore,
+                    release: wait,
+                })],
+                &VisibleRoots::default(),
+                Duration::from_millis(1),
+            );
+        }
+        let snapshot = observe_bounded(
+            vec![Box::new(Acp)],
+            &VisibleRoots::default(),
+            Duration::from_secs(2),
+        );
+        drop(releases);
+        assert_eq!(
+            snapshot.sections[8].status(),
+            HealthStatus::Ok,
+            "blocked session reads exhausted the worker cap for the fast ACP section"
+        );
+        assert!(snapshot.sections[8]
+            .items
+            .iter()
+            .any(|item| item.id.to_string() == "acp.protocol"));
+    }
+
+    #[test]
     fn repeated_blocked_probes_are_refused_instead_of_spawning_unbounded_workers() {
         let mut releases = Vec::new();
         let probes = (0..MAX_ACTIVE_PROBES + 1)
