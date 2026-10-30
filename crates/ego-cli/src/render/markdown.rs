@@ -15,7 +15,7 @@
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::caps::Depth;
+use super::caps::{Depth, OscProfile};
 use super::line::{Line, Span};
 use super::style::{Palette, Style};
 use super::table::{Align, Table};
@@ -23,8 +23,10 @@ use super::table::{Align, Table};
 /// Turn a markdown document into rendered rows.
 ///
 /// `width` lays out containers and tables. Top-level prose stays on logical
-/// lines so each terminal viewer can wrap it at its own edge.
-pub fn render(source: &str, width: usize) -> Vec<Line> {
+/// lines so each terminal viewer can wrap it at its own edge. Only the TUIC
+/// OSC profile preserves host protocol marker boundaries.
+pub fn render(source: &str, width: usize, host: OscProfile) -> Vec<Line> {
+    let tuic = host == OscProfile::Tuic;
     let mut renderer = Renderer::new(width);
     let mut paragraph = false;
     for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
@@ -36,11 +38,14 @@ pub fn render(source: &str, width: usize) -> Vec<Line> {
             Event::Start(Tag::Paragraph) if top_level => {
                 paragraph = true;
                 renderer.event(event);
-                renderer.host_line = host_marker_line(&source[range.start..]);
+                renderer.host_line = tuic && host_marker_line(&source[range.start..]);
             }
             Event::SoftBreak | Event::HardBreak if paragraph => {
-                let next_host = host_marker_line(&source[range.end..]);
-                if renderer.host_line || next_host || source[range.end..].starts_with("💬 ") {
+                let next_host = tuic && host_marker_line(&source[range.end..]);
+                if renderer.host_line
+                    || next_host
+                    || (tuic && source[range.end..].starts_with("💬 "))
+                {
                     renderer.flush();
                 } else {
                     renderer.event(event);
@@ -538,11 +543,30 @@ mod tests {
     use super::*;
 
     fn text(source: &str, width: usize) -> Vec<String> {
-        render(source, width).iter().map(Line::text).collect()
+        render(source, width, OscProfile::Tuic)
+            .iter()
+            .map(Line::text)
+            .collect()
     }
 
     fn bytes(source: &str, width: usize) -> String {
-        crate::render::block(&render(source, width), Depth::TrueColor)
+        crate::render::block(&render(source, width, OscProfile::Tuic), Depth::TrueColor)
+    }
+
+    // Catches: non-TUIC profiles accidentally retain marker-specific Markdown boundaries.
+    #[test]
+    fn non_tuic_profiles_render_markers_as_ordinary_markdown() {
+        for host in [OscProfile::None, OscProfile::Standard] {
+            let source =
+                "intent: task\nsuggest: **try this**\nTUICommander v2.0.0 is connected.\n💬 answer";
+            assert_eq!(
+                render(source, 80, host)
+                    .iter()
+                    .map(Line::text)
+                    .collect::<Vec<_>>(),
+                ["intent: task suggest: try this TUICommander v2.0.0 is connected. 💬 answer"]
+            );
+        }
     }
 
     // Catches: CommonMark merges adjacent host protocol lines into one paragraph row.
@@ -744,7 +768,7 @@ mod tests {
     #[test]
     fn a_styled_cell_survives_layout_and_does_not_break_the_alignment() {
         let source = "| flag | note |\n|---|---|\n| `--no-color` | off |\n";
-        let lines = render(source, 60);
+        let lines = render(source, 60, OscProfile::Standard);
         let rendered = crate::render::block(&lines, Depth::TrueColor);
         assert!(rendered.contains("38;2;174;185;213m--no-color"));
         let widths: Vec<usize> = lines
@@ -775,7 +799,7 @@ mod tests {
     #[test]
     fn nothing_escapes_at_depth_none() {
         let source = "# h\n\n**b** *i* `c` [l](http://x) ~~s~~\n\n> q\n\n- i\n\n| a |\n|---|\n| 1 |\n\n---\n";
-        let out = crate::render::block(&render(source, 60), Depth::None);
+        let out = crate::render::block(&render(source, 60, OscProfile::Standard), Depth::None);
         assert!(!out.contains('\x1b'), "{out:?}");
     }
 
@@ -793,7 +817,7 @@ mod tests {
 
     #[test]
     fn an_empty_document_renders_nothing() {
-        assert!(render("", 80).is_empty());
-        assert!(render("   \n\n  \n", 80).is_empty());
+        assert!(render("", 80, OscProfile::Standard).is_empty());
+        assert!(render("   \n\n  \n", 80, OscProfile::Standard).is_empty());
     }
 }

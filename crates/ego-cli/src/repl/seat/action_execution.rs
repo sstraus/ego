@@ -54,7 +54,6 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 ActionId::Tools,
                 ActionId::Skills,
                 ActionId::Hooks,
-                ActionId::Memory,
                 ActionId::Init,
             ],
         ),
@@ -191,9 +190,7 @@ pub(super) fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str>
         }
         Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
         Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
-        Dispatch::Memory(_) | Dispatch::Init(_) => {
-            Some("memory and init are unavailable while a turn is running")
-        }
+        Dispatch::Init(_) => Some("init is unavailable while a turn is running"),
         Dispatch::Fast(_) => Some("fast tier cannot change while a turn is running"),
         Dispatch::Hooks => Some("cannot inspect hooks during a reply; wait for it to finish"),
         _ => None,
@@ -290,7 +287,6 @@ fn submit_busy_line(
         | Dispatch::McpContext(_)
         | Dispatch::Mcp(_)
         | Dispatch::Setup(_)
-        | Dispatch::Memory(_)
         | Dispatch::Init(_)
         | Dispatch::Fast(_)
         | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
@@ -572,9 +568,6 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Setup(arguments) => {
                     return (Line::HostCommand(HostCommand::Setup(arguments)), failed);
-                }
-                Dispatch::Memory(arguments) => {
-                    return (Line::HostCommand(HostCommand::Memory(arguments)), failed);
                 }
                 Dispatch::Init(arguments) => {
                     return (Line::HostCommand(HostCommand::Init(arguments)), failed);
@@ -1229,12 +1222,9 @@ pub(super) fn apply_surface_effect(
                 return Some(Line::HostCommand(HostCommand::Hooks));
             }
         }
-        SurfaceActionEffect::Memory | SurfaceActionEffect::Init => {
+        SurfaceActionEffect::Init => {
             if !busy {
-                return Some(Line::HostCommand(match effect {
-                    SurfaceActionEffect::Memory => HostCommand::Memory(String::new()),
-                    _ => HostCommand::Init(String::new()),
-                }));
+                return Some(Line::HostCommand(HostCommand::Init(String::new())));
             }
         }
         SurfaceActionEffect::Config => {

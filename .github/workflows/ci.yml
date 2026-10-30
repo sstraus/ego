@@ -57,6 +57,7 @@ jobs:
             echo "TMPDIR=${{ github.workspace }}/.tmp" >> "$GITHUB_ENV"
           fi
 
+      - run: just portable-paths-check
       - run: just fmt-check
       - run: just catalogue-check
       - run: just lint

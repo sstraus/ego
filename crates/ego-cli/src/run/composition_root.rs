@@ -183,40 +183,6 @@ impl CliPrepared {
         }
     }
 
-    async fn refresh_orchestrator_tool(&mut self) -> Result<(), RunExecutorError> {
-        if !self
-            .registry
-            .iter()
-            .any(|tool| tool.descriptor().name == "orchestrator_active")
-        {
-            return Ok(());
-        }
-        use futures::StreamExt;
-        let entries = SessionStore::read(self.store.as_ref(), &self.session_id)
-            .map_err(|e| RunExecutorError::new(e.to_string()))?
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| RunExecutorError::new(e.to_string()))?;
-        let limits = ego_tools::orchestrator_active::rework_limits(&entries)
-            .map_err(RunExecutorError::new)?;
-        let home = std::env::var_os("HOME")
-            .ok_or_else(|| RunExecutorError::new("orchestration requires HOME"))?;
-        let tool = ego_tools::orchestrator_active::tool_with_rework_limits(
-            ego_core::orchestrator::Mode::Active,
-            std::path::Path::new(&home),
-            std::env::var("TUIC_SESSION").ok(),
-            limits,
-        );
-        for entry in &mut self.registry {
-            if entry.descriptor().name == "orchestrator_active" {
-                *entry = RegisteredTool::Effect(Arc::clone(&tool));
-            }
-        }
-        Ok(())
-    }
-
     pub(super) async fn prepare(
         mut args: Args,
         store: Arc<JsonlStore>,
@@ -362,7 +328,6 @@ impl CliPrepared {
         pause: &PauseToken,
     ) -> Result<RunSettlement, RunExecutorError> {
         self.apply_operator_seat(&bindings);
-        self.refresh_orchestrator_tool().await?;
         let run_id = self.run_id;
         let artifacts = self.artifacts.clone();
         let child_root = RunRoot::new(self.root.clone())
@@ -493,8 +458,7 @@ impl CliPrepared {
                 bindings.human(),
             )
             .with_profile_roots(profile_roots)
-            .with_read_perimeter(&self.confinement)
-            .with_coordinator_profile(self.effective.active_profile.as_ref()),
+            .with_read_perimeter(&self.confinement),
         );
         let config = TurnConfig {
             cache: self.effective.cache,
@@ -548,7 +512,6 @@ impl CliPrepared {
                 gate,
                 hook_layers: self.profile_layers.as_deref(),
                 hook_trust: self.trust,
-                mdkb_prompt_command: self.effective.mdkb_prompt_command.clone(),
                 policy_source,
                 judge_available,
             },

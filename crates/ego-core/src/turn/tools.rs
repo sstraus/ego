@@ -274,15 +274,11 @@ pub struct Tools<'a> {
     resume: Option<std::sync::Arc<ResumeSealer>>,
     task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
     pub(super) named_agents: Vec<super::NamedAgent>,
-    delegation_host: bool,
+
     task_tool_ceiling: Option<std::collections::BTreeSet<String>>,
 }
 
 impl<'a> Tools<'a> {
-    pub(crate) fn cwd(&self) -> &CanonPath {
-        &self.cwd
-    }
-
     pub(crate) fn context_notes(&self) -> Vec<String> {
         self.source.context_notes()
     }
@@ -307,7 +303,6 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
-            delegation_host: false,
         }
     }
 
@@ -329,7 +324,6 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
-            delegation_host: false,
         }
     }
 
@@ -352,7 +346,6 @@ impl<'a> Tools<'a> {
             task_context: None,
             named_agents: Vec::new(),
             task_tool_ceiling: None,
-            delegation_host: false,
         })
     }
 
@@ -362,17 +355,12 @@ impl<'a> Tools<'a> {
         self
     }
 
-    pub fn with_delegation_host(mut self, tuic: bool) -> Self {
-        self.delegation_host = tuic;
-        self
-    }
-
     fn describe(&self, tool: &RegisteredTool) -> GenToolDescriptor {
         let mut descriptor = tool.descriptor();
         if matches!(tool, RegisteredTool::Task) {
             descriptor
                 .description
-                .push_str(super::delegation_guidance(self.delegation_host));
+                .push_str(super::delegation_guidance());
         }
         if matches!(tool, RegisteredTool::Task) {
             if self.named_agents.is_empty() {
@@ -459,7 +447,6 @@ impl<'a> Tools<'a> {
             task_context: Some((name, serial)),
             named_agents: Vec::new(),
             task_tool_ceiling: ceiling,
-            delegation_host: self.delegation_host,
         })
     }
 

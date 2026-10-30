@@ -36,7 +36,10 @@ const WIDTHS: [usize; 3] = [40, 80, 120];
 
 /// The rendering of `SOURCE` at one width and one depth.
 fn transcript(width: usize, depth: Depth) -> String {
-    block(&markdown::render(SOURCE, width), depth)
+    block(
+        &markdown::render(SOURCE, width, ego_cli::render::OscProfile::Standard),
+        depth,
+    )
 }
 
 /// The two depths that are contracts rather than fallbacks: what a modern
@@ -227,7 +230,10 @@ fn every_row_of_the_table_agrees_and_none_reaches_past_the_edge() {
 /// that the *values* survive, which is what truncating a cell would break.
 #[test]
 fn a_table_too_narrow_to_draw_still_says_everything_it_said() {
-    let narrow = block(&markdown::render(SOURCE, 20), Depth::None);
+    let narrow = block(
+        &markdown::render(SOURCE, 20, ego_cli::render::OscProfile::Standard),
+        Depth::None,
+    );
     assert!(
         !narrow.contains('┌'),
         "20 columns cannot hold three columns"

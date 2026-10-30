@@ -148,7 +148,6 @@ fn docs_review_reference_does_not_drop_nested_leaf_arguments() {
         ("roots add", "--access"),
         ("mcp login", "--callback-port"),
         ("hooks ls", "--json"),
-        ("orchestrator brief", "--root"),
         ("worktree cleanup", "RECEIPT"),
     ] {
         let heading = format!("## `ego {path}`\n");

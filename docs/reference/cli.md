@@ -35,7 +35,6 @@ Run an agent, from one command line.
 - `ego roots`
 - `ego rules` — Inspect and manage persistent permission rules.
 - `ego mcp-server` — Serve scoped ego runs over MCP on stdio.
-- `ego orchestrator`
 - `ego worktree` — Inspect or clean up a retained local worktree.
 
 - `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
@@ -1005,27 +1004,6 @@ Serve scoped ego runs over MCP on stdio.
 - `--max-resource-bytes <MAX_RESOURCE_BYTES>` — (undocumented) Required.
 - `--retained-requests <RETAINED_REQUESTS>` — (undocumented) Required.
 - `--session-dir <SESSION_DIR>` — Override the store location
-
-## `ego orchestrator`
-
-```text
-Usage: ego orchestrator <COMMAND>
-```
-
-- `ego orchestrator brief` — Inspect tracked children and unread results without model generation or inbox reads
-
-- `-h, --help` — Print help
-
-## `ego orchestrator brief`
-
-```text
-Usage: ego orchestrator brief [OPTIONS]
-```
-
-Inspect tracked children and unread results without model generation or inbox reads
-
-- `-h, --help` — Print help
-- `--root <ROOT>` — (undocumented)
 
 ## `ego worktree`
 

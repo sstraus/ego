@@ -1395,37 +1395,28 @@ fn persistent_instruction_actions_route_menus_and_refuse_busy_ingress() {
     let mut editor = Reedline::create();
     let phase = SurfacePhase::new(EditPhase::Idle);
     let status = Arc::new(Mutex::new(SurfaceStatus::default()));
-    for (id, effect, dispatch, expected) in [
-        (
-            ActionId::Memory,
-            SurfaceActionEffect::Memory,
-            Dispatch::Memory(String::new()),
-            HostCommand::Memory(String::new()),
-        ),
-        (
-            ActionId::Init,
-            SurfaceActionEffect::Init,
-            Dispatch::Init(String::new()),
-            HostCommand::Init(String::new()),
-        ),
-    ] {
-        assert_eq!(
-            sink.invoke(LocalAction { id, busy: false }),
-            LocalActionOutcome::Completed
-        );
-        assert_eq!(
-            pending
-                .lock()
-                .unwrap()
-                .take()
-                .map(|value| std::mem::discriminant(&value)),
-            Some(std::mem::discriminant(&effect))
-        );
-        assert!(super::action_execution::busy_dispatch_refusal(&dispatch).is_some());
-        assert!(
-            matches!(apply_surface_effect(&mut editor, &phase, &status, effect, false), Some(Line::HostCommand(command)) if command == expected)
-        );
-    }
+    let (id, effect, dispatch, expected) = (
+        ActionId::Init,
+        SurfaceActionEffect::Init,
+        Dispatch::Init(String::new()),
+        HostCommand::Init(String::new()),
+    );
+    assert_eq!(
+        sink.invoke(LocalAction { id, busy: false }),
+        LocalActionOutcome::Completed
+    );
+    assert_eq!(
+        pending
+            .lock()
+            .unwrap()
+            .take()
+            .map(|value| std::mem::discriminant(&value)),
+        Some(std::mem::discriminant(&effect))
+    );
+    assert!(super::action_execution::busy_dispatch_refusal(&dispatch).is_some());
+    assert!(
+        matches!(apply_surface_effect(&mut editor, &phase, &status, effect, false), Some(Line::HostCommand(command)) if command == expected)
+    );
 }
 /// Catches: discovery descriptions omit the grammar of argument-bearing commands.
 #[test]

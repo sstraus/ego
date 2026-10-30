@@ -5,7 +5,7 @@ permits those operations before a guarded port executes them. Listing a tool or
 including it in `--tools` does not grant access.
 
 Use `/tools` inside a session to inspect its current catalogue. `--tools` restricts
-built-ins; `--no-tools` offers none. Skills, MCP attachments, and orchestration
+built-ins; `--no-tools` offers none. Skills and MCP attachments
 can add admitted operations, subject to the same ceilings.
 
 ## Built-in effect tools
@@ -45,6 +45,14 @@ argv is a process request with its own risk and confinement. A timeout is not
 proof that a child never started. Detached-process recovery also uses evidence
 and settlement; do not repeat an uncertain effect blindly.
 
+A foreground `exec` call has a default lifetime of two minutes. `timeout_ms`
+accepts 1 through 600000 (ten minutes); omitted or null uses the default. The
+transcript row shows the effective limit, for example `(timeout 2m)`. For longer
+work, use `background=true`: then an omitted or null `timeout_ms` means no
+deadline. A foreground command promoted with Ctrl+B keeps its original limit.
+On expiry, ego terminates the child and its descendants and reports a timeout.
+Time while ego is suspended does not count.
+
 ## Background processes and web access
 
 `exec` with `background=true` returns a session-owned ID. The model can use
@@ -74,10 +82,7 @@ silent fallback between backends. See [web search reference](../reference/tools.
 | `context` | Request a compact/clear transition after the current tool batch; clear needs operator opt-in and an active goal |
 | `task` | Run an isolated depth-one child with inherited tools, permission, sandbox, offline posture, and shared budget; the child cannot delegate |
 | `history.search`, `history.open` | Read bounded prior user/assistant conversation through the store-bound history port; exclude tool payloads |
-| `memory_lookup` | Coordinator-profile-only lookup of decision/problem/handoff MDKB entries; absence/refusal is explicit |
 | Collapsed MCP operations | Discover and call external tools from one captured admitted catalogue |
-| `orchestrator_status`, `orchestrator_brief` | Observe native TUICommander children when its socket exists |
-| `orchestrator_active` | Opt-in guarded coordinator actions; see [orchestration](../integrations/orchestration.md) |
 
 The available catalogue depends on session composition, admitted extensions,
 provider capability, and configuration; these names are not a promise that every
@@ -103,7 +108,7 @@ Background exec settlement wakes an idle interactive session to process the
 retained result; the model need not repeatedly request `exec_status` while waiting.
 `history.search` accepts `query`; `history.open` accepts a session UUID. History
 is read-only conversational access across workspace roots, not arbitrary paths
-or authority to execute a prior tool call. Native TUICommander orchestration is
+or authority to execute a prior tool call. Coordination through the TUIC API is
 a different operation from the in-process depth-one `task` child.
 
 Sources: [task contract](../../crates/ego-core/src/turn/task.rs),

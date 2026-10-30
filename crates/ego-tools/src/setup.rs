@@ -715,33 +715,6 @@ pub fn inventory_report(
                 reason: reason.into(),
             });
         }
-        let config = home.join("Library/Application Support/mbx/config.toml");
-        probes.push(Probe::Metadata {
-            path: config.clone(),
-            reason: "operator mbx cache_dir source; bounded TOML only, no command".into(),
-        });
-        if let Ok(metadata) = reader.metadata(&config)
-            && let Ok(content) = reader.read(&metadata.canonical, 64 * 1024)
-            && !content.truncated
-            && let Ok(text) = std::str::from_utf8(&content.bytes)
-            && let Ok(document) = text.parse::<toml_edit::DocumentMut>()
-            && let Some(cache) = document.get("cache_dir").and_then(|value| value.as_str())
-        {
-            let path = cache
-                .strip_prefix("~/")
-                .map_or_else(|| PathBuf::from(cache), |suffix| home.join(suffix));
-            if path.is_absolute()
-                && !path
-                    .components()
-                    .any(|part| part == std::path::Component::ParentDir)
-            {
-                probes.push(Probe::Metadata {
-                    path,
-                    reason: "derived mbx cache_dir from bounded operator TOML; presence only"
-                        .into(),
-                });
-            }
-        }
     }
     #[cfg(target_os = "macos")]
     probes.push(Probe::Metadata { path: std::env::var_os("DEVELOPER_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/var/db/xcode_select_link")), reason: "operator/platform developer selection; inspect selector only, never xcode-select execution".into() });

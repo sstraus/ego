@@ -6,7 +6,6 @@ Yes: load project instructions, configuration, skills, hooks and MCP server
 declarations.
 No: continue without project files.
 Trust project files in <workspace>? [y/N] yes
-εgo: ~/Gits does not exist; file access is limited to the workspace
 εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3
 mode auto (trusted interactive default) · sandbox off (flags)
@@ -19,7 +18,6 @@ a launch transcript
 
 # trusted: next launch
 εgo: ego <version>
-εgo: ~/Gits does not exist; file access is limited to the workspace
 εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3
 mode auto (trusted interactive default) · sandbox off (flags)

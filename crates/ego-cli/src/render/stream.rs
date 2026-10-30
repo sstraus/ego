@@ -80,7 +80,7 @@ impl Answer {
         if source.trim().is_empty() {
             return String::new();
         }
-        let lines = markdown::render(source, self.capabilities.width);
+        let lines = markdown::render(source, self.capabilities.width, self.capabilities.osc);
         if lines.is_empty() {
             return String::new();
         }
@@ -176,6 +176,38 @@ mod tests {
         out
     }
 
+    // Catches: TUIC marker rules split ordinary Markdown on non-TUIC terminals.
+    #[test]
+    fn outside_tuic_suggest_is_plain_markdown() {
+        let source = "before\nsuggest: **try this**\nafter";
+        let chars: Vec<String> = source.chars().map(|ch| ch.to_string()).collect();
+        let deltas: Vec<&str> = chars.iter().map(String::as_str).collect();
+        assert_eq!(
+            bare(&drain(screen(), &[source])),
+            "before suggest: try this after\n"
+        );
+        assert_eq!(
+            bare(&drain(screen(), &deltas)),
+            "before suggest: try this after\n"
+        );
+    }
+
+    // Catches: connection, intent and answer prefixes retain host-only soft-break rules.
+    #[test]
+    fn outside_tuic_all_marker_prefixes_are_plain_markdown() {
+        for prefix in [
+            "intent: task",
+            "TUICommander v2.0.0 is connected.",
+            "💬 answer",
+        ] {
+            let source = format!("before\n{prefix}\nafter");
+            assert_eq!(
+                bare(&drain(screen(), &[&source])),
+                format!("before {prefix} after\n")
+            );
+        }
+    }
+
     // Catches: delta boundaries or pipe rendering alter host marker line boundaries.
     #[test]
     fn rendered_host_markers_survive_split_deltas_and_pipes() {
@@ -184,7 +216,11 @@ mod tests {
         let chars: Vec<String> = source.chars().map(|ch| ch.to_string()).collect();
         let deltas: Vec<&str> = chars.iter().map(String::as_str).collect();
         for width in [80, 120, 200] {
-            let caps = Capabilities { width, ..screen() };
+            let caps = Capabilities {
+                width,
+                osc: OscProfile::Tuic,
+                ..screen()
+            };
             assert_eq!(bare(&drain(caps, &[source])), expected);
             assert_eq!(bare(&drain(caps, &deltas)), expected);
         }
@@ -203,7 +239,14 @@ mod tests {
         let deltas: Vec<&str> = chars.iter().map(String::as_str).collect();
         for width in [80, 120, 200] {
             for (mode, chunks) in [("whole", vec![source.as_str()]), ("split", deltas.clone())] {
-                let rendered = drain(Capabilities { width, ..screen() }, &chunks);
+                let rendered = drain(
+                    Capabilities {
+                        width,
+                        osc: OscProfile::Tuic,
+                        ..screen()
+                    },
+                    &chunks,
+                );
                 let bytes = pty_bytes(&rendered, width);
                 let mut terminal = vt100::Parser::new(24, width as u16, 0);
                 terminal.process(&bytes);

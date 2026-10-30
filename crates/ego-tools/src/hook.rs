@@ -39,6 +39,7 @@ impl std::error::Error for HookAdapterError {}
 pub struct HookAdapterSettlement {
     decision: HookDecision,
     feedback: Option<String>,
+    context: Option<ego_core::hook::HookContextOutput>,
     failure: Option<String>,
     evidence: Option<EvidenceRef>,
     delivery: DeliveryCertainty,
@@ -53,6 +54,7 @@ impl HookAdapterSettlement {
         Self {
             decision: result.decision(),
             feedback: result.feedback().map(str::to_owned),
+            context: result.context().cloned(),
             failure: None,
             evidence,
             delivery,
@@ -63,6 +65,7 @@ impl HookAdapterSettlement {
         Self {
             decision: HookDecision::Continue,
             feedback: None,
+            context: None,
             failure: Some(message.into()),
             evidence: None,
             delivery,
@@ -75,6 +78,10 @@ impl HookAdapterSettlement {
 
     pub fn feedback(&self) -> Option<&str> {
         self.feedback.as_deref()
+    }
+
+    pub fn context(&self) -> Option<&ego_core::hook::HookContextOutput> {
+        self.context.as_ref()
     }
 
     pub fn failure(&self) -> Option<&str> {
@@ -201,9 +208,15 @@ fn parse_process_output(output: ToolResult, delivery: DeliveryCertainty) -> Hook
             }
         )
     });
-    let Some(stdout) = stdout else {
-        return HookAdapterSettlement::failed("command hook returned no stdout", delivery);
-    };
+    // Claude Code command hooks may exit successfully without output.
+    if stdout.is_none_or(|stdout| stdout.text.trim().is_empty()) {
+        return HookAdapterSettlement::success(
+            HookHandlerResultV1::parse(b"{}").expect("empty object is a no-op hook result"),
+            stdout.and_then(|stdout| stdout.evidence_reference().cloned()),
+            delivery,
+        );
+    }
+    let stdout = stdout.expect("nonempty stdout was checked");
     if stdout.preview_is_head_and_tail()
         || stdout
             .evidence_reference()
@@ -237,6 +250,7 @@ fn parse_veto_output(output: ToolResult) -> HookAdapterSettlement {
         return HookAdapterSettlement {
             decision: HookDecision::Block,
             feedback: None,
+            context: None,
             failure: None,
             evidence: stdout.and_then(|stdout| stdout.evidence_reference().cloned()),
             delivery: DeliveryCertainty::DefinitelySent,
@@ -403,5 +417,19 @@ async fn settle_http_response(
             settlement.evidence = Some(evidence);
             settlement
         }
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    #[test]
+    fn successful_silent_command_does_not_block_stop_as_a_malformed_result() {
+        let result = parse_process_output(
+            ToolResult::new(Vec::new()),
+            DeliveryCertainty::DefinitelySent,
+        );
+        assert!(result.failure().is_none());
+        assert!(result.decision().is_continue());
     }
 }

@@ -754,12 +754,37 @@ impl HookSpec {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct HookSortKey(u8, u32, u32, String);
 
+/// Generic event data, projected from the authoritative journal at dispatch.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookInputContext {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_input: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_response: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookEvent {
     lifecycle: HookLifecycle,
     subject: HookSubject,
     selector: Option<String>,
     permission_selector: Option<Rule>,
+    context: HookInputContext,
 }
 
 impl HookEvent {
@@ -769,6 +794,7 @@ impl HookEvent {
             subject: HookSubject::Session,
             selector: None,
             permission_selector: None,
+            context: HookInputContext::default(),
         }
     }
 
@@ -778,6 +804,7 @@ impl HookEvent {
             subject,
             selector: None,
             permission_selector: None,
+            context: HookInputContext::default(),
         }
     }
 
@@ -793,7 +820,13 @@ impl HookEvent {
             subject,
             selector: Some(selector),
             permission_selector,
+            context: HookInputContext::default(),
         }
+    }
+
+    pub fn with_context(mut self, context: HookInputContext) -> Self {
+        self.context = context;
+        self
     }
 
     pub fn lifecycle(&self) -> HookLifecycle {
@@ -1060,6 +1093,9 @@ pub struct HookEventV1 {
     subject: HookSubject,
     #[serde(skip_serializing_if = "Option::is_none")]
     selector: Option<String>,
+    hook_event_name: HookLifecycle,
+    #[serde(flatten)]
+    context: HookInputContext,
 }
 
 #[derive(Deserialize)]
@@ -1074,6 +1110,9 @@ struct HookEventWire {
     subject: HookSubject,
     #[serde(default)]
     selector: Option<String>,
+    hook_event_name: HookLifecycle,
+    #[serde(flatten)]
+    context: HookInputContext,
 }
 
 impl<'de> Deserialize<'de> for HookEventV1 {
@@ -1103,6 +1142,8 @@ impl<'de> Deserialize<'de> for HookEventV1 {
             phase: wire.phase,
             subject: wire.subject,
             selector: wire.selector,
+            hook_event_name: wire.hook_event_name,
+            context: wire.context,
         })
     }
 }
@@ -1122,6 +1163,8 @@ impl HookEventV1 {
             phase: request.event.lifecycle.phase().into(),
             subject: request.event.subject,
             selector: request.event.selector.clone(),
+            hook_event_name: request.event.lifecycle,
+            context: request.event.context.clone(),
         };
         validate_wire_size(&value)?;
         Ok(value)
@@ -1148,44 +1191,93 @@ impl HookHandlerRequestV1 {
     }
 }
 
-/// The sole accepted raw handler settlement.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+/// Claude Code's context envelope, shared by all generic adapters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HookContextOutput {
+    pub hook_event_name: HookLifecycle,
+    pub additional_context: String,
+}
+
+impl HookContextOutput {
+    pub fn text_for(&self, lifecycle: HookLifecycle) -> Result<&str, HookWireError> {
+        if self.hook_event_name != lifecycle || !context_lifecycle(lifecycle) {
+            return Err(HookWireError::new(
+                "additionalContext does not match a supported lifecycle",
+            ));
+        }
+        Ok(&self.additional_context)
+    }
+}
+
+pub fn context_lifecycle(lifecycle: HookLifecycle) -> bool {
+    matches!(
+        lifecycle,
+        HookLifecycle::SessionStart | HookLifecycle::UserPromptSubmit | HookLifecycle::PostToolUse
+    )
+}
+
+/// Bound foreign context at a UTF-8 boundary. The marker is inside the cap.
+pub fn bounded_hook_context(text: &str, cap: usize) -> String {
+    const MARKER: &str = "\n[hook context truncated]";
+    if text.len() <= cap {
+        return text.to_owned();
+    }
+    let mut end = cap.saturating_sub(MARKER.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{}", &text[..end], MARKER)
+}
+
+/// Existing ego decisions and Claude Code context use one closed result shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "HookHandlerResultWire")]
 pub struct HookHandlerResultV1 {
     version: u8,
     decision: HookDecision,
     #[serde(skip_serializing_if = "Option::is_none")]
     feedback: Option<String>,
+    #[serde(rename = "hookSpecificOutput", skip_serializing_if = "Option::is_none")]
+    context: Option<HookContextOutput>,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HookHandlerResultWire {
-    version: u8,
-    decision: HookDecision,
-    #[serde(default)]
+    version: Option<u8>,
+    decision: Option<HookDecision>,
     feedback: Option<String>,
+    #[serde(rename = "hookSpecificOutput")]
+    context: Option<HookContextOutput>,
 }
 
-impl<'de> Deserialize<'de> for HookHandlerResultV1 {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let wire = HookHandlerResultWire::deserialize(deserializer)?;
-        if wire.version != 1 {
-            return Err(serde::de::Error::custom("unsupported hook result version"));
+impl TryFrom<HookHandlerResultWire> for HookHandlerResultV1 {
+    type Error = HookWireError;
+    fn try_from(mut wire: HookHandlerResultWire) -> Result<Self, Self::Error> {
+        let ego = wire.version.is_some() || wire.decision.is_some() || wire.feedback.is_some();
+        if ego && (wire.version != Some(1) || wire.decision.is_none()) {
+            return Err(HookWireError::new(
+                "ego hook decisions require version 1 and decision",
+            ));
         }
         if wire
             .feedback
             .as_ref()
-            .is_some_and(|feedback| feedback.len() > MAX_HOOK_WIRE_BYTES)
+            .is_some_and(|text| text.len() > MAX_HOOK_WIRE_BYTES)
         {
-            return Err(serde::de::Error::custom("hook feedback exceeds 64 KiB"));
+            return Err(HookWireError::new("hook feedback exceeds 64 KiB"));
+        }
+        if let Some(context) = &mut wire.context {
+            context.text_for(context.hook_event_name)?;
+            context.additional_context =
+                bounded_hook_context(&context.additional_context, 16 * 1024);
         }
         Ok(Self {
-            version: wire.version,
-            decision: wire.decision,
+            version: 1,
+            decision: wire.decision.unwrap_or(HookDecision::Continue),
             feedback: wire.feedback,
+            context: wire.context,
         })
     }
 }
@@ -1195,21 +1287,16 @@ impl HookHandlerResultV1 {
         if bytes.len() > MAX_HOOK_WIRE_BYTES {
             return Err(HookWireError::new("hook result exceeds 64 KiB"));
         }
-        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
-        let result = Self::deserialize(&mut deserializer)
-            .map_err(|error| HookWireError::new(error.to_string()))?;
-        deserializer
-            .end()
-            .map_err(|error| HookWireError::new(error.to_string()))?;
-        Ok(result)
+        serde_json::from_slice(bytes).map_err(|error| HookWireError::new(error.to_string()))
     }
-
     pub fn decision(&self) -> HookDecision {
         self.decision
     }
-
     pub fn feedback(&self) -> Option<&str> {
         self.feedback.as_deref()
+    }
+    pub fn context(&self) -> Option<&HookContextOutput> {
+        self.context.as_ref()
     }
 }
 
@@ -2323,6 +2410,7 @@ pub struct SessionHookState<'s> {
     journal: SharedJournal<'s>,
     parent_cancel: CancelToken,
     parent_deadline: Instant,
+    cwd: Option<String>,
 }
 
 impl<'s> SessionHookState<'s> {
@@ -2337,7 +2425,13 @@ impl<'s> SessionHookState<'s> {
             journal,
             parent_cancel,
             parent_deadline,
+            cwd: None,
         }
+    }
+
+    pub fn with_cwd(mut self, cwd: String) -> Self {
+        self.cwd = Some(cwd);
+        self
     }
 
     pub fn bind(&self, invoker: Arc<dyn HookInvocationPort + 's>) -> SessionHookRuntime<'s> {
@@ -2420,6 +2514,77 @@ impl<'s> SessionHookRuntime<'s> {
         producer: Producer,
         occurrence: HookOccurrence,
     ) -> Result<HookRunResult, HookRunError> {
+        let mut occurrence = occurrence;
+        let session = self
+            .state
+            .journal
+            .session_id()
+            .map_err(|error| HookRunError::new(error.to_string()))?;
+        let context = self
+            .state
+            .inspect(|state| {
+                let mut context = HookInputContext {
+                    session_id: Some(session),
+                    cwd: self.state.cwd.clone(),
+                    ..HookInputContext::default()
+                };
+                let lifecycle = occurrence.event.lifecycle();
+                if lifecycle == HookLifecycle::SessionStart {
+                    context.source = Some("startup".to_owned());
+                }
+                if let HookSubject::Item { item } = occurrence.event.subject()
+                    && let Some(item) = state.items.get(&item)
+                {
+                    if lifecycle == HookLifecycle::UserPromptSubmit {
+                        context.prompt = Some(item.text.clone());
+                    } else if matches!(
+                        lifecycle,
+                        HookLifecycle::PreToolUse
+                            | HookLifecycle::PostToolUse
+                            | HookLifecycle::PostToolUseFailure
+                    ) {
+                        context.tool_name = item.tool_name.clone();
+                        context.tool_input = serde_json::from_str(&item.args).ok();
+                        if let Some(result) = &item.tool_result {
+                            let text = result
+                                .content
+                                .iter()
+                                .map(|block| block.text.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n");
+                            if lifecycle == HookLifecycle::PostToolUseFailure {
+                                context.error = Some(text);
+                            } else if lifecycle == HookLifecycle::PostToolUse {
+                                context.tool_response = Some(serde_json::Value::String(text));
+                            }
+                        }
+                    }
+                }
+                if lifecycle == HookLifecycle::Stop {
+                    let mut items: Vec<_> = state
+                        .items
+                        .values()
+                        .filter(|item| {
+                            item.turn == occurrence.causality.turn()
+                                && matches!(
+                                    item.kind,
+                                    crate::state::ItemKind::UserPrompt
+                                        | crate::state::ItemKind::Assistant
+                                )
+                        })
+                        .collect();
+                    items.sort_by_key(|item| item.seq);
+                    let text = items
+                        .iter()
+                        .map(|item| format!("{:?}: {}", item.kind, item.text))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    context.transcript = Some(bounded_hook_context(&text, 8 * 1024));
+                }
+                context
+            })
+            .map_err(|error| HookRunError::new(error.to_string()))?;
+        occurrence.event.context = context;
         self.state
             .dispatcher
             .dispatch(
@@ -2499,7 +2664,8 @@ fn normalize_result(
 ) -> HookResult {
     match result {
         Ok(outcome)
-            if (phase.is_observer() && outcome.decision().is_blocking())
+            if (outcome.additional_context().is_some() && !context_lifecycle(lifecycle))
+                || (phase.is_observer() && outcome.decision().is_blocking())
                 || (outcome.decision().is_escalation()
                     && lifecycle != HookLifecycle::PreToolUse) =>
         {

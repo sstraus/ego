@@ -58,10 +58,7 @@ transport to bypass the block.
 In a separate shell, inspect the new resolution with `ego config ls --effective`
 and `ego doctor`; inside ego, inspect the captured one with `/config perimeter`.
 For a non-secret instruction file, the user can add its canonical path with
-`ego roots add /absolute/path/to/file --access read`. **First preserve any required
-implicit `~/Gits` grant:** the first addition replaces it. For example, add
-`ego roots add "$HOME/Gits" --access read-write` before other paths if that is the
-intended perimeter. Saved changes require exit and resume; they do not apply live.
+`ego roots add /absolute/path/to/file --access read`. Declare each additional path explicitly. Saved changes require exit and resume; they do not apply live.
 
 For `execvp ... Operation not permitted`, a read root is insufficient. Add the
 canonical executable directory to `exec_paths` with `ego config edit`. Include
@@ -93,7 +90,7 @@ workspace. The macOS sandbox then prevents git from reading it.
 
 In an ordinary user shell at the worktree, run `git rev-parse --git-common-dir`
 and resolve the output to an absolute canonical path. Inspect effective roots:
-if the directory is already covered by `~/Gits`, no new grant is needed. Otherwise,
+if the directory is already covered by an explicit root, no new grant is needed. Otherwise,
 add that directory with `ego roots add /absolute/common/git/dir --access read`
 for inspection, or `--access read-write` for git operations that update metadata.
 Preserve required default roots as described above. Exit and resume to apply it.
@@ -152,7 +149,7 @@ It can still escalate. See [judge action evidence](permissions.md#judge-action-e
 
 ## `unable to access ~/.config/git/ignore: Operation not permitted`
 
-The E2E observed this git warning with the default `~/Gits` perimeter.
+The historical E2E observed this git warning with an explicit shared-tree perimeter.
 The actual path can be expanded to the user's absolute home path. Git reads
 configuration and ignore files outside the workspace. Grant the existing
 non-secret file with `ego roots add /absolute/path/to/.config/git/ignore --access read`,

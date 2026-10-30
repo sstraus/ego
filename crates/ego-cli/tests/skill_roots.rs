@@ -4,7 +4,8 @@ mod support;
 #[cfg(unix)]
 #[test]
 fn boss_portable_layout_lists_once_and_invokes_admitted_body() {
-    // Catches: the CLI omits portable roots or alias collisions disable invocation.
+    // Catches: omitted portable roots, duplicate alias entries, or disabled invocation.
+    // Count whole entries: a wrapped source path can also end a line with /foo.
     let stub = support::Stub::start(support::Plan {
         installed: vec![support::MODEL.to_owned()],
         completions: vec![support::Reply::Sse(support::text("portable complete"))],
@@ -28,8 +29,12 @@ fn boss_portable_layout_lists_once_and_invokes_admitted_body() {
     .unwrap();
     let listing = places.ego(&stub).conversing().run_pty("/skills details");
     assert_eq!(listing.code, Some(0), "{}", listing.stderr);
+    let retained = support::terminal_transcript(listing.stdout.as_bytes(), 24, 80);
     assert_eq!(
-        listing.stdout.matches("/foo\r\n").count() + listing.stdout.matches("/foo\n").count(),
+        retained
+            .lines()
+            .filter(|line| line.trim() == "/foo")
+            .count(),
         1,
         "{}",
         listing.stdout

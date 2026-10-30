@@ -78,15 +78,6 @@ fn default_policy_keeps_read_admission_write_escalation_and_allow_rules() {
         covered.classify(write()),
         Classification::Settled(Ok(_))
     ));
-    let coordinator = PolicyEngine::new(workspace, Mode::Default, Ruleset::default())
-        .with_coordinator_profile(true);
-    let Classification::Ask(pending) = coordinator.classify(write()) else {
-        panic!("uncovered bounded write enters coordinator admission");
-    };
-    assert!(matches!(
-        block_on(coordinator.settle(pending)),
-        Resolution::Settled(Ok(_))
-    ));
 }
 
 // Catches: accept-edits auto-approves writes in an admitted external root.

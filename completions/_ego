@@ -795,31 +795,6 @@ _arguments "${_arguments_options[@]}" : \
 '--help[Print help]' \
 && ret=0
 ;;
-(orchestrator)
-_arguments "${_arguments_options[@]}" : \
-'-h[Print help]' \
-'--help[Print help]' \
-":: :_ego__subcmd__orchestrator_commands" \
-"*::: :->orchestrator" \
-&& ret=0
-
-    case $state in
-    (orchestrator)
-        words=($line[1] "${words[@]}")
-        (( CURRENT += 1 ))
-        curcontext="${curcontext%:*:*}:ego-orchestrator-command-$line[1]:"
-        case $line[1] in
-            (brief)
-_arguments "${_arguments_options[@]}" : \
-'--root=[]:ROOT:_files' \
-'-h[Print help]' \
-'--help[Print help]' \
-&& ret=0
-;;
-        esac
-    ;;
-esac
-;;
 (worktree)
 _arguments "${_arguments_options[@]}" : \
 '-h[Print help]' \
@@ -882,7 +857,6 @@ _ego_commands() {
 'roots:' \
 'rules:Inspect and manage persistent permission rules.' \
 'mcp-server:Serve scoped ego runs over MCP on stdio.' \
-'orchestrator:' \
 'worktree:Inspect or clean up a retained local worktree.' \
     )
     _describe -t commands 'ego commands' commands "$@"
@@ -1086,18 +1060,6 @@ _ego__subcmd__mcp-server_commands() {
 _ego__subcmd__models_commands() {
     local commands; commands=()
     _describe -t commands 'ego models commands' commands "$@"
-}
-(( $+functions[_ego__subcmd__orchestrator_commands] )) ||
-_ego__subcmd__orchestrator_commands() {
-    local commands; commands=(
-'brief:Inspect tracked children and unread results without model generation or inbox reads' \
-    )
-    _describe -t commands 'ego orchestrator commands' commands "$@"
-}
-(( $+functions[_ego__subcmd__orchestrator__subcmd__brief_commands] )) ||
-_ego__subcmd__orchestrator__subcmd__brief_commands() {
-    local commands; commands=()
-    _describe -t commands 'ego orchestrator brief commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__resume_commands] )) ||
 _ego__subcmd__resume_commands() {

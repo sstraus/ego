@@ -14,7 +14,7 @@ default:
     @just --list
 
 # Everything CI checks, cheapest failure first.
-gate: fmt-check catalogue-check lint test
+gate: portable-paths-check fmt-check catalogue-check lint test
 
 python := if os() == "windows" { "python" } else { "python3" }
 
@@ -23,6 +23,11 @@ python := if os() == "windows" { "python" } else { "python3" }
 # Fail if the builtin model catalogue is not what its generator writes.
 catalogue-check:
     {{ python }} -B scripts/catalogue.py check
+
+# Reject owner-specific filesystem literals in production source.
+portable-paths-check:
+    {{ python }} -B scripts/check-portable-paths.py --self-test
+    {{ python }} -B scripts/check-portable-paths.py
 
 # Rewrite formatting in place.
 fmt:

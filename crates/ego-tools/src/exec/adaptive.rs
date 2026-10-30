@@ -31,7 +31,6 @@ pub fn admit_confinement(
         check_write_root(&home, workspace.as_path(), &resolve(source)?, &[])?;
     }
     let temporary = env("TMPDIR").unwrap_or_else(std::env::temp_dir);
-    let mbx = mbx_cache(&home)?;
     let mut writable = vec![
         cargo.join("registry"),
         cargo.join("git"),
@@ -42,7 +41,6 @@ pub fn admit_confinement(
         rustup.join("tmp"),
         temporary,
     ];
-    writable.extend(mbx);
     writable.extend(env("CARGO_TARGET_DIR"));
     let set = |key| env(key).filter(|path| !path.as_os_str().is_empty());
     #[cfg(target_os = "macos")]
@@ -212,29 +210,6 @@ pub(super) fn check_write_root(
         return Err(error("adaptive source crosses a hard write floor"));
     }
     Ok(())
-}
-
-fn mbx_cache(home: &Path) -> Result<Option<PathBuf>, ProcessError> {
-    let config = home.join("Library/Application Support/mbx/config.toml");
-    let text = match std::fs::read_to_string(config) {
-        Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(error(format!("cannot read trusted mbx config: {e}"))),
-    };
-    let config = text
-        .parse::<toml_edit::DocumentMut>()
-        .map_err(|_| error("invalid trusted mbx config"))?;
-    config
-        .get("cache_dir")
-        .map(|item| {
-            let value = item
-                .as_str()
-                .ok_or_else(|| error("mbx cache_dir must be a path string"))?;
-            Ok(value
-                .strip_prefix("~/")
-                .map_or_else(|| PathBuf::from(value), |p| home.join(p)))
-        })
-        .transpose()
 }
 
 fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessError> {

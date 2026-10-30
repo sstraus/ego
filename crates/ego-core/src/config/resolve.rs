@@ -80,6 +80,7 @@ impl ResolvedMcpConfig {
 /// and the trust gate have been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
+    pub instructions: super::InstructionConfig,
     pub max_output_tokens: Option<std::num::NonZeroU64>,
     /// Fields reduced by an explicitly selected host profile ceiling.
     pub profile_warnings: Vec<String>,
@@ -96,7 +97,6 @@ pub struct Effective {
     pub sandbox: Option<Confinement>,
     pub exec: super::ExecLayer,
     pub network: super::Network,
-    pub orchestration: crate::orchestrator::Mode,
     /// What decided `sandbox`.
     pub sandbox_provenance: super::SettingProvenance,
     /// Winning layer for the active profile roots.
@@ -131,8 +131,6 @@ pub struct Effective {
     pub ui: UiLayer,
     /// Effective configured entries and winning tombstones with provenance.
     pub mcp: ResolvedMcpConfig,
-    /// Optional user-configured mdkb prompt recall executable.
-    pub mdkb_prompt_command: Option<PathBuf>,
     /// What the trust gate threw away, so a run can say so.
     ///
     /// Dropping a Project or Local layer under [`Posture::Bare`] is correct
@@ -176,6 +174,7 @@ impl std::fmt::Display for Discarded {
 /// eligibility, so it is never discarded and saying it was would be false.
 fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     let ConfigLayer {
+        instructions,
         max_output_tokens,
         cache,
         model,
@@ -186,7 +185,6 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         sandbox,
         exec,
         network,
-        orchestration,
         exec_paths,
         permissions,
         budget,
@@ -195,11 +193,11 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         auth,
         ui,
         mcp,
-        mdkb_prompt_command,
         hooks,
     } = layer;
     let mut settings = Vec::new();
     for (present, name) in [
+        (instructions.is_some(), "instructions"),
         (max_output_tokens.is_some(), "max_output_tokens"),
         (cache.is_some(), "cache"),
         (model.is_some(), "model"),
@@ -210,7 +208,6 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (sandbox.is_some(), "sandbox"),
         (exec.is_some(), "exec"),
         (network.is_some(), "network"),
-        (orchestration.is_some(), "orchestration"),
         (exec_paths.is_some(), "exec_paths"),
         (permissions.is_some(), "permissions"),
         (budget.is_some(), "budget"),
@@ -218,7 +215,6 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (!auth.is_empty(), "auth"),
         (ui.is_some(), "ui"),
         (!mcp.servers.is_empty(), "mcp servers"),
-        (mdkb_prompt_command.is_some(), "mdkb_prompt_command"),
         (!hooks.is_empty(), "hooks"),
     ] {
         if present {
@@ -360,7 +356,6 @@ fn resolve_inner(
     let mut sandbox = None;
     let mut exec = super::ExecLayer::default();
     let mut network = super::Network::default();
-    let mut orchestration = crate::orchestrator::Mode::Observe;
     let mut mode_provenance = super::SettingProvenance::Default;
     let mut sandbox_provenance = super::SettingProvenance::Default;
     let mut roots_source = None;
@@ -371,7 +366,7 @@ fn resolve_inner(
     let mut auth = std::collections::HashMap::new();
     let mut ui = UiLayer::default();
     let mut mcp = ResolvedMcpConfig::default();
-    let mut mdkb_prompt_command = None;
+    let mut instructions = super::InstructionConfig::default();
     let mut session_dir = None;
     let mut artifact_dir = None;
     let mut roots = Vec::new();
@@ -379,7 +374,7 @@ fn resolve_inner(
 
     for sourced in &eligible {
         if sourced.source == Source::User {
-            mdkb_prompt_command = sourced.value.mdkb_prompt_command.clone();
+            instructions = sourced.value.instructions.clone().unwrap_or_default();
         }
         let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
 
@@ -425,12 +420,6 @@ fn resolve_inner(
         {
             network = value;
         }
-        if let Some(config) = profile
-            .and_then(|p| p.orchestration)
-            .or(sourced.value.orchestration)
-        {
-            orchestration = config.mode;
-        }
         if let Some(paths) = profile
             .and_then(|profile| profile.exec_paths.as_ref())
             .or(sourced.value.exec_paths.as_ref())
@@ -471,7 +460,6 @@ fn resolve_inner(
             select_roots(
                 sourced.source,
                 selected,
-                sandbox,
                 &mut roots,
                 &mut roots_source,
                 &mut root_restrictions,
@@ -620,6 +608,7 @@ fn resolve_inner(
         }
     }
     Ok(Effective {
+        instructions,
         max_output_tokens,
         profile_warnings,
         cache,
@@ -634,7 +623,6 @@ fn resolve_inner(
         network,
         sandbox_provenance,
         roots_source,
-        orchestration,
         exec_paths,
         permissions: permissions.with_credential_defaults(),
         judge,
@@ -648,7 +636,6 @@ fn resolve_inner(
         auth,
         ui,
         mcp,
-        mdkb_prompt_command,
         discarded,
     })
 }
@@ -675,22 +662,12 @@ fn system_budget_ceiling(
 fn select_roots(
     source: Source,
     selected: &[crate::permit::RootCfg],
-    sandbox: Option<Confinement>,
     roots: &mut Vec<crate::permit::RootCfg>,
     roots_source: &mut Option<Source>,
     root_restrictions: &mut Vec<Vec<crate::permit::RootCfg>>,
 ) {
     if matches!(source, Source::Project | Source::Local) {
-        let inherited =
-            if roots_source.is_none() && sandbox.unwrap_or_default() != Confinement::Adaptive {
-                vec![crate::permit::RootCfg {
-                    path: "~/Gits".into(),
-                    access: crate::permit::RootAccess::ReadWrite,
-                }]
-            } else {
-                roots.clone()
-            };
-        root_restrictions.push(inherited);
+        root_restrictions.push(roots.clone());
     }
     *roots = selected.to_vec();
     *roots_source = Some(source);

@@ -1053,11 +1053,25 @@ impl HookDecision {
 pub struct HookOutcome {
     decision: HookDecision,
     feedback: Option<HookFeedback>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    additional_context: Option<String>,
 }
 
 impl HookOutcome {
+    pub fn with_additional_context(mut self, context: &str) -> Self {
+        self.additional_context = Some(crate::hook::bounded_hook_context(context, 16 * 1024));
+        self
+    }
+    pub fn additional_context(&self) -> Option<&str> {
+        self.additional_context.as_deref()
+    }
+
     pub fn new(decision: HookDecision, feedback: Option<HookFeedback>) -> Self {
-        Self { decision, feedback }
+        Self {
+            decision,
+            feedback,
+            additional_context: None,
+        }
     }
 
     pub fn decision(&self) -> HookDecision {

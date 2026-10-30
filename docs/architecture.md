@@ -9,7 +9,7 @@ boundaries. [CLI.md](../CLI.md) describes command conventions.
 | Crate | Responsibility |
 | --- | --- |
 | `ego-core` | Pure configuration resolution, events, permissions, budgets, turns, durable run/session lifecycle, skills and hooks |
-| `ego-tools` | Guarded filesystem/process/HTTP effects, private storage, evidence, credentials, and orchestration adapters |
+| `ego-tools` | Guarded filesystem/process/HTTP effects, private storage, evidence, and credentials |
 | `ego-ai` | Provider rows, capability/pricing resolution, wire requests, decoding, and authentication flows |
 | `ego-cli` | Composition, parsing, interactive terminal, output, diagnostics, and served protocol setup |
 | `ego-acp` | ACP host projection over the durable core |

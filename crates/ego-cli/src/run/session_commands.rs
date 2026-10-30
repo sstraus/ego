@@ -246,14 +246,24 @@ fn follow_transcript(args: &ExportArgs, out: &Stdout) -> RunTermination {
     };
     let mut follow = TranscriptFollow::new(args.after.unwrap_or(0));
     loop {
-        match follow.snapshot(&store, args.source) {
-            Ok(bytes) => out.write(&bytes),
-            Err(error) => return error,
-        }
-        if let Some(message) = out.broken() {
-            return RunTermination::Failed { message };
+        if let Err(error) = write_follow_snapshot(&mut follow, &store, args.source, out) {
+            return error;
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+}
+
+fn write_follow_snapshot(
+    follow: &mut TranscriptFollow,
+    store: &JsonlStore,
+    session: SessionId,
+    out: &Stdout,
+) -> Result<(), RunTermination> {
+    let bytes = follow.snapshot(store, session)?;
+    out.write(&bytes);
+    match out.broken() {
+        Some(message) => Err(RunTermination::Failed { message }),
+        None => Ok(()),
     }
 }
 
@@ -339,11 +349,7 @@ fn local_render_error(error: serde_json::Error) -> RunTermination {
     }
 }
 
-fn publish_export_file(
-    root: &Path,
-    requested: &Path,
-    bytes: &[u8],
-) -> Result<AtomicReplacePublication, String> {
+fn resolve_export_target(root: &Path, requested: &Path) -> Result<std::path::PathBuf, String> {
     let absolute = if requested.is_absolute() {
         requested.to_path_buf()
     } else {
@@ -373,7 +379,15 @@ fn publish_export_file(
             parent.display()
         ));
     }
-    let target = parent.join(name);
+    Ok(parent.join(name))
+}
+
+fn publish_export_file(
+    root: &Path,
+    requested: &Path,
+    bytes: &[u8],
+) -> Result<AtomicReplacePublication, String> {
+    let target = resolve_export_target(root, requested)?;
     match std::fs::symlink_metadata(&target) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(format!(

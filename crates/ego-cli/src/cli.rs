@@ -32,7 +32,6 @@ use crate::agent_file::{self, AgentFile};
 #[derive(Debug, PartialEq, Eq)]
 pub enum Invocation {
     Worktree(WorktreeAction),
-    Orchestrator(Box<OrchestratorArgs>),
     /// `ego config get|set|unset|ls|edit` — typed user configuration management.
     Config(Box<ConfigArgs>),
     /// `ego rules ls|allow|deny|revoke|remember|explain`.
@@ -155,7 +154,6 @@ pub const BUILT: &[&str] = &[
     "roots",
     "rules",
     "mcp-server",
-    "orchestrator",
     "worktree",
 ];
 
@@ -230,7 +228,6 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("roots", RootsCommand::command()))
         .subcommand(named("rules", RulesCommand::command()))
         .subcommand(named("mcp-server", McpServerCommand::command()))
-        .subcommand(named("orchestrator", OrchestratorCommand::command()))
         .subcommand(named("worktree", WorktreeCommand::command()))
 }
 
@@ -250,26 +247,6 @@ pub enum WorktreeAction {
 struct WorktreeCommand {
     #[command(subcommand)]
     action: WorktreeAction,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub struct OrchestratorArgs {
-    pub root: Option<PathBuf>,
-}
-
-#[derive(Parser)]
-struct OrchestratorCommand {
-    #[command(subcommand)]
-    action: OrchestratorAction,
-}
-
-#[derive(Subcommand)]
-enum OrchestratorAction {
-    /// Inspect tracked children and unread results without model generation or inbox reads.
-    Brief {
-        #[arg(long)]
-        root: Option<PathBuf>,
-    },
 }
 
 /// The refusal a retired flag earns, if `name` names one in `table`.
@@ -1250,7 +1227,6 @@ fn overview(program: &str) -> String {
             "doctor" => "Print a read-only redacted health snapshot",
             "checkpoint" => "Preview and selectively restore session-owned file edits",
             "mcp-server" => "Serve scoped ego runs over MCP on stdio",
-            "orchestrator" => "Inspect native orchestration without model generation",
             "worktree" => "Inspect or safely remove a retained local worktree",
             "auth" => "Manage subscription credentials",
             "mcp" => "Manage configured MCP servers",
@@ -1359,16 +1335,6 @@ fn parse_subcommand(
         Some("worktree") => match clap_or_answer::<WorktreeCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Worktree(parsed.action)),
-        },
-        Some("orchestrator") => match clap_or_answer::<OrchestratorCommand>(&tokens)? {
-            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => match parsed.action {
-                OrchestratorAction::Brief { root } => {
-                    Ok(Invocation::Orchestrator(Box::new(OrchestratorArgs {
-                        root,
-                    })))
-                }
-            },
         },
         None => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),

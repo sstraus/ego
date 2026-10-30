@@ -81,7 +81,6 @@ ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
                               from outside this machine is refused by name
                               unless the operator asks for it
 ego worktree show|cleanup RECEIPT_UUID   inspect or safely remove a retained local checkout
-ego orchestrator brief [--root PATH]  read-only TUIC children and unread results
 ego doctor [--json]           read-only redacted health snapshot
 ego setup [PROMPT] [--profile NAME] [--directory PATH]
                              transient read-only setup inventory
@@ -301,9 +300,8 @@ explicit constraints through the shared lifecycle.
 
 ### Reviewed persistent memory and project initialization
 
-`/init` reviews proposed workspace instructions before writing them. `/memory`
-uses an optional external memory index and requires review for mutations.
-Memory content is data, not system authority. See [memory](docs/guides/memory.md).
+`/init` reviews proposed workspace instructions before writing them.
+External memory integrations use configured hooks. See [memory](docs/guides/memory.md).
 
 ## 7. Configuration
 

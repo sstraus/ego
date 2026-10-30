@@ -20,6 +20,10 @@ On macOS and Linux:
 brew install sstraus/tap/ego
 ```
 
+Homebrew installs Bash, Zsh, and Fish completions in its standard completion
+directories. PowerShell and Elvish scripts are available under
+`$(brew --prefix ego)/share/ego/completions/`.
+
 ### Direct download
 
 Download an executable and its SHA256 file from
@@ -33,8 +37,11 @@ Download an executable and its SHA256 file from
 | Linux ARM64 | `ego-linux-arm64` |
 | Windows x86_64 | `ego-windows-x64.exe` |
 
-Linux binaries require GLIBC 2.35 or newer. Target-triple archives and a combined
-`SHA256SUMS` file are also provided. For example, on Apple Silicon:
+Linux binaries require GLIBC 2.35 or newer. Target-triple `.tar.gz` archives
+(`.zip` on Windows) remain available, together with `SHA256SUMS`. Each archive
+includes a `completions/` directory with Bash, Zsh, Fish, PowerShell, and Elvish
+scripts. Use the archive if you need completion files with a direct download.
+For example, on Apple Silicon, download and verify before installation:
 
 ```sh
 asset=ego-macos-arm64
@@ -76,14 +83,24 @@ ego config set 'roots=[]'
 ego -m ollama/qwen3 --thinking off --sandbox workspace
 ```
 
-Use a model listed by your daemon. Type a prompt such as “Explain the main entry
-points in this repository.” Review the workspace trust question before accepting
-project instructions. Use `/help` for controls and `/quit` to exit.
+Type a first prompt such as “Explain the main entry points in this repository.”
+The model name above is an example: use one listed by your daemon.
+`ego config set 'roots=[]'` clears configured extra roots. The example also selects
+`workspace` confinement; macOS's default adaptive sandbox can derive additional
+roots. Inspect `/config perimeter` for the actual admitted boundary. For a hosted
+model, supply its API key or complete subscription login first; see
+[providers and login](docs/guides/providers.md). No key belongs in project files.
 
-`roots=[]` clears extra configured roots. `--sandbox workspace` selects explicit
-workspace confinement. Use `/config perimeter` to inspect the admitted boundary.
-For hosted models, configure an API key or complete subscription login; see
-[providers and login](docs/guides/providers.md). Do not put credentials in Git.
+| Entry point | Use it for |
+| --- | --- |
+| `ego` or `ego PROMPT` | Interactive conversation, model selection, permissions, and session controls |
+| `ego run PROMPT` | One headless run; text, JSON, or live JSONL on stdout |
+| `ego acp` | ACP over stdio for a host such as TUICommander |
+
+The command set is `ego run`, `ego resume`, `ego continue`, `ego fork`, `ego compact`,
+`ego export`, `ego checkpoint`, `ego ls`, `ego rm`, `ego usage`, `ego models`, `ego hooks`, `ego doctor`, `ego setup`,
+`ego acp`, `ego a2a`, `ego auth`, `ego mcp`, `ego config`, `ego roots`,
+`ego rules`, `ego worktree`, and `ego mcp-server`.
 
 For a non-interactive run:
 
@@ -97,7 +114,19 @@ bare by default. See [automation](docs/guides/automation.md) before enabling eff
 
 ## Commands
 
-Use `ego COMMAND --help` for exact arguments, or see the [command language](CLI.md).
+Start with the [user guide](docs/README.md). It is organized as an mdBook with
+getting-started, task guides, integrations, and reference sections. With mdBook
+0.5.4 and Python 3 available, build it with `mdbook build docs` or preview it
+with `mdbook serve docs`; see [documentation maintenance](docs/maintaining.md).
+These commands build or serve locally; they do not publish a website.
+
+- [Getting started](docs/getting-started/README.md) and [interactive use](docs/guides/interactive.md)
+- [Git worktrees](docs/guides/worktrees.md) and [instructions and memory](docs/guides/memory.md)
+- [Sessions, runs, turns, permits, and evidence](docs/concepts/README.md)
+- [CLI reference](docs/reference/README.md) and [configuration reference](docs/reference/configuration.md)
+- [Providers](docs/guides/providers.md), [tools](docs/guides/tools.md), and [permissions](docs/guides/permissions.md)
+- [ACP, MCP, skills, and hooks](docs/integrations/README.md)
+- [Architecture](docs/architecture.md) and [open-source licenses](docs/THIRD_PARTY_LICENSES.md)
 
 | Commands | Purpose |
 | --- | --- |

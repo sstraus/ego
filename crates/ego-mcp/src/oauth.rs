@@ -569,23 +569,19 @@ async fn discover_oauth(
     })
 }
 
-pub async fn login<'a>(
-    mut request: McpLoginRequest,
-    effects: Arc<dyn McpHttpEffects>,
-    interaction: Arc<dyn McpOAuthInteraction + 'a>,
-    credentials: Arc<dyn CredentialStore>,
-) -> Result<McpLoginResult, McpError> {
-    let discovery =
-        discover_oauth(&request.server, &request.config, request.deadline, &effects).await?;
+async fn select_login_client(
+    request: &mut McpLoginRequest,
+    discovery: &OAuthDiscovery,
+    interaction: &dyn McpOAuthInteraction,
+    effects: &Arc<dyn McpHttpEffects>,
+) -> Result<String, McpError> {
     let OAuthDiscovery {
         profile: as_profile,
         issuer,
-        resource,
-        scopes,
         metadata,
+        ..
     } = discovery;
-
-    validate_public_client(&metadata)?;
+    validate_public_client(metadata)?;
     if matches!(
         request.client_metadata.registration,
         Registration::Interactive
@@ -622,7 +618,7 @@ pub async fn login<'a>(
             let endpoint = metadata.registration_endpoint.as_ref().ok_or_else(|| {
                 McpError::new(McpFailure::Authorization, "issuer does not advertise DCR")
             })?;
-            if normalized_origin(endpoint)? != normalized_origin(&issuer)? {
+            if normalized_origin(endpoint)? != normalized_origin(issuer)? {
                 return Err(McpError::new(
                     McpFailure::Authorization,
                     "DCR endpoint issuer mismatch",
@@ -643,13 +639,13 @@ pub async fn login<'a>(
             )
             .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
             let response = execute(
-                &as_profile,
+                as_profile,
                 &request.server,
                 McpHttpPurpose::ClientMetadata,
                 endpoint,
                 registration,
                 request.deadline,
-                &effects,
+                effects,
             )
             .await?;
             fn field_present<'de, D: serde::Deserializer<'de>>(
@@ -657,14 +653,16 @@ pub async fn login<'a>(
             ) -> Result<bool, D::Error> {
                 serde::de::IgnoredAny::deserialize(deserializer).map(|_| true)
             }
-            fn requested_public_auth_method() -> String {
-                "none".to_owned()
+            fn explicit_auth_method<'de, D: serde::Deserializer<'de>>(
+                deserializer: D,
+            ) -> Result<Option<String>, D::Error> {
+                String::deserialize(deserializer).map(Some)
             }
             #[derive(Deserialize)]
             struct Registered {
                 client_id: String,
-                #[serde(default = "requested_public_auth_method")]
-                token_endpoint_auth_method: String,
+                #[serde(default, deserialize_with = "explicit_auth_method")]
+                token_endpoint_auth_method: Option<String>,
                 #[serde(default, deserialize_with = "field_present")]
                 client_secret: bool,
                 redirect_uris: Vec<Url>,
@@ -673,10 +671,16 @@ pub async fn login<'a>(
             // Interoperability exception for publishwith.ai, not RFC compliance:
             // RFC 7591 §2 defaults omission to client_secret_basic, unusable without
             // a secret. Retain our requested public method only when no secret is
-            // returned; §3.2.1 still requires checking explicit metadata bindings.
+            // returned. An explicit none confirms public authentication even if
+            // the issuer supplies an unrequested secret: discard its value and
+            // never persist or send it. Explicit metadata bindings still apply.
             if registered.client_id.trim().is_empty()
-                || registered.client_secret
-                || registered.token_endpoint_auth_method != "none"
+                || (registered.token_endpoint_auth_method.is_none() && registered.client_secret)
+                || registered
+                    .token_endpoint_auth_method
+                    .as_deref()
+                    .unwrap_or("none")
+                    != "none"
                 || registered.redirect_uris != [request.redirect_uri.clone()]
             {
                 return Err(McpError::new(
@@ -692,6 +696,70 @@ pub async fn login<'a>(
             .expect("explicit registration")
             .to_owned(),
     };
+    Ok(client_id)
+}
+
+fn login_callback_code(
+    redirect_uri: &Url,
+    callback: &Url,
+    state: &str,
+    issuer: &Url,
+) -> Result<String, McpError> {
+    validate_callback_binding(redirect_uri, callback)?;
+    let mut seen = std::collections::HashSet::new();
+    if callback
+        .query_pairs()
+        .any(|(key, _)| !seen.insert(key.into_owned()))
+    {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "duplicate OAuth callback parameter",
+        ));
+    }
+    let callback_values = callback
+        .query_pairs()
+        .collect::<std::collections::HashMap<_, _>>();
+    if callback_values.contains_key("error") {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "OAuth authorization was denied",
+        ));
+    }
+    let code = callback_values
+        .get("code")
+        .filter(|code| !code.is_empty())
+        .ok_or_else(|| McpError::new(McpFailure::Authorization, "OAuth callback has no code"))?;
+    if callback_values.get("state").map(|value| value.as_ref()) != Some(state)
+        || callback_values.get("iss").is_some_and(|value| {
+            value.as_ref().trim_end_matches('/') != issuer.as_str().trim_end_matches('/')
+        })
+    {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "OAuth callback binding mismatch",
+        ));
+    }
+
+    Ok(code.to_string())
+}
+
+pub async fn login<'a>(
+    mut request: McpLoginRequest,
+    effects: Arc<dyn McpHttpEffects>,
+    interaction: Arc<dyn McpOAuthInteraction + 'a>,
+    credentials: Arc<dyn CredentialStore>,
+) -> Result<McpLoginResult, McpError> {
+    let discovery =
+        discover_oauth(&request.server, &request.config, request.deadline, &effects).await?;
+    let client_id =
+        select_login_client(&mut request, &discovery, interaction.as_ref(), &effects).await?;
+    let OAuthDiscovery {
+        profile: as_profile,
+        issuer,
+        resource,
+        scopes,
+        metadata,
+    } = discovery;
     let state = opaque_nonce()?;
     let verifier = opaque_nonce()?;
     let challenge = base64url(&Sha256::digest(verifier.as_bytes()));
@@ -721,48 +789,13 @@ pub async fn login<'a>(
             },
         })
         .await?;
-    validate_callback_binding(&request.redirect_uri, callback.as_url())?;
-    let mut seen = std::collections::HashSet::new();
-    if callback
-        .as_url()
-        .query_pairs()
-        .any(|(key, _)| !seen.insert(key.into_owned()))
-    {
-        return Err(McpError::new(
-            McpFailure::Authorization,
-            "duplicate OAuth callback parameter",
-        ));
-    }
-    let callback_values = callback
-        .as_url()
-        .query_pairs()
-        .collect::<std::collections::HashMap<_, _>>();
-    if callback_values.contains_key("error") {
-        return Err(McpError::new(
-            McpFailure::Authorization,
-            "OAuth authorization was denied",
-        ));
-    }
-    let code = callback_values
-        .get("code")
-        .filter(|code| !code.is_empty())
-        .ok_or_else(|| McpError::new(McpFailure::Authorization, "OAuth callback has no code"))?;
-    if callback_values.get("state").map(|value| value.as_ref()) != Some(state.as_str())
-        || callback_values.get("iss").is_some_and(|value| {
-            value.as_ref().trim_end_matches('/') != issuer.as_str().trim_end_matches('/')
-        })
-    {
-        return Err(McpError::new(
-            McpFailure::Authorization,
-            "OAuth callback binding mismatch",
-        ));
-    }
+    let code = login_callback_code(&request.redirect_uri, callback.as_url(), &state, &issuer)?;
 
     let token_profile = as_profile.admitting(&request.server, &metadata.token_endpoint)?;
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("grant_type", "authorization_code")
         .append_pair("client_id", &client_id)
-        .append_pair("code", code)
+        .append_pair("code", &code)
         .append_pair("redirect_uri", request.redirect_uri.as_str())
         .append_pair("resource", resource.as_str())
         .append_pair("code_verifier", &verifier)
@@ -794,10 +827,14 @@ pub async fn login<'a>(
             .map(str::to_owned)
             .collect(),
     )?;
-    if scopes.iter().any(|scope| !granted.contains(scope)) {
+    // scopes_supported supplies a default request, not mandatory permissions.
+    // RFC 6749 §3.3 permits a narrower grant; persist only what was granted.
+    if (!scopes.is_empty() && granted.is_empty())
+        || granted.iter().any(|scope| !scopes.contains(scope))
+    {
         return Err(McpError::new(
             McpFailure::Authorization,
-            "required OAuth scope was not granted",
+            "OAuth scope grant is empty or outside the request",
         ));
     }
     if token.refresh_token.as_ref().is_some_and(String::is_empty) {

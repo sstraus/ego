@@ -105,7 +105,14 @@ impl<'a> McpHookPort<'a> {
                     .map_err(|_| Box::new(HookFailure::new(HookFailureKind::EvidenceFailed, None)))
             })
             .transpose()?;
-        Ok(HookOutcome::new(settlement.decision(), feedback))
+        let mut outcome = HookOutcome::new(settlement.decision(), feedback);
+        if let Some(context) = &settlement.context {
+            let text = context.text_for(request.lifecycle()).map_err(|error| {
+                self.failure(HookFailureKind::MalformedResult, error.to_string())
+            })?;
+            outcome = outcome.with_additional_context(text);
+        }
+        Ok(outcome)
     }
 
     fn failure(&self, kind: HookFailureKind, message: String) -> Box<HookFailure> {
@@ -163,6 +170,7 @@ pub struct McpHookSettlement {
     wire_input: Value,
     decision: HookDecision,
     feedback: Option<String>,
+    context: Option<ego_core::hook::HookContextOutput>,
     failure: Option<McpHookFailure>,
     evidence: Option<EvidenceRef>,
     delivery: DeliveryCertainty,
@@ -181,6 +189,7 @@ impl McpHookSettlement {
             wire_input,
             decision: HookDecision::Continue,
             feedback: None,
+            context: None,
             failure: Some(failure),
             evidence: None,
             delivery,
@@ -362,6 +371,7 @@ impl<'a> McpHookAdapter<'a> {
             wire_input,
             decision: result.decision(),
             feedback: result.feedback().map(str::to_owned),
+            context: result.context().cloned(),
             failure: None,
             evidence: Some(execution.evidence().clone()),
             delivery: execution.delivery(),

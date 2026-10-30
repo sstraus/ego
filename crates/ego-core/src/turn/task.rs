@@ -111,13 +111,9 @@ pub trait BackgroundTaskPort: Send + Sync {
     fn refresh_tasks(&self, state: SessionState) -> BoxFuture<'_, Result<(), String>>;
 }
 
-/// Host-selected policy text is shared by the prompt and tool catalogue.
-pub fn delegation_guidance(tuic: bool) -> &'static str {
-    if tuic {
-        "Inside TUIC, prefer orchestrator_active for long delegated work. End your turn after launching managed peers; RESULT/BLOCKED resumes it. Use task only for short in-turn work."
-    } else {
-        "For standalone delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Use /tasks to inspect or cancel it."
-    }
+/// Task guidance is the same in every host; external coordination uses its own API.
+pub fn delegation_guidance() -> &'static str {
+    "For delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Use /tasks to inspect or cancel it."
 }
 
 /// Only accounting crosses into the parent's durable log. Conversation and
@@ -589,7 +585,6 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     Err("background task does not accept agent or plan_step; use an explicit prompt".to_owned())
                 } else if let Some(port) = &self.background_task_port {
                     let mut tools: BTreeSet<_> = self.tools.effect_names().into_iter().collect();
-                    tools.remove("orchestrator_active");
                     if let Some(ceiling) = self.inherited_effect_tools.as_ref() {
                         tools.retain(|name| ceiling.contains(name));
                     }

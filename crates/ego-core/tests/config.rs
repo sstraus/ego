@@ -29,19 +29,6 @@ fn fresh_config_resolves_to_adaptive_instead_of_legacy_workspace() {
     assert_eq!(effective.sandbox_provenance, SettingProvenance::Default);
 }
 
-// Catches: prompt-only setup creates a pre-effect hook in ego's catalogue.
-#[test]
-fn mdkb_prompt_setup_does_not_register_a_hook() {
-    let layer =
-        ConfigLayer::parse(Source::User, "mdkb_prompt_command = '/usr/bin/mdkb'\n").unwrap();
-    assert!(layer.value.hooks.is_empty());
-    let effective = resolve(&[layer], Trust::Untrusted, None).unwrap();
-    assert_eq!(
-        effective.mdkb_prompt_command.as_deref(),
-        Some(std::path::Path::new("/usr/bin/mdkb"))
-    );
-}
-
 // Catches: a layer that sets mode is not the one reported, or a profile in a
 // lower layer is credited to the higher layer that only set the other field.
 #[test]
@@ -272,20 +259,6 @@ fn auth_precedence_merges_command_and_headers_per_field_and_name() {
         auth.headers.get("x-client").map(String::as_str),
         Some("ego")
     );
-}
-
-// Catches: project configuration silently executes a recall binary on a user prompt.
-#[test]
-fn prompt_recall_executable_requires_explicit_user_authority() {
-    let user =
-        ConfigLayer::parse(Source::User, "mdkb_prompt_command = '/usr/local/bin/mdkb'").unwrap();
-    let effective = resolve(&[user], Trust::Untrusted, None).unwrap();
-    assert_eq!(
-        effective.mdkb_prompt_command.as_deref(),
-        Some(std::path::Path::new("/usr/local/bin/mdkb"))
-    );
-    assert!(ConfigLayer::parse(Source::Project, "mdkb_prompt_command = '/usr/bin/mdkb'").is_err());
-    assert!(ConfigLayer::parse(Source::User, "mdkb_prompt_command = 'mdkb'").is_err());
 }
 
 #[test]
@@ -1952,5 +1925,38 @@ fn status_providers_are_bounded_and_only_operator_sources_can_install_them() {
             .ui
             .statusline
             .is_none()
+    );
+}
+
+// Catches: repository configuration can widen instruction discovery beyond its trust boundary.
+#[test]
+fn shared_instruction_paths_are_user_only_and_absolute() {
+    let shared = std::env::temp_dir().join("shared-instructions");
+    let excluded = shared.join("scratch");
+    let text = format!("[instructions]\nshared_root={shared:?}\nexclude_roots=[{excluded:?}]\n");
+    let user = ConfigLayer::parse(Source::User, &text).unwrap();
+    let effective = resolve(&[user], Trust::Untrusted, None).unwrap();
+    assert_eq!(
+        effective.instructions.shared_root.as_deref(),
+        Some(shared.as_path())
+    );
+    assert!(ConfigLayer::parse(Source::Project, &text).is_err());
+    assert!(ConfigLayer::parse(Source::Local, &text).is_err());
+    assert!(ConfigLayer::parse(Source::User, "[instructions]\nshared_root='relative'").is_err());
+    assert!(
+        ConfigLayer::parse(Source::User, "[instructions]\nexclude_roots=['relative']").is_err()
+    );
+}
+
+// Catches: retired native bridge configuration is silently accepted as active authority.
+#[test]
+fn private_bridge_configuration_is_rejected() {
+    assert!(ConfigLayer::parse(Source::User, "[orchestration]\nmode='active'").is_err());
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            "[profile.coordinator.orchestration]\nmode='active'"
+        )
+        .is_err()
     );
 }

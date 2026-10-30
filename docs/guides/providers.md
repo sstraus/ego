@@ -97,6 +97,28 @@ client's identity. Non-secret operator header overrides are documented in
 [configuration](../reference/configuration.md); credentials/wire headers remain
 forbidden there. Do not put tokens in a project file, captured output, or issue.
 
+## Explicit HTTPS proxy
+
+`--proxy http://HOST[:PORT]` sends provider HTTPS requests through one HTTP
+CONNECT proxy for this invocation. It applies to `ego run`, interactive `ego`, and
+`ego resume`; specify it again when you resume. The URL must use `http://` with
+no credentials, path, query, or fragment; the default port is 80.
+`--proxy-ca FILE` adds one PEM CA certificate (at most 64 KiB) to this
+invocation's provider TLS trust and requires `--proxy`. Certificate verification
+stays enabled. A trusted CA lets that proxy read inference content and provider
+credentials.
+
+Ambient `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, and `NO_PROXY` values do not
+select or bypass the proxy. A proxy failure does not fall back to a direct
+connection. `--offline` refuses every proxy, including a loopback proxy. With
+`--proxy`, HTTP provider endpoints and WebSocket inference are refused. The
+proxy does not carry MCP, OAuth login, attachment downloads, served protocol
+hosts, or standalone commands such as `ego models` and `ego compact`.
+
+Sources: [option parsing](../../crates/ego-cli/src/cli/proxy.rs),
+[proxy transport](../../crates/ego-tools/src/http/proxy.rs), and
+[provider HTTP binding](../../crates/ego-cli/src/provider_http.rs).
+
 ## Capability and cost facts
 
 Hosted model facts merge builtin, system, and user rows per slug. The bootstrap

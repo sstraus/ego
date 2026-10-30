@@ -292,7 +292,7 @@ fn cleanup_preserves_ignored_files() {
 // takes over a hosted lifecycle. Isolated HOME and PATH prohibit real host/model calls.
 #[cfg(unix)]
 #[test]
-fn unavailable_host_never_falls_back_to_local_ownership() {
+fn failed_available_host_never_falls_back_to_local_ownership() {
     let (dir, root, _) = fixture();
     let tools = dir.path().join("tools");
     fs::create_dir(&tools).unwrap();
@@ -303,6 +303,10 @@ fn unavailable_host_never_falls_back_to_local_ownership() {
         tools.join("git"),
     )
     .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let tuic = tools.join("tuic");
+    fs::write(&tuic, "#!/bin/sh\nexit 1\n").unwrap();
+    fs::set_permissions(&tuic, fs::Permissions::from_mode(0o755)).unwrap();
     let home = dir.path().join("isolated-home");
     fs::create_dir(&home).unwrap();
     let ego_home = home.join("ego");
@@ -312,7 +316,7 @@ fn unavailable_host_never_falls_back_to_local_ownership() {
         .env("PATH", &tools)
         .env("HOME", &home)
         .env("EGO_HOME", &ego_home)
-        .env("TUIC_SOCKET", dir.path().join("missing.sock"))
+        .env("TUIC_SESSION", "test-host")
         .args([
             "run",
             "--worktree",
@@ -330,7 +334,8 @@ fn unavailable_host_never_falls_back_to_local_ownership() {
         .env_clear()
         .env("HOME", &home)
         .env("EGO_HOME", &ego_home)
-        .env("TUIC_SOCKET", dir.path().join("missing.sock"))
+        .env("PATH", &tools)
+        .env("TUIC_SESSION", "test-host")
         .args(["worktree", "cleanup", &uuid::Uuid::new_v4().to_string()])
         .output()
         .unwrap();
@@ -388,5 +393,92 @@ fn cleanup_requires_both_merge_and_upstream_evidence_for_new_commits() {
     assert_eq!(
         git(&root, &["show", "feat/integrated:tracked"]),
         "new commit"
+    );
+}
+
+// Catches: a stale TUIC_SOCKET outside TUIC prevents ordinary git creation.
+#[test]
+fn outside_tuic_creates_worktree_with_git() {
+    let (dir, root, _) = fixture();
+    let ego_home = dir.path().join("standalone");
+    let output = Command::new(env!("CARGO_BIN_EXE_ego"))
+        .env_remove("TUIC_SESSION")
+        .env("TUIC_SOCKET", dir.path().join("stale.sock"))
+        .env("EGO_HOME", &ego_home)
+        .args([
+            "run",
+            "--worktree",
+            "feat/standalone",
+            "-C",
+            root.to_str().unwrap(),
+            "no generation",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Retained worktree receipt:"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git(
+            &root,
+            &[
+                "branch",
+                "--list",
+                "--format=%(refname:short)",
+                "feat/standalone"
+            ]
+        ),
+        "feat/standalone"
+    );
+}
+
+// Catches: TUIC_SESSION without a usable tuic executable disables plain git.
+#[cfg(unix)]
+#[test]
+fn missing_tuic_binary_uses_git_even_with_session_marker() {
+    let (dir, root, _) = fixture();
+    let tools = dir.path().join("git-only");
+    fs::create_dir(&tools).unwrap();
+    let git_path = Command::new("which").arg("git").output().unwrap();
+    assert!(git_path.status.success());
+    std::os::unix::fs::symlink(
+        String::from_utf8(git_path.stdout).unwrap().trim(),
+        tools.join("git"),
+    )
+    .unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ego"))
+        .env_clear()
+        .env("PATH", &tools)
+        .env("HOME", dir.path())
+        .env("EGO_HOME", dir.path().join("ego"))
+        .env("TUIC_SESSION", "test-host-without-cli")
+        .args([
+            "run",
+            "--worktree",
+            "feat/no-tuic",
+            "-C",
+            root.to_str().unwrap(),
+            "no generation",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Retained worktree receipt:"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        git(
+            &root,
+            &[
+                "branch",
+                "--list",
+                "--format=%(refname:short)",
+                "feat/no-tuic"
+            ]
+        ),
+        "feat/no-tuic"
     );
 }
