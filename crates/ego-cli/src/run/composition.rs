@@ -275,7 +275,7 @@ pub(super) fn orchestration_mode(effective: &Effective) -> ego_core::orchestrato
 pub(super) fn tools_with_mode(
     selected: Option<&Vec<String>>,
     skills: Option<Arc<ego_core::skill::SkillCatalogue>>,
-    profile: Option<&str>,
+    _profile: Option<&str>,
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
     orchestration: ego_core::orchestrator::Mode,
@@ -295,11 +295,6 @@ pub(super) fn tools_with_mode(
         all.push(RegisteredTool::Effect(
             ego_tools::tools::selected_web_search(local),
         ));
-    }
-    if profile == Some("coordinator") {
-        all.push(RegisteredTool::Effect(Arc::new(ego_core::permit::Typed(
-            ego_tools::tools::MemoryLookup,
-        ))));
     }
     all.extend(
         ego_tools::orchestrator::tools_from_environment_with_mode(orchestration)

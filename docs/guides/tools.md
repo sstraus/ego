@@ -82,7 +82,6 @@ silent fallback between backends. See [web search reference](../reference/tools.
 | `context` | Request a compact/clear transition after the current tool batch; clear needs operator opt-in and an active goal |
 | `task` | Run an isolated depth-one child with inherited tools, permission, sandbox, offline posture, and shared budget; the child cannot delegate |
 | `history.search`, `history.open` | Read bounded prior user/assistant conversation through the store-bound history port; exclude tool payloads |
-| `memory_lookup` | Coordinator-profile-only lookup of decision/problem/handoff MDKB entries; absence/refusal is explicit |
 | Collapsed MCP operations | Discover and call external tools from one captured admitted catalogue |
 | `orchestrator_status`, `orchestrator_brief` | Observe native TUICommander children when its socket exists |
 | `orchestrator_active` | Opt-in guarded coordinator actions; see [orchestration](../integrations/orchestration.md) |

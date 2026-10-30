@@ -42,7 +42,6 @@ pub enum ActionId {
     Expand,
     Skills,
     Hooks,
-    Memory,
     Init,
     Retry,
     Version,
@@ -122,7 +121,6 @@ pub enum Dispatch {
     Export(ExportSelection),
     Fork(ego_core::event::id::ItemId),
     Hooks,
-    Memory(String),
     Init(String),
     Config(String),
     Fast(bool),
@@ -595,7 +593,6 @@ impl ActionRegistry {
             )
             .unavailable("the skill catalogue"),
             enabled(Hooks, "hooks", "Inspect admitted hooks"),
-            enabled(Memory, "memory", "Review scoped persistent MDKB memories"),
             enabled(Init, "init", "Review project instruction initialization"),
             enabled(Retry, "retry", "Retry a waiting provider now").shortcut('r'),
             enabled(Version, "version", "Show packaged version information"),
@@ -1220,15 +1217,6 @@ impl ActionRegistry {
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
             if name.starts_with("mcp__") || name.starts_with("mcp_resource__") {
                 return self.classify_mcp_context(name, raw_arguments);
-            }
-            if name == "memory" && self.resolve_slash(name) == Some(ActionId::Memory) {
-                return if self.availability(ActionId::Memory) == Availability::Enabled {
-                    Dispatch::Memory(raw_arguments.trim().to_owned())
-                } else {
-                    Dispatch::Refused {
-                        reason: "memory is unavailable",
-                    }
-                };
             }
             if name == "init" && self.resolve_slash(name) == Some(ActionId::Init) {
                 return if self.availability(ActionId::Init) == Availability::Enabled {
