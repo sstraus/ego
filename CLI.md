@@ -1341,10 +1341,15 @@ History, completion, multiline editing, bracketed paste, and concurrent output
 use reedline. A smaller presentation may collapse detail by width, never remove
 a capability.
 
-Interactive startup prints the application name and version before configuration,
+Interactive startup shows the selected three-row εgo braille logo directly above
+the application name and version, before configuration,
 trust, provider, or MCP notices. It reports the selected model, effective posture,
 and key hints after admission. Startup notices remain visible; `--quiet` keeps
-its existing announcement policy. The name does not require a resolved model.
+its existing announcement policy. The logo requires interactive stdin and TTY stdout
+and at least 17 observed terminal columns. It keeps the same glyphs without SGR
+when colour is disabled (including `NO_COLOR`); narrow terminals keep the identity
+line only. Headless and protocol modes do not show the logo. The name does not
+require a resolved model.
 
 The live seat enters raw mode before startup discovery, so lines typed before
 the composer appears retain their Enter boundaries without cooked terminal
