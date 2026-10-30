@@ -28,6 +28,7 @@ Dir.mktmpdir('ego-release-check-', scratch) do |dir|
   FileUtils.mkdir_p(File.join(dir, 'scripts'))
   FileUtils.cp(File.join(root, 'scripts/package-release.sh'), File.join(dir, 'scripts'))
   File.write(File.join(dir, 'README.md'), "release fixture\n")
+  FileUtils.cp_r(File.join(root, 'completions'), dir)
   rows.each do |row|
     target, name = row.values_at('target', 'name')
     windows = target.include?('windows')
@@ -46,6 +47,12 @@ Dir.mktmpdir('ego-release-check-', scratch) do |dir|
       abort "Bad checksum: #{file}" unless File.read("#{path}.sha256") == expected_sum
     end
     abort 'Archive lost its executable' unless IO.popen(['tar', '-tzf', File.join(dir, 'dist', "ego-#{target}.tar.gz")], &:read).include?("ego-#{target}/ego")
+    # Catches: release archives deliver the binary but omit generated shell completions.
+    %w[ego.bash _ego ego.fish _ego.ps1 ego.elv].each do |completion|
+      entry = "ego-#{target}/completions/#{completion}"
+      bytes = IO.popen(['tar', '-xOzf', File.join(dir, 'dist', "ego-#{target}.tar.gz"), entry], &:read)
+      abort "Archive lost completion #{completion}" unless $?.success? && bytes == File.read(File.join(root, 'completions', completion))
+    end
     puts "PASS: #{asset}, archive and relative SHA256 checksums"
   end
   # Catches the tag workflow reading an absent CHANGELOG instead of versioned notes.
@@ -72,8 +79,17 @@ Dir.mktmpdir('ego-release-check-', scratch) do |dir|
   formula = IO.popen(['bash', File.join(root, 'scripts/homebrew-formula.sh'), 'v0.4.0', 'sstraus/ego', File.join(dir, 'dist')], &:read)
   abort 'Formula generation failed' unless $?.success?
   abort 'Formula version drifted' unless formula.include?('version "0.4.0"') && formula.include?('/releases/download/v0.4.0/')
-  %w[macos-arm64 macos-x64 linux-arm64 linux-x64].each do |name|
-    abort "Formula missing #{name}" unless formula.include?("/ego-#{name}\"")
+  rows.reject { |row| row.fetch('target').include?('windows') }.each do |row|
+    asset = "ego-#{row.fetch('target')}.tar.gz"
+    abort "Formula missing archive #{asset}" unless formula.include?("/#{asset}\"")
+    checksum = Digest::SHA256.file(File.join(dir, 'dist', asset)).hexdigest
+    abort "Formula checksum drifted for #{asset}" unless formula.include?("sha256 \"#{checksum}\"")
+  end
+  # Catches: Homebrew downloads completions but never installs them for its shells.
+  ['bin.install "ego"', 'bash_completion.install "completions/ego.bash" => "ego"',
+   'zsh_completion.install "completions/_ego"', 'fish_completion.install "completions/ego.fish"',
+   '(pkgshare/"completions").install "completions/_ego.ps1", "completions/ego.elv"'].each do |install|
+    abort "Formula missing installation: #{install}" unless formula.include?(install)
   end
   formula_path = File.join(dir, 'ego.rb')
   File.write(formula_path, formula)
