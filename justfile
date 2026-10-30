@@ -31,6 +31,7 @@ catalogue-check:
 
 # Reject owner-specific filesystem literals in production source.
 portable-paths-check:
+    {{ python }} -B scripts/test-check-portable-paths.py
     {{ python }} -B scripts/check-portable-paths.py --self-test
     {{ python }} -B scripts/check-portable-paths.py
 
