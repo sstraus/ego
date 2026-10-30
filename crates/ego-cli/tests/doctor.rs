@@ -388,3 +388,58 @@ fn unsupported_foreign_plugin_roots_are_not_silently_reported_as_supported() {
     assert!(text.contains("installed caches are not admitted"));
     assert!(text.contains("not_checked"));
 }
+
+/// A filesystem read that never completes must not suppress the whole diagnosis.
+#[cfg(unix)]
+#[test]
+fn blocked_session_log_does_not_hide_other_doctor_sections() {
+    use std::io::Write;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let scratch = scratch();
+    let workspace = scratch.path().to_path_buf();
+    let home = home_in(&workspace);
+    let session = home.join("sessions/00000000-0000-7000-8000-000000000001");
+    fs::create_dir_all(&session).expect("session directory");
+    let log = session.join("events.jsonl");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&log)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+    // A real OS pipe, held open without bytes: JsonlStore's read cannot finish.
+    let mut release = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&log)
+        .expect("open FIFO");
+    let roots = doctor::visible_roots(&workspace, Some(&home));
+    let (send, receive) = mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = doctor::snapshot(workspace, Some(home), &roots);
+        let _ = send.send(result);
+    });
+    let result = receive.recv_timeout(Duration::from_secs(4));
+    // Release even the pre-fix reader before asserting, so RED leaves no worker.
+    release
+        .write_all(b"invalid session header\n")
+        .expect("release read");
+    drop(release);
+    worker.join().expect("snapshot did not panic");
+    let snapshot = result.expect("blocked session replay must not block the doctor snapshot");
+    assert_eq!(snapshot.sections.len(), 9);
+    let sessions = snapshot
+        .sections
+        .iter()
+        .find(|section| section.section == HealthSection::SessionStore)
+        .expect("session section");
+    assert_eq!(sessions.status(), HealthStatus::Error);
+    assert!(doctor::text(&snapshot).contains("timed out"));
+    let json: serde_json::Value =
+        serde_json::from_str(&doctor::render(&snapshot, true).expect("JSON"))
+            .expect("snapshot JSON");
+    assert_eq!(json["sections"].as_array().expect("sections").len(), 9);
+}
