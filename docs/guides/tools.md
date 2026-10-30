@@ -45,6 +45,14 @@ argv is a process request with its own risk and confinement. A timeout is not
 proof that a child never started. Detached-process recovery also uses evidence
 and settlement; do not repeat an uncertain effect blindly.
 
+A foreground `exec` call has a default lifetime of two minutes. `timeout_ms`
+accepts 1 through 600000 (ten minutes); omitted or null uses the default. The
+transcript row shows the effective limit, for example `(timeout 2m)`. For longer
+work, use `background=true`: then an omitted or null `timeout_ms` means no
+deadline. A foreground command promoted with Ctrl+B keeps its original limit.
+On expiry, ego terminates the child and its descendants and reports a timeout.
+Time while ego is suspended does not count.
+
 ## Background processes and web access
 
 `exec` with `background=true` returns a session-owned ID. The model can use
