@@ -140,6 +140,10 @@ impl<'s> SharedJournal<'s> {
         self.lock().expect("journal clock").clock
     }
 
+    pub fn session_id(&self) -> Result<SessionId, SharedJournalError> {
+        Ok(self.lock()?.session)
+    }
+
     pub fn same_owner(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.inner, &other.inner)
     }

@@ -67,3 +67,48 @@ Sources: [hook domain/schema](../../crates/ego-core/src/hook.rs),
 [hook lifecycle tests](../../crates/ego-cli/tests/hook_lifecycle.rs).
 The [compatibility research](../internals/21-claude-hook-parity.md) is retained
 with its dated claims; use the current source schema for accepted fields.
+
+## Command input and returned context
+
+Command stdin and HTTP bodies retain the versioned ego invocation envelope and
+add Claude Code-compatible fields. The lifecycle owner supplies `session_id`,
+`cwd`, and `hook_event_name`. `UserPromptSubmit` supplies `prompt`. Tool events
+supply `tool_name` and the parsed JSON `tool_input`; successful completion adds
+`tool_response` (the model-visible text), and failure adds `error`. `SessionStart`
+supplies `source="startup"`. `Stop` supplies `transcript`: current-turn user and
+assistant text, in journal order, capped at 8 KiB. This is inline text, not a
+Claude Code transcript-file path. Names and tool schemas remain ego's own.
+Requests over 64 KiB fail visibly; prompt or tool input is not silently cut.
+
+A handler can return context directly in Claude Code's envelope:
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "UserPromptSubmit",
+    "additionalContext": "External context for this request."
+  }
+}
+```
+
+Supported context events are `SessionStart`, `UserPromptSubmit`, and
+`PostToolUse`. The output event must match the invocation. Existing ego output
+`{"version":1,"decision":"continue","feedback":"..."}` remains valid and can
+include the same context envelope. Ego decision fields still require both
+`version=1` and `decision`. An empty object is a no-op; a command that exits 0
+without stdout is also a no-op. Unknown output fields are rejected, including
+unsupported Claude Code permission/output features; this is context compatibility,
+not full Claude Code policy compatibility. Exit 2 still means veto.
+
+Context is capped at 16 KiB per settlement, on a UTF-8 boundary, with a truncation
+marker inside the cap. It is stored with the durable hook settlement. Generation
+composition uses up to 32 KiB of attributed context, plus a fixed data disclaimer.
+Session-start context lasts for the session; prompt/tool context lasts only for
+its turn, including resumed generation in that turn. Each block names the hook,
+lifecycle, and invocation. Blocks use user-role data, not system authority, and
+do not grant permissions. Blocked outcomes do not contribute context.
+
+Reference: [Claude Code hooks](https://code.claude.com/docs/en/hooks.md),
+sections Common input fields, SessionStart, UserPromptSubmit, PostToolUse,
+Stop, and JSON output. Ego accepts the existing `hookSpecificOutput` context
+shape rather than adding a second context protocol.

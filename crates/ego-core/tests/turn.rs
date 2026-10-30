@@ -13637,6 +13637,273 @@ mod turn {
     }
 
     #[test]
+    fn hook_payload_uses_settled_tool_data_and_bounded_ordered_stop_text() {
+        struct Capture(Arc<Mutex<Vec<serde_json::Value>>>);
+        impl HookInvocationPort for Capture {
+            fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+                self.0.lock().unwrap().push(
+                    serde_json::to_value(
+                        ego_core::hook::HookHandlerRequestV1::from_runtime(&request).unwrap(),
+                    )
+                    .unwrap(),
+                );
+                Box::pin(futures::future::ready(Ok(HookOutcome::new(
+                    HookDecision::Continue,
+                    None,
+                ))))
+            }
+        }
+        let fx = Fixture::new(Vec::new());
+        let session = SessionId::new();
+        let turn = TurnId::new();
+        let journal = SharedJournal::new(Journal::new(
+            session,
+            &fx.store,
+            &fx.clock,
+            &fx.sink,
+            Producer::Main,
+            SessionState::default(),
+        ));
+        let config = ["SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"].iter().map(|event| format!("[[hooks]]\nevent = \"{event}\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"capture\"\n")).collect::<String>();
+        let catalogue = HookCatalogue::admit_typed(
+            &[ConfigLayer::parse(Source::User, &config).unwrap()],
+            &[],
+            Trust::Trusted,
+        )
+        .unwrap();
+        journal
+            .append(
+                turn,
+                None,
+                None,
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: catalogue.evidence(),
+                },
+            )
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let runtime = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+            journal.clone(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .with_cwd("/ws".into())
+        .bind(Arc::new(Capture(captured.clone())));
+        let dispatch = |event: ego_core::hook::HookEvent, causality: HookCausality| {
+            let key = ego_core::event::hook::HookOccurrenceKey::new(
+                event.lifecycle(),
+                causality.owner().clone(),
+            );
+            block_on(runtime.dispatch(
+                Producer::Main,
+                ego_core::hook::HookOccurrence::new(key, event, causality).unwrap(),
+            ))
+            .unwrap()
+        };
+        assert!(
+            !dispatch(
+                ego_core::hook::HookEvent::session(HookLifecycle::SessionStart),
+                HookCausality::session(session, turn)
+            )
+            .is_blocked()
+        );
+        for (ok, response) in [(true, "read content"), (false, "read failed")] {
+            let item = ItemId::new();
+            let start = journal
+                .append(
+                    turn,
+                    Some(item),
+                    None,
+                    EventKind::ToolCallStarted {
+                        name: "read".into(),
+                        args: r#"{"path":"README.md"}"#.into(),
+                        call_id: Some(format!("call-{ok}")),
+                    },
+                )
+                .unwrap();
+            assert!(
+                !dispatch(
+                    ego_core::hook::HookEvent::tool(
+                        HookLifecycle::PreToolUse,
+                        ego_core::event::hook::HookSubject::Item { item },
+                        "read(README.md)"
+                    ),
+                    HookCausality::item(item, turn, start)
+                )
+                .is_blocked()
+            );
+            journal
+                .append(
+                    turn,
+                    Some(item),
+                    Some(start),
+                    EventKind::ToolCallCompleted {
+                        ok,
+                        result: ToolResult::builtin(response),
+                    },
+                )
+                .unwrap();
+            let lifecycle = if ok {
+                HookLifecycle::PostToolUse
+            } else {
+                HookLifecycle::PostToolUseFailure
+            };
+            dispatch(
+                ego_core::hook::HookEvent::tool(
+                    lifecycle,
+                    ego_core::event::hook::HookSubject::Item { item },
+                    "read(README.md)",
+                ),
+                HookCausality::item(item, turn, start),
+            );
+        }
+        journal
+            .append(
+                turn,
+                Some(ItemId::new()),
+                None,
+                EventKind::UserPrompt {
+                    text: "first prompt".into(),
+                    images: Vec::new(),
+                    audio: Vec::new(),
+                    queued_prompt: None,
+                },
+            )
+            .unwrap();
+        let end = journal
+            .append(
+                turn,
+                Some(ItemId::new()),
+                None,
+                EventKind::AssistantMessage {
+                    text: "é".repeat(5000),
+                },
+            )
+            .unwrap();
+        dispatch(
+            ego_core::hook::HookEvent::turn(
+                HookLifecycle::Stop,
+                ego_core::event::hook::HookSubject::Turn { turn },
+            ),
+            HookCausality::generation(ego_core::event::id::GenerationId::new(), turn, end),
+        );
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 6);
+        for wire in captured.iter() {
+            assert_eq!(wire["session_id"], session.to_string());
+            assert_eq!(wire["cwd"], "/ws");
+        }
+        assert_eq!(captured[0]["source"], "startup");
+        assert_eq!(captured[1]["tool_name"], "read");
+        assert_eq!(captured[1]["tool_input"], json!({"path":"README.md"}));
+        assert!(captured[1].get("tool_response").is_none());
+        assert_eq!(captured[2]["tool_response"], "read content");
+        assert_eq!(captured[4]["error"], "read failed");
+        assert!(captured[4].get("tool_response").is_none());
+        let transcript = captured[5]["transcript"].as_str().unwrap();
+        assert!(transcript.starts_with("UserPrompt: first prompt\nAssistant: é"));
+        assert!(transcript.len() <= 8 * 1024);
+        assert!(transcript.ends_with("[hook context truncated]"));
+    }
+
+    #[test]
+    fn hook_context_reaches_model_input_without_leaking_to_the_next_turn() {
+        struct ContextHook;
+        impl HookInvocationPort for ContextHook {
+            fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+                let wire = serde_json::to_value(
+                    ego_core::hook::HookHandlerRequestV1::from_runtime(&request).unwrap(),
+                )
+                .unwrap();
+                let decoded: ego_core::hook::HookHandlerRequestV1 =
+                    serde_json::from_value(wire.clone()).unwrap();
+                assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+                assert_eq!(wire["hook_event_name"], "UserPromptSubmit");
+                assert!(wire["session_id"].is_string());
+                assert_eq!(wire["cwd"], "/ws");
+                let prompt = wire["prompt"].as_str().unwrap();
+                let outcome = if prompt == "recall first" {
+                    HookOutcome::new(HookDecision::Continue, None)
+                        .with_additional_context("context sentinel")
+                } else {
+                    HookOutcome::new(HookDecision::Continue, None)
+                };
+                Box::pin(futures::future::ready(Ok(outcome)))
+            }
+        }
+        let fx = Fixture::new(vec![
+            vec![AiEvent::Stop(StopReason::Stop)],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]);
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        );
+        let catalogue = HookCatalogue::admit_typed(&[ConfigLayer::parse(Source::User, "[[hooks]]\nevent = \"UserPromptSubmit\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"context\"\n").unwrap()], &[], Trust::Trusted).unwrap();
+        turn.journal()
+            .append(
+                TurnId::new(),
+                None,
+                None,
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: catalogue.evidence(),
+                },
+            )
+            .unwrap();
+        let state = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+            turn.journal(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .with_cwd("/ws".into());
+        struct ContextBinding;
+        impl HookInvocationBinding for ContextBinding {
+            fn bind<'a>(
+                &self,
+                _policy: Arc<PolicyEngine>,
+                _mcp: Option<&dyn McpRuntimeBinding>,
+            ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
+            where
+                Self: 'a,
+            {
+                Ok(Arc::new(ContextHook))
+            }
+        }
+        turn = turn
+            .with_hook_binding(state, Arc::new(ContextBinding), None)
+            .unwrap();
+        block_on(turn.run("recall first")).unwrap();
+        block_on(turn.run("unrelated second")).unwrap();
+        let requests = fx.generator.calls();
+        let render = |request: &GenRequest| format!("{:?}", request.messages);
+        assert!(render(&requests[0]).contains("context sentinel"));
+        assert!(render(&requests[0]).contains("external context data"));
+        assert!(!render(&requests[1]).contains("context sentinel"));
+    }
+
+    #[test]
     fn policy_capture_failure_has_no_generation_provider_or_effect() {
         let fx = Fixture::new(vec![vec![AiEvent::Stop(StopReason::Stop)]]);
         let trace = generation_boundary::GenerationTrace::default();

@@ -456,6 +456,14 @@ pub(super) async fn compose_session_hooks<'a>(
         journal,
         cancel,
         deadline.unwrap_or_else(unbounded_hook_deadline),
+    )
+    .with_cwd(
+        std::env::current_dir()
+            .map_err(|error| RunTermination::Failed {
+                message: error.to_string(),
+            })?
+            .to_string_lossy()
+            .into_owned(),
     );
     let invoker = binding
         .bind(policy, mcp_runtime.as_deref())

@@ -128,6 +128,7 @@ pub enum PromptHookFailure {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PromptHookSettlement {
+    context: Option<ego_core::hook::HookContextOutput>,
     raw: Vec<u8>,
     decision: HookDecision,
     feedback: Option<String>,
@@ -195,6 +196,7 @@ impl<S: ToollessGenerationService> HookPromptAdapter<S> {
             Ok(generated) => generated,
             Err(error) => {
                 return Ok(PromptHookSettlement {
+                    context: None,
                     raw: Vec::new(),
                     decision: HookDecision::Continue,
                     feedback: None,
@@ -208,6 +210,7 @@ impl<S: ToollessGenerationService> HookPromptAdapter<S> {
         match parsed {
             Ok(result) => Ok(PromptHookSettlement {
                 raw: generated.raw,
+                context: result.context().cloned(),
                 decision: result.decision(),
                 feedback: result.feedback().map(str::to_owned),
                 failure: None,
@@ -216,6 +219,7 @@ impl<S: ToollessGenerationService> HookPromptAdapter<S> {
             }),
             Err(_) => Ok(PromptHookSettlement {
                 raw: generated.raw,
+                context: None,
                 decision: HookDecision::Continue,
                 feedback: None,
                 failure: Some(PromptHookFailure::Malformed),
@@ -385,7 +389,12 @@ impl<'a> HookPortAdapter<'a> {
             };
             return Err(Box::new(HookFailure::new(kind, None)));
         }
-        self.outcome(&request, settlement.decision(), settlement.feedback())
+        self.outcome(
+            &request,
+            settlement.decision(),
+            settlement.feedback(),
+            settlement.context.as_ref(),
+        )
     }
 
     fn authorize(
@@ -484,7 +493,12 @@ impl<'a> HookPortAdapter<'a> {
             };
             return Err(Box::new(HookFailure::new(kind, None)));
         }
-        self.outcome(request, settlement.decision(), settlement.feedback())
+        self.outcome(
+            request,
+            settlement.decision(),
+            settlement.feedback(),
+            settlement.context(),
+        )
     }
 
     fn outcome(
@@ -492,11 +506,19 @@ impl<'a> HookPortAdapter<'a> {
         request: &HookInvocationRequest,
         decision: HookDecision,
         feedback: Option<&str>,
+        context: Option<&ego_core::hook::HookContextOutput>,
     ) -> Result<HookOutcome, Box<HookFailure>> {
         let feedback = feedback
             .map(|feedback| self.feedback(request, feedback))
             .transpose()?;
-        Ok(HookOutcome::new(decision, feedback))
+        let mut outcome = HookOutcome::new(decision, feedback);
+        if let Some(context) = context {
+            let text = context.text_for(request.lifecycle()).map_err(|error| {
+                self.failure(HookFailureKind::MalformedResult, error.to_string())
+            })?;
+            outcome = outcome.with_additional_context(text);
+        }
+        Ok(outcome)
     }
 
     fn failure(&self, kind: HookFailureKind, message: String) -> Box<HookFailure> {
