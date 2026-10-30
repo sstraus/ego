@@ -4,16 +4,17 @@ Use εgo to work with a model in your current repository. You control the model,
 workspace trust, tool permission, and confinement. A model credential alone does
 not grant tools access to your machine.
 
-Release `0.4.0` is being prepared, not published. See the
+Release `0.4.0` is tagged in the public repository. See the
 [release notes](../release-notes/0.4.0.md) and
-[installation overview](../../README.md#install) for the planned binary assets
+[installation overview](../../README.md#install) for binary asset names
 and checksum procedure. The source procedure below works without publication.
 
 ## Build and install from source
 
 The workspace requires Rust 1.95 or newer (`Cargo.toml`). Install from a complete
 checkout; the CLI uses a repository-local patched Reedline in `vendor/reedline`.
-The repository has not published a stable binary or crates.io package.
+Workspace crates are not published to crates.io. Binary downloads depend on
+the release workflow completing successfully; tagging is not proof of a download.
 
 ```sh
 cargo install --locked --path crates/ego-cli --root "$PWD/.ego-bin"
