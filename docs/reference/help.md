@@ -1,6 +1,6 @@
 # CLI help from a verified binary
 
-Captured from `ego 0.4.0` on 2026-10-27. Binary SHA-256: `343fcfe8d4ef822c09cdcb59bd28f7714e0c52afe14fe088e67b4ae2b6fae782`.
+Captured from `ego 0.4.0` on 2026-10-29. Binary SHA-256: `6e7a97e7e878f6a52de6743ac9da837dd1bf109a072bd4fcf63863a5294e6be6`.
 
 This is a dated help-only snapshot, not a separate command specification. The [generated reference](cli.md) follows the source parser. For your installed binary, use `ego COMMAND SUBCOMMAND --help`.
 
@@ -54,6 +54,10 @@ Commands:
           provider/model slug, e.g. ollama/qwen3
       --offline
           No non-loopback egress from ego's own HTTP transport
+      --proxy <http://HOST[:PORT]>
+          Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+      --proxy-ca <FILE>
+          Additional PEM trust anchor for provider HTTPS through --proxy only
       --sandbox <SANDBOX>
           Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
       --thinking <THINKING>
@@ -170,6 +174,10 @@ Options:
           provider/model slug, e.g. ollama/qwen3
       --offline
           No non-loopback egress from ego's own HTTP transport
+      --proxy <http://HOST[:PORT]>
+          Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+      --proxy-ca <FILE>
+          Additional PEM trust anchor for provider HTTPS through --proxy only
       --sandbox <SANDBOX>
           Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
       --thinking <THINKING>
@@ -286,6 +294,10 @@ Options:
           provider/model slug, e.g. ollama/qwen3
       --offline
           No non-loopback egress from ego's own HTTP transport
+      --proxy <http://HOST[:PORT]>
+          Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+      --proxy-ca <FILE>
+          Additional PEM trust anchor for provider HTTPS through --proxy only
       --sandbox <SANDBOX>
           Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
       --thinking <THINKING>
@@ -404,6 +416,10 @@ Options:
           provider/model slug, e.g. ollama/qwen3
       --offline
           No non-loopback egress from ego's own HTTP transport
+      --proxy <http://HOST[:PORT]>
+          Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+      --proxy-ca <FILE>
+          Additional PEM trust anchor for provider HTTPS through --proxy only
       --sandbox <SANDBOX>
           Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
       --thinking <THINKING>
@@ -1387,6 +1403,10 @@ Options:
           provider/model slug, e.g. ollama/qwen3
       --offline
           No non-loopback egress from ego's own HTTP transport
+      --proxy <http://HOST[:PORT]>
+          Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
+      --proxy-ca <FILE>
+          Additional PEM trust anchor for provider HTTPS through --proxy only
       --sandbox <SANDBOX>
           Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included
       --thinking <THINKING>
