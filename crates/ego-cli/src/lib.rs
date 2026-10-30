@@ -48,8 +48,6 @@ pub mod model_picker;
 pub mod models;
 pub(crate) mod named_agents;
 pub(crate) mod onboarding;
-pub(crate) mod orchestration_observer;
-pub mod orchestrator;
 pub mod output;
 pub(crate) mod output_style;
 pub mod perimeter;

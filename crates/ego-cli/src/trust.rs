@@ -35,33 +35,42 @@ use crate::output::Diagnostics;
 const PROJECT_CONFIGS: [&str; 2] = [".ego/config.toml", ".ego/config.local.toml"];
 const SKILL_FILE: &str = "SKILL.md";
 
-/// Shared project rules precede repository rules, but scratch fixtures under
-/// `~/Gits/.tmp` stay isolated from the human's instruction hierarchy.
-pub(crate) fn instruction_discovery_root(root: &Path, home: &Path) -> std::io::Result<PathBuf> {
+/// Only an explicit user-owned ancestor expands the instruction hierarchy.
+pub(crate) fn instruction_discovery_root(
+    root: &Path,
+    instructions: &ego_core::config::InstructionConfig,
+) -> std::io::Result<PathBuf> {
     let root = fs::canonicalize(root)?;
-    let home = fs::canonicalize(home)?;
-    let shared_path = home.join("Gits");
-    let shared = match fs::canonicalize(&shared_path) {
-        Ok(shared) => shared,
-        Err(error)
-            if error.kind() == std::io::ErrorKind::NotFound
-                && fs::symlink_metadata(&shared_path)
-                    .is_err_and(|meta_error| meta_error.kind() == std::io::ErrorKind::NotFound) =>
-        {
+    let Some(shared) = &instructions.shared_root else {
+        return Ok(root);
+    };
+    let shared = fs::canonicalize(shared)?;
+    if !root.starts_with(&shared) {
+        return Ok(root);
+    }
+    for excluded in &instructions.exclude_roots {
+        // Missing exclusions are harmless; a dangling link or unreadable path is not.
+        let excluded = match fs::canonicalize(excluded) {
+            Ok(path) => path,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound
+                    && fs::symlink_metadata(excluded)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if root.starts_with(excluded) {
             return Ok(root);
         }
-        Err(error) => return Err(error),
-    };
-    let is_scratch = root
-        .strip_prefix(&shared)
-        .ok()
-        .and_then(|relative| relative.components().next())
-        .is_some_and(|component| component.as_os_str() == ".tmp");
-    if root.starts_with(&shared) && !is_scratch {
-        Ok(shared)
-    } else {
-        Ok(root)
     }
+    Ok(shared)
+}
+
+fn user_instruction_discovery_root(root: &Path) -> std::io::Result<PathBuf> {
+    let effective = crate::config::user_effective().map_err(std::io::Error::other)?;
+    instruction_discovery_root(root, &effective.instructions)
 }
 
 /// The terminal launch resolves the same per-root answer ACP uses.
@@ -389,7 +398,7 @@ pub(crate) fn executable_surface_selected(
     }
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
-        if let Ok(discovery_root) = instruction_discovery_root(root, &home) {
+        if let Ok(discovery_root) = user_instruction_discovery_root(root) {
             let mut selections = vec![ego_core::config::Selection::Ambient];
             if let Some(selected) = selected {
                 selections.push(ego_core::config::Selection::Explicit(
@@ -690,15 +699,12 @@ fn inventory(root: &Path) -> TrustInventory {
         content(path.parent()?, path)
     }));
 
-    let discovery_root = match std::env::var_os("HOME") {
-        Some(home) => match instruction_discovery_root(root, &PathBuf::from(home)) {
-            Ok(discovery_root) => discovery_root,
-            Err(error) => {
-                tracing::warn!(%error, "the workspace instruction discovery root could not be resolved");
-                return TrustInventory::new(Vec::new());
-            }
-        },
-        None => root.to_path_buf(),
+    let discovery_root = match user_instruction_discovery_root(root) {
+        Ok(discovery_root) => discovery_root,
+        Err(error) => {
+            tracing::warn!(%error, "the workspace instruction discovery root could not be resolved");
+            return TrustInventory::new(Vec::new());
+        }
     };
     if let Ok(instructions) = ego_core::config::load(
         &OsInstructionIo,
@@ -1305,6 +1311,19 @@ mod tests {
         assert_eq!(asked.get(), 2);
     }
 
+    // Catches: an unconfigured home layout silently loads another repository's rules.
+    #[test]
+    fn portable_defaults_do_not_discover_home_layout_rules() {
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("Gits/project");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(tree.path().join("Gits/AGENTS.md"), "unrelated rules").unwrap();
+        assert_eq!(
+            instruction_discovery_root(&workspace, &Default::default()).unwrap(),
+            fs::canonicalize(workspace).unwrap()
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn symlinked_home_discovers_shared_instructions() {
@@ -1320,8 +1339,14 @@ mod tests {
 
         let workspace = fs::canonicalize(&workspace).expect("canonical workspace");
         let shared = fs::canonicalize(&shared).expect("canonical shared root");
-        let discovery_root =
-            instruction_discovery_root(&workspace, &alias).expect("canonical discovery root");
+        let discovery_root = instruction_discovery_root(
+            &workspace,
+            &ego_core::config::InstructionConfig {
+                shared_root: Some(alias.join("Gits")),
+                ..Default::default()
+            },
+        )
+        .expect("canonical discovery root");
         let loaded = ego_core::config::load(
             &OsInstructionIo,
             &discovery_root,
@@ -1341,7 +1366,14 @@ mod tests {
         let outside = tree.path().join("outside");
         fs::create_dir_all(&outside).expect("sibling workspace");
         assert_eq!(
-            instruction_discovery_root(&outside, &alias).expect("canonical outside root"),
+            instruction_discovery_root(
+                &outside,
+                &ego_core::config::InstructionConfig {
+                    shared_root: Some(alias.join("Gits")),
+                    ..Default::default()
+                }
+            )
+            .expect("canonical outside root"),
             fs::canonicalize(outside).expect("canonical sibling root")
         );
     }
@@ -1360,8 +1392,14 @@ mod tests {
 
         let workspace = fs::canonicalize(&workspace).expect("canonical workspace");
         let shared = fs::canonicalize(&shared).expect("canonical shared root");
-        let discovery_root =
-            instruction_discovery_root(&workspace, &home).expect("canonical discovery root");
+        let discovery_root = instruction_discovery_root(
+            &workspace,
+            &ego_core::config::InstructionConfig {
+                shared_root: Some(home.join("Gits")),
+                ..Default::default()
+            },
+        )
+        .expect("canonical discovery root");
         let loaded = ego_core::config::load(
             &OsInstructionIo,
             &discovery_root,

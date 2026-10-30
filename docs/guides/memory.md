@@ -43,7 +43,6 @@ write permission and confirmation of the preview. Disable retains the record
 with expired retrieval eligibility; delete removes the selected entry.
 
 The operator surface does not consume model output or automatically inject memory
-bodies into prompts. The model-side coordinator-only `memory_lookup` operation
-is separate; see [tools](tools.md). Do not store credentials in either surface.
+bodies into prompts. Do not store credentials in memory records.
 
 Source: [memory and instruction administration](../../crates/ego-cli/src/memory.rs).

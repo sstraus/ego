@@ -102,7 +102,6 @@ complete -c ego -n "__fish_ego_needs_command" -a "config" -d 'Manage stored user
 complete -c ego -n "__fish_ego_needs_command" -a "roots"
 complete -c ego -n "__fish_ego_needs_command" -a "rules" -d 'Inspect and manage persistent permission rules.'
 complete -c ego -n "__fish_ego_needs_command" -a "mcp-server" -d 'Serve scoped ego runs over MCP on stdio.'
-complete -c ego -n "__fish_ego_needs_command" -a "orchestrator"
 complete -c ego -n "__fish_ego_needs_command" -a "worktree" -d 'Inspect or clean up a retained local worktree.'
 complete -c ego -n "__fish_ego_using_subcommand run" -l worktree -d 'Create a retained managed worktree on this explicitly approved new branch' -r
 complete -c ego -n "__fish_ego_using_subcommand run" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
@@ -477,10 +476,6 @@ complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l max-concurrent-ru
 complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l retained-requests -r
 complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l max-resource-bytes -r
 complete -c ego -n "__fish_ego_using_subcommand mcp-server" -s h -l help -d 'Print help'
-complete -c ego -n "__fish_ego_using_subcommand orchestrator; and not __fish_seen_subcommand_from brief" -s h -l help -d 'Print help'
-complete -c ego -n "__fish_ego_using_subcommand orchestrator; and not __fish_seen_subcommand_from brief" -f -a "brief" -d 'Inspect tracked children and unread results without model generation or inbox reads'
-complete -c ego -n "__fish_ego_using_subcommand orchestrator; and __fish_seen_subcommand_from brief" -l root -r -F
-complete -c ego -n "__fish_ego_using_subcommand orchestrator; and __fish_seen_subcommand_from brief" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand worktree; and not __fish_seen_subcommand_from show cleanup" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand worktree; and not __fish_seen_subcommand_from show cleanup" -f -a "show" -d 'Inspect a durable local worktree receipt without starting a model'
 complete -c ego -n "__fish_ego_using_subcommand worktree; and not __fish_seen_subcommand_from show cleanup" -f -a "cleanup" -d 'Remove only a clean worktree whose commits are integrated; retain its branch'

@@ -131,22 +131,9 @@ pub(crate) fn clamp(
     Ok(())
 }
 
-/// Materialize the default at the process edge, keeping missing paths visible.
-pub(crate) fn defaults(effective: &mut Effective, home: &std::path::Path) -> Vec<String> {
+/// Report confinement warnings without adding implicit filesystem authority.
+pub(crate) fn defaults(effective: &mut Effective, _home: &std::path::Path) -> Vec<String> {
     let mut warnings = Vec::new();
-    if effective.roots_source.is_none()
-        && effective.sandbox.unwrap_or_default() != ego_core::permit::Confinement::Adaptive
-    {
-        let path = home.join("Gits");
-        if path.is_dir() {
-            effective.roots = vec![ego_core::permit::RootCfg {
-                path,
-                access: ego_core::permit::RootAccess::ReadWrite,
-            }];
-        } else {
-            warnings.push("~/Gits does not exist; file access is limited to the workspace".into());
-        }
-    }
     if effective.sandbox == Some(ego_core::permit::Confinement::Off) {
         warnings.push(
             "sandbox is off; commands can access any file your user account can access".into(),
@@ -155,45 +142,17 @@ pub(crate) fn defaults(effective: &mut Effective, home: &std::path::Path) -> Vec
     warnings
 }
 
-#[cfg(all(test, target_os = "macos"))]
-mod tests {
+#[cfg(test)]
+mod portable_defaults {
     use super::*;
-    use ego_core::config::{ConfigLayer, Source, Trust, resolve};
-    // Catches: default HOME reach is broadened or an explicit empty profile cannot clear it.
+    // Catches: a home folder name grants read-write reach without user configuration.
     #[test]
-    fn perimeter_default_uses_fake_home_and_explicit_profile_replaces_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let home = dir.path().join("home");
-        std::fs::create_dir_all(home.join("Gits")).unwrap();
-        let adaptive_layer = ConfigLayer::parse(Source::User, "sandbox='adaptive'").unwrap();
-        let mut adaptive = resolve(&[adaptive_layer], Trust::Untrusted, None).unwrap();
-        assert!(defaults(&mut adaptive, &home).is_empty());
-        assert!(
-            adaptive.roots.is_empty(),
-            "adaptive must not inherit ~/Gits writes"
-        );
-        let workspace = ConfigLayer::parse(Source::User, "sandbox='workspace'").unwrap();
+    fn portable_defaults_do_not_grant_home_layout_roots() {
+        let tree = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tree.path().join("Gits")).unwrap();
         let mut effective =
-            resolve(std::slice::from_ref(&workspace), Trust::Untrusted, None).unwrap();
-        assert!(defaults(&mut effective, &home).is_empty());
-        assert_eq!(effective.roots[0].path, home.join("Gits"));
-        assert_eq!(
-            effective.roots[0].access,
-            ego_core::permit::RootAccess::ReadWrite
-        );
-        let layer = ConfigLayer::parse(Source::User, "[profile.strict]\nroots=[]").unwrap();
-        let mut strict = resolve(&[layer], Trust::Untrusted, Some("strict")).unwrap();
-        assert!(defaults(&mut strict, &home).is_empty());
-        assert!(strict.roots.is_empty());
-        std::fs::remove_dir(home.join("Gits")).unwrap();
-        let mut missing = resolve(&[workspace], Trust::Untrusted, None).unwrap();
-        assert_eq!(defaults(&mut missing, &home).len(), 1);
-        assert!(missing.roots.is_empty());
-        missing.sandbox = Some(ego_core::permit::Confinement::Off);
-        assert!(
-            defaults(&mut missing, &home)
-                .iter()
-                .any(|warning| warning.contains("sandbox is off"))
-        );
+            ego_core::config::resolve(&[], ego_core::config::Trust::Untrusted, None).unwrap();
+        defaults(&mut effective, tree.path());
+        assert!(effective.roots.is_empty());
     }
 }

@@ -42,9 +42,9 @@ impl AgentIdentity {
              never bypass a refusal or claim a partially failed mutation is safe to replay."
         } else {
             "The workspace sandbox confines reads, writes and exec. Absent explicit \
-             roots, an existing ~/Gits is an extra read-write root. Extra read/write roots do \
+             roots, file access is limited to the workspace. Extra read/write roots do \
              not grant exec; extra executable paths need exec_paths via ego config edit. \
-             The first ego roots add replaces the implicit default; removing all roots leaves \
+             Use ego roots add to grant extra paths; removing all roots leaves \
              roots=[]; ego config unset roots restores absence."
         };
         format!(

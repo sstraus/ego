@@ -899,3 +899,17 @@ fn restored_read_perimeter_keeps_broad_reads_and_credential_exclusions() {
         }
     }
 }
+
+// Catches: a saved private coordinator flag silently restores retired permission bypasses.
+#[test]
+fn retired_coordinator_authority_is_not_a_supported_policy_snapshot() {
+    for coordinator in [false, true] {
+        let bytes = format!(
+            r#"{{"version":1,"workspace":"{WORKSPACE}","mode":"auto","coordinator":{coordinator},"allow":[],"deny":[]}}"#
+        );
+        assert_decode_rejected(
+            bytes.as_bytes(),
+            GenerationPolicyCaptureError::InvalidSnapshot,
+        );
+    }
+}

@@ -221,8 +221,6 @@ pub struct ProfileLayer {
     pub sandbox: Option<Confinement>,
     pub exec: Option<ExecLayer>,
     pub network: Option<Network>,
-    /// Active orchestration is an explicit operator choice.
-    pub orchestration: Option<crate::orchestrator::Config>,
     /// Additional read and executable roots; absence preserves lower authority.
     pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
@@ -964,6 +962,8 @@ where
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigLayer {
+    /// User-owned shared instruction hierarchy. Absence starts at the repository.
+    pub instructions: Option<InstructionConfig>,
     pub max_output_tokens: Option<std::num::NonZeroU64>,
     /// Prompt caching: short (default), none, or explicit user opt-in long.
     pub cache: Option<crate::generator::capabilities::CacheRetention>,
@@ -979,8 +979,6 @@ pub struct ConfigLayer {
     pub roots: Option<Vec<crate::permit::RootCfg>>,
     pub exec: Option<ExecLayer>,
     pub network: Option<Network>,
-    /// Active orchestration is an explicit operator choice.
-    pub orchestration: Option<crate::orchestrator::Config>,
     /// Additional read and executable roots; absence preserves lower authority.
     pub exec_paths: Option<Vec<std::path::PathBuf>>,
     pub permissions: Option<PermCfg>,
@@ -1021,6 +1019,22 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
+        if let Some(instructions) = &value.instructions
+            && (source != Source::User
+                || instructions
+                    .shared_root
+                    .as_ref()
+                    .is_some_and(|path| !path.is_absolute())
+                || instructions
+                    .exclude_roots
+                    .iter()
+                    .any(|path| !path.is_absolute()))
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "instructions paths require absolute paths in user configuration".into(),
+            });
+        }
         if value.mdkb_prompt_command.is_some()
             && (source != Source::User
                 || value
@@ -1184,4 +1198,13 @@ fn classify_parse_error(source: Source, err: &toml::de::Error) -> ConfigError {
         source,
         message: message.to_string(),
     }
+}
+
+/// Optional user-owned instruction hierarchy, independent of sandbox authority.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstructionConfig {
+    pub shared_root: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub exclude_roots: Vec<std::path::PathBuf>,
 }

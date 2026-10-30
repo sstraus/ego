@@ -1186,7 +1186,6 @@ pub struct PolicyEngine {
     /// with no profile roots, which keeps the single-boundary behaviour.
     roots: Vec<ProfileRoot>,
     read_perimeter: super::ReadPerimeter,
-    coordinator: bool,
     mode: Mode,
     /// Both lists intact, matched per call. `resolve` no longer subtracts one
     /// from the other — that comparison was string equality between two lists
@@ -1224,7 +1223,6 @@ impl PolicyEngine {
             workspace,
             roots: Vec::new(),
             read_perimeter: super::ReadPerimeter::default(),
-            coordinator: false,
             mode,
             allow: permissions.allow,
             deny: permissions.deny,
@@ -1250,14 +1248,6 @@ impl PolicyEngine {
         }
     }
 
-    /// Apply the operator-selected coordinator profile's deterministic risk policy.
-    pub fn with_coordinator_profile(self, coordinator: bool) -> Self {
-        Self {
-            coordinator,
-            ..self
-        }
-    }
-
     pub(crate) fn judge_roots(&self) -> Vec<String> {
         std::iter::once(self.workspace.to_string())
             .chain(
@@ -1270,11 +1260,7 @@ impl PolicyEngine {
 
     pub(crate) fn risk(&self, call: &PreparedCall) -> super::analysis::RiskAssessment {
         use super::analysis::RiskReason;
-        let mut risk = if self.coordinator {
-            super::orchestration::assess(call)
-        } else {
-            super::analysis::assess(call)
-        };
+        let mut risk = super::analysis::assess(call);
         // The prepared paths are canonical; a tool name says nothing about
         // whether its writes land inside this workspace.
         risk.reasons
@@ -1291,10 +1277,6 @@ impl PolicyEngine {
         risk.reasons.sort();
         risk.reasons.dedup();
         risk
-    }
-
-    fn coordinator_high(&self, call: &PreparedCall) -> bool {
-        self.coordinator && self.risk(call).class == super::analysis::RiskClass::High
     }
 
     /// Nested read-only restrictions veto writes throughout their subtree.
@@ -1503,16 +1485,6 @@ impl PolicyEngine {
                 return Classification::Settled(Err(*denied));
             }
         }
-        // High belongs to the human, even with an allow rule or yolo mode.
-        if self.coordinator_high(&call) {
-            let op = &call.ops()[0];
-            let why = Escalation::ModeAsksSubject {
-                mode: self.mode,
-                op: op.name(),
-                subject: op.subject(&self.workspace),
-            };
-            return Classification::Ask(self.pending(call, why));
-        }
         // Every rule that covered an independent op, not the first one to
         // match. A foreign transport structurally supporting wholly allowed
         // opaque identities contributes no second rule authority. A denial is
@@ -1597,21 +1569,6 @@ impl PolicyEngine {
     /// the two parties means a crash while the human is thinking cannot erase
     /// the fact that the request was raised.
     pub async fn settle(&self, pending: Pending) -> Resolution {
-        if self.coordinator_high(pending.call()) {
-            return Resolution::Ask(pending);
-        }
-        if self.coordinator
-            && self.mode != Mode::Plan
-            && self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
-        {
-            let call = pending.call;
-            let permit = self.mint(scope_of(&call));
-            return Resolution::Settled(Ok(Authorized {
-                call,
-                permit,
-                by: Authority::Mode { mode: self.mode },
-            }));
-        }
         match self.approver.approve(&pending).await {
             Verdict::Allow { by } => {
                 let call = pending.call;

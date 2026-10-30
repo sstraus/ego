@@ -27,7 +27,6 @@ name does not prove a provider credential or confinement backend is available.
 | `ego checkpoint SESSION_ID preview\|restore\|close` | Inspect or selectively restore session-owned file edits |
 | `ego setup` | Inspect expected work without running effects |
 | `ego worktree show\|cleanup RECEIPT_UUID` | Inspect or safely remove a retained checkout |
-| `ego orchestrator` | Inspect native orchestration without model generation |
 | `ego acp` | Serve ACP on stdio or an endpoint |
 | `ego mcp-server` | Serve rooted runs on MCP stdio |
 | `ego a2a --listen ENDPOINT` | Serve local/loopback A2A discovery; operational methods are refused |

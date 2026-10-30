@@ -2161,7 +2161,7 @@ fn quiet_drops_the_tool_reports_and_keeps_the_answer() {
     assert_eq!(finished.stdout.trim(), "I read it.");
     assert_eq!(
         finished.stderr,
-        "εgo: ~/Gits does not exist; file access is limited to the workspace\nεgo: sandbox is off; commands can access any file your user account can access\n"
+        "εgo: sandbox is off; commands can access any file your user account can access\n"
     );
 }
 

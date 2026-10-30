@@ -335,7 +335,7 @@ pub(super) async fn drive_headless_turn(
     .with_provider_recovery(provider_recovery.then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON))
     .with_skill_invocation_port(skill_owner.clone())
     .with_background_task_port(skill_owner.clone())
-    .with_delegation_host(std::env::var_os("TUIC_SESSION").is_some())
+    .with_task_guidance()
     .with_pause_token(pause.clone());
     let loop_ = match prompt_context {
         Some(source) => loop_.with_prompt_context(source),
