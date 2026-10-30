@@ -827,10 +827,14 @@ pub async fn login<'a>(
             .map(str::to_owned)
             .collect(),
     )?;
-    if scopes.iter().any(|scope| !granted.contains(scope)) {
+    // scopes_supported supplies a default request, not mandatory permissions.
+    // RFC 6749 §3.3 permits a narrower grant; persist only what was granted.
+    if (!scopes.is_empty() && granted.is_empty())
+        || granted.iter().any(|scope| !scopes.contains(scope))
+    {
         return Err(McpError::new(
             McpFailure::Authorization,
-            "required OAuth scope was not granted",
+            "OAuth scope grant is empty or outside the request",
         ));
     }
     if token.refresh_token.as_ref().is_some_and(String::is_empty) {
