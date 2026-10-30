@@ -193,7 +193,7 @@ pub fn report(ended: &Ended) -> Report {
 pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
     let message = match termination {
         RunTermination::Done => return,
-        RunTermination::TaskFailed => "the answer never satisfied the schema".to_string(),
+        RunTermination::TaskFailed => "the task did not complete successfully".to_string(),
         RunTermination::UsageError { message }
         | RunTermination::Provider { message }
         | RunTermination::ProviderUncertain { message }
