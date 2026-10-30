@@ -25,15 +25,16 @@ fn workspace_permission_guide_keeps_its_current_perimeter_and_recovery_text() {
     let guide = captured_stable_guide("workspace");
     for fact in [
         "The workspace sandbox confines reads, writes and exec.",
-        "Absent explicit roots, an existing ~/Gits is an extra read-write root.",
+        "Absent explicit roots, file access is limited to the workspace.",
         "Extra read/write roots do not grant exec",
-        "ego roots add replaces the implicit default",
+        "Use ego roots add to grant extra paths",
         "roots=[]",
         "ego config unset roots restores absence",
     ] {
         assert!(guide.contains(fact), "missing {fact:?}: {guide}");
     }
     assert!(!guide.contains("Adaptive sandbox"), "{guide}");
+    assert!(!guide.contains("~/Gits"), "{guide}");
 }
 
 fn captured_stable_guide(sandbox: &str) -> String {

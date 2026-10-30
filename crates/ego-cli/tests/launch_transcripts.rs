@@ -399,6 +399,14 @@ fn readable_keeps_the_last_wrapped_trust_modal_frame() {
         .split_once("\n# trusted: next launch")
         .expect("next launch heading")
         .0;
+    // Preserve the historical capture byte-for-byte. That launch predates
+    // removal of the implicit home root, so its expected frame still carries
+    // the retired warning; current launch goldens must not carry it.
+    let expected = expected.replacen(
+        "εgo: sandbox is off;",
+        "εgo: ~/Gits does not exist; file access is limited to the workspace\nεgo: sandbox is off;",
+        1,
+    );
     assert_eq!(readable(recorded), expected);
 }
 

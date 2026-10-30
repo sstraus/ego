@@ -1,6 +1,5 @@
 # nothing-to-trust: first launch
 εgo: ego <version>
-εgo: ~/Gits does not exist; file access is limited to the workspace
 εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3
 mode default (default) · sandbox off (flags)
@@ -13,7 +12,6 @@ a launch transcript
 
 # nothing-to-trust: next launch
 εgo: ego <version>
-εgo: ~/Gits does not exist; file access is limited to the workspace
 εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3
 mode default (default) · sandbox off (flags)
