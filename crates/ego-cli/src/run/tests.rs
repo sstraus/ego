@@ -2023,7 +2023,8 @@ fn a_childs_posture_decides_whether_it_sees_the_project_at_all() {
         "model = \"a-project-model\"\n",
     )
     .expect("project config");
-    let args = interactive_args(&[]);
+    // Layer inheritance does not depend on the host Adaptive temp perimeter.
+    let args = interactive_args(&["--sandbox", "workspace"]);
 
     for (posture, project, expected) in [
         (Trust::Trusted, true, ego_core::config::Posture::Ambient),
@@ -2068,7 +2069,8 @@ fn a_frozen_child_of_a_trusted_parent_prepares_the_layers_its_parent_admitted() 
         "model = \"a-project-model\"\n",
     )
     .expect("project config");
-    let args = interactive_args(&[]);
+    // Layer inheritance does not depend on the host Adaptive temp perimeter.
+    let args = interactive_args(&["--sandbox", "workspace"]);
     let frozen = crate::config::FrozenRunConfig::capture(&root, &args, Trust::Trusted)
         .expect("a parent that was trusted captures its layers");
 

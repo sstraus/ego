@@ -62,9 +62,9 @@ def main():
         return
     root = Path(__file__).resolve().parent.parent
     if args.git_ref:
-        names = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', args.git_ref, 'crates'], cwd=root, text=True).splitlines()
+        names = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', args.git_ref, 'crates'], cwd=root, text=True, encoding='utf-8').splitlines()
     else:
-        names = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard', 'crates'], cwd=root, text=True).splitlines()
+        names = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard', 'crates'], cwd=root, text=True, encoding='utf-8').splitlines()
     bad = []
     for name in sorted(names):
         path = Path(name)
@@ -72,7 +72,7 @@ def main():
             continue
         if not args.git_ref and not (root / path).is_file():
             continue
-        text = subprocess.check_output(['git', 'show', f'{args.git_ref}:{name}'], cwd=root, text=True) if args.git_ref else (root / path).read_text()
+        text = subprocess.check_output(['git', 'show', f'{args.git_ref}:{name}'], cwd=root, text=True, encoding='utf-8') if args.git_ref else (root / path).read_text(encoding='utf-8')
         matches = violations(text) if path.suffix == '.rs' else ((number, line) for number, line in enumerate(text.splitlines(), 1) if PERSONAL.search(line))
         bad.extend(f'{name}:{line}: {value}' for line, value in matches)
     if bad:
