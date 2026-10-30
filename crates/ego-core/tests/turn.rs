@@ -74,9 +74,8 @@ use ego_core::subagent::{ChildWait, ChildWaitResult};
 use ego_core::suspension::ResumeFloor;
 use ego_core::turn::{
     CancelToken, ControlError, GenerationPolicyCapture, GenerationPolicySnapshot,
-    GenerationPolicySource, GenerationRuntime, Journal, JudgeContext, PauseToken,
-    PromptContextSource, RegisteredTool, Session, SharedJournal, ToolEffectPorts, Tools,
-    TurnConfig, TurnLoop as CoreTurnLoop,
+    GenerationPolicySource, GenerationRuntime, Journal, JudgeContext, PauseToken, RegisteredTool,
+    Session, SharedJournal, ToolEffectPorts, Tools, TurnConfig, TurnLoop as CoreTurnLoop,
 };
 use futures::StreamExt;
 use futures::executor::block_on;
@@ -3997,103 +3996,6 @@ mod turn {
         )));
     }
 
-    // Catches: busy-turn admission skips recall before the follow-up provider request.
-    #[test]
-    fn queued_steer_recall_reaches_follow_up_without_repeating_warmup() {
-        let (ingress, mut control) = ego_core::turn::interactive_control();
-        let fx = Fixture::new(vec![
-            vec![
-                AiEvent::TextDelta {
-                    text: "the final answer".to_owned(),
-                },
-                AiEvent::Stop(StopReason::Stop),
-            ],
-            vec![
-                AiEvent::TextDelta {
-                    text: "the queued follow-up".to_owned(),
-                },
-                AiEvent::Stop(StopReason::Stop),
-            ],
-        ]);
-        struct SteerRecall {
-            warmups: AtomicUsize,
-        }
-        impl PromptContextSource for SteerRecall {
-            fn warmup<'a>(
-                &'a self,
-                _cwd: &'a Path,
-                _session: SessionId,
-            ) -> BoxFuture<'a, Result<Option<String>, String>> {
-                self.warmups.fetch_add(1, Ordering::Relaxed);
-                Box::pin(async { Ok(None) })
-            }
-
-            fn recall<'a>(
-                &'a self,
-                prompt: &'a str,
-                _cwd: &'a Path,
-                _session: SessionId,
-            ) -> BoxFuture<'a, Result<Option<String>, String>> {
-                Box::pin(async move { Ok(Some(format!("Recall for: {prompt}"))) })
-            }
-        }
-        let source = Arc::new(SteerRecall {
-            warmups: AtomicUsize::new(0),
-        });
-        let mut budget = fx.gate.borrow_mut();
-        let tools = Tools::new(
-            &fx.registry,
-            ToolEffectPorts::new(
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
-                Arc::new(NoResolver),
-                Arc::new(NoHop),
-                Arc::new(NoDuplex),
-            ),
-            CanonPath::new("/ws"),
-        );
-        let mut turn = TurnLoop::open(
-            session(
-                SessionState::default(),
-                &fx.store,
-                &fx.clock,
-                &fx.sink,
-                CancelToken::new(),
-            ),
-            model_for(&fx, &fx.generator, &mut budget),
-            tools,
-        )
-        .with_interactive_control(&mut control)
-        .with_prompt_context(Arc::clone(&source) as Arc<dyn PromptContextSource>);
-        let mut submit =
-            Box::pin(ingress.submit("deliver this after the final".to_owned(), Vec::new()));
-        let waker = futures::task::noop_waker();
-        let mut cx = std::task::Context::from_waker(&waker);
-        assert!(matches!(submit.as_mut().poll(&mut cx), Poll::Pending));
-        let (outcome, accepted) =
-            block_on(async { futures::join!(turn.run("initial prompt"), submit) });
-        assert_eq!(outcome.unwrap().exit_reason, ExitReason::Completed);
-        assert_eq!(accepted.unwrap().pending_steers, 1);
-        let generations = fx.generator.calls();
-        assert_eq!(generations.len(), 2);
-        assert_eq!(source.warmups.load(Ordering::Relaxed), 1);
-        assert!(
-            generations[1]
-                .messages
-                .messages()
-                .iter()
-                .any(|message| message.role == Role::User
-                    && format!("{:?}", message.content)
-                        .contains("Recall for: deliver this after the final")),
-            "the follow-up must receive recall for the newly admitted steer"
-        );
-        assert!(
-            !format!("{:?}", generations[0].messages.messages())
-                .contains("Recall for: deliver this after the final")
-        );
-    }
-
     #[test]
     fn an_ordinary_sibling_batch_delivers_a_pending_steer_at_the_safe_boundary() {
         let (ingress, mut control) = ego_core::turn::interactive_control();
@@ -7723,263 +7625,6 @@ mod turn {
             vec![ContentBlock::Text {
                 text: "the only thing said so far".to_string()
             }]
-        );
-    }
-
-    struct StaticRecall {
-        response: Result<Option<String>, String>,
-        warmup: Result<Option<String>, String>,
-        seen: Mutex<Vec<(String, String, SessionId)>>,
-        warmup_sessions: Mutex<Vec<SessionId>>,
-        tools: Mutex<Vec<(String, String, bool)>>,
-    }
-
-    impl PromptContextSource for StaticRecall {
-        fn warmup<'a>(
-            &'a self,
-            _cwd: &'a Path,
-            session: SessionId,
-        ) -> BoxFuture<'a, Result<Option<String>, String>> {
-            self.warmup_sessions.lock().unwrap().push(session);
-            Box::pin(async { self.warmup.clone() })
-        }
-
-        fn recall<'a>(
-            &'a self,
-            prompt: &'a str,
-            cwd: &'a Path,
-            session: SessionId,
-        ) -> BoxFuture<'a, Result<Option<String>, String>> {
-            self.seen
-                .lock()
-                .unwrap()
-                .push((prompt.to_owned(), cwd.display().to_string(), session));
-            Box::pin(async { self.response.clone() })
-        }
-
-        fn tool<'a>(
-            &'a self,
-            _cwd: &'a Path,
-            _session: SessionId,
-            name: &'a str,
-            args: &'a str,
-            ok: bool,
-            _result: &'a str,
-        ) -> BoxFuture<'a, Result<Option<String>, String>> {
-            self.tools
-                .lock()
-                .unwrap()
-                .push((name.into(), args.into(), ok));
-            Box::pin(async { Ok(Some("Use the indexed definition".into())) })
-        }
-    }
-
-    fn run_with_context(
-        response: Result<Option<String>, String>,
-        warmup: Result<Option<String>, String>,
-        prompts: &[&str],
-    ) -> (Fixture, Arc<StaticRecall>) {
-        let fx = Fixture::new(
-            prompts
-                .iter()
-                .map(|_| vec![AiEvent::Stop(StopReason::Stop)])
-                .collect(),
-        );
-        let recall = Arc::new(StaticRecall {
-            response,
-            warmup,
-            seen: Mutex::new(Vec::new()),
-            warmup_sessions: Mutex::new(Vec::new()),
-            tools: Mutex::new(Vec::new()),
-        });
-        let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(
-            &fx.registry,
-            ToolEffectPorts::new(
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
-                Arc::new(NoResolver),
-                Arc::new(NoHop),
-                Arc::new(NoDuplex),
-            ),
-            CanonPath::new("/ws"),
-        );
-        let mut turn = TurnLoop::open(
-            session(
-                SessionState::default(),
-                &fx.store,
-                &fx.clock,
-                &fx.sink,
-                CancelToken::new(),
-            ),
-            model_for(&fx, &fx.generator, &mut gate),
-            tools,
-        )
-        .with_prompt_context(Arc::clone(&recall) as Arc<dyn PromptContextSource>);
-        for prompt in prompts {
-            block_on(turn.run(prompt)).unwrap();
-        }
-        drop(turn);
-        drop(gate);
-        (fx, recall)
-    }
-
-    fn run_with_recall(response: Result<Option<String>, String>) -> (Fixture, Arc<StaticRecall>) {
-        run_with_context(response, Ok(None), &["find the relevant decision"])
-    }
-
-    // Catches: SessionStart returns warmup, but ego discards it before generation.
-    #[test]
-    fn warmup_uses_the_stable_session_and_enters_durable_user_context() {
-        let (fx, source) = run_with_context(
-            Ok(None),
-            Ok(Some("A warmup entry".into())),
-            &["find the relevant decision"],
-        );
-        let warmup_sessions = source.warmup_sessions.lock().unwrap();
-        assert_eq!(warmup_sessions.len(), 1);
-        assert_eq!(warmup_sessions[0], source.seen.lock().unwrap()[0].2);
-        let messages = fx.generator.calls()[0].messages.messages().to_vec();
-        assert!(messages.iter().any(|message| message.role == Role::User
-            && format!("{:?}", message.content).contains("A warmup entry")));
-        assert!(!messages.iter().any(|message| message.role == Role::System
-            && format!("{:?}", message.content).contains("A warmup entry")));
-        assert!(fx.store.events().iter().any(|event| matches!(&event.kind,
-            EventKind::HostContextAppended { text } if text.starts_with("mdkb session warmup data")
-                && text.contains("A warmup entry"))));
-    }
-
-    // Catches: a tool hint arrives after execution but is lost before the next generation.
-    #[test]
-    fn settled_tool_hint_is_durable_user_data_in_the_next_generation() {
-        let fx = Fixture::new(reading("/ws/guide")).with_read_tool();
-        fx.fs.file("/ws/guide", "guide contents");
-        let source = Arc::new(StaticRecall {
-            response: Ok(None),
-            warmup: Ok(None),
-            seen: Mutex::new(Vec::new()),
-            warmup_sessions: Mutex::new(Vec::new()),
-            tools: Mutex::new(Vec::new()),
-        });
-        let mut gate = fx.gate.borrow_mut();
-        let tools = Tools::new(
-            &fx.registry,
-            ToolEffectPorts::new(
-                &fx.fs,
-                fx.process.as_ref(),
-                &fx.evidence,
-                Arc::new(NoResolver),
-                Arc::new(NoHop),
-                Arc::new(NoDuplex),
-            ),
-            CanonPath::new("/ws"),
-        );
-        let mut turn = TurnLoop::open(
-            session(
-                SessionState::default(),
-                &fx.store,
-                &fx.clock,
-                &fx.sink,
-                CancelToken::new(),
-            ),
-            model_for(&fx, &fx.generator, &mut gate),
-            tools,
-        )
-        .with_prompt_context(Arc::clone(&source) as Arc<dyn PromptContextSource>);
-        block_on(turn.run("read the guide")).unwrap();
-        assert_eq!(
-            source.tools.lock().unwrap().as_slice(),
-            &[("read".into(), r#"{"path":"/ws/guide"}"#.into(), true)]
-        );
-        let messages = fx.generator.calls()[1].messages.messages().to_vec();
-        assert!(messages.iter().any(|message| message.role == Role::User
-            && format!("{:?}", message.content).contains("Use the indexed definition")));
-        assert!(!messages.iter().any(|message| message.role == Role::System
-            && format!("{:?}", message.content).contains("Use the indexed definition")));
-        assert!(fx.store.events().iter().any(|event| matches!(&event.kind,
-            EventKind::HostContextAppended { text } if text.starts_with("mdkb tool hint data"))));
-    }
-
-    // Catches: the second prompt resets mdkb's session-start state and re-injects warmup.
-    #[test]
-    fn warmup_is_not_requested_again_after_its_durable_context_is_admitted() {
-        let (fx, source) = run_with_context(
-            Ok(None),
-            Ok(Some("One warmup entry".into())),
-            &["first prompt", "second prompt"],
-        );
-        assert_eq!(fx.generator.calls().len(), 2);
-        assert_eq!(source.warmup_sessions.lock().unwrap().len(), 1);
-        assert_eq!(source.seen.lock().unwrap().len(), 2);
-        assert_eq!(fx.store.events().iter().filter(|event| matches!(&event.kind,
-            EventKind::HostContextAppended { text } if text.starts_with("mdkb session warmup data"))).count(), 1);
-        // Catches: retry restoration mistakes a merged memory hint for missing
-        // host-state evidence and appends another copy to every request.
-        for request in fx.generator.calls() {
-            assert_eq!(
-                serde_json::to_string(&request.messages)
-                    .unwrap()
-                    .matches("One warmup entry")
-                    .count(),
-                1
-            );
-        }
-    }
-
-    // Catches: empty warmup resets mdkb's recall deduplication on every prompt.
-    #[test]
-    fn empty_warmup_is_attempted_only_once_per_run() {
-        let (_fx, source) =
-            run_with_context(Ok(None), Ok(None), &["first prompt", "second prompt"]);
-        assert_eq!(source.warmup_sessions.lock().unwrap().len(), 1);
-        assert_eq!(source.seen.lock().unwrap().len(), 2);
-    }
-
-    // Catches: an unavailable SessionStart source blocks the first generation.
-    #[test]
-    fn failed_warmup_does_not_block_prompt_recall() {
-        let (fx, _) = run_with_context(
-            Ok(Some("Recall still works".into())),
-            Err("unavailable".into()),
-            &["find the relevant decision"],
-        );
-        assert_eq!(fx.generator.calls().len(), 1);
-        let messages = fx.generator.calls()[0].messages.messages().to_vec();
-        assert!(messages.iter().any(|message| message.role == Role::User
-            && format!("{:?}", message.content).contains("Recall still works")));
-    }
-
-    // Catches: prompt recall is computed but never included in the provider request.
-    #[test]
-    fn recalled_prompt_data_is_visible_as_durable_user_context() {
-        let (fx, recall) = run_with_recall(Ok(Some("A prior decision".into())));
-        assert_eq!(
-            recall.seen.lock().unwrap().as_slice(),
-            &[(
-                "find the relevant decision".into(),
-                "/ws".into(),
-                recall.warmup_sessions.lock().unwrap()[0]
-            )]
-        );
-        let messages = fx.generator.calls()[0].messages.messages().to_vec();
-        assert!(messages.iter().any(|message| message.role == Role::User
-            && format!("{:?}", message.content).contains("A prior decision")));
-        assert!(!messages.iter().any(|message| message.role == Role::System
-            && format!("{:?}", message.content).contains("A prior decision")));
-        assert!(fx.store.events().iter().any(|event| matches!(&event.kind, EventKind::HostContextAppended { text } if text.contains("A prior decision"))));
-    }
-
-    // Catches: an unavailable external recall source blocks a valid user prompt.
-    #[test]
-    fn failed_prompt_recall_does_not_block_generation() {
-        let (fx, _) = run_with_recall(Err("unavailable".into()));
-        assert_eq!(fx.generator.calls().len(), 1);
-        assert!(
-            !fx.store
-                .events()
-                .iter()
-                .any(|event| matches!(event.kind, EventKind::HostContextAppended { .. }))
         );
     }
 
@@ -13989,6 +13634,273 @@ mod turn {
             })
             .collect();
         assert_eq!(completed, [true, false]);
+    }
+
+    #[test]
+    fn hook_payload_uses_settled_tool_data_and_bounded_ordered_stop_text() {
+        struct Capture(Arc<Mutex<Vec<serde_json::Value>>>);
+        impl HookInvocationPort for Capture {
+            fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+                self.0.lock().unwrap().push(
+                    serde_json::to_value(
+                        ego_core::hook::HookHandlerRequestV1::from_runtime(&request).unwrap(),
+                    )
+                    .unwrap(),
+                );
+                Box::pin(futures::future::ready(Ok(HookOutcome::new(
+                    HookDecision::Continue,
+                    None,
+                ))))
+            }
+        }
+        let fx = Fixture::new(Vec::new());
+        let session = SessionId::new();
+        let turn = TurnId::new();
+        let journal = SharedJournal::new(Journal::new(
+            session,
+            &fx.store,
+            &fx.clock,
+            &fx.sink,
+            Producer::Main,
+            SessionState::default(),
+        ));
+        let config = ["SessionStart", "PreToolUse", "PostToolUse", "PostToolUseFailure", "Stop"].iter().map(|event| format!("[[hooks]]\nevent = \"{event}\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"capture\"\n")).collect::<String>();
+        let catalogue = HookCatalogue::admit_typed(
+            &[ConfigLayer::parse(Source::User, &config).unwrap()],
+            &[],
+            Trust::Trusted,
+        )
+        .unwrap();
+        journal
+            .append(
+                turn,
+                None,
+                None,
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: catalogue.evidence(),
+                },
+            )
+            .unwrap();
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let runtime = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+            journal.clone(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .with_cwd("/ws".into())
+        .bind(Arc::new(Capture(captured.clone())));
+        let dispatch = |event: ego_core::hook::HookEvent, causality: HookCausality| {
+            let key = ego_core::event::hook::HookOccurrenceKey::new(
+                event.lifecycle(),
+                causality.owner().clone(),
+            );
+            block_on(runtime.dispatch(
+                Producer::Main,
+                ego_core::hook::HookOccurrence::new(key, event, causality).unwrap(),
+            ))
+            .unwrap()
+        };
+        assert!(
+            !dispatch(
+                ego_core::hook::HookEvent::session(HookLifecycle::SessionStart),
+                HookCausality::session(session, turn)
+            )
+            .is_blocked()
+        );
+        for (ok, response) in [(true, "read content"), (false, "read failed")] {
+            let item = ItemId::new();
+            let start = journal
+                .append(
+                    turn,
+                    Some(item),
+                    None,
+                    EventKind::ToolCallStarted {
+                        name: "read".into(),
+                        args: r#"{"path":"README.md"}"#.into(),
+                        call_id: Some(format!("call-{ok}")),
+                    },
+                )
+                .unwrap();
+            assert!(
+                !dispatch(
+                    ego_core::hook::HookEvent::tool(
+                        HookLifecycle::PreToolUse,
+                        ego_core::event::hook::HookSubject::Item { item },
+                        "read(README.md)"
+                    ),
+                    HookCausality::item(item, turn, start)
+                )
+                .is_blocked()
+            );
+            journal
+                .append(
+                    turn,
+                    Some(item),
+                    Some(start),
+                    EventKind::ToolCallCompleted {
+                        ok,
+                        result: ToolResult::builtin(response),
+                    },
+                )
+                .unwrap();
+            let lifecycle = if ok {
+                HookLifecycle::PostToolUse
+            } else {
+                HookLifecycle::PostToolUseFailure
+            };
+            dispatch(
+                ego_core::hook::HookEvent::tool(
+                    lifecycle,
+                    ego_core::event::hook::HookSubject::Item { item },
+                    "read(README.md)",
+                ),
+                HookCausality::item(item, turn, start),
+            );
+        }
+        journal
+            .append(
+                turn,
+                Some(ItemId::new()),
+                None,
+                EventKind::UserPrompt {
+                    text: "first prompt".into(),
+                    images: Vec::new(),
+                    audio: Vec::new(),
+                    queued_prompt: None,
+                },
+            )
+            .unwrap();
+        let end = journal
+            .append(
+                turn,
+                Some(ItemId::new()),
+                None,
+                EventKind::AssistantMessage {
+                    text: "é".repeat(5000),
+                },
+            )
+            .unwrap();
+        dispatch(
+            ego_core::hook::HookEvent::turn(
+                HookLifecycle::Stop,
+                ego_core::event::hook::HookSubject::Turn { turn },
+            ),
+            HookCausality::generation(ego_core::event::id::GenerationId::new(), turn, end),
+        );
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 6);
+        for wire in captured.iter() {
+            assert_eq!(wire["session_id"], session.to_string());
+            assert_eq!(wire["cwd"], "/ws");
+        }
+        assert_eq!(captured[0]["source"], "startup");
+        assert_eq!(captured[1]["tool_name"], "read");
+        assert_eq!(captured[1]["tool_input"], json!({"path":"README.md"}));
+        assert!(captured[1].get("tool_response").is_none());
+        assert_eq!(captured[2]["tool_response"], "read content");
+        assert_eq!(captured[4]["error"], "read failed");
+        assert!(captured[4].get("tool_response").is_none());
+        let transcript = captured[5]["transcript"].as_str().unwrap();
+        assert!(transcript.starts_with("UserPrompt: first prompt\nAssistant: é"));
+        assert!(transcript.len() <= 8 * 1024);
+        assert!(transcript.ends_with("[hook context truncated]"));
+    }
+
+    #[test]
+    fn hook_context_reaches_model_input_without_leaking_to_the_next_turn() {
+        struct ContextHook;
+        impl HookInvocationPort for ContextHook {
+            fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+                let wire = serde_json::to_value(
+                    ego_core::hook::HookHandlerRequestV1::from_runtime(&request).unwrap(),
+                )
+                .unwrap();
+                let decoded: ego_core::hook::HookHandlerRequestV1 =
+                    serde_json::from_value(wire.clone()).unwrap();
+                assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+                assert_eq!(wire["hook_event_name"], "UserPromptSubmit");
+                assert!(wire["session_id"].is_string());
+                assert_eq!(wire["cwd"], "/ws");
+                let prompt = wire["prompt"].as_str().unwrap();
+                let outcome = if prompt == "recall first" {
+                    HookOutcome::new(HookDecision::Continue, None)
+                        .with_additional_context("context sentinel")
+                } else {
+                    HookOutcome::new(HookDecision::Continue, None)
+                };
+                Box::pin(futures::future::ready(Ok(outcome)))
+            }
+        }
+        let fx = Fixture::new(vec![
+            vec![AiEvent::Stop(StopReason::Stop)],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]);
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            model_for(&fx, &fx.generator, &mut gate),
+            tools,
+        );
+        let catalogue = HookCatalogue::admit_typed(&[ConfigLayer::parse(Source::User, "[[hooks]]\nevent = \"UserPromptSubmit\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"context\"\n").unwrap()], &[], Trust::Trusted).unwrap();
+        turn.journal()
+            .append(
+                TurnId::new(),
+                None,
+                None,
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: catalogue.evidence(),
+                },
+            )
+            .unwrap();
+        let state = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+            turn.journal(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .with_cwd("/ws".into());
+        struct ContextBinding;
+        impl HookInvocationBinding for ContextBinding {
+            fn bind<'a>(
+                &self,
+                _policy: Arc<PolicyEngine>,
+                _mcp: Option<&dyn McpRuntimeBinding>,
+            ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
+            where
+                Self: 'a,
+            {
+                Ok(Arc::new(ContextHook))
+            }
+        }
+        turn = turn
+            .with_hook_binding(state, Arc::new(ContextBinding), None)
+            .unwrap();
+        block_on(turn.run("recall first")).unwrap();
+        block_on(turn.run("unrelated second")).unwrap();
+        let requests = fx.generator.calls();
+        let render = |request: &GenRequest| format!("{:?}", request.messages);
+        assert!(render(&requests[0]).contains("context sentinel"));
+        assert!(render(&requests[0]).contains("external context data"));
+        assert!(!render(&requests[1]).contains("context sentinel"));
     }
 
     #[test]

@@ -34,7 +34,8 @@ changes, untracked or ignored files, and unmerged commits. New commits also need
 upstream evidence before cleanup. The branch is retained after checkout removal.
 Inspect a refusal rather than deleting the directory to bypass the checks.
 
-When TUICommander owns the launch, it also owns worktree lifecycle. Use its
+When `TUIC_SESSION` is nonempty and `tuic` is executable on PATH,
+TUICommander owns launch and worktree lifecycle. Otherwise ego uses system git. Use its
 controls; a hosted receipt is not adopted into ego's local worktree store.
 
 Sources: [worktree lifecycle](../../crates/ego-cli/src/worktree.rs) and

@@ -133,8 +133,6 @@ pub struct Effective {
     pub ui: UiLayer,
     /// Effective configured entries and winning tombstones with provenance.
     pub mcp: ResolvedMcpConfig,
-    /// Optional user-configured mdkb prompt recall executable.
-    pub mdkb_prompt_command: Option<PathBuf>,
     /// What the trust gate threw away, so a run can say so.
     ///
     /// Dropping a Project or Local layer under [`Posture::Bare`] is correct
@@ -197,7 +195,6 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         auth,
         ui,
         mcp,
-        mdkb_prompt_command,
         hooks,
     } = layer;
     let mut settings = Vec::new();
@@ -220,7 +217,6 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (!auth.is_empty(), "auth"),
         (ui.is_some(), "ui"),
         (!mcp.servers.is_empty(), "mcp servers"),
-        (mdkb_prompt_command.is_some(), "mdkb_prompt_command"),
         (!hooks.is_empty(), "hooks"),
     ] {
         if present {
@@ -380,7 +376,6 @@ fn resolve_inner(
     let mut ui = UiLayer::default();
     let mut mcp = ResolvedMcpConfig::default();
     let mut instructions = super::InstructionConfig::default();
-    let mut mdkb_prompt_command = None;
     let mut session_dir = None;
     let mut artifact_dir = None;
     let mut roots = Vec::new();
@@ -389,7 +384,6 @@ fn resolve_inner(
     for sourced in &eligible {
         if sourced.source == Source::User {
             instructions = sourced.value.instructions.clone().unwrap_or_default();
-            mdkb_prompt_command = sourced.value.mdkb_prompt_command.clone();
         }
         let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
 
@@ -667,7 +661,6 @@ fn resolve_inner(
         auth,
         ui,
         mcp,
-        mdkb_prompt_command,
         discarded,
     })
 }

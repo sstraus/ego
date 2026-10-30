@@ -435,7 +435,7 @@ saved config is rewritten. `adaptive` reads and executes broadly, because a
 usable sandbox is a permissive one, but the credential floors (SSH, AWS, GnuPG,
 netrc, keychains, browser profiles, provider and ego credentials, `.env*`
 outside the workspace) stay closed. Writes reach the workspace, the configured
-roots and a toolchain set (Cargo, rustup, mbx cache, git common directory,
+roots and a toolchain set (Cargo, rustup, git common directory,
 `TMPDIR`, pnpm and npm caches) that the host captures from the operator
 environment before any child runs (`AdaptivePerimeter`). A write outside that
 perimeter is a residual write. In permission mode `auto` with a configured
@@ -503,11 +503,7 @@ operations, widenings and exact parameters behind a details key (`CLI.md` §6).
   stable identity, source/digest, and typed start/settlement evidence only; M4
   builds the strict catalogue, runner, four adapters, and inspection surfaces.
   See `ARCHITECTURE.md` and the accepted hook ADR.
-  Optional mdkb warmup, recall and tool hints use a separate
-  guarded data source. It does not change hook decisions or permissions;
-  bounded returned context enters as user-role data and source failure cannot
-  veto a turn. See
-  `ARCHITECTURE.md`.
+  External memory integrations use configured hooks, not an embedded vendor bridge.
 
 ### 3.6 Extensibility posture (plugins without a plugin system)
 

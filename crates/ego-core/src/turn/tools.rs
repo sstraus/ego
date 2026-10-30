@@ -281,10 +281,6 @@ pub struct Tools<'a> {
 }
 
 impl<'a> Tools<'a> {
-    pub(crate) fn cwd(&self) -> &CanonPath {
-        &self.cwd
-    }
-
     pub(crate) fn context_notes(&self) -> Vec<String> {
         self.source.context_notes()
     }

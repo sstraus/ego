@@ -1005,8 +1005,6 @@ pub struct ConfigLayer {
     /// Name-keyed MCP entries in this layer.
     #[serde(default)]
     pub mcp: McpLayer,
-    /// User-authorized executable for optional mdkb prompt recall.
-    pub mdkb_prompt_command: Option<std::path::PathBuf>,
     /// Hooks retain declaration order within this authority layer.
     #[serde(default)]
     pub hooks: Vec<HookConfigEntry>,
@@ -1033,19 +1031,6 @@ impl ConfigLayer {
             return Err(ConfigError::Invalid {
                 source,
                 message: "instructions paths require absolute paths in user configuration".into(),
-            });
-        }
-        if value.mdkb_prompt_command.is_some()
-            && (source != Source::User
-                || value
-                    .mdkb_prompt_command
-                    .as_ref()
-                    .is_some_and(|path| !path.is_absolute()))
-        {
-            return Err(ConfigError::Invalid {
-                source,
-                message: "mdkb_prompt_command requires an absolute path in user configuration"
-                    .into(),
             });
         }
         if source != Source::System && value.max_mode.is_some() {

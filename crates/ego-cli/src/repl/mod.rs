@@ -68,7 +68,6 @@ pub enum HostCommand {
     /// handler by sending [`ExportSelection::default`].
     Export(ExportSelection),
     Hooks,
-    Memory(String),
     Init(String),
     Config(String),
     Fast(bool),

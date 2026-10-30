@@ -309,12 +309,12 @@ fn setup_adaptive_write_reach_subtracts_captured_floors() {
     assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 0);
 }
 
-// Catches: setup omits the native developer selector and operator mbx provenance.
+// Catches: setup omits the native developer selector or executes its probes.
+#[cfg(target_os = "macos")]
 #[test]
-fn setup_inventory_names_developer_and_mbx_selection_without_execution() {
+fn setup_inventory_names_native_developer_selection_without_execution() {
     let root = tempfile::tempdir().unwrap();
     let probes = ego_tools::setup::inventory(root.path());
-    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("mbx") && reason.contains("operator"))), "mbx catalogue source missing");
     #[cfg(target_os = "macos")]
     assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("developer selection"))));
     assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
@@ -424,9 +424,9 @@ fn setup_inventory_deduplicates_same_kind_path_preserving_source_depths() {
     assert!(report.omissions.is_empty());
 }
 
-// Catches: operator mbx configuration is ignored or its cache path is fabricated.
+// Catches: an unrelated build tool's config is read or grants cache authority.
 #[test]
-fn setup_inventory_observes_recorded_operator_cache_source_without_creating_cache() {
+fn setup_does_not_read_mbx_configuration() {
     if std::env::var_os("EGO_SETUP_CATALOGUE_FIXTURE").is_none() {
         let home = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
@@ -434,34 +434,50 @@ fn setup_inventory_observes_recorded_operator_cache_source_without_creating_cach
             .path()
             .join("Library/Application Support/mbx/config.toml");
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
-        // Recorded from the operator mbx config on 2026-10-15; only the cache_dir field is relevant.
-        std::fs::write(&config, r#"cache_dir = "/home/example/workspace""#).unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "setup_inventory_observes_recorded_operator_cache_source_without_creating_cache",
-            ])
-            .env("EGO_SETUP_CATALOGUE_FIXTURE", "1")
-            .env("HOME", home.path())
-            .env("EGO_SETUP_CATALOGUE_WORKSPACE", workspace.path())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
+        std::fs::create_dir(home.path().join("tmp")).unwrap();
+        for content in ["cache_dir = '~/external-cache'", "not = [valid toml"] {
+            std::fs::write(&config, content).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "setup_does_not_read_mbx_configuration"])
+                .env_clear()
+                .env("EGO_SETUP_CATALOGUE_FIXTURE", "1")
+                .env("HOME", home.path())
+                .env("TMPDIR", home.path().join("tmp"))
+                .env("EGO_SETUP_CATALOGUE_WORKSPACE", workspace.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{} {}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(!home.path().join("external-cache").exists());
         assert!(!home.path().join(".cargo").exists());
-        assert_eq!(std::fs::read_dir(workspace.path()).unwrap().count(), 0);
         return;
     }
     let workspace =
         std::path::PathBuf::from(std::env::var_os("EGO_SETUP_CATALOGUE_WORKSPACE").unwrap());
     let probes = ego_tools::setup::inventory(&workspace);
-    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { path, reason } if path == std::path::Path::new("/home/example/workspace") && reason.contains("bounded operator TOML"))));
+    assert!(!probes.iter().any(|probe| matches!(probe, Probe::Metadata { path, reason } if path.to_string_lossy().contains("mbx") || reason.contains("mbx"))), "setup imported an unrelated mbx configuration");
     #[cfg(target_os = "macos")]
-    assert!(probes.iter().any(|probe| matches!(probe, Probe::Metadata { reason, .. } if reason.contains("developer selection"))));
+    {
+        let policy = ego_tools::exec::admit_confinement(
+            ego_core::permit::Confinement::Adaptive,
+            false,
+            CanonPath::new(&workspace),
+        )
+        .unwrap();
+        assert!(
+            !policy
+                .adaptive_perimeter()
+                .unwrap()
+                .writable
+                .iter()
+                .any(|path| path.as_path().ends_with("external-cache"))
+        );
+    }
 }
 
 // Catches: action diagnostics launch commands or inspect credential aliases/unbounded argv.
