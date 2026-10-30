@@ -889,7 +889,7 @@ fn permission_recovery_guidance_reaches_the_stable_system_context() {
         "Permissions and OS confinement are separate",
         "auto",
         "permissions.judge",
-        "~/Gits",
+        "Absent explicit roots, file access is limited to the workspace.",
         "exec_paths",
         "ego roots add",
         "roots=[]",

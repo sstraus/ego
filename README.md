@@ -95,8 +95,7 @@ ego -m ollama/qwen3 --thinking off --sandbox workspace
 
 Type a first prompt such as “Explain the main entry points in this repository.”
 The model name above is an example: use one listed by your daemon.
-`ego config set 'roots=[]'` clears configured extra roots, including the implicit
-`~/Gits` extra root under strict confinement. The example also explicitly selects
+`ego config set 'roots=[]'` clears configured extra roots. The example also selects
 `workspace` confinement; macOS's default adaptive sandbox can derive additional
 roots. Inspect `/config perimeter` for the actual admitted boundary. For a hosted
 model, supply its API key or complete subscription login first; see
@@ -111,7 +110,7 @@ model, supply its API key or complete subscription login first; see
 The command set is `ego run`, `ego resume`, `ego continue`, `ego fork`, `ego compact`,
 `ego export`, `ego checkpoint`, `ego ls`, `ego rm`, `ego usage`, `ego models`, `ego hooks`, `ego doctor`, `ego setup`,
 `ego acp`, `ego a2a`, `ego auth`, `ego mcp`, `ego config`, `ego roots`,
-`ego rules`, `ego orchestrator`, `ego worktree`, and `ego mcp-server`.
+`ego rules`, `ego worktree`, and `ego mcp-server`.
 
 `ego checkpoint SESSION_ID preview` lists session-owned file checkpoints.
 Use `ego checkpoint SESSION_ID restore CHECKPOINT_COMMIT` to restore one
@@ -194,7 +193,7 @@ These commands build or serve locally; they do not publish a website.
 - [Sessions, runs, turns, permits, and evidence](docs/concepts/README.md)
 - [CLI reference](docs/reference/README.md) and [configuration reference](docs/reference/configuration.md)
 - [Providers](docs/guides/providers.md), [tools](docs/guides/tools.md), and [permissions](docs/guides/permissions.md)
-- [ACP, MCP, skills, hooks, and orchestration](docs/integrations/README.md)
+- [ACP, MCP, skills, and hooks](docs/integrations/README.md)
 - [Architecture](docs/architecture.md) and [open-source licenses](docs/THIRD_PARTY_LICENSES.md)
 
 ## Name

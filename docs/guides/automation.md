@@ -15,7 +15,7 @@ Replace the model with one your installation can resolve. To clear configured
 extra roots, save `ego config set 'roots=[]'` in your user configuration first.
 Select `--sandbox workspace` explicitly when you need that confinement level;
 the macOS default is adaptive and can derive additional roots. Under strict
-confinement, an absent root declaration adds `~/Gits` when it exists. `-` selects stdin as
+confinement, an absent root declaration grants no extra home-tree access. `-` selects stdin as
 prompt. JSON writes one final object; JSONL writes live versioned public events;
 text writes the answer with diagnostics on stderr. `--quiet` suppresses stderr
 progress, not the result. [CLI reference](../reference/README.md) lists exits.

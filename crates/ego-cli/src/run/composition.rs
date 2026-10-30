@@ -144,16 +144,14 @@ pub(super) fn instructions(
         let selection = Selection::of(effective.posture, named.clone());
         let discovery_root = if matches!(selection, Selection::Disabled) {
             root.to_path_buf()
-        } else if let Some(home) = std::env::var_os("HOME") {
-            crate::trust::instruction_discovery_root(root, &PathBuf::from(home)).map_err(
+        } else {
+            crate::trust::instruction_discovery_root(root, &effective.instructions).map_err(
                 |error| {
                     UsageError(format!(
                         "instruction discovery root could not be resolved: {error}"
                     ))
                 },
             )?
-        } else {
-            root.to_path_buf()
         };
         let home = std::env::var_os("HOME").map(PathBuf::from);
         let mut set = ego_core::config::load_with_home(
@@ -249,27 +247,7 @@ pub(super) fn tools(
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
-    tools_with_mode(
-        selected,
-        skills,
-        profile,
-        history,
-        environment,
-        ego_core::orchestrator::Mode::Observe,
-        None,
-    )
-}
-
-pub(super) fn orchestration_mode(effective: &Effective) -> ego_core::orchestrator::Mode {
-    if effective
-        .active_profile
-        .as_ref()
-        .is_some_and(|p| p.name == "coordinator")
-    {
-        effective.orchestration
-    } else {
-        ego_core::orchestrator::Mode::Observe
-    }
+    tools_with_mode(selected, skills, profile, history, environment, None)
 }
 
 pub(super) fn tools_with_mode(
@@ -278,7 +256,6 @@ pub(super) fn tools_with_mode(
     _profile: Option<&str>,
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
-    orchestration: ego_core::orchestrator::Mode,
     _model: Option<&str>,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
     let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
@@ -296,11 +273,6 @@ pub(super) fn tools_with_mode(
             ego_tools::tools::selected_web_search(local),
         ));
     }
-    all.extend(
-        ego_tools::orchestrator::tools_from_environment_with_mode(orchestration)
-            .into_iter()
-            .map(RegisteredTool::Effect),
-    );
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     all.push(RegisteredTool::Task);
     all.push(RegisteredTool::Goal);
@@ -1068,7 +1040,6 @@ pub(super) fn prepared_materials(
             .exec
             .policy()
             .map_err(|error| UsageError(error.to_string()))?,
-        orchestration_mode(&settings.effective),
         args.model.as_deref().or_else(|| {
             settings
                 .effective

@@ -1268,7 +1268,7 @@ pub struct TurnLoop<'session, 'turn> {
     control: Option<&'turn mut InteractiveControl>,
     elicitor: Option<Arc<dyn Elicitor>>,
     foreign_question_port: Option<Arc<dyn crate::mcp::ForeignQuestionPort + 'turn>>,
-    delegation_host: Option<bool>,
+    task_guidance: bool,
     background_task_port: Option<Arc<dyn BackgroundTaskPort + 'turn>>,
     skill_invocation_port: Option<Arc<dyn crate::skill::SkillInvocationPort + 'turn>>,
     inherited_effect_tools: Option<Arc<BTreeSet<String>>>,
@@ -1450,7 +1450,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             foreign_question_port: None,
             skill_invocation_port: None,
             background_task_port: None,
-            delegation_host: None,
+            task_guidance: false,
             inherited_effect_tools: None,
             hook_binding: None,
             hook_runtime: None,
@@ -1546,20 +1546,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         self
     }
 
-    /// Bind both provider-visible prompt and task guidance to the product host.
-    pub fn with_delegation_host(mut self, tuic: bool) -> Self {
-        self.delegation_host = Some(tuic);
-        self.tools = self.tools.with_delegation_host(tuic);
+    /// Include the same durable task contract in provider-visible prompt and tools.
+    pub fn with_task_guidance(mut self) -> Self {
+        self.task_guidance = true;
         if let Some(identity) = self.prompt_snapshot.identity.as_mut() {
-            let previous_identity = identity.clone();
-            for previous in [delegation_guidance(false), delegation_guidance(true)] {
-                if let Some(prefix) = identity.strip_suffix(previous) {
-                    *identity = prefix.trim_end().to_owned();
-                }
-            }
-            identity.push_str("\n\n");
-            identity.push_str(delegation_guidance(tuic));
-            if *identity != previous_identity {
+            let guidance = delegation_guidance();
+            if !identity.ends_with(guidance) {
+                identity.push_str("\n\n");
+                identity.push_str(guidance);
                 self.prompt_snapshot.epoch = EventId::new();
             }
         }
@@ -1688,8 +1682,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 .map(AgentIdentity::stable_text),
             system: self.config.system.clone(),
         };
-        if let Some(tuic) = self.delegation_host {
-            self = self.with_delegation_host(tuic);
+        if self.task_guidance {
+            self = self.with_task_guidance();
         }
         self
     }
@@ -1703,8 +1697,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             self.prompt_snapshot = snapshot.clone();
         }
         self.ancestor = Some(AncestorHistory::Replayed(Box::new(replayed.clone())));
-        if let Some(tuic) = self.delegation_host {
-            self = self.with_delegation_host(tuic);
+        if self.task_guidance {
+            self = self.with_task_guidance();
         }
         self
     }

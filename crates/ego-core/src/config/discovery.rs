@@ -2,7 +2,7 @@
 //!
 //! `AGENTS.md`, from the supplied discovery root down to the current directory,
 //! including bounded relative imports, only in a workspace the trust gate let
-//! through. The CLI chooses `~/Gits` as the discovery root where applicable. See
+//! through. The CLI uses the repository root unless the user configures a shared root. See
 //! `ARCHITECTURE.md`
 //! and `ARCHITECTURE.md`
 //! and `ARCHITECTURE.md` I2.

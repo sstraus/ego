@@ -12,7 +12,6 @@ not create a second permission model or turn remote content into trusted inputs.
 | [A2A](a2a.md) | Publish εgo discovery on an admitted local endpoint; task delegation is not implemented |
 | [Skills](skills.md) | Add named, progressively disclosed instruction capabilities |
 | [Hooks](hooks.md) | Add subtractive lifecycle checks/feedback under existing authority |
-| [Native orchestration](orchestration.md) | Observe or explicitly control TUICommander children through guarded adapters |
 
 For configuration fields, defaults, and source files, see
 [configuration reference](../reference/configuration.md). The

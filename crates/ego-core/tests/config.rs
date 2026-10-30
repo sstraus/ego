@@ -1950,3 +1950,36 @@ fn status_providers_are_bounded_and_only_operator_sources_can_install_them() {
             .is_none()
     );
 }
+
+// Catches: repository configuration can widen instruction discovery beyond its trust boundary.
+#[test]
+fn shared_instruction_paths_are_user_only_and_absolute() {
+    let shared = std::env::temp_dir().join("shared-instructions");
+    let excluded = shared.join("scratch");
+    let text = format!("[instructions]\nshared_root={shared:?}\nexclude_roots=[{excluded:?}]\n");
+    let user = ConfigLayer::parse(Source::User, &text).unwrap();
+    let effective = resolve(&[user], Trust::Untrusted, None).unwrap();
+    assert_eq!(
+        effective.instructions.shared_root.as_deref(),
+        Some(shared.as_path())
+    );
+    assert!(ConfigLayer::parse(Source::Project, &text).is_err());
+    assert!(ConfigLayer::parse(Source::Local, &text).is_err());
+    assert!(ConfigLayer::parse(Source::User, "[instructions]\nshared_root='relative'").is_err());
+    assert!(
+        ConfigLayer::parse(Source::User, "[instructions]\nexclude_roots=['relative']").is_err()
+    );
+}
+
+// Catches: retired native bridge configuration is silently accepted as active authority.
+#[test]
+fn private_bridge_configuration_is_rejected() {
+    assert!(ConfigLayer::parse(Source::User, "[orchestration]\nmode='active'").is_err());
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            "[profile.coordinator.orchestration]\nmode='active'"
+        )
+        .is_err()
+    );
+}

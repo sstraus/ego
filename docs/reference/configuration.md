@@ -103,12 +103,11 @@ higher or lower layer supplies a value.
 | `mode` | `plan`, `default`, `auto`, `accept-edits`, `yolo` (legacy input alias: `edits`) | Trusted interactive with no configured mode uses `auto`; ordinary unresolved policy uses `default` |
 | `sandbox` | `ro`, `workspace`, `adaptive`, `off` | `adaptive` when absent on macOS, `workspace` elsewhere; effective inspection reports the platform default reason; explicit selections retain their meaning, system ceilings bind, mode is independent |
 | `max_mode` | Same mode vocabulary | Absent = no system maximum; system-only, does not select a mode |
-| `roots` | Array of `{path="...", access="read"\|"read-write"}` | Under strict levels, absent declaration adds read-write `~/Gits` when present. Adaptive omits that implicit root; `[]` clears configured roots, while adaptive derived roots remain. System declarations cap additional roots |
+| `roots` | Array of `{path="...", access="read"\|"read-write"}` | Under strict levels, no extra roots are granted by default. `[]` clears configured roots, while adaptive derived roots remain. System declarations cap additional roots |
 | `exec_paths` | Array of paths | Empty; extra read/executable roots, under system root bounds |
 | `exec.env` | `inherit`, `core`, `allowlist` | `inherit` |
 | `exec.env_allowlist` | Array of environment names | Empty; used only with `allowlist` |
 | `network` | `on`, `off` | `on`; explicit `--offline` cannot be cleared by this setting |
-| `orchestration.mode` | `observe`, `active` | `observe`; see [orchestration](../integrations/orchestration.md) |
 | `permissions.judge` | Full model slug or `none` | Absent prefers a supplied same-provider review model, otherwise the active model; `none` disables advisory generation |
 | `permissions.allow` | Array of canonical predicates | Empty contribution |
 | `permissions.deny` | Array of canonical predicates | Empty contribution; system denies remain immutable |
@@ -122,6 +121,8 @@ higher or lower layer supplies a value.
 | `ui.keybindings` | Map of action names to key-chord arrays | User-only shortcut overrides; an empty array removes an action's shortcuts |
 | `ui.vim` | Boolean | False; user-only Vim composer preference, also selected by `--vim` |
 | `mcp.servers.NAME` | Complete tagged server entry (optional `enabled = false` detaches it from session start) or tombstone | No configured external server |
+| `instructions.shared_root` | Absolute shared ancestor directory; user layer only | Absent: discover from the repository root; grants no sandbox authority |
+| `instructions.exclude_roots` | Array of absolute subtree directories; user layer only | Empty; repositories inside an excluded subtree do not inherit shared instructions |
 | `hooks` | Ordered array of hook entries | Empty contribution; hooks combine across admitted sources |
 
 `permissions` is a whole-block override, not a merge of individual lists.
@@ -134,8 +135,7 @@ fail closed (read refuses, grep skips). Exec refuses protected paths declared
 in argv, including resolved symlink targets, for foreground and background
 calls. This check does not analyze dynamic program code or sanitize arbitrary
 process output.
-The first `ego roots add` writes an explicit list and replaces implicit
-`~/Gits` access. Removing all stored roots leaves an explicit empty list. Use
+The first `ego roots add` writes an explicit list of additional roots. Removing all stored roots leaves an explicit empty list. Use
 `ego config unset roots` to restore absence. Extra execution grants require
 `exec_paths` in the user/system file or invocation flags; `ego roots` cannot
 express them. Use `ego config set 'exec_paths=["/absolute/path"]'` to edit `exec_paths`. Restart or resume the
@@ -170,7 +170,7 @@ diagnostic notes. Source: [status providers](../../crates/ego-cli/src/status_pro
 ## Profiles and managed edits
 
 A profile accepts `model`, `max_output_tokens`, `thinking`, `mode`, `sandbox`, `roots`, `exec`,
-`exec_paths`, `network`, `orchestration`, `permissions`, `budget`, and `mcp`.
+`exec_paths`, `network`, `permissions`, `budget`, and `mcp`.
 It does not accept base-only `bare`, `cache`, `max_mode`, `auth`, `ui`, or `hooks`.
 Only `profile.ci` accepts `session_dir` and `artifact_dir`, both absent by default.
 
@@ -312,7 +312,6 @@ prices are shipped. Monetary limits require enough known rates for admission.
 | API key variables | [Provider table](../guides/providers.md) |
 | `EGO_LOG`, `EGO_LOG_FILE` | Opt-in diagnostic filtering/destination; see [troubleshooting](../guides/troubleshooting.md) |
 | `VISUAL`, `EDITOR` | External config editor selection |
-| `TUIC_SOCKET` | Native orchestration connection |
 | `$EGO_HOME/sessions` | Default durable session store; invocation `--session-dir` can override |
 | `$EGO_HOME/auth.json` | Private provider credentials; never publish or inspect it for troubleshooting output |
 
@@ -356,3 +355,24 @@ Read a fresh snapshot, recompute the change, and retry with its revision; never
 retry the stale token or fall back to an unconditional write. Successful writes
 use the batch receipt above; obtain the next revision with a fresh snapshot.
 Revisions use a private keyed digest and do not disclose secret configuration.
+
+## Shared instruction hierarchy
+
+Edit `$EGO_HOME/config.toml` (`~/.ego/config.toml` by default) to opt into a
+shared hierarchy. This is separate from file access: declare `roots` when the
+sandbox must also reach files outside the workspace.
+
+```toml
+roots = [{ path = "/shared/projects", access = "read-write" }]
+
+[instructions]
+shared_root = "/shared/projects"
+exclude_roots = ["/shared/projects/scratch"]
+```
+
+Only repositories inside the canonical shared root inherit its instructions.
+Exclusions follow canonical paths, including symlinks. A missing shared root or
+invalid link refuses instruction discovery; a missing exclusion is inert.
+Project configuration cannot widen this user-owned discovery boundary. Use
+`ego config edit` to edit these keys; the typed `config set` vocabulary does not
+include instruction paths. No coordinator file bridge or landing command is offered.

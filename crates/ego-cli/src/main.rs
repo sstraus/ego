@@ -141,14 +141,6 @@ async fn ordinary_main() -> std::process::ExitCode {
                     mcp_errors: Vec::new(),
                 }
             }
-            Ok(Invocation::Orchestrator(args)) => Ended {
-                termination: ego_cli::orchestrator::execute(&args, &out).await,
-                session: ego_core::event::id::SessionId::new(),
-                state: ego_core::state::SessionState::default(),
-                result: serde_json::Value::String(String::new()),
-                selected_session: None,
-                mcp_errors: Vec::new(),
-            },
             Ok(Invocation::Config(args)) => {
                 let mut running = Box::pin(ego_cli::config::execute(&args, &out, &cancel));
                 let termination = tokio::select! {
