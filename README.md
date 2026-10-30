@@ -29,6 +29,10 @@ these are publication instructions, not evidence that a release exists.
 brew install sstraus/tap/ego
 ```
 
+Homebrew installs Bash, Zsh, and Fish completions in its standard completion
+directories. PowerShell and Elvish scripts are available under
+`$(brew --prefix ego)/share/ego/completions/`.
+
 ### Direct download
 
 The release provides plain executables and individual SHA256 files:
@@ -42,7 +46,9 @@ The release provides plain executables and individual SHA256 files:
 | Windows x86_64 | `ego-windows-x64.exe` |
 
 Linux binaries require GLIBC 2.35 or newer. Target-triple `.tar.gz` archives
-(`.zip` on Windows) remain available, together with `SHA256SUMS`.
+(`.zip` on Windows) remain available, together with `SHA256SUMS`. Each archive
+includes a `completions/` directory with Bash, Zsh, Fish, PowerShell, and Elvish
+scripts. Use the archive if you need completion files with a direct download.
 For example, on Apple Silicon, download and verify before installation:
 
 ```sh

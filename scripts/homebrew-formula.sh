@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate the formula from the same plain-binary checksums as the release.
+# Generate the formula from release archives, including shell completions.
 set -euo pipefail
 tag=${1:?usage: homebrew-formula.sh <tag> <owner/repo> <asset-directory>}
 repository=${2:?}
@@ -16,7 +16,13 @@ for os in macos linux; do
   echo "  on_$os do"
   for cpu in arm intel; do
     arch=arm64; [[ $cpu != intel ]] || arch=x64
-    asset="ego-$os-$arch"
+    case "$os-$arch" in
+      macos-arm64) target=aarch64-apple-darwin ;;
+      macos-x64) target=x86_64-apple-darwin ;;
+      linux-arm64) target=aarch64-unknown-linux-gnu ;;
+      linux-x64) target=x86_64-unknown-linux-gnu ;;
+    esac
+    asset="ego-$target.tar.gz"
     read -r checksum filename < "$directory/$asset.sha256"
     [[ $checksum =~ ^[0-9a-fA-F]{64}$ && $filename == "$asset" ]] || {
       echo "Invalid checksum file for $asset" >&2; exit 2;
@@ -31,7 +37,11 @@ done
 cat <<'EOF'
 
   def install
-    bin.install cached_download => "ego"
+    bin.install "ego"
+    bash_completion.install "completions/ego.bash" => "ego"
+    zsh_completion.install "completions/_ego"
+    fish_completion.install "completions/ego.fish"
+    (pkgshare/"completions").install "completions/_ego.ps1", "completions/ego.elv"
   end
 
   test do
