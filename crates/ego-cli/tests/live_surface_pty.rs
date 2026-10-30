@@ -6259,7 +6259,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 35] = [
+    const COMMANDS: [&str; 34] = [
         "help",
         "model",
         "thinking",
@@ -6291,7 +6291,6 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "expand",
         "skills",
         "hooks",
-        "memory",
         "init",
         "retry",
         "version",
