@@ -303,6 +303,101 @@ fn refresh_discovery_responses(token_response: &str) -> Vec<McpHttpResponse> {
 }
 
 #[test]
+fn login_accepts_narrowed_scope_without_requiring_every_advertised_scope() {
+    // Catches: advertised optional product scopes are treated as mandatory grants.
+    let http = OAuthHttp::with_responses(refresh_discovery_responses(
+        r#"{"access_token":"narrowed-access","token_type":"Bearer","scope":"tools:read"}"#,
+    ));
+    let credentials = Arc::new(RecordingCredentials::new());
+    let result = futures::executor::block_on(login(
+        login_request(),
+        http,
+        Arc::new(RecordingInteraction {
+            captured: Mutex::new(None),
+        }),
+        Arc::clone(&credentials) as Arc<dyn CredentialStore>,
+    ))
+    .expect("a nonempty subset grant completes login");
+    let bundle = McpCredentialBundle::decode(
+        credentials
+            .get(result.credential_key())
+            .unwrap()
+            .expect("persisted grant"),
+    )
+    .unwrap();
+    assert_eq!(bundle.scopes(), &["tools:read"]);
+    assert_eq!(
+        bundle.access_token().expose_secret_bytes(),
+        b"narrowed-access"
+    );
+    assert_eq!(*credentials.puts.lock().unwrap(), 1);
+}
+
+#[test]
+fn login_scope_defaults_and_set_normalization_do_not_invent_or_drop_grants() {
+    // Catches: omitted scope loses permissions, or duplicate/order changes corrupt the grant.
+    for (scope, expected) in [
+        (None, vec!["tools:execute", "tools:read"]),
+        (Some("tools:read tools:read"), vec!["tools:read"]),
+        (
+            Some("tools:read tools:execute tools:read"),
+            vec!["tools:execute", "tools:read"],
+        ),
+    ] {
+        let mut token = serde_json::json!({"access_token":"scope-access", "token_type":"Bearer"});
+        if let Some(scope) = scope {
+            token["scope"] = scope.into();
+        }
+        let http = OAuthHttp::with_responses(refresh_discovery_responses(&token.to_string()));
+        let credentials = Arc::new(RecordingCredentials::new());
+        let result = futures::executor::block_on(login(
+            login_request(),
+            http,
+            Arc::new(RecordingInteraction {
+                captured: Mutex::new(None),
+            }),
+            Arc::clone(&credentials) as Arc<dyn CredentialStore>,
+        ))
+        .expect("default or normalized scope grant");
+        let bundle = McpCredentialBundle::decode(
+            credentials
+                .get(result.credential_key())
+                .unwrap()
+                .expect("persisted grant"),
+        )
+        .unwrap();
+        assert_eq!(bundle.scopes(), expected, "token scope {scope:?}");
+    }
+}
+
+#[test]
+fn login_rejects_empty_or_expanded_scope_grants_without_publishing_credentials() {
+    // Catches: accepting no requested permission or silently adding an unrequested one.
+    for scope in ["", "   ", "tools:read tools:admin"] {
+        let token = serde_json::json!({"access_token":"invalid-scope-access", "token_type":"Bearer", "scope":scope});
+        let http = OAuthHttp::with_responses(refresh_discovery_responses(&token.to_string()));
+        let credentials = Arc::new(RecordingCredentials::new());
+        let error = futures::executor::block_on(login(
+            login_request(),
+            http,
+            Arc::new(RecordingInteraction {
+                captured: Mutex::new(None),
+            }),
+            Arc::clone(&credentials) as Arc<dyn CredentialStore>,
+        ))
+        .err()
+        .expect("empty or expanded grant must fail");
+        assert_eq!(
+            error.failure(),
+            ego_mcp::McpFailure::Authorization,
+            "{scope:?}"
+        );
+        assert!(credentials.values.lock().unwrap().is_empty(), "{scope:?}");
+        assert_eq!(*credentials.puts.lock().unwrap(), 0, "{scope:?}");
+    }
+}
+
+#[test]
 fn login_uses_cimd_pkce_metadata_and_issuer_resource_bound_token_identity() {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
@@ -841,7 +936,7 @@ fn explicit_login_does_not_follow_an_initial_redirect_to_an_unconfigured_server(
 }
 
 #[test]
-fn login_rejects_a_token_that_does_not_step_up_to_the_required_scope() {
+fn login_rejects_a_token_with_only_unrequested_scopes() {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
@@ -939,7 +1034,7 @@ fn login_fails_closed_when_the_authorization_code_is_rejected() {
 }
 
 #[test]
-fn issuer_resource_or_audience_mismatch_and_scope_step_up_fail_closed() {
+fn issuer_resource_or_audience_mismatch_and_invalid_client_metadata_fail_closed() {
     let http = OAuthHttp::with_responses([
         McpHttpResponse::json(
             200,
