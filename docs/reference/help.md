@@ -1,6 +1,6 @@
 # CLI help from a verified binary
 
-Captured from `ego 0.4.0` on 2026-10-29. Binary SHA-256: `6e7a97e7e878f6a52de6743ac9da837dd1bf109a072bd4fcf63863a5294e6be6`.
+Captured from `ego 0.4.0` on 2026-10-30. Binary SHA-256: `9edc678efbbcf456311bc9db1c7583e996b08d57839163e254cdb89a4382fa7b`.
 
 This is a dated help-only snapshot, not a separate command specification. The [generated reference](cli.md) follows the source parser. For your installed binary, use `ego COMMAND SUBCOMMAND --help`.
 
@@ -17,30 +17,29 @@ Interactive:
   ego -m ollama/qwen3
 
 Commands:
-  run           Run an agent from a prompt, headless
-  resume        Continue a session; terminal picker, otherwise latest in this workspace
-  continue      Continue a session; terminal picker, otherwise latest in this workspace
-  fork          Fork a session at its tip or after a completed turn
-  rm            Delete a stored session
-  compact       Compact a session into its deterministic successor
-  export        Export a session or sanitized bundle
-  ls            List sessions (this workspace; --all for every one)
-  usage         Report usage, context and cost for this workspace
-  models        List the shared model catalogue
-  hooks         Inspect the admitted hook catalogue
-  doctor        Print a read-only redacted health snapshot
-  checkpoint    Preview and selectively restore session-owned file edits
-  setup         Inspect expected work without running effects
-  acp           Serve the Agent Client Protocol on stdio
-  a2a           Serve Agent2Agent discovery information
-  auth          Manage subscription credentials
-  mcp           Manage configured MCP servers
-  config        Manage stored user configuration
-  roots         Manage perimeter roots
-  rules         Inspect and manage permission rules
-  mcp-server    Serve scoped ego runs over MCP on stdio
-  orchestrator  Inspect native orchestration without model generation
-  worktree      Inspect or safely remove a retained local worktree
+  run         Run an agent from a prompt, headless
+  resume      Continue a session; terminal picker, otherwise latest in this workspace
+  continue    Continue a session; terminal picker, otherwise latest in this workspace
+  fork        Fork a session at its tip or after a completed turn
+  rm          Delete a stored session
+  compact     Compact a session into its deterministic successor
+  export      Export a session or sanitized bundle
+  ls          List sessions (this workspace; --all for every one)
+  usage       Report usage, context and cost for this workspace
+  models      List the shared model catalogue
+  hooks       Inspect the admitted hook catalogue
+  doctor      Print a read-only redacted health snapshot
+  checkpoint  Preview and selectively restore session-owned file edits
+  setup       Inspect expected work without running effects
+  acp         Serve the Agent Client Protocol on stdio
+  a2a         Serve Agent2Agent discovery information
+  auth        Manage subscription credentials
+  mcp         Manage configured MCP servers
+  config      Manage stored user configuration
+  roots       Manage perimeter roots
+  rules       Inspect and manage permission rules
+  mcp-server  Serve scoped ego runs over MCP on stdio
+  worktree    Inspect or safely remove a retained local worktree
 
       --worktree <BRANCH>
           Create a retained managed worktree on this explicitly approved new branch
@@ -1304,31 +1303,6 @@ Options:
       --retained-requests <RETAINED_REQUESTS>
       --max-resource-bytes <MAX_RESOURCE_BYTES>
   -h, --help                                       Print help
-```
-
-## `ego orchestrator --help`
-
-```text
-Usage: ego orchestrator <COMMAND>
-
-Commands:
-  brief  Inspect tracked children and unread results without model generation or inbox reads
-  help   Print this message or the help of the given subcommand(s)
-
-Options:
-  -h, --help  Print help
-```
-
-## `ego orchestrator brief --help`
-
-```text
-Inspect tracked children and unread results without model generation or inbox reads
-
-Usage: ego orchestrator brief [OPTIONS]
-
-Options:
-      --root <ROOT>
-  -h, --help         Print help
 ```
 
 ## `ego worktree --help`

@@ -191,7 +191,7 @@ session/fork ok
 The replayed message described the refused
 `http://127.0.0.1:1/api/tags` connection. Ordering of asynchronous updates can
 vary. ego also wrote expected diagnostics to stderr: an absent isolated
-`~/Gits` default root, sandbox-off warnings, and no effective confinement.
+explicit shared-tree roots, sandbox-off warnings, and no effective confinement.
 These are not JSON-RPC stdout. The TypeScript example closes the child's stdin
 before transport teardown; without this EOF, the initial probe hung after the
 last successful method and was stopped by the bounded runner. The corrected

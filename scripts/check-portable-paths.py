@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Reject personal filesystem literals in shipped Rust source, not test fixtures."""
+"""Reject personal filesystem literals in shipped source and templates, not test fixtures."""
 import argparse
 import re
 import subprocess
 from pathlib import Path
 
 # Treat strings/comments as single tokens so braces inside them do not close items.
-TOKENS = re.compile(r'r(?P<hash>\#*)"[\s\S]*?"(?P=hash)|b?"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/|[{}]|[^{}"/r]+|.', re.DOTALL)
-TEST_ITEM = re.compile(r'#\[cfg\((?:test|all\(test,[^\n]*|all\([^\n]*,\s*test\))\)\]')
-PERSONAL = re.compile(r'(?:\bGits(?:[/\\]|\b)|/Users/|/home/|example\.user|(?:~|\$HOME|\$\{HOME\})/(?:personal|repos|projects|work|\.tmp)(?:[/\\]|\b))', re.IGNORECASE)
+TOKENS = re.compile(
+    r"""r(?P<hash>\#*)"[\s\S]*?"(?P=hash)|b?"(?:\\.|[^"\\])*"|b?'(?:\\(?:u\{[0-9a-fA-F]+\}|.)|[^'\\])'|//[^\n]*|/\*[\s\S]*?\*/|[{};]|[^{}"/r';]+|.""",
+    re.DOTALL,
+)
+TEST_ITEM = re.compile(r'#\[(?:test|cfg\((?:test|all\(test,[^\n]*|all\([^\n]*,\s*test\))\))\]')
+PERSONAL = re.compile(r'(?:\bGits(?:[/\\]|\b)|/Users/|/home/|example\.user|tuic-land(?:-cleanup)?\.sh|(?:^"|^r\#*")(?:personal|projects|repos|work)(?:[/\\]|"|\b)|(?:~|\$HOME|\$\{HOME\})/(?:personal|repos|projects|work|\.tmp)(?:[/\\]|\b))', re.IGNORECASE)
 
 
 def production(text):
@@ -23,6 +26,8 @@ def production(text):
             if value == '{':
                 depth += 1
                 opened = True
+            elif value == ';' and not opened:
+                break
             elif value == '}':
                 depth -= 1
                 if opened and depth == 0:
@@ -42,20 +47,34 @@ def violations(text):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--self-test', action='store_true', help='check scanner regression cases')
     parser.add_argument('--git-ref', help='inspect a committed tree instead of the worktree')
     args = parser.parse_args()
+    if args.self_test:
+        for text in ['let root = home.join("Gits");', 'let path = r#"/Users/alice/private"#;', 'let path = "/home/alice/work";', 'let root = home.join("personal/tools");']:
+            assert list(violations(text)), text
+        for text in ['#[cfg(test)] mod tests { let path = "Gits"; }', '#[cfg(all(test, unix))] mod tests { let path = r#"Gits/{fixture}"#; }', 'let path = "https://github.com/sstraus/ego";']:
+            assert not list(violations(text)), text
+        assert not list(violations("#[cfg(test)] mod tests { let brace = '}'; let fixture = \"Gits\"; }"))
+        assert list(violations('#[cfg(test)] use test_only; fn shipped() { let path = "Gits"; }'))
+        assert list(violations('#[cfg(test)] mod tests { let path = "Gits"; } let path = "Gits";'))
+        print('Portable path scanner regressions: PASS')
+        return
     root = Path(__file__).resolve().parent.parent
     if args.git_ref:
         names = subprocess.check_output(['git', 'ls-tree', '-r', '--name-only', args.git_ref, 'crates'], cwd=root, text=True).splitlines()
     else:
-        names = [str(p.relative_to(root)) for p in (root / 'crates').rglob('*.rs')]
+        names = subprocess.check_output(['git', 'ls-files', '--cached', '--others', '--exclude-standard', 'crates'], cwd=root, text=True).splitlines()
     bad = []
     for name in sorted(names):
         path = Path(name)
-        if path.suffix != '.rs' or 'src' not in path.parts or 'tests' in path.parts or path.stem == 'tests' or path.stem.endswith('_tests'):
+        if path.suffix not in {'.rs', '.txt', '.md', '.json', '.sh', '.py'} or ('src' not in path.parts and path.name != 'build.rs') or {'tests', 'fixtures'}.intersection(path.parts) or path.stem == 'tests' or path.stem.endswith('_tests'):
+            continue
+        if not args.git_ref and not (root / path).is_file():
             continue
         text = subprocess.check_output(['git', 'show', f'{args.git_ref}:{name}'], cwd=root, text=True) if args.git_ref else (root / path).read_text()
-        bad.extend(f'{name}:{line}: {value}' for line, value in violations(text))
+        matches = violations(text) if path.suffix == '.rs' else ((number, line) for number, line in enumerate(text.splitlines(), 1) if PERSONAL.search(line))
+        bad.extend(f'{name}:{line}: {value}' for line, value in matches)
     if bad:
         print('\n'.join(bad))
         raise SystemExit(1)

@@ -27,7 +27,6 @@
 - [A2A discovery](integrations/a2a.md)
 - [Skills and custom commands](integrations/skills.md)
 - [Hooks](integrations/hooks.md)
-- [Native orchestration](integrations/orchestration.md)
 
 # Reference
 

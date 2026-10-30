@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tempfile::tempdir;
 
 #[test]
-fn trusted_project_instructions_begin_at_the_shared_gits_root() {
+fn configured_shared_instructions_respect_exclusions_and_repository_boundaries() {
     let tree = tempdir().expect("fixture directory");
     let gits = tree.path().join("Gits");
     let project = gits.join("personal/ego");
@@ -34,7 +34,11 @@ fn trusted_project_instructions_begin_at_the_shared_gits_root() {
         std::fs::write(gits.join(relative), text).expect("fixture instruction");
     }
 
-    let root = crate::trust::instruction_discovery_root(&project, tree.path())
+    let instructions = ego_core::config::InstructionConfig {
+        shared_root: Some(gits.clone()),
+        exclude_roots: vec![gits.join(".tmp")],
+    };
+    let root = crate::trust::instruction_discovery_root(&project, &instructions)
         .expect("canonical instruction discovery root");
     let cwd = std::fs::canonicalize(cwd).expect("canonical working directory");
     let loaded = ego_core::config::load(
@@ -65,7 +69,7 @@ fn trusted_project_instructions_begin_at_the_shared_gits_root() {
     let lookalike = tree.path().join("Gits-elsewhere/project");
     std::fs::create_dir_all(&lookalike).expect("lookalike workspace");
     assert_eq!(
-        crate::trust::instruction_discovery_root(&lookalike, tree.path())
+        crate::trust::instruction_discovery_root(&lookalike, &instructions)
             .expect("canonical lookalike root"),
         std::fs::canonicalize(lookalike).expect("canonical lookalike"),
         "a similarly named directory does not inherit shared instructions"
@@ -74,7 +78,7 @@ fn trusted_project_instructions_begin_at_the_shared_gits_root() {
     let scratch = gits.join(".tmp/test-fixture");
     std::fs::create_dir_all(&scratch).expect("scratch workspace");
     assert_eq!(
-        crate::trust::instruction_discovery_root(&scratch, tree.path())
+        crate::trust::instruction_discovery_root(&scratch, &instructions)
             .expect("canonical scratch root"),
         std::fs::canonicalize(scratch).expect("canonical scratch"),
         "scratch fixtures do not inherit the human's shared instructions"
@@ -3192,7 +3196,6 @@ fn native_search_registry_does_not_require_or_select_exa() {
             None,
             None,
             ego_core::permit::EnvPolicy::Inherited,
-            ego_core::orchestrator::Mode::Observe,
             Some(model),
         )
         .unwrap();
@@ -3207,7 +3210,6 @@ fn native_search_registry_does_not_require_or_select_exa() {
             None,
             None,
             ego_core::permit::EnvPolicy::Inherited,
-            ego_core::orchestrator::Mode::Observe,
             Some(model),
         )
         .unwrap();
@@ -3881,4 +3883,23 @@ fn sandbox_grant_decline_does_not_widen_the_session() {
         grants.ask(&grant, "/bin/cat /outside/input")
     ));
     assert!(grants.granted().is_empty());
+}
+
+// Catches: the retired private coordinator tools leak back into the offered catalogue.
+#[test]
+fn portable_defaults_do_not_offer_private_coordinator_tools() {
+    let registry = composition::tools(
+        None,
+        None,
+        Some("coordinator"),
+        None,
+        ego_core::permit::EnvPolicy::Inherited,
+    )
+    .unwrap();
+    assert!(
+        registry
+            .iter()
+            .all(|tool| !tool.descriptor().name.starts_with("orchestrator_")
+                && tool.descriptor().name != "memory_lookup")
+    );
 }

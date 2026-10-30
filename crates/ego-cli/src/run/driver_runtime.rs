@@ -2252,7 +2252,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         )
         .with_skill_invocation_port(skill_owner.clone())
         .with_background_task_port(skill_owner)
-        .with_delegation_host(std::env::var_os("TUIC_SESSION").is_some());
+        .with_task_guidance();
     let loop_ = match active.replayed() {
         Some(replayed) => loop_.with_replayed_context(replayed),
         None => loop_,
@@ -2371,7 +2371,6 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
             .exec
             .policy()
             .map_err(|error| CompactionError::Internal(error.to_string()))?,
-        super::composition::orchestration_mode(effective),
         args.model
             .as_deref()
             .or_else(|| effective.model.as_ref().map(|model| model.0.as_str())),
@@ -2658,7 +2657,6 @@ fn rescanned_skill_tools(
             .map(|profile| profile.name.as_str()),
         Some(Arc::new(jsonl_store.history())),
         exec_environment,
-        super::composition::orchestration_mode(effective),
         args.model
             .as_deref()
             .or_else(|| effective.model.as_ref().map(|model| model.0.as_str())),

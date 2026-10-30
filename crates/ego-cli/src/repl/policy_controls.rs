@@ -179,7 +179,6 @@ pub(crate) struct CliGenerationPolicySource {
     selection: GenerationPolicySelection,
     workspace: CanonPath,
     roots: Vec<ProfileRoot>,
-    coordinator: bool,
     read_perimeter: ego_core::permit::ReadPerimeter,
     human: Option<Arc<dyn HumanApprover>>,
 }
@@ -194,7 +193,6 @@ impl CliGenerationPolicySource {
             selection,
             workspace,
             roots: Vec::new(),
-            coordinator: false,
             read_perimeter: ego_core::permit::ReadPerimeter::default(),
             human,
         }
@@ -214,14 +212,6 @@ impl CliGenerationPolicySource {
         self
     }
 
-    pub(crate) fn with_coordinator_profile(
-        mut self,
-        profile: Option<&ego_core::config::ActiveProfileProvenance>,
-    ) -> Self {
-        self.coordinator = profile.is_some_and(|profile| profile.name == "coordinator");
-        self
-    }
-
     fn engine(&self, snapshot: GenerationPolicySnapshot) -> Arc<PolicyEngine> {
         Arc::new(
             match self.human.as_ref() {
@@ -234,8 +224,7 @@ impl CliGenerationPolicySource {
                 None => PolicyEngine::new(self.workspace.clone(), snapshot.mode, snapshot.ruleset),
             }
             .with_profile_roots(self.roots.clone())
-            .with_read_perimeter(self.read_perimeter.clone())
-            .with_coordinator_profile(self.coordinator),
+            .with_read_perimeter(self.read_perimeter.clone()),
         )
     }
 }
@@ -253,12 +242,7 @@ impl GenerationPolicySource for CliGenerationPolicySource {
             .selection
             .capture()
             .map_err(|error| error.to_string())?;
-        let capture = if self.coordinator {
-            GenerationPolicyCapture::with_coordinator_profile
-        } else {
-            GenerationPolicyCapture::with_profile_roots
-        };
-        capture(
+        GenerationPolicyCapture::with_profile_roots(
             self.workspace.clone(),
             self.roots.clone(),
             snapshot.mode,

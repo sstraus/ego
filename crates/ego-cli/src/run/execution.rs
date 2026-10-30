@@ -321,8 +321,7 @@ fn prepare_resume_phase<'store>(
             human,
         )
         .with_profile_roots(profile_roots)
-        .with_read_perimeter(&settings.confinement)
-        .with_coordinator_profile(settings.effective.active_profile.as_ref()),
+        .with_read_perimeter(&settings.confinement),
     );
     let invocation = RunInvocationId::new();
     let run_id = RunId::new(scoped.session_id, invocation.uuid());

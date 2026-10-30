@@ -9,7 +9,7 @@ configuration and instructions are admitted. These are separate authorities.
 | Mode | Purpose |
 | --- | --- |
 | `plan` | Prevent mutating operations; inspect and reason |
-| `default` | Free reads, prompts for uncovered writes, honors allow rules and coordinator bounded admission |
+| `default` | Free reads, prompts for uncovered writes, honors explicit allow rules |
 | `auto` | Use deterministic low/bounded analysis, a judge where needed, then ordinary escalation |
 | `accept-edits` | Admit workspace file edits; execution, network, opaque tools and external writes retain their normal checks |
 | `yolo` | Relax ordinary session approval; retain system denies, confinement, offline, budgets, and hard boundaries |
@@ -135,10 +135,9 @@ or traversal subtree; writes do not gain this reach. Adaptive also retains its
 captured credential exclusions. Under `ro` and `workspace`, these tools retain
 the workspace and admitted extra-root boundary.
 
-Under strict levels, absent an explicit roots declaration, an existing `~/Gits` is added as a read-write
-extra root. Adaptive omits that implicit root. Use `ego config set 'roots=[]'` to clear configured roots; local/flag
-root declarations have stricter read-only constraints and cannot replace this
-user declaration. The effective perimeter reports the resulting source.
+Under strict levels, no extra home-tree root is granted by default. Use the user
+`roots` list to grant additional paths. `roots=[]` clears configured roots;
+adaptive derived roots remain. The effective perimeter reports the source.
 
 For `ro` and `workspace`, outside files remain closed unless the native backend
 admits their root. On macOS, credential-shaped files outside the workspace and
@@ -266,11 +265,9 @@ other prompt-only cases) are listed in that test. Agent instruction files have
 an executor write floor and do not depend on the judge prompt.
 
 **Root-list traps:** `ego roots add PATH --access read` edits the stored list,
-not the implicit default. The first addition replaces the default `~/Gits`
-grant. Removing the final stored root with `ego roots rm PATH` leaves
-`roots = []`; it does not restore the default. Use `ego config unset roots`
-to remove the declaration and restore the implicit default, if no other layer
-selects roots. `ego roots ls` shows stored roots as access/path columns, not the
+not the running session perimeter. Removing the final stored root with `ego roots rm PATH` leaves
+`roots = []`; it does not grant extra paths. Use `ego config unset roots`
+to remove the declaration and inherit other layers, if any. `ego roots ls` shows stored roots as access/path columns, not the
 effective perimeter. Its empty messages distinguish an absent declaration from
 an explicit empty list. Root edits report saved, removed or unchanged roots and
 remind the user that running sessions keep their current permissions.

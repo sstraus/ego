@@ -14529,7 +14529,6 @@ mod turn {
 
         #[derive(Default)]
         struct TaskHost {
-            tuic: bool,
             background: Option<Arc<dyn ego_core::turn::BackgroundTaskPort>>,
             prior_snapshot: Option<ego_core::session::PromptSnapshot>,
             refresh: bool,
@@ -14597,7 +14596,7 @@ mod turn {
                 tools,
             )
             .unwrap();
-            loop_ = loop_.with_delegation_host(host.tuic);
+            loop_ = loop_.with_task_guidance();
             if host.refresh {
                 loop_ = loop_.with_prompt_refresh();
             }
@@ -14647,7 +14646,6 @@ mod turn {
                 vec![],
                 vec![],
                 TaskHost {
-                    tuic: false,
                     background: Some(port.clone()),
                     ..TaskHost::default()
                 },
@@ -14692,80 +14690,32 @@ mod turn {
         }
 
         #[test]
-        fn task_guidance_under_tuic_does_not_send_long_work_to_in_turn_children() {
-            // Catches: TUIC agents receiving standalone task-first guidance in prompt or tool schema.
-            for tuic in [false, true] {
-                let fx = Fixture::new(vec![]);
-                let generator =
-                    Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
-                run_task_host_case(
-                    &fx,
-                    &generator,
-                    CancelToken::new(),
-                    None,
-                    vec![],
-                    vec![],
-                    TaskHost {
-                        tuic,
-                        background: None,
-                        refresh: true,
-                        ..TaskHost::default()
-                    },
-                );
-                let calls = generator.calls();
-                let request = &calls[0];
-                let expected = if tuic {
-                    "prefer orchestrator_active for long delegated work"
-                } else {
-                    "For standalone delegation, use task"
-                };
-                let task = request
-                    .tools
-                    .iter()
-                    .find(|tool| tool.name == "task")
-                    .unwrap();
-                assert!(task.description.contains(expected), "{}", task.description);
-                assert!(request.messages.messages().iter().any(|message| message.role == Role::System && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains(expected)))));
-            }
-        }
-
-        #[test]
-        fn task_guidance_host_change_replaces_stale_prompt_authority_once() {
-            // Catches: resuming standalone history inside TUIC retaining task-first system guidance.
-            let prior = ego_core::session::PromptSnapshot {
-                epoch: EventId::new(),
-                identity: Some(format!(
-                    "ego test\n\n{}",
-                    ego_core::turn::delegation_guidance(false)
-                )),
-                system: None,
-            };
-            let mut snapshot = prior.clone();
-            for changed in [true, false] {
-                let fx = Fixture::new(vec![]);
-                let generator =
-                    Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
-                let (_, state) = run_task_host_case(
-                    &fx,
-                    &generator,
-                    CancelToken::new(),
-                    None,
-                    vec![],
-                    vec![],
-                    TaskHost {
-                        tuic: true,
-                        prior_snapshot: Some(snapshot.clone()),
-                        ..TaskHost::default()
-                    },
-                );
-                let next = state.prompt_snapshot.unwrap();
-                assert_eq!(next.epoch != snapshot.epoch, changed);
-                let text = next.identity.as_ref().unwrap();
-                assert!(text.contains("prefer orchestrator_active"));
-                assert!(!text.contains("For standalone delegation"));
-                assert_eq!(text.matches("Inside TUIC").count(), 1);
-                snapshot = next;
-            }
+        fn task_guidance_matches_the_durable_task_contract() {
+            // Catches: a host-specific retired bridge displaces the supported durable task API.
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([vec![AiEvent::Stop(StopReason::Stop)]]));
+            run_task_host_case(
+                &fx,
+                &generator,
+                CancelToken::new(),
+                None,
+                vec![],
+                vec![],
+                TaskHost {
+                    refresh: true,
+                    ..TaskHost::default()
+                },
+            );
+            let calls = generator.calls();
+            let task = calls[0]
+                .tools
+                .iter()
+                .find(|tool| tool.name == "task")
+                .unwrap();
+            let expected = ego_core::turn::delegation_guidance();
+            assert!(task.description.contains(expected));
+            assert!(calls[0].messages.messages().iter().any(|message| message.role == Role::System && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains(expected)))));
+            assert!(!task.description.contains("orchestrator_active"));
         }
 
         #[test]

@@ -5,7 +5,7 @@ permits those operations before a guarded port executes them. Listing a tool or
 including it in `--tools` does not grant access.
 
 Use `/tools` inside a session to inspect its current catalogue. `--tools` restricts
-built-ins; `--no-tools` offers none. Skills, MCP attachments, and orchestration
+built-ins; `--no-tools` offers none. Skills and MCP attachments
 can add admitted operations, subject to the same ceilings.
 
 ## Built-in effect tools
@@ -84,8 +84,6 @@ silent fallback between backends. See [web search reference](../reference/tools.
 | `history.search`, `history.open` | Read bounded prior user/assistant conversation through the store-bound history port; exclude tool payloads |
 | `memory_lookup` | Coordinator-profile-only lookup of decision/problem/handoff MDKB entries; absence/refusal is explicit |
 | Collapsed MCP operations | Discover and call external tools from one captured admitted catalogue |
-| `orchestrator_status`, `orchestrator_brief` | Observe native TUICommander children when its socket exists |
-| `orchestrator_active` | Opt-in guarded coordinator actions; see [orchestration](../integrations/orchestration.md) |
 
 The available catalogue depends on session composition, admitted extensions,
 provider capability, and configuration; these names are not a promise that every
@@ -111,7 +109,7 @@ Background exec settlement wakes an idle interactive session to process the
 retained result; the model need not repeatedly request `exec_status` while waiting.
 `history.search` accepts `query`; `history.open` accepts a session UUID. History
 is read-only conversational access across workspace roots, not arbitrary paths
-or authority to execute a prior tool call. Native TUICommander orchestration is
+or authority to execute a prior tool call. Coordination through the TUIC API is
 a different operation from the in-process depth-one `task` child.
 
 Sources: [task contract](../../crates/ego-core/src/turn/task.rs),
