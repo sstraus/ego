@@ -131,16 +131,16 @@ fn snapshot_with_perimeter(
     observe_bounded(probes, roots, Duration::from_secs(2))
 }
 
-// A blocked filesystem read cannot safely be killed in-process. Limit outstanding
-// read-only workers across repeated /doctor calls instead of leaking threads.
-static ACTIVE_PROBES: AtomicUsize = AtomicUsize::new(0);
+// A blocked filesystem read cannot safely be killed in-process. Partition the
+// worker budget by section so repeated slow reads cannot starve other diagnoses.
+static ACTIVE_PROBES: [AtomicUsize; 9] = [const { AtomicUsize::new(0) }; 9];
 const MAX_ACTIVE_PROBES: usize = 32;
 
-struct ProbePermit;
+struct ProbePermit(&'static AtomicUsize);
 
 impl Drop for ProbePermit {
     fn drop(&mut self) {
-        ACTIVE_PROBES.fetch_sub(1, Ordering::AcqRel);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -169,8 +169,10 @@ fn observe_bounded(
         .map(|probe| {
             let section = probe.section();
             let (send, receive) = mpsc::sync_channel(1);
-            let admitted = ACTIVE_PROBES.fetch_add(1, Ordering::AcqRel) < MAX_ACTIVE_PROBES;
-            let permit = ProbePermit;
+            let active = &ACTIVE_PROBES[section as usize];
+            let admitted =
+                active.fetch_add(1, Ordering::AcqRel) < MAX_ACTIVE_PROBES / ACTIVE_PROBES.len();
+            let permit = ProbePermit(active);
             if admitted {
                 let roots = roots.clone();
                 // Builder reports resource exhaustion instead of panicking and
@@ -987,10 +989,12 @@ mod bounded_tests {
             HealthStatus::Ok,
             "blocked session reads exhausted the worker cap for the fast ACP section"
         );
-        assert!(snapshot.sections[8]
-            .items
-            .iter()
-            .any(|item| item.id.to_string() == "acp.protocol"));
+        assert!(
+            snapshot.sections[8]
+                .items
+                .iter()
+                .any(|item| item.id.to_string() == "acp.protocol")
+        );
     }
 
     #[test]
