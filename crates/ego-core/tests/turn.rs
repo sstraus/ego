@@ -11154,7 +11154,7 @@ mod turn {
         }
 
         // Recorded events, not invented provider fixtures: regression case retained the live JSONL slices.
-        fn regression_case_attempts() -> Vec<(&'static str, Vec<AiEvent>)> {
+        fn recorded_attempts() -> Vec<(&'static str, Vec<AiEvent>)> {
             [
                 (
                     "exec",
