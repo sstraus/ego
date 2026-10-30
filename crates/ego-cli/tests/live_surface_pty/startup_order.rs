@@ -263,11 +263,11 @@ fn plain_flag_start_has_no_sgr() {
         .stdout
         .split_once(concat!("ego ", env!("CARGO_PKG_VERSION")))
         .expect("startup identity proves the interactive driver ran");
-    assert!(startup.contains("⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄"), "{startup:?}");
     assert!(
         !startup.contains("\x1b["),
         "plain startup contains terminal styling: {startup:?}"
     );
+    assert!(startup.contains("⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄"), "{startup:?}");
 }
 
 // Refuse immediately after the real startup block, before terminal-editor or
