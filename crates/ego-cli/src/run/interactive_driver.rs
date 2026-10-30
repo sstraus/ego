@@ -536,17 +536,25 @@ pub(super) async fn interactive_process(
         });
     }
 
-    // Identity precedes keyboard/configuration admission, trust, and provider/MCP
-    // setup. These paths keep their own diagnostics; none need buffering.
-    if !args.quiet && std::io::stdin().is_terminal() {
-        out.note(&format!("ego {}", env!("CARGO_PKG_VERSION")));
-    }
     let quiet = args.quiet;
     let environment = Environment::read();
-    let capabilities = Capabilities::of(&Terminal {
+    let terminal = Terminal {
         flag_plain: args.plain,
         ..Terminal::from_process(args.no_color, &environment)
-    });
+    };
+    let capabilities = Capabilities::of(&terminal);
+    // Identity precedes keyboard/configuration admission, trust, and provider/MCP
+    // setup. Use observed columns, not the renderer's minimum-width clamp.
+    if !quiet && std::io::stdin().is_terminal() {
+        if terminal.stdout_is_terminal
+            && terminal
+                .columns
+                .is_some_and(|width| width >= crate::render::startup_logo::WIDTH)
+        {
+            out.write(crate::render::startup_logo::render(capabilities.depth));
+        }
+        out.note(&format!("ego {}", env!("CARGO_PKG_VERSION")));
+    }
     let keyboard = match config::keyboard_preferences(args.vim) {
         Ok(preferences) => preferences,
         Err(error) => return Ended::refused(RunTermination::UsageError { message: error.0 }),
