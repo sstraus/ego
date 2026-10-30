@@ -443,3 +443,59 @@ fn blocked_session_log_does_not_hide_other_doctor_sections() {
             .expect("snapshot JSON");
     assert_eq!(json["sections"].as_array().expect("sections").len(), 9);
 }
+
+#[cfg(unix)]
+#[test]
+fn timed_out_doctor_does_not_claim_schema_validation_failed() {
+    let scratch = scratch();
+    let workspace = scratch.path();
+    let home = home_in(workspace);
+    let session = home.join("sessions/00000000-0000-7000-8000-000000000001");
+    fs::create_dir_all(&session).expect("session directory");
+    let log = session.join("events.jsonl");
+    assert!(
+        std::process::Command::new("mkfifo")
+            .arg(&log)
+            .status()
+            .expect("mkfifo")
+            .success()
+    );
+    // Real reads stay blocked until each child exits, not until a mock replies.
+    let _keep_open = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&log)
+        .expect("open FIFO");
+    for json in [false, true] {
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_ego"));
+        command
+            .arg("doctor")
+            .current_dir(workspace)
+            .env("EGO_HOME", &home)
+            .env("HOME", &home)
+            .env_remove("EGO_PROFILE")
+            .env_remove("EGO_LOG");
+        if json {
+            command.arg("--json");
+        }
+        let output = command.output().expect("run doctor");
+        assert_eq!(output.status.code(), Some(1), "json={json}");
+        let stdout = String::from_utf8(output.stdout).expect("snapshot UTF-8");
+        let stderr = String::from_utf8(output.stderr).expect("diagnostic UTF-8");
+        assert!(stdout.contains("timed out"), "json={json}: {stdout}");
+        if json {
+            let snapshot: serde_json::Value =
+                serde_json::from_str(&stdout).expect("protocol-clean JSON snapshot");
+            assert_eq!(snapshot["v"], 1);
+            assert_eq!(snapshot["sections"].as_array().expect("sections").len(), 9);
+        }
+        assert!(
+            !stderr.contains("schema"),
+            "doctor timeout falsely diagnosed as schema failure: {stderr}"
+        );
+        assert!(
+            stderr.contains("the task did not complete successfully"),
+            "missing honest task-failure diagnostic: {stderr}"
+        );
+    }
+}
