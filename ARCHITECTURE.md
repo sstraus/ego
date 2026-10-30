@@ -5,7 +5,9 @@ maintainer** after adversarial review
 (`ARCHITECTURE.md`) and triage (`ARCHITECTURE.md`).
 Resolves the eight open questions of `SPEC.md` §4. Evidence citations refer to
 the dossier in `docs/`. Statements labelled M5 target are required final
-behavior, not claims about the current binary.
+behavior, not claims about the current binary. Release `0.4.0` is tagged; the
+[post-tag record](ARCHITECTURE.md) distinguishes
+implemented M5 boundaries from remaining whole-product proof and lifecycle work.
 
 ## 0. Product stance
 

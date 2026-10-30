@@ -19,9 +19,9 @@ the durable session machinery.
 
 ## Install
 
-Published installation methods below become available after the first GitHub
-release and Homebrew tap setup. This checkout does not yet have a Git remote;
-these are publication instructions, not evidence that a release exists.
+Version `0.4.0` is tagged in the [public repository](https://github.com/sstraus/ego/releases/tag/v0.4.0).
+Release assets become available when the release workflow succeeds. Homebrew
+availability depends on the tap update; a tag alone does not prove either step.
 
 ### Homebrew (macOS and Linux)
 
@@ -155,19 +155,19 @@ routing is in [REPL actions](crates/ego-cli/src/repl/actions.rs).
 
 Codex subscription generation uses WebSocket continuation with guarded SSE
 fallback; see [Codex transport](docs/guides/providers.md#codex-transport).
-Remote MCP OAuth login and runtime attachment are code-landed, but the real
-operator login/restart check remains pending; see [MCP login](docs/integrations/mcp.md#remote-oauth-login).
+Remote MCP OAuth login and runtime attachment include a completed operator
+login/restart acceptance check (regression case); see [MCP login](docs/integrations/mcp.md#remote-oauth-login).
 
 Permission mode and operating-system confinement are separate choices. A relaxed
 permission mode does not remove a sandbox or an administrator's ceilings.
 
 ## Status and platforms
 
-Release `0.4.0` is being prepared locally; it is not published. See the
+Release `0.4.0` is tagged publicly at `9f86288` (2026-10-30). See the
 [release notes](docs/release-notes/0.4.0.md) for changes since `0.3.0`. The version is
 defined once in
 `[workspace.package]` in `Cargo.toml`; all workspace packages inherit it and are
-not published. This release preparation selects `0.4.0`; normal landings increment
+not published to crates.io. The release version is `0.4.0`; normal landings increment
 the patch version by one (`0.0.1`). Run `ego --version` to identify an installed
 build. The command references describe this checkout, not a promise about a future release.
 
@@ -181,7 +181,7 @@ the requested guarantee. Windows transport and private-state support exist, but
 Windows `workspace`, `ro`, and `--offline` confinement remain unsupported.
 The final product proof remains open; the
 [0.4.0 closure audit](ARCHITECTURE.md) separates
-release evidence from remaining operator and publication work.
+historical preparation from the [post-tag closure record](ARCHITECTURE.md).
 An unavailable confinement guarantee is refused rather than silently weakened.
 See [platforms and troubleshooting](docs/guides/troubleshooting.md) and
 [the roadmap](ARCHITECTURE.mdregression case-resolves-48).
