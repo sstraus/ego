@@ -39,7 +39,22 @@ pub trait Repository {
         &self,
         source: &Path,
         branch: &str,
-    ) -> Result<(PathBuf, String, Option<File>), String>;
+    ) -> Result<(PathBuf, String, Option<WorktreeLease>), String>;
+}
+
+/// Owns an active checkout until drop, independently of inherited descriptors.
+/// The lock file stays in place so later launches lock the same inode.
+pub struct WorktreeLease {
+    file: File,
+}
+
+impl Drop for WorktreeLease {
+    fn drop(&mut self) {
+        // On Unix, fork/dup shares the open file description. Close-on-exec
+        // cannot prevent a concurrent child from retaining it before exec.
+        // Unlock before closing so that child cannot extend our lease.
+        let _ = self.file.unlock();
+    }
 }
 
 pub struct LocalRepository {
@@ -70,7 +85,7 @@ impl LocalRepository {
         ))
     }
 
-    fn lease(&self, id: Uuid) -> Result<File, String> {
+    fn lease(&self, id: Uuid) -> Result<WorktreeLease, String> {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -83,10 +98,10 @@ impl LocalRepository {
             .map_err(error)?;
         file.try_lock()
             .map_err(|_| "worktree is in use by another ego process".to_owned())?;
-        Ok(file)
+        Ok(WorktreeLease { file })
     }
 
-    fn existing_lease(&self, directory: &Path) -> Result<Option<File>, String> {
+    fn existing_lease(&self, directory: &Path) -> Result<Option<WorktreeLease>, String> {
         let directory = fs::canonicalize(directory).map_err(error)?;
         let checkouts = self.directory().join("checkouts");
         let Ok(relative) = directory.strip_prefix(checkouts) else {
@@ -233,7 +248,7 @@ impl Repository for LocalRepository {
         &self,
         source: &Path,
         branch: &str,
-    ) -> Result<(PathBuf, String, Option<File>), String> {
+    ) -> Result<(PathBuf, String, Option<WorktreeLease>), String> {
         validate_branch(source, branch)?;
         let mut lock = self.lock()?;
         let _guard = lock.try_write().map_err(error)?;
@@ -286,7 +301,7 @@ impl Repository for TuicRepository {
         &self,
         source: &Path,
         branch: &str,
-    ) -> Result<(PathBuf, String, Option<File>), String> {
+    ) -> Result<(PathBuf, String, Option<WorktreeLease>), String> {
         validate_branch(source, branch)?;
         let request = serde_json::json!({
             "action": "worktree_create", "path": fs::canonicalize(source).map_err(error)?,
@@ -413,7 +428,7 @@ fn hosted() -> bool {
 
 /// Run before trust/config/provider admission: all subsequent consumers use
 /// the actual checkout directory, not the source repository's directory.
-pub fn launch(args: &mut Args) -> Result<Option<File>, String> {
+pub fn launch(args: &mut Args) -> Result<Option<WorktreeLease>, String> {
     let source = args
         .directory
         .clone()
@@ -467,15 +482,24 @@ mod tests {
         let lease = repository.lease(id).unwrap();
         // dup and fork share the same kernel open file description. Keep the
         // duplicate alive to hold the pre-exec child interval deterministically.
-        let inherited = lease.try_clone().unwrap();
-        assert!(repository.lease(id).is_err(), "live owner must exclude cleanup");
+        let inherited = lease.file.try_clone().unwrap();
+        assert!(
+            repository.lease(id).is_err(),
+            "live owner must exclude cleanup"
+        );
         drop(lease);
         let replacement = repository
             .lease(id)
             .expect("owner drop must release the lock while the duplicate is alive");
         drop(inherited);
-        assert!(repository.lease(id).is_err(), "old child must not release new owner");
+        assert!(
+            repository.lease(id).is_err(),
+            "old child must not release new owner"
+        );
         drop(replacement);
-        assert!(repository.lease(id).is_ok(), "replacement drop must release its lock");
+        assert!(
+            repository.lease(id).is_ok(),
+            "replacement drop must release its lock"
+        );
     }
 }
