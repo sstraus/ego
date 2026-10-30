@@ -1,62 +1,29 @@
-//! Contracts for operator-only persistent state; no hosted calls or MDKB writes.
-use ego_cli::memory::{InitProposal, Operation, Request, init_admitted};
+//! Contracts for reviewed project instruction initialization.
+use ego_cli::instruction_init::{InitProposal, init_admitted};
 use ego_cli::repl::actions::{
     ActionId, ActionKind, ActionRegistry, Availability, Dispatch, InputOrigin,
 };
 use ego_core::config::{ConfigLayer, Source, Trust, resolve};
 
 #[test]
-fn memory_and_init_cannot_fall_through_to_model_or_bypass_disabled_actions() {
+fn init_cannot_fall_through_to_model_or_bypass_disabled_actions() {
     // Catches: command bodies become paid model prompts or bypass a disabled snapshot.
     let registry = ActionRegistry::final_surface();
-    for (name, id, expected) in [
-        ("memory", ActionId::Memory, Dispatch::Memory(String::new())),
-        ("init", ActionId::Init, Dispatch::Init(String::new())),
-    ] {
-        assert_eq!(registry.kind(id), ActionKind::Local);
-        assert_eq!(
-            registry.classify(registry.submit(format!("/{name}"), InputOrigin::Typed)),
-            expected
-        );
-        assert_eq!(
-            registry.classify(registry.submit(format!("/{name}"), InputOrigin::BracketedPaste)),
-            Dispatch::Prompt
-        );
-        let disabled = ActionRegistry::final_surface().with_availability(id, Availability::Busy);
-        assert!(matches!(
-            disabled.classify(disabled.submit(format!("/{name}"), InputOrigin::Typed)),
-            Dispatch::Refused { .. }
-        ));
-    }
+    let (name, id, expected) = ("init", ActionId::Init, Dispatch::Init(String::new()));
+    assert_eq!(registry.kind(id), ActionKind::Local);
     assert_eq!(
-        registry.classify(registry.submit("/memory user show decision", InputOrigin::Typed)),
-        Dispatch::Memory("user show decision".into())
+        registry.classify(registry.submit(format!("/{name}"), InputOrigin::Typed)),
+        expected
     );
-}
-
-#[test]
-fn memory_scope_and_operator_text_parse_without_shell_expansion() {
-    // Catches: user scope leaks into project scope or quoted content becomes executable syntax.
-    let request = Request::parse("user set lesson 'A title' 'Never run $(tool)' ").unwrap();
-    assert!(request.user);
     assert_eq!(
-        request.operation,
-        Operation::Set {
-            id: "lesson".into(),
-            title: "A title".into(),
-            content: "Never run $(tool)".into()
-        }
+        registry.classify(registry.submit(format!("/{name}"), InputOrigin::BracketedPaste)),
+        Dispatch::Prompt
     );
-    assert!(!Request::parse("project list").unwrap().user);
-    for input in [
-        "delete --help",
-        "show ../other",
-        "set id title",
-        "set id '' content",
-        "disable id extra",
-    ] {
-        assert!(Request::parse(input).is_err(), "{input}");
-    }
+    let disabled = ActionRegistry::final_surface().with_availability(id, Availability::Busy);
+    assert!(matches!(
+        disabled.classify(disabled.submit(format!("/{name}"), InputOrigin::Typed)),
+        Dispatch::Refused { .. }
+    ));
 }
 
 #[test]
@@ -163,51 +130,4 @@ fn init_respects_plan_read_only_and_explicit_deny_before_confirmation() {
     }
     let effective = resolve(&[], Trust::Untrusted, None).unwrap();
     assert!(!init_admitted(&effective, dir.path(), Trust::Untrusted));
-}
-
-#[tokio::test]
-async fn untrusted_memory_never_reads_or_writes_the_native_store() {
-    // Catches: untrusted workspace content starts an ambient MDKB process.
-    let dir = tempfile::tempdir().unwrap();
-    let effective = resolve(&[], Trust::Untrusted, None).unwrap();
-    let result = ego_cli::memory::command(
-        "set note title content",
-        dir.path(),
-        None,
-        &effective,
-        Trust::Untrusted,
-        &|_| panic!("untrusted must not ask"),
-    )
-    .await;
-    assert!(result.unwrap_err().contains("trusted workspace"));
-    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
-}
-
-#[tokio::test]
-async fn declining_memory_review_does_not_invoke_native_persistence() {
-    // Catches: native persistence happens before the operator sees the exact body.
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir(dir.path().join(".mdkb")).unwrap();
-    let layer = ConfigLayer::parse(Source::User, "sandbox = 'off'").unwrap();
-    let effective = resolve(&[layer], Trust::Trusted, None).unwrap();
-    let result = ego_cli::memory::command(
-        "set note title 'Operator text'",
-        dir.path(),
-        None,
-        &effective,
-        Trust::Trusted,
-        &|preview| {
-            assert!(preview.contains("Operator text"));
-            assert!(preview.contains("user_statement"));
-            assert!(preview.contains("Do not save secrets"));
-            false
-        },
-    )
-    .await
-    .unwrap();
-    assert!(result.contains("declined"));
-    assert_eq!(
-        std::fs::read_dir(dir.path().join(".mdkb")).unwrap().count(),
-        0
-    );
 }

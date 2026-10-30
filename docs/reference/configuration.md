@@ -122,7 +122,6 @@ higher or lower layer supplies a value.
 | `ui.keybindings` | Map of action names to key-chord arrays | User-only shortcut overrides; an empty array removes an action's shortcuts |
 | `ui.vim` | Boolean | False; user-only Vim composer preference, also selected by `--vim` |
 | `mcp.servers.NAME` | Complete tagged server entry (optional `enabled = false` detaches it from session start) or tombstone | No configured external server |
-| `mdkb_prompt_command` | Absolute path to the mdkb executable; user layer only. Enables bounded mdkb warmup, prompt recall, tool hints, and bounded inline model Stop episodes; returned context is user-role data and cannot grant authority. Command execution remains subject to run policy. | Disabled |
 | `hooks` | Ordered array of hook entries | Empty contribution; hooks combine across admitted sources |
 
 `permissions` is a whole-block override, not a merge of individual lists.

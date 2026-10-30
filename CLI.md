@@ -562,7 +562,7 @@ of a removed receipt is unchanged success. No background or exit cleanup runs.
 Do not edit a checkout concurrently with cleanup; Git performs the final
 non-forced removal check. A cleanup refusal never grants force authority.
 
-With `TUIC_SOCKET` set, launch uses TUIC `repo.worktree_create` and its receipt,
+With nonempty `TUIC_SESSION` and an executable `tuic` on PATH, launch uses TUIC `repo.worktree_create` and its receipt,
 not a second local ownership record. No fallback to local Git occurs on host
 failure. Hosted cleanup stays with TUIC `repo.worktree_remove` and its lifecycle
 checks; the local receipt commands refuse under TUIC. Launch receipts and retained
@@ -1367,7 +1367,7 @@ and their JSON argument schemas when the admitted runtime opens a prompt.
 Slash commands: `/help /model /thinking /fast on|off /mode /plan /yolo /permissions /mcp
 /sessions /history QUERY /resume [ID] /continue [ID] /fork [message-id]
 /compact /pin /unpin /refresh /clear /usage /statusline /export /config /setup /doctor /quit /new
-/name /goal /tasks /tools /expand /skills /hooks /memory /init /retry /version`. These commands and aliases form the
+/name /goal /tasks /tools /expand /skills /hooks /init /retry /version`. These commands and aliases form the
 maintainer-selected surface; a missing implementation remains required work rather
 than an implicit de-selection. Typing `/` at the beginning of the composer
 opens a filterable menu; the menu, shortcut bindings, help, and enabled-state
@@ -1386,25 +1386,7 @@ menu, help, dispatch, and live availability read that one registry. Actions
 whose final owner has not landed remain visible with their explicit disabled
 reason rather than becoming model input or silently disappearing.
 
-### Reviewed persistent memory and project initialization
-
-`/memory [project|user] [list | show ID | set ID TITLE CONTENT | disable ID | delete ID]`
-uses the native MDKB index in the workspace or ego user directory. The selected
-scope must already have a `.mdkb` index; initialize it explicitly with `mdkb init`.
-Quote a title or content that contains spaces. `set` creates or replaces the
-record as an operator-authored `topic` with `user_statement` provenance and the
-`ego-reviewed` tag. `list` and `show` expose native provenance and lifecycle
-metadata. Every mutation requires review of the exact proposed content and
-scope. Disable preserves the record and source provenance, adds `ego-disabled`,
-and sets native TTL to zero so ordinary MDKB retrieval excludes it. Native
-MDKB expiry and archive rules still apply. Delete uses native MDKB removal;
-native archive and history may retain content. It is not secure erasure.
-
-These actions require workspace trust. Plan mode, read-only confinement, root
-limits, and explicit write denies remain effective. No model response, tool
-result, or conversation is automatically saved. Review must exclude secrets and
-untrusted tool instructions. Memory bodies are not automatically promoted to
-system instructions. This surface adds no second memory store.
+### Reviewed project initialization
 
 `/init` builds a deterministic, local `AGENTS.md` proposal and shows the diff
 before confirmation. It creates `CLAUDE.md` only as the relative sibling symlink

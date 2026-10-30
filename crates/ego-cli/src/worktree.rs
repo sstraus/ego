@@ -391,7 +391,24 @@ fn home() -> Result<PathBuf, String> {
 }
 
 fn hosted() -> bool {
-    std::env::var_os("TUIC_SOCKET").is_some_and(|s| !s.is_empty())
+    std::env::var_os("TUIC_SESSION").is_some_and(|session| !session.is_empty())
+        && std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path).any(|directory| {
+                let name = if cfg!(windows) { "tuic.exe" } else { "tuic" };
+                let Ok(metadata) = fs::metadata(directory.join(name)) else {
+                    return false;
+                };
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                {
+                    metadata.is_file()
+                }
+            })
+        })
 }
 
 /// Run before trust/config/provider admission: all subsequent consumers use

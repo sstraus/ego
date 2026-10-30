@@ -158,12 +158,14 @@ file is rewritten. Select those levels when their stricter or open reach is
 required. Adaptive
 currently requires macOS Seatbelt and successful native capability probes;
 explicit adaptive selections on unsupported platforms fail admission with explicit alternatives. It captures
-operator `CARGO_HOME`, `RUSTUP_HOME`, trusted mbx `cache_dir`, validated git common
+operator `CARGO_HOME`, `RUSTUP_HOME`, validated git common
 and linked-worktree metadata, `TMPDIR`, an operator `CARGO_TARGET_DIR`, the pnpm
 home (`PNPM_HOME`, `XDG_DATA_HOME/pnpm` or `~/Library/pnpm`), the
 pnpm cache (`XDG_CACHE_HOME` or `~/Library/Caches`, plus `/pnpm`) and the npm
 `_cacache` and `_logs` (`npm_config_cache` or `~/.npm`) before commands.
 Cargo/rustup defaults apply when their environment variables are absent.
+External build-cache locations require ordinary configured roots. Ego does not
+read another tool's configuration to derive write authority.
 
 On macOS, Workspace and Adaptive grant read/write access to the **whole operator
 pnpm home**, including its binaries, engine store, links and global environments.

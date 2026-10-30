@@ -16,34 +16,11 @@ confinement. After an accepted change, use `/refresh` when idle to request ordin
 instruction admission in a new prompt epoch. Do not assume an already-sent
 provider request sees edited files.
 
-## Inspect persistent memory
+## External memory tools
 
-The `/memory` surface requires the native MDKB CLI, an initialized `.mdkb` index
-in the selected scope, and an admitted trusted workspace. If the index is absent,
-initialize it deliberately with `mdkb init` in that scope; ego does not create it
-silently. Project scope is the default. User scope uses the ego user directory.
+Ego does not embed a memory store, vendor command, or model memory tool.
+Run your memory CLI directly, or configure an external integration through
+[generic hooks](../integrations/hooks.md). The external handler must implement
+ego's hook input and result schema; Claude Code hook JSON is not imported.
 
-```text
-/memory project list
-/memory project show parser-convention
-/memory user list
-```
-
-## Review a mutation
-
-```text
-/memory project set parser-convention "Parser convention" "Keep parsing separate from effects."
-/memory project disable parser-convention
-/memory project delete parser-convention
-```
-
-Quote titles and content that contain spaces. IDs are alphanumeric slugs with
-hyphens or underscores; titles are limited to 50 characters. Mutations require
-write permission and confirmation of the preview. Disable retains the record
-with expired retrieval eligibility; delete removes the selected entry.
-
-The operator surface does not consume model output or automatically inject memory
-bodies into prompts. The model-side coordinator-only `memory_lookup` operation
-is separate; see [tools](tools.md). Do not store credentials in either surface.
-
-Source: [memory and instruction administration](../../crates/ego-cli/src/memory.rs).
+Source: [instruction initialization](../../crates/ego-cli/src/instruction_init.rs).

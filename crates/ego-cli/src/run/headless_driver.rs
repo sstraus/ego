@@ -25,7 +25,6 @@ pub(super) struct HeadlessGeneration<'a> {
     pub(super) gate: SharedBudgetGate,
     pub(super) hook_layers: Option<&'a [Sourced<ConfigLayer>]>,
     pub(super) hook_trust: Trust,
-    pub(super) mdkb_prompt_command: Option<PathBuf>,
     pub(super) policy_source: Arc<dyn GenerationPolicySource>,
     pub(super) judge_available: bool,
 }
@@ -87,7 +86,6 @@ pub(super) async fn drive_headless_turn(
         gate,
         hook_layers,
         hook_trust,
-        mdkb_prompt_command,
         policy_source,
         judge_available,
     } = generation;
@@ -286,14 +284,6 @@ pub(super) async fn drive_headless_turn(
             message: "custom commands do not accept image or audio attachments".to_owned(),
         });
     }
-    let prompt_context = mdkb_prompt_command.map(|binary| {
-        Arc::new(crate::prompt_context::MdkbPromptContext::new(
-            binary,
-            Arc::clone(&policy_source),
-            effect_ports.clone(),
-            ports.process(),
-        )) as Arc<dyn ego_core::turn::PromptContextSource>
-    });
     let tools = match admitted_tools {
         Some(source) => {
             Tools::from_registry_with_source(registry, source, effect_ports, CanonPath::new(cwd))
@@ -337,10 +327,6 @@ pub(super) async fn drive_headless_turn(
     .with_background_task_port(skill_owner.clone())
     .with_delegation_host(std::env::var_os("TUIC_SESSION").is_some())
     .with_pause_token(pause.clone());
-    let loop_ = match prompt_context {
-        Some(source) => loop_.with_prompt_context(source),
-        None => loop_,
-    };
     let loop_ = match recovered_policy.as_ref() {
         Some(policy) => loop_
             .with_hook_policy(Arc::clone(policy))
