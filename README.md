@@ -9,8 +9,10 @@ Choose the model. Review the permissions. Keep control of your workspace.
 
 ## Install
 
-Release assets and the Homebrew formula become available when the first release
-is published. You can build from source before publication.
+Version `0.4.0` is published in the [public repository](https://github.com/sstraus/ego/releases/tag/v0.4.0).
+Version `0.4.1` is prepared locally; see its [release notes](docs/release-notes/0.4.1.md).
+Release assets and Homebrew availability depend on their release workflows.
+You can also build from source.
 
 ### Homebrew
 

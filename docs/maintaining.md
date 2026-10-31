@@ -69,7 +69,7 @@ version/status, first-run examples, and links consistent with these guides.
 The workspace version is in `[workspace.package]` in `Cargo.toml`. Workspace
 packages inherit it. Let Cargo refresh their lockfile versions; do not edit
 `Cargo.lock` by hand. A release preparation can select a new minor version;
-the manifest is the release version authority.
+`0.4.1` is the current local preparation, not a publication claim.
 
 Write notes in `release-notes/VERSION.md`, grouped by user-visible features,
 fixes, and breaking changes. Verify the changes against

@@ -111,4 +111,5 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           # The policy is `deny.toml`, committed next to the manifest.
-          command: --all-features check
+          # The action already defaults arguments to --all-features.
+          command: check

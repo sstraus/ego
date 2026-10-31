@@ -3,13 +3,14 @@
 //! Check identical semantic snapshots across surfaces, deterministic order,
 //! exit folding, partial failures, redaction, and observation without writes.
 //!
-//! These are functions over an explicit workspace and an explicit `EGO_HOME`,
-//! not forks of a binary. Doctor's whole job is to be a pure reading of state,
-//! so a test that had to spawn a process to see the reading would be admitting
-//! it is not one.
+//! Fixtures use an explicit workspace and an explicit `EGO_HOME`. Their
+//! lifetimes are serialized because in-process observations share doctor's
+//! bounded worker budget, even when their filesystem roots are independent.
+//! Binary regressions also verify command exit and stderr behavior.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 
 use tempfile::{TempDir, tempdir};
 
@@ -21,12 +22,29 @@ const PRIVATE_MACHINE_PATH: &str = "/Users/someone/.ssh/id_ed25519";
 #[cfg(windows)]
 const PRIVATE_MACHINE_PATH: &str = r"C:\Users\someone\.ssh\id_ed25519";
 
-/// An empty workspace with an empty `EGO_HOME` inside it.
-///
-/// Held by the caller, because dropping it deletes it — and every assertion
-/// below is about what doctor saw in a directory that still exists.
-fn scratch() -> TempDir {
-    tempdir().expect("a scratch workspace is creatable")
+static DOCTOR_FIXTURE: Mutex<()> = Mutex::new(());
+
+struct Scratch {
+    directory: TempDir,
+    _observation: MutexGuard<'static, ()>,
+}
+
+impl Scratch {
+    fn path(&self) -> &Path {
+        self.directory.path()
+    }
+}
+
+/// Keep the shared worker allowance exclusive through every observation and
+/// FIFO release, not just through one snapshot in a repeated-reading test.
+fn scratch() -> Scratch {
+    let observation = DOCTOR_FIXTURE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    Scratch {
+        directory: tempdir().expect("a scratch workspace is creatable"),
+        _observation: observation,
+    }
 }
 
 /// The home doctor is handed, which is *not* the one the environment names.
