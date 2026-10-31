@@ -61,11 +61,11 @@ Dir.mktmpdir('ego-release-check-', scratch) do |dir|
   end.fetch('run')
   notes_directory = File.join(dir, 'docs', 'release-notes')
   FileUtils.mkdir_p(notes_directory)
-  notes_path = File.join(notes_directory, '0.4.0.md')
-  notes = File.read(File.join(root, 'docs', 'release-notes', '0.4.0.md'))
+  notes_path = File.join(notes_directory, '0.4.1.md')
+  notes = File.read(File.join(root, 'docs', 'release-notes', '0.4.1.md'))
   File.write(notes_path, notes)
   run_notes = lambda do
-    system({'GITHUB_REF_NAME' => 'v0.4.0'}, 'bash', '-c', notes_step,
+    system({'GITHUB_REF_NAME' => 'v0.4.1'}, 'bash', '-c', notes_step,
            chdir: dir, out: File::NULL, err: File::NULL)
   end
   abort 'Workflow could not prepare versioned notes' unless run_notes.call
@@ -76,9 +76,9 @@ Dir.mktmpdir('ego-release-check-', scratch) do |dir|
   abort 'Workflow accepted empty release notes' if run_notes.call
   puts 'PASS: workflow copies versioned notes and refuses missing or empty notes'
 
-  formula = IO.popen(['bash', File.join(root, 'scripts/homebrew-formula.sh'), 'v0.4.0', 'sstraus/ego', File.join(dir, 'dist')], &:read)
+  formula = IO.popen(['bash', File.join(root, 'scripts/homebrew-formula.sh'), 'v0.4.1', 'sstraus/ego', File.join(dir, 'dist')], &:read)
   abort 'Formula generation failed' unless $?.success?
-  abort 'Formula version drifted' unless formula.include?('version "0.4.0"') && formula.include?('/releases/download/v0.4.0/')
+  abort 'Formula version drifted' unless formula.include?('version "0.4.1"') && formula.include?('/releases/download/v0.4.1/')
   rows.reject { |row| row.fetch('target').include?('windows') }.each do |row|
     asset = "ego-#{row.fetch('target')}.tar.gz"
     abort "Formula missing archive #{asset}" unless formula.include?("/#{asset}\"")
