@@ -20,10 +20,18 @@ path = "tests/fixtures/oauth_pty_main.rs"
 required-features = ["test-support"]
 test = false
 
+# Native bounded child fixture; absent from ordinary release installation.
+[[bin]]
+name = "ego-protocol-filter-fixture"
+path = "tests/fixtures/protocol_filter_main.rs"
+required-features = ["test-support"]
+test = false
+
 [features]
 test-support = ["ego-tools/test-support"]
 
 [dependencies]
+base64 = "0.22.1"
 minijinja.workspace = true
 ego-a2a = { path = "../ego-a2a" }
 ego-acp = { path = "../ego-acp" }
@@ -112,6 +120,7 @@ tempfile = "3.27.0"
 png = "0.18.1"
 
 [dev-dependencies]
+base64 = "0.22"
 ego-cli = { path = ".", features = ["test-support"] }
 # A test that stands in for the transport has to build an `HttpResponse`, whose
 # body is a stream of `bytes::Bytes` — the type `ego-ai` chose so a chunk can be

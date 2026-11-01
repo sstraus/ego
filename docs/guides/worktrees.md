@@ -1,5 +1,7 @@
 # Git worktrees
 
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/worktrees.html).
+
 Use a worktree when a task needs an isolated checkout and a new branch. A worktree
 shares Git history with its source repository, but has its own working files.
 Creating a worktree does not grant tools more filesystem or network authority.

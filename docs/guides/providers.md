@@ -1,5 +1,7 @@
 # Providers and login
 
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/providers.html).
+
 A provider profile selects an endpoint, credential strategy, wire contract,
 capabilities, and metering. Changing a model does not change tool authority.
 Use the catalogue to see what your current installation can actually select.
@@ -94,8 +96,11 @@ a vendor login.
 Some subscription endpoints reject εgo's identity or require an entitlement.
 A 401/403 is not proof of a different wire protocol. εgo does not ship another
 client's identity. Non-secret operator header overrides are documented in
-[configuration](../reference/configuration.md); credentials/wire headers remain
-forbidden there. Do not put tokens in a project file, captured output, or issue.
+[configuration](../reference/configuration.md). An optional, user-owned
+[protocol filter](../integrations/protocol-filter.md) can change final HTTP
+generation bytes and declared identity headers; it is not a supported vendor
+identity or a subscription guarantee. Credentials/wire headers remain forbidden
+there. Do not put tokens in a project file, captured output, or issue.
 
 ## Explicit HTTPS proxy
 
@@ -157,7 +162,7 @@ Names in the reserved `__ego_` namespace are also mapped to prevent an original
 name from impersonating an encoded name. Assignment is deterministic and checks
 collisions across the complete request, including historical tool names.
 
-For a host integration smoke check, start the candidate with `ego acp -C
+For a host integration smoke check, launch ego with `ego acp -C
 /workspace/project` and use the host's supported ACP connection. Verify a new
 turn and a resumed turn with a provider you have configured. Hosted checks can
 incur charges and require credentials; they are not part of the offline gate.

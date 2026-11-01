@@ -65,8 +65,6 @@ Sources: [hook domain/schema](../../crates/ego-core/src/hook.rs),
 [event vocabulary](../../crates/ego-core/src/event/hook.rs),
 [OS adapters](../../crates/ego-tools/src/hook.rs), and
 [hook lifecycle tests](../../crates/ego-cli/tests/hook_lifecycle.rs).
-Compatibility notes are retained
-with its dated claims; use the current source schema for accepted fields.
 
 ## Command input and returned context
 
@@ -103,10 +101,13 @@ not full Claude Code policy compatibility. Exit 2 still means veto.
 Context is capped at 16 KiB per settlement, on a UTF-8 boundary, with a truncation
 marker inside the cap. It is stored with the durable hook settlement. Generation
 composition uses up to 32 KiB of attributed context, plus a fixed data disclaimer.
-Session-start context lasts for the session; prompt/tool context lasts only for
-its turn, including resumed generation in that turn. Each block names the hook,
-lifecycle, and invocation. Blocks use user-role data, not system authority, and
-do not grant permissions. Blocked outcomes do not contribute context.
+Session-start context is current for the session; prompt/tool context is current
+only for its turn, including resumed generation in that turn. Changes and expiry
+use append-only host-context snapshots or deltas after the complete history.
+Earlier observations remain unchanged historical evidence, not current context.
+Each block names the hook, lifecycle, and invocation. Blocks use user-role data,
+not system authority, and do not grant permissions. Blocked outcomes do not
+contribute context.
 
 Reference: [Claude Code hooks](https://code.claude.com/docs/en/hooks.md),
 sections Common input fields, SessionStart, UserPromptSubmit, PostToolUse,

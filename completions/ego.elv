@@ -60,6 +60,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --mode 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)'
             cand -c 'Dotted-path config override, value parsed as TOML'
             cand --set 'Dotted-path config override, value parsed as TOML'
+            cand --continua 'Resume the latest saved session in this workspace without the terminal picker'
             cand --offline 'No non-loopback egress from ego''s own HTTP transport'
             cand --bare 'No ambient discovery, even in a trusted workspace'
             cand --no-tools 'Offer no tools at all'
@@ -91,7 +92,7 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand hooks 'Inspect the admitted system and user hook catalogue.'
             cand doctor 'Report a read-only redacted health snapshot of this installation.'
             cand checkpoint 'Preview or selectively restore session-owned Git file checkpoints.'
-            cand setup 'Inspect expected work without running effects.'
+            cand setup 'Configure saved user settings in an interactive terminal.'
             cand acp 'Serve the Agent Client Protocol on stdio or an endpoint.'
             cand a2a 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
             cand auth 'Manage subscription credentials.'
@@ -159,13 +160,14 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --no-color 'Never emit ANSI colour, whatever the terminal claims to support'
             cand --plain 'Append plain output without terminal styling or live retry updates'
             cand --vim 'Use Vim normal/insert editing in the interactive composer'
+            cand --continua 'Resume the latest saved session in this workspace without the terminal picker'
             cand -h 'Print help'
             cand --help 'Print help'
         }
         &'ego;resume'= {
             cand --answer 'Settle a pending question. Repeat for multiple sibling questions'
             cand --name 'Read or change the session title without starting a turn: show, set=TEXT, clear'
-            cand --goal-operation 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON'
+            cand --goal-operation 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
             cand --var 'Supply one declared agent-file template variable. Requires --file'
@@ -228,7 +230,7 @@ set edit:completion:arg-completer[ego] = {|@words|
         &'ego;continue'= {
             cand --answer 'Settle a pending question. Repeat for multiple sibling questions'
             cand --name 'Read or change the session title without starting a turn: show, set=TEXT, clear'
-            cand --goal-operation 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON'
+            cand --goal-operation 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON'
             cand -f 'Read the instruction and its invocation configuration from an agent file'
             cand --file 'Read the instruction and its invocation configuration from an agent file'
             cand --var 'Supply one declared agent-file template variable. Requires --file'
@@ -386,10 +388,9 @@ set edit:completion:arg-completer[ego] = {|@words|
             cand --help 'Print help'
         }
         &'ego;setup'= {
-            cand --items 'Select proposal item IDs as one comma-separated list; repeat to add IDs'
-            cand --judge 'Offer a validated judge for unresolved policy; never authorizes an action'
-            cand --profile 'profile'
-            cand --directory 'directory'
+            cand --profile 'Edit one user profile rather than the base user settings'
+            cand -C 'Resolve effective settings for this workspace'
+            cand --directory 'Resolve effective settings for this workspace'
             cand -h 'Print help'
             cand --help 'Print help'
         }

@@ -62,7 +62,7 @@ pub(super) fn catalogue(default_reasoning_effort: Option<ThinkingLevel>) -> Mode
 pub(super) fn run_child(case: &str, thinking: Option<&str>) {
     let home = tempdir().expect("isolated EGO_HOME");
     let config = format!(
-        "model = \"openai/fixture\"\nbudget = \"1k\"\n{}",
+        "model = \"openai/fixture\"\nbudget = \"1k\"\nsandbox = \"off\"\n{}",
         thinking.map_or(String::new(), |value| format!("thinking = \"{value}\"\n"))
     );
     std::fs::write(home.path().join("config.toml"), config).expect("fixture config");
@@ -189,7 +189,9 @@ fn cancelled_readmission_does_not_complete_measurement() {
         run_child("cancelled_readmission", Some("off"));
         return;
     }
-    tokio::runtime::Builder::new_current_thread()
+    // Online Off completes without a probe; offline may also fall back to null.
+    for offline in [false, true] {
+        tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .unwrap()
@@ -233,7 +235,7 @@ fn cancelled_readmission_does_not_complete_measurement() {
             let (_, mut prepared) = executor.prepare(&preparation).await.unwrap().into_parts();
             prepared.confinement = ego_core::permit::RunConfinement::new(
                 ego_core::permit::Confinement::Off,
-                true,
+                offline,
                 ego_core::permit::CanonPath::new(&workspace),
             )
             .unwrap();
@@ -261,7 +263,7 @@ fn cancelled_readmission_does_not_complete_measurement() {
                 "printf started > probe-started\nsleep 10\nprintf finished > probe-finished\n",
             )
             .unwrap();
-            let measurement = executor.execution_observation(&mut prepared, cancel);
+            let mut measurement = executor.execution_observation(&mut prepared, cancel);
             let cancellation = async {
                 tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     while !started.exists() {
@@ -272,7 +274,22 @@ fn cancelled_readmission_does_not_complete_measurement() {
                 .expect("scripted probe must signal its actual start");
                 signal.cancel(ego_core::event::domain::CancelCause::User);
             };
-            let (observed, _) = tokio::join!(measurement, cancellation);
+            let observed = tokio::select! {
+                biased;
+                () = cancellation => measurement.await,
+                observed = &mut measurement => {
+                    // Off has an honest null fallback when the host cannot measure
+                    // offline confinement (for example, no usable bwrap on Linux).
+                    // No network child starts in that case; do not wait for one.
+                    let (observation, _) = observed
+                        .expect("unprobed Off observation completes")
+                        .expect("re-admission returns an observation");
+                    assert!(!started.exists(), "a running probe completed before cancellation");
+                    assert_eq!(observation.backend().name(), "null");
+                    assert!(!observation.capabilities().contains(ego_core::permit::ExecCaps::NO_IP_NETWORK));
+                    return;
+                }
+            };
             assert!(started.exists(), "cancellation preceded probe startup");
             assert!(
                 !finished.exists(),
@@ -288,4 +305,5 @@ fn cancelled_readmission_does_not_complete_measurement() {
             );
             drop(opened);
         });
+    }
 }

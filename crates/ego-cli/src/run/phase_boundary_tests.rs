@@ -652,12 +652,16 @@ struct IdleExecSeat {
     first: std::sync::atomic::AtomicBool,
     wake: crossbeam::channel::Receiver<repl::Line>,
     sender: crossbeam::channel::Sender<repl::Line>,
+    idle_marker: Option<std::path::PathBuf>,
 }
 
 impl Reads for IdleExecSeat {
     fn read(&self) -> repl::Line {
         if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
             return repl::Line::Submitted("start background work".into());
+        }
+        if let Some(marker) = &self.idle_marker {
+            std::fs::write(marker, "idle").unwrap();
         }
         self.wake
             .recv_timeout(std::time::Duration::from_secs(3))
@@ -752,6 +756,7 @@ fn idle_background_exec_settlement_starts_one_continuation() {
             first: std::sync::atomic::AtomicBool::new(true),
             wake,
             sender,
+            idle_marker: None,
         });
         let mut arguments = args("anthropic/fixture-vision");
         arguments.mode = Some(ego_core::config::Mode::Yolo);
@@ -784,6 +789,194 @@ fn idle_background_exec_settlement_starts_one_continuation() {
             ended.state.turns.len(),
             2,
             "one launch turn and one continuation"
+        );
+    });
+}
+
+// Catches: a settled durable task never reaches an idle parent without a user prompt.
+#[test]
+#[cfg(unix)]
+fn idle_background_task_settlement_starts_one_continuation() {
+    const PROMPT: &str = "Return IDLE-TASK-RESULT after the parent is idle";
+    if std::env::var_os(CHILD).is_none() {
+        let stub = child_case(
+            "idle_background_task_settlement_starts_one_continuation",
+            "task-idle",
+            Plan {
+                completions: vec![
+                    Reply::Sse(tool_call(
+                        "task-launch",
+                        "task",
+                        &serde_json::json!({
+                            "name":"idle check", "prompt":PROMPT, "background":true
+                        })
+                        .to_string(),
+                    )),
+                    Reply::Sse(text("waiting for background task")),
+                    Reply::Sse(text("background task outcome received")),
+                ],
+                prompt_completions: vec![(
+                    PROMPT.into(),
+                    vec![
+                    Reply::Sse(tool_call("wait-idle", "exec", &serde_json::json!({
+                        "argv":["/bin/sh", "-c", "while [ ! -f parent-idle ]; do sleep 0.01; done"],
+                        "timeout_ms":2000
+                    }).to_string())),
+                    Reply::Sse(text("IDLE-TASK-RESULT")),
+                ],
+                )],
+                ..Plan::default()
+            },
+        );
+        let requests = stub.generations();
+        assert_eq!(
+            requests.len(),
+            5,
+            "three parent requests and two child requests; stale wake must not generate"
+        );
+        assert!(
+            requests
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("IDLE-TASK-RESULT")
+        );
+        return;
+    }
+    // The live CLI uses a multithread runtime: children must progress during seat.read().
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let (sender, wake) = crossbeam::channel::bounded(2);
+            let seat = Arc::new(IdleExecSeat {
+                first: std::sync::atomic::AtomicBool::new(true),
+                wake,
+                sender,
+                idle_marker: Some(std::env::current_dir().unwrap().join("parent-idle")),
+            });
+            let mut arguments = args("ollama/qwen3");
+            arguments.mode = Some(ego_core::config::Mode::Yolo);
+            let ended = execute(
+                arguments,
+                |_| &NullSink,
+                CancelToken::new(),
+                None,
+                RunHost {
+                    driver: Driver::Interactive {
+                        seat,
+                        between: &|| {},
+                    },
+                    elicitor: None,
+                    status: None,
+                    diagnostics: &Stderr,
+                    text_output: None,
+                    evidence: Arc::new(EvidenceAdmissionService::new()),
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("driver refused: {error:?}"));
+            assert_eq!(ended.termination.exit_code(), 0);
+            assert!(
+                ended
+                    .state
+                    .items
+                    .values()
+                    .any(|item| item.text.contains("IDLE-TASK-RESULT")),
+                "the child must really complete, not just launch or fail"
+            );
+            assert_eq!(
+                ended.state.turns.len(),
+                2,
+                "one launch turn and one automatic continuation while idle"
+            );
+            assert_eq!(ended.state.delivered_subagents.len(), 1);
+        });
+}
+
+// Catches: a failed output owner cancels the process token, but the independent
+// interactive turn keeps streaming and reports success instead of settling.
+#[test]
+fn host_output_failure_cancels_the_active_interactive_turn() {
+    if std::env::var_os(CHILD).is_none() {
+        let stub = child_case(
+            "host_output_failure_cancels_the_active_interactive_turn",
+            "host-output-failure",
+            Plan {
+                completions: vec![support::paced(
+                    "OUTPUT-FAILURE",
+                    std::time::Duration::from_millis(100),
+                )],
+                ..Plan::default()
+            },
+        );
+        assert_eq!(
+            stub.generations().len(),
+            1,
+            "no generation after host failure"
+        );
+        return;
+    }
+    struct FailedOutput(CancelToken);
+    impl EventSink for FailedOutput {
+        fn publish(&self, event: &PublicEvent, _: &SessionState) {
+            if matches!(event, PublicEvent::ItemDelta { .. }) {
+                // Same authority as Stdout::failed and own_terminal's read error.
+                self.0.cancel(CancelCause::Host);
+            }
+        }
+    }
+    runtime().block_on(async {
+        let cancel = CancelToken::new();
+        let sink = FailedOutput(cancel.clone());
+        let seat = Arc::new(ClipboardSeat {
+            images: repl::ImageDraft::default(),
+            case: "host-output-failure".into(),
+            lines: Mutex::new(VecDeque::from([repl::Line::Submitted(
+                "respond while the output owner fails".into(),
+            )])),
+            chips: Mutex::new(Vec::new()),
+            notices: Mutex::new(Vec::new()),
+            inserted: Mutex::new(Vec::new()),
+        });
+        let ended = execute(
+            args("ollama/qwen3"),
+            |_| &sink,
+            cancel.clone(),
+            None,
+            RunHost {
+                driver: Driver::Interactive {
+                    seat,
+                    between: &|| {},
+                },
+                elicitor: None,
+                status: None,
+                diagnostics: &Stderr,
+                text_output: None,
+                evidence: Arc::new(EvidenceAdmissionService::new()),
+            },
+        )
+        .await
+        .expect("admitted interactive driver");
+        assert_eq!(cancel.cause(), Some(CancelCause::Host));
+        assert!(
+            matches!(
+                ended.termination,
+                RunTermination::Signalled(ego_core::run::Signal::Term)
+            ),
+            "failed host must not report a successful active turn: {:?}",
+            ended.termination
+        );
+        assert!(
+            ended.state.turns.values().any(|turn| matches!(
+                turn.exit_reason,
+                Some(ego_core::event::domain::ExitReason::Cancelled(
+                    CancelCause::Host
+                ))
+            )),
+            "the journal must settle the active turn with the host cause"
         );
     });
 }

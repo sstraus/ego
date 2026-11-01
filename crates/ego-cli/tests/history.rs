@@ -134,3 +134,157 @@ fn history_tools_search_and_open_conversation_from_another_root() {
     assert!(conversation.contains("assistant: assistant durable answer"));
     assert!(!conversation.contains("RAW-TOOL-MUST-NOT-LEAK"));
 }
+
+// Catches: public argument parsing ignores the anchor/evidence selection and returns the old prefix.
+// The provider is scripted: this proves the native process/tool/store boundary, not model reasoning.
+#[test]
+fn history_tools_open_late_anchored_evidence_without_prefix_dump() {
+    use std::sync::Arc;
+    let home = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(workspace.path()).unwrap();
+    let store = Arc::new(JsonlStore::new(
+        home.path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    ));
+    let id = SessionId::new();
+    store
+        .publish_empty_session(id, &root, Timestamp::from_millis(1))
+        .unwrap();
+    let mut seq = Seq::ZERO;
+    let late = TurnId::new();
+    for (turn, kind) in [
+        (
+            TurnId::new(),
+            EventKind::UserPrompt {
+                text: "PREFIX-MUST-NOT-RETURN".repeat(1000),
+                audio: vec![],
+                images: vec![],
+                queued_prompt: None,
+            },
+        ),
+        (
+            late,
+            EventKind::UserPrompt {
+                text: "latewireanchor chosen decision".into(),
+                audio: vec![],
+                images: vec![],
+                queued_prompt: None,
+            },
+        ),
+        (
+            late,
+            EventKind::ToolCallCompleted {
+                ok: true,
+                result: ToolResult::builtin("EXPLICIT-SOURCE-EVIDENCE"),
+            },
+        ),
+        (
+            late,
+            EventKind::AssistantMessage {
+                text: "Grounded historical answer".into(),
+            },
+        ),
+        (
+            late,
+            EventKind::TurnCompleted {
+                ok: true,
+                exit_reason: ExitReason::Completed,
+            },
+        ),
+    ] {
+        store
+            .append(
+                &id,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn,
+                        item: Some(ItemId::new()),
+                        parent: None,
+                        ts: Timestamp::from_millis(1000),
+                        producer: Producer::Main,
+                    },
+                    kind,
+                },
+            )
+            .unwrap();
+    }
+    let result: serde_json::Value =
+        serde_json::from_str(&store.history().search("latewireanchor").unwrap()).unwrap();
+    let anchor = result["hits"][0]["anchor"].as_str().unwrap();
+    let open = |evidence| {
+        serde_json::json!({"session": id, "anchor": anchor, "evidence": evidence}).to_string()
+    };
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "search",
+                "__ego_63bedf8acff0198465745adb1cc6ac86280c80864e92de652724ac7f73",
+                r#"{"query":"latewireanchor"}"#,
+            )),
+            Reply::Sse(tool_call(
+                "open",
+                "__ego_499a3ed2db8204841d4cae8578f638ac459d83325d9d2723233e010bf9",
+                &open(false),
+            )),
+            Reply::Sse(tool_call(
+                "evidence",
+                "__ego_499a3ed2db8204841d4cae8578f638ac459d83325d9d2723233e010bf9",
+                &open(true),
+            )),
+            Reply::Sse(text("Evidence retrieved.")),
+        ],
+        ..Plan::default()
+    });
+    let finished = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--thinking",
+            "off",
+            "--sandbox",
+            "off",
+            "--tools",
+            "history.search,history.open",
+            "Recall the grounded decision",
+        ])
+        .run();
+    assert_eq!(finished.code, Some(0), "{}", finished.stderr);
+    assert_eq!(finished.stdout.trim(), "Evidence retrieved.");
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 4);
+    let last_tool = |index: usize| {
+        requests[index]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "tool")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap()
+    };
+    let search: serde_json::Value = serde_json::from_str(last_tool(1)).unwrap();
+    assert_eq!(search["hits"][0]["anchor"], anchor);
+    let plain = last_tool(2);
+    assert!(plain.contains("latewireanchor chosen decision"));
+    assert!(
+        !plain.contains("PREFIX-MUST-NOT-RETURN") && !plain.contains("EXPLICIT-SOURCE-EVIDENCE")
+    );
+    let expanded = last_tool(3);
+    assert!(expanded.contains("EXPLICIT-SOURCE-EVIDENCE"));
+    assert!(!expanded.contains("PREFIX-MUST-NOT-RETURN"));
+    let page: serde_json::Value = serde_json::from_str(expanded).unwrap();
+    assert_eq!(page["historical"], true);
+    assert_eq!(page["session"], id.to_string());
+    assert!(
+        page["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|record| record["source"].is_string() && record["event"].is_string())
+    );
+}

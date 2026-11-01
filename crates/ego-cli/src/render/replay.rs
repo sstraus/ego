@@ -18,6 +18,7 @@ pub(crate) fn replay(
     session: SessionId,
     output: &dyn TextOutput,
     capabilities: Capabilities,
+    workspace: Option<&std::path::Path>,
 ) -> Result<(), String> {
     let entries = source
         .entries(&session)
@@ -33,13 +34,18 @@ pub(crate) fn replay(
             | SessionEntry::ModelSelected(_) => None,
         })
         .collect();
-    render(&events, output, capabilities);
+    render(&events, output, capabilities, workspace);
     output.finish();
     Ok(())
 }
 
-fn message(output: &dyn TextOutput, text: &str, capabilities: Capabilities) {
-    let mut answer = Answer::new(capabilities.with_current_width());
+fn message(
+    output: &dyn TextOutput,
+    text: &str,
+    capabilities: Capabilities,
+    workspace: Option<&std::path::Path>,
+) {
+    let mut answer = Answer::new(capabilities.with_current_width(), workspace);
     let mut rendered = answer.push(text);
     rendered.push_str(&answer.finish());
     output.begin_block();
@@ -49,7 +55,12 @@ fn message(output: &dyn TextOutput, text: &str, capabilities: Capabilities) {
     }
 }
 
-fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabilities) {
+fn render(
+    events: &[DomainEvent],
+    output: &dyn TextOutput,
+    capabilities: Capabilities,
+    workspace: Option<&std::path::Path>,
+) {
     let mut seen = HashSet::new();
     let turns: Vec<_> = events
         .iter()
@@ -106,12 +117,12 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
             EventKind::AssistantMessage { text } => {
                 if event.env.item.and_then(|item| finals.get(&item)) == Some(&index) {
                     tools.separate();
-                    message(output, text, capabilities);
+                    message(output, text, capabilities, workspace);
                 }
             }
             EventKind::CompactionSeeded { checkpoint, .. } => {
                 tools.separate();
-                message(output, checkpoint, capabilities)
+                message(output, checkpoint, capabilities, workspace)
             }
             EventKind::AssistantDelta { text } => {
                 let item = event.env.item.expect("transcript item checked above");
@@ -120,7 +131,7 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
                     partial.push_str(text);
                     if last_delta.get(&item) == Some(&index) {
                         tools.separate();
-                        message(output, partial, capabilities);
+                        message(output, partial, capabilities, workspace);
                     }
                 }
             }
@@ -169,6 +180,7 @@ fn render(events: &[DomainEvent], output: &dyn TextOutput, capabilities: Capabil
 
 #[cfg(test)]
 mod tests {
+    mod links;
     mod measured;
     use super::*;
     use crate::output::Diagnostics;
@@ -217,7 +229,7 @@ mod tests {
             ),
         ];
         let output = Recorded::default();
-        render(&events, &output, Capabilities::plain());
+        render(&events, &output, Capabilities::plain(), None);
         let text = output.0.lock().unwrap();
         assert!(!text.contains("duration unavailable"), "{text}");
         assert!(
@@ -257,6 +269,7 @@ mod tests {
                     osc: super::super::OscProfile::Tuic,
                     ..Capabilities::plain()
                 },
+                None,
             );
             assert_eq!(*output.0.lock().unwrap(), format!("{text}\n"));
         }
@@ -385,6 +398,7 @@ mod tests {
                     osc: super::super::OscProfile::Standard,
                     ..Capabilities::plain()
                 },
+                None,
             );
             output.finish();
             let replayed = receiver.try_iter().collect::<String>();
@@ -467,7 +481,7 @@ mod tests {
         let entries = source_entries(&store, id);
         let state = ego_core::state::SessionState::replay(entries.clone());
         let output = Recorded::default();
-        replay(&store, id, &output, Capabilities::plain()).unwrap();
+        replay(&store, id, &output, Capabilities::plain(), Some(&root)).unwrap();
         assert_eq!(*output.0.lock().unwrap(), "DISPLAY-ONLY-KOO\n");
         assert_eq!(std::fs::read(log).unwrap(), before);
         assert_eq!(

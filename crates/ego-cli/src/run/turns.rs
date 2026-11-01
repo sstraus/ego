@@ -251,12 +251,116 @@ impl ego_core::permit::SandboxGrantPort for SeatSandboxGrants {
     }
 }
 
+/// The native terminal is the only seat that may save a refused root.
+pub(super) struct SeatRootGrants {
+    pub(super) elicitor: Arc<dyn Elicitor>,
+    pub(super) effective: Effective,
+    pub(super) workspace: CanonPath,
+    pub(super) target: UserConfigTarget,
+    pub(super) store_root: PathBuf,
+}
+
+impl ego_core::turn::RootGrantPort for SeatRootGrants {
+    fn ask<'a>(
+        &'a self,
+        session: SessionId,
+        item: ItemId,
+        request: ego_core::turn::RootGrantRequest,
+    ) -> futures::future::BoxFuture<'a, Result<ego_core::turn::RootGrantChoice, String>> {
+        use ego_core::question::{QuestionMode, QuestionOption, QuestionRequest};
+        use ego_core::turn::RootGrantChoice;
+        Box::pin(async move {
+            let path = std::fs::canonicalize(request.path.as_path())
+                .map(CanonPath::new)
+                .map_err(|error| format!("root path changed or disappeared: {error}"))?;
+            if path != request.path {
+                return Err("root path changed since the refused operation".into());
+            }
+            let mut proposed = self.effective.clone();
+            proposed.roots.push(ego_core::permit::RootCfg {
+                consent: None,
+                path: path.as_path().to_path_buf(),
+                access: request.access,
+            });
+            super::profile_roots::admit(&proposed, &self.workspace)?;
+            let shown_path = ego_core::permit::terminal_safe(&request.path.to_string());
+            let question = QuestionRequest::new(
+                format!(
+                    "{} may not {} {}: outside the workspace. Exact canonical root: {} ({}). If this root is a directory, a sandboxed command can read its descendants, including credentials. Choose Deny, Session, or Permanent. Neither grant applies in this process; exit, then run ego resume {}.",
+                    ego_core::permit::terminal_safe(&request.tool),
+                    request.operation,
+                    shown_path,
+                    shown_path,
+                    request.access.as_str(),
+                    session,
+                ),
+                QuestionMode::Single,
+                vec![
+                    QuestionOption::new("deny", "Deny"),
+                    QuestionOption::new("session", "Session"),
+                    QuestionOption::new("permanent", "Permanent"),
+                ],
+                false,
+            );
+            let choice = match self.elicitor.elicit(item, question).await {
+                Ok(QuestionOutcome::Answered(QuestionAnswer::Single(answer))) => {
+                    match answer.as_str() {
+                        "session" => RootGrantChoice::Session,
+                        "permanent" => RootGrantChoice::Permanent(ego_core::permit::RootConsent {
+                            revision: SessionId::new(),
+                            session,
+                            store: self.store_root.clone(),
+                        }),
+                        _ => RootGrantChoice::Deny,
+                    }
+                }
+                _ => RootGrantChoice::Deny,
+            };
+            Ok(choice)
+        })
+    }
+
+    fn publish<'a>(
+        &'a self,
+        consent: &'a ego_core::permit::PermanentRootConsent,
+    ) -> futures::future::BoxFuture<'a, Result<(), String>> {
+        Box::pin(async move {
+            let path = std::fs::canonicalize(consent.root.path().as_path())
+                .map(CanonPath::new)
+                .map_err(|error| format!("root path changed or disappeared: {error}"))?;
+            if &path != consent.root.path() {
+                return Err("root path changed after terminal approval".into());
+            }
+            let result = crate::config::user_store()
+                .map_err(|error| format!("{error:?}"))?
+                .mutate(UserConfigMutation::GrantRoot {
+                    target: self.target.clone(),
+                    root: ego_core::permit::RootCfg {
+                        path: path.as_path().to_path_buf(),
+                        access: consent.root.access(),
+                        consent: Some(consent.receipt.clone()),
+                    },
+                })
+                .map_err(|error| error.to_string())?;
+            if let UserConfigPublication::PublishedDurabilityUncertain { diagnostic } =
+                result.publication
+            {
+                return Err(format!(
+                    "root settings changed, but disk durability is uncertain: {diagnostic}"
+                ));
+            }
+            Ok(())
+        })
+    }
+}
+
 /// The run-level limits, and the loop that applies them between turns.
 ///
 /// Between turns is where they belong: `max_turns` fires *between* two
 /// completed turns and is not honestly a cause of the preceding one, and a
 /// token budget cannot interrupt a generation that is already paid for.
 pub(super) struct Turns<'a> {
+    pub(super) parent_cancel: CancelToken,
     pub(super) schema: Option<&'a schema::Schema>,
     pub(super) retries: u32,
     pub(super) max_turns: Option<u32>,
@@ -335,6 +439,44 @@ impl Turns<'_> {
     ) -> (RunTermination, Value) {
         self.drive_from(loop_, TurnStart::McpContext(command), cancel, diagnostics)
             .await
+    }
+
+    pub(super) async fn drive_user_shell<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        command: String,
+        environment: ego_core::permit::EnvPolicy,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        let argv = if cfg!(windows) {
+            vec!["cmd.exe", "/C", command.as_str()]
+        } else {
+            vec!["/bin/sh", "-c", command.as_str()]
+        };
+        let tool: Arc<dyn ego_core::permit::Tool> = Arc::new(ego_core::permit::Typed(
+            ego_tools::tools::ExecTool::with_environment(environment),
+        ));
+        match self
+            .one_running(
+                Box::pin(loop_.run_user_shell(serde_json::json!({ "argv": argv }), tool)),
+                cancel,
+            )
+            .await
+        {
+            Ok(outcome) => {
+                let termination =
+                    RunTermination::after_outcome(&outcome).unwrap_or(RunTermination::Done);
+                (termination, self.answer(&loop_.state()))
+            }
+            Err(termination) => {
+                diagnostics.note(&format!(
+                    "shell escape failed: {}",
+                    termination.exit_reason()
+                ));
+                (termination, self.answer(&loop_.state()))
+            }
+        }
     }
 
     pub(super) async fn drive_checkpoint<'session: 'turn, 'turn>(
@@ -590,6 +732,13 @@ impl Turns<'_> {
                 }
                 tokio::select! {
                     biased;
+                    cause = self.parent_cancel.cancelled() => {
+                        cancel.cancel(cause);
+                        stopped = true;
+                    }
+                    _ = cancel.cancelled() => {
+                        stopped = true;
+                    }
                     cause = stop_signal(self.deadline) => {
                         cancel.cancel(cause);
                         stopped = true;
@@ -702,6 +851,7 @@ mod deadline_tests {
     #[tokio::test]
     async fn completed_turn_is_not_rewritten_by_post_completion_deadline() {
         let turns = Turns {
+            parent_cancel: CancelToken::new(),
             schema: None,
             retries: 0,
             max_turns: None,
@@ -728,6 +878,7 @@ mod deadline_tests {
     #[tokio::test]
     async fn completed_turn_survives_deadline_during_async_cleanup() {
         let turns = Turns {
+            parent_cancel: CancelToken::new(),
             schema: None,
             retries: 0,
             max_turns: None,
@@ -751,6 +902,7 @@ mod deadline_tests {
     #[tokio::test]
     async fn running_turn_still_times_out() {
         let turns = Turns {
+            parent_cancel: CancelToken::new(),
             schema: None,
             retries: 0,
             max_turns: None,

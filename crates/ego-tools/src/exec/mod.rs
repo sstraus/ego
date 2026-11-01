@@ -18,6 +18,7 @@ pub(crate) mod process;
 mod process_tree;
 #[cfg(target_os = "macos")]
 mod profile;
+mod protocol_session;
 mod residual;
 #[cfg(target_os = "macos")]
 mod seatbelt;
@@ -42,6 +43,7 @@ use null::NullBackend;
 
 pub use crate::store::SessionEvidenceStore;
 pub use adaptive::admit_confinement;
+pub use protocol_session::{ProtocolChild, start_protocol_session};
 
 /// Conservative setup write preview. This never constructs or launches a backend.
 /// Directory reach that overlaps operator configuration is not proposed, even on
@@ -132,9 +134,9 @@ pub fn setup_exec_reachable(
     #[cfg(target_os = "linux")]
     let runtime = landlock::derived_runtime_roots()?;
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    return Err(ProcessError::Backend(
-        "setup executable reach is unsupported on this platform".into(),
-    ));
+    return Err(ProcessError::Backend(format!(
+        "setup executable reach for {target} is unsupported on this platform"
+    )));
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     Ok(target.is_or_under(policy.workspace())
         || runtime
@@ -149,7 +151,9 @@ pub use ego_core::permit::{ProcessError, ProcessExecutor};
 pub use landlock::dispatch_helper as dispatch_landlock_helper;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use probe::dispatch_network_probe;
-pub use secret_child::{SecretChildError, SecretChildOutput, SecretChildRequest, run_secret_child};
+pub use secret_child::{
+    SecretChildError, SecretChildOutput, SecretChildRequest, run_protocol_child, run_secret_child,
+};
 
 pub(crate) fn runtime_handle() -> tokio::runtime::Handle {
     static RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();

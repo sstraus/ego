@@ -805,6 +805,14 @@ impl<'a> Tools<'a> {
         policy.classify(call)
     }
 
+    pub(crate) fn authorize_user_exec(
+        &self,
+        policy: &PolicyEngine,
+        call: PreparedCall,
+    ) -> Classification {
+        policy.classify_user_exec(call)
+    }
+
     pub(crate) fn authorize_presented(
         &self,
         policy: &PolicyEngine,

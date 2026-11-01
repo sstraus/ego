@@ -1,8 +1,9 @@
 # Build and maintain the guide
 
-The user documentation is one set of Markdown files. It can be read in the
-checkout or built as an mdBook, with a chapter sidebar, search, and print view.
-`SUMMARY.md` owns book navigation.
+The [hosted user guide](https://sstraus.github.io/ego/) is published by
+[the documentation workflow](../.github/workflows/docs.yml). Readers do not need
+to build it. Contributors maintain one set of Markdown files; `SUMMARY.md` owns
+the chapter sidebar. Use the commands below to check changes before submission.
 
 ## Requirements
 
@@ -24,8 +25,35 @@ run `mdbook serve docs --hostname 127.0.0.1 --port 3000`, open the displayed
 loopback URL, and stop the server when finished. To place a build elsewhere,
 use `mdbook build docs --dest-dir /absolute/output/directory`.
 
-Building a book does not publish a website. No hosted documentation URL or
-remote deployment is required by this configuration.
+## Automated publication and Pages setup
+
+The workflow runs on pushes to `main`, release tags matching `v*`, and manual
+workflow dispatch. It downloads the official Linux mdBook **0.5.4** release
+archive and verifies its recorded SHA-256 before extracting or running it. It
+then runs the source-link and preprocessor checks, builds the book, and checks
+the generated HTML before
+uploading `docs/book/` as a Pages artifact. A separate deployment job uses
+`actions/deploy-pages`, the `github-pages` environment, and job-scoped
+`pages: write` and `id-token: write` permissions. Deployments share the `pages`
+concurrency group and do not cancel a deployment already in progress.
+
+Before first publication, a repository administrator must approve and perform
+these steps in the **public** `sstraus/ego` repository:
+
+1. Open **Settings → Pages → Build and deployment** and select **GitHub Actions**
+   as the source. Do not select branch-based publication.
+2. Review the `github-pages` environment deployment rules. They must permit
+   `main` and release tags matching `v*` for both workflow triggers to deploy.
+3. After the workflow is present on `main`, run **Deploy User Guide** manually
+   or allow an authorized push or release tag to trigger it.
+4. Check the build and deployment receipts and open
+   <https://sstraus.github.io/ego/>. The site may return 404 until the first
+   successful deployment. A local build alone does not prove publication.
+
+These are publication steps, not prerequisites for reading or contributing.
+Do not change repository settings or publish without maintainer authorization.
+To check workflow syntax without deploying, run
+`actionlint .github/workflows/docs.yml` alongside the local build above.
 
 ## Add or update a page
 
@@ -69,7 +97,7 @@ version/status, first-run examples, and links consistent with these guides.
 The workspace version is in `[workspace.package]` in `Cargo.toml`. Workspace
 packages inherit it. Let Cargo refresh their lockfile versions; do not edit
 `Cargo.lock` by hand. A release preparation can select a new minor version;
-`0.4.1` is the current local preparation, not a publication claim.
+the `0.4.3` notes describe the upcoming release until it is published.
 
 Write notes in `release-notes/VERSION.md`, grouped by user-visible features,
 fixes, and breaking changes. Verify the changes against

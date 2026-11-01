@@ -181,6 +181,118 @@ impl DurableAcpFixture {
         item
     }
 
+    pub fn append_child_start(
+        &self,
+        session: &str,
+    ) -> (TurnId, ItemId, ego_core::public::ChildIdentity) {
+        use ego_core::event::id::SubagentInvocationId;
+        use ego_core::store::blob::BlobId;
+        let session: SessionId = session.parse().unwrap();
+        let turn = TurnId::new();
+        let item = ItemId::new();
+        let invocation = SubagentInvocationId::new();
+        let child = ego_core::run::RunId::new(SessionId::new(), uuid::Uuid::new_v4());
+        let mut seq = self.store.semantic_seq(&session);
+        for kind in [
+            EventKind::SubagentRequested {
+                invocation,
+                task: BlobRef::new(BlobId::parse("a".repeat(64)).unwrap(), 1),
+                selections: RunSelections::empty(),
+            },
+            EventKind::SubagentSpawned { invocation, child },
+        ] {
+            seq.next();
+            self.store
+                .append(
+                    &session,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq,
+                            id: EventId::new(),
+                            turn,
+                            item: Some(item),
+                            parent: None,
+                            ts: Timestamp::EPOCH,
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    },
+                )
+                .unwrap();
+        }
+        (
+            turn,
+            item,
+            ego_core::public::ChildIdentity::Durable {
+                invocation,
+                run: child,
+            },
+        )
+    }
+
+    pub fn append_child_settlement(
+        &self,
+        session: &str,
+        turn: TurnId,
+        item: ItemId,
+        child: ego_core::public::ChildIdentity,
+    ) {
+        let ego_core::public::ChildIdentity::Durable { invocation, run } = child else {
+            panic!("fixture settles a durable child");
+        };
+        let session: SessionId = session.parse().unwrap();
+        let mut seq = self.store.semantic_seq(&session);
+        self.store
+            .append(
+                &session,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn,
+                        item: Some(item),
+                        parent: None,
+                        ts: Timestamp::EPOCH,
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::SubagentSettled {
+                        invocation,
+                        child: Some(run),
+                        terminal: ego_core::event::domain::SubagentTerminal::Failed {
+                            settlement: RunSettlement::CancelledBeforeStart,
+                        },
+                    },
+                },
+            )
+            .unwrap();
+    }
+
+    pub fn append_parent_completion(&self, session: &str, turn: TurnId) {
+        let session: SessionId = session.parse().unwrap();
+        let mut seq = self.store.semantic_seq(&session);
+        seq.next();
+        self.store
+            .append(
+                &session,
+                &DomainEvent {
+                    env: Envelope {
+                        seq,
+                        id: EventId::new(),
+                        turn,
+                        item: None,
+                        parent: None,
+                        ts: Timestamp::EPOCH,
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::TurnCompleted {
+                        ok: true,
+                        exit_reason: ego_core::event::domain::ExitReason::Completed,
+                    },
+                },
+            )
+            .unwrap();
+    }
+
     pub fn seed_compaction_child(&self, source: &str) -> String {
         let source: SessionId = source.parse().unwrap();
         let target = SessionId::new();
@@ -726,6 +838,25 @@ impl ego_core::run::EventSinkFactory for NullSinkFactory {
     }
 }
 
+fn child_capabilities(context_window: u64) -> ModelCapabilities {
+    ModelCapabilities {
+        schema_version: ModelCapabilities::SCHEMA_VERSION,
+        audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
+        max_context_tokens: Some(context_window),
+        max_output_tokens: None,
+        max_tools: None,
+        supports_parallel_tool_calls: false,
+        reasoning_carryover: ReasoningCarryover::Unsupported,
+        reasoning_efforts: ReasoningEffortSupport::Any,
+        reasoning_state_dialect: None,
+        cancel: CancelSemantics::Unsupported,
+        cache: CacheRetention::None,
+        transport: Transport::Sse,
+        image_input: ImageInputSupport::Unknown,
+        default_reasoning_effort: None,
+    }
+}
+
 fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecord {
     EvidenceRecord::GenerationAdmission(GenerationAdmissionEvidence::new(
         session,
@@ -737,22 +868,7 @@ fn generation_evidence(session: SessionId, context_window: u64) -> EvidenceRecor
             ModelRef("fixture-provider/model".to_owned()),
             "fixture-model",
         ),
-        ModelCapabilities {
-            schema_version: ModelCapabilities::SCHEMA_VERSION,
-            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
-            max_context_tokens: Some(context_window),
-            max_output_tokens: None,
-            max_tools: None,
-            supports_parallel_tool_calls: false,
-            reasoning_carryover: ReasoningCarryover::Unsupported,
-            reasoning_efforts: ReasoningEffortSupport::Any,
-            reasoning_state_dialect: None,
-            cancel: CancelSemantics::Unsupported,
-            cache: CacheRetention::None,
-            transport: Transport::Sse,
-            image_input: ImageInputSupport::Unknown,
-            default_reasoning_effort: None,
-        },
+        child_capabilities(context_window),
         PricingEvidence::Unpriced {
             source: "fixture".to_owned(),
             reason: "not relevant to the ACP replay fixture".to_owned(),
@@ -1127,6 +1243,7 @@ impl SessionLifecycleStore for Store {
 #[allow(dead_code)]
 #[derive(Default)]
 pub struct Executor {
+    pub child_events: Mutex<Vec<PublicEvent>>,
     block_next: AtomicBool,
     ask_permission_next: AtomicBool,
     recover_running: AtomicBool,
@@ -1291,6 +1408,10 @@ impl RunExecutor for Executor {
     ) -> BoxFuture<'a, Result<RunSettlement, RunExecutorError>> {
         self.submit_calls.fetch_add(1, Ordering::SeqCst);
         Box::pin(async move {
+            let sink = bindings.sink_factory.create(&child_capabilities(200_000));
+            for event in self.child_events.lock().expect("child events").iter() {
+                sink.publish(event, &SessionState::default());
+            }
             if self.ask_permission_next.swap(false, Ordering::SeqCst) {
                 use ego_core::permit::{
                     Authority, CanonPath, Escalation, Op, OpName, PermissionDecision,

@@ -1057,6 +1057,10 @@ impl QueuedPrompt {
 /// function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    /// Per-configured-filter variables; new session identities start empty.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub protocol_filter_variables:
+        BTreeMap<String, crate::generator::filter_state::FilterVariables>,
     /// Standing user registrations, reduced independently of model prose.
     #[serde(
         default,
@@ -1072,6 +1076,12 @@ pub struct SessionState {
     pub execution_observation: Option<crate::permit::ExecObservation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_selections: Option<RunSelections>,
+    /// Approved roots belong to this session, not to a fork or live process.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub session_roots: Vec<crate::permit::ProfileRoot>,
+    /// Terminal consent for a profile root, retained only for policy re-admission.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub permanent_root_consents: Vec<crate::permit::PermanentRootConsent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_snapshot: Option<crate::session::PromptSnapshot>,
     /// The `seq` carried by the most recently applied event. `apply` trusts
@@ -1230,6 +1240,8 @@ impl Default for SessionState {
             context_cooldown: 0,
             execution_observation: None,
             session_selections: None,
+            session_roots: Vec::new(),
+            permanent_root_consents: Vec::new(),
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
             lineage: None,
@@ -1267,6 +1279,7 @@ impl Default for SessionState {
             background_tasks: std::collections::BTreeMap::new(),
             skill_catalogue_generation: None,
             skill_catalogue: SkillCatalogueEvidence::default(),
+            protocol_filter_variables: BTreeMap::default(),
             skill_events: Vec::default(),
             errors: Vec::default(),
             compactions: Vec::default(),
@@ -1940,6 +1953,28 @@ impl SessionState {
         self.known_events.insert(ev.env.id);
 
         match &ev.kind {
+            EventKind::ProtocolFilterVariablesSaved {
+                session_id,
+                namespace,
+                expected_revision,
+                state,
+            } => {
+                let key = format!("{session_id}:{namespace}");
+                let current = self
+                    .protocol_filter_variables
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default();
+                if namespace.len() == 64
+                    && namespace.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    && current.revision == *expected_revision
+                    && current
+                        .proposed(&state.values)
+                        .is_ok_and(|next| next == *state)
+                {
+                    self.protocol_filter_variables.insert(key, state.clone());
+                }
+            }
             EventKind::PinsChanged { constraints } => {
                 if constraints.validate().is_ok() {
                     self.constraints = constraints.clone();
@@ -2195,9 +2230,24 @@ impl SessionState {
                     self.prompt_snapshot = Some(snapshot.clone());
                 }
             }
-            EventKind::FallbackDecision { .. } => {}
+            EventKind::FallbackDecision { .. } | EventKind::PermanentRootGrantPending { .. } => {}
             EventKind::SessionSelectionsSelected { selections } => {
                 self.session_selections = Some(selections.clone());
+            }
+            EventKind::SessionRootGranted { root } => {
+                if !self.session_roots.contains(root) {
+                    self.session_roots.push(root.clone());
+                }
+            }
+            EventKind::PermanentRootGranted { consent } => {
+                if !self.permanent_root_consents.contains(consent) {
+                    self.permanent_root_consents.push(consent.clone());
+                }
+            }
+            EventKind::RootRevoked { path } => {
+                self.session_roots.retain(|root| root.path() != path);
+                self.permanent_root_consents
+                    .retain(|consent| consent.root.path() != path);
             }
             EventKind::ExecutionObserved { observation, .. } => {
                 self.execution_observation = Some(observation.clone());
@@ -2443,6 +2493,15 @@ impl SessionState {
             return;
         }
         match transition {
+            GoalTransition::AllowanceExtended { turns } => {
+                // admits checked the positive increment and overflow before replay.
+                goal.continuation_budget = Some(
+                    goal.continuation_budget
+                        .unwrap_or(crate::goal::DEFAULT_CONTINUATION_BUDGET)
+                        + turns,
+                );
+                goal.check_stop = None;
+            }
             GoalTransition::Blocked { reason } => {
                 goal.state = GoalState::Blocked;
                 goal.blocker_reason = Some(reason.clone());

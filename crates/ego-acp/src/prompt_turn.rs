@@ -280,10 +280,10 @@ where
                                     .await
                             }
                             Some((run_id, revision)) => {
-                                let cancel = ego_core::turn::CancelToken::new();
+                                let cancel = bindings.cancel();
                                 let admission = std::pin::pin!(controller.continue_run(
                                     ContinueRequest::new(run_id, request_id, digest, revision, prompt),
-                                    bindings.with_cancel(cancel.clone()),
+                                    bindings,
                                 ));
                                 match futures::future::select(&mut withdrawn, admission).await {
                                     Either::Right((outcome, _)) => outcome,

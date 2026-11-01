@@ -1,8 +1,8 @@
 # ego extensions to ACP
 
 This is the client integration contract audited on 2026-10-10 and reconciled
-against local source on 2026-10-20. It describes the
-code in this checkout, not a promise that every ACP client implements it.
+against the source, most recently on 2026-10-31. It describes ego's implemented
+contract, not a promise that every ACP client implements it.
 `C → E` means client to ego. `E → C` means ego to client.
 
 ## Comparison baseline
@@ -44,8 +44,8 @@ listed separately below. There are no ego-named notification methods in the
 router: extensions are carried by standard `session/update` notifications.
 
 Source citations below are repository-relative `file:line` positions at the
-audited checkout. Test citations identify existing source evidence. These tests
-were read, not run, for this documentation change. JSON examples with `S`, `R`,
+dated audit; line numbers can move. Test citations identify existing source evidence.
+The current review reads these contracts; it does not claim a new integration run. JSON examples with `S`, `R`,
 `T`, or `M` stand for valid non-nil session, request, target, or message UUIDs;
 replace these labels before sending a request. Examples of metadata show the
 containing standard object fragment, not a complete JSON-RPC envelope.
@@ -59,7 +59,7 @@ The production durable composition advertises:
 ```json
 {
   "loadSession": true,
-  "promptCapabilities": {"image": true, "audio": false, "embeddedContext": true},
+  "promptCapabilities": {"image": true, "audio": true, "embeddedContext": true},
   "mcpCapabilities": {"http": true, "sse": true, "acp": true},
   "sessionCapabilities": {
     "list": {}, "delete": {"_meta": {"ego": {"force": true}}}, "resume": {}, "close": {},
@@ -67,13 +67,15 @@ The production durable composition advertises:
   },
   "_meta": {"ego": {
     "steer": {"version": 1, "method": "_ego/steer", "contentTypes": ["text"]},
+    "retry": {"version": 1, "method": "_ego/retry"},
+    "childActivity": {"version": 1, "update": "session_info_update", "field": "_meta.ego.childActivity"},
     "compact": {"version": 1, "method": "_ego/compact"},
     "hold": {"version": 1, "pause": "_ego/pause", "resume": "_ego/resume"}
   }}
 }
 ```
 
-`_meta.ego.steer`, `.compact`, `.hold`, and the fork capability's
+`_meta.ego.steer`, `.retry`, `.compact`, `.hold`, and the fork capability's
 `_meta.ego.atMessage` are E → C capability extensions. `steer` is always
 advertised by this router. `compact` requires the compaction port. `hold`,
 `loadSession`, and the session lifecycle capabilities require the lifecycle
@@ -470,8 +472,8 @@ second protocol implementation.
 | `initialize`, C → E → C | Negotiate a supported protocol version; report capabilities. | `{"protocolVersion":1}` for supported asks at or above 1. Version 0 is refused by the SDK. Do not assume that compiled v2 projections are served. Use the returned version or refuse the connection. | `crates/ego-acp/src/negotiate.rs:49`; `initialize.rs::the_router_answers_what_negotiate_says_it_answers` |
 | `cwd`, C → E on session setup | Absolute path required by the compared schema. | Production also accepts a relative path, for example `{"cwd":"repo","mcpServers":[]}`, relative to the launch base. It canonicalizes and requires an existing directory. Load/resume require the durable session root to match. Bad roots are invalid-params. Portable clients must send an absolute path. This is a permissive difference, not an advertised extension. | `crates/ego-cli/src/host_ports.rs:55`; `host_ports.rs::one_resolver_answers_both_front_doors_and_names_the_right_thing`; `session_lifecycle.rs::malformed_unknown_and_wrong_root_requests_return_explicit_errors` |
 | `additionalDirectories`, C → E | Optional extra roots, subject to capability negotiation. | Any non-empty array, such as `{"additionalDirectories":["/other"]}`, is invalid-params before root resolution or MCP effects, for new/load/resume/fork. Omit it or send `[]`; it is not a way to loosen the profile perimeter. | `crates/ego-acp/src/serve.rs:2964`, `:3212`, `:3369`, `:3510`; `session_lifecycle.rs::every_nonempty_additional_directories_field_refuses_before_other_effects` |
-| `mcpServers`, C → E | Client supplies MCP server descriptions. HTTP/SSE are capability-gated. | Example stdio entry: `{"name":"tools","command":"/usr/bin/tool-server","args":[],"env":[]}`. ego requires absolute stdio commands, valid case-insensitively unique names/env names, valid HTTP URLs and headers, no duplicate or wire-owned HTTP headers, and non-empty ACP server IDs. Plain HTTP is limited to exact loopback. SSE/unknown transports refuse; the raw-versus-parsed count check prevents silently dropped servers. Invalid selection is refused atomically. Omit unsupported servers rather than assume partial admission. | `crates/ego-acp/src/serve.rs:1426`, `:2196`; `prompt.rs::invalid_supplied_mcp_servers_are_rejected_atomically_before_session_insert`, `session_new_accepts_exact_loopback_http_and_refuses_other_plaintext_hosts` |
-| `session/prompt` content, C → E | Text and resource links are baseline; images are advertised. | `[{"type":"resource_link","uri":"file:///workspace/a","name":"a"}]` becomes URI text, not an automatic file read. Text joins with newlines. Embedded text accepts absent MIME or text/plain, text/markdown, text/html, text/csv, application/json; binary resources accept JPEG/PNG/GIF/WebP only. Host bytes are used directly: no file read or URI fetch. Image positions survive durable blob metadata as UTF-8 text offsets and provider reconstruction. Resource provenance is a URI digest; each embedded resource is explicitly labeled host-supplied untrusted data, not instructions. Raw URI, annotations and `_meta` are discarded. See [IDE setup](ide.md) for selection, diagnostic and edit-review snapshots. URI metadata must be nonempty, at most 4096 bytes and free of control characters. Joined text is limited to 1 MiB; images to 100 and 64 MiB total decoded bytes. JPEG/PNG/GIF/WebP require valid base64 and matching decoded media. Audio and unsupported resource media refuse before a turn. Model limits still apply. Send text-only if image support is absent. | `crates/ego-acp/src/serve.rs:1686`, `:1718`; `prompt.rs::the_two_block_kinds_every_agent_must_accept_reach_the_turn`, `an_image_whose_bytes_contradict_its_declared_type_is_refused` |
+| `mcpServers`, C → E | Client supplies MCP server descriptions. HTTP/SSE are capability-gated. | Example stdio entry: `{"name":"tools","command":"/usr/bin/tool-server","args":[],"env":[]}`. ego requires absolute stdio commands, valid case-insensitively unique names/env names, valid HTTP URLs and headers, no duplicate or wire-owned HTTP headers, and non-empty ACP server IDs. Plain HTTP is limited to exact loopback. Explicit SSE selects the legacy profile; unknown transports refuse; the raw-versus-parsed count check prevents silently dropped servers. Invalid selection is refused atomically. Omit unsupported servers rather than assume partial admission. | `crates/ego-acp/src/serve.rs:1426`, `:2196`; `prompt.rs::invalid_supplied_mcp_servers_are_rejected_atomically_before_session_insert`, `session_new_accepts_exact_loopback_http_and_refuses_other_plaintext_hosts` |
+| `session/prompt` content, C → E | Text and resource links are baseline; images are advertised. | `[{"type":"resource_link","uri":"file:///workspace/a","name":"a"}]` becomes URI text, not an automatic file read. Text joins with newlines. Embedded text accepts absent MIME or text/plain, text/markdown, text/html, text/csv, application/json; binary resources accept JPEG/PNG/GIF/WebP only. Host bytes are used directly: no file read or URI fetch. Image positions survive durable blob metadata as UTF-8 text offsets and provider reconstruction. Resource provenance is a URI digest; each embedded resource is explicitly labeled host-supplied untrusted data, not instructions. Raw URI, annotations and `_meta` are discarded. See [IDE setup](ide.md) for selection, diagnostic and edit-review snapshots. URI metadata must be nonempty, at most 4096 bytes and free of control characters. Joined text is limited to 1 MiB; images to 100 and 64 MiB total decoded bytes. JPEG/PNG/GIF/WebP require valid base64 and matching decoded media. Audio accepts explicit `audio/wav` blocks only: at most four clips and 10 MiB total, with valid PCM16 WAV bytes (mono/stereo, at most 48 kHz and 60 seconds per clip). Mixed audio/image prompts and unsupported resource media refuse before a turn. The selected provider/model must support the admitted audio contract. Model limits still apply. Send text-only if image support is absent. | `crates/ego-acp/src/serve.rs:1686`, `:1718`; `prompt.rs::the_two_block_kinds_every_agent_must_accept_reach_the_turn`, `an_image_whose_bytes_contradict_its_declared_type_is_refused` |
 | Prompt admission, C → E | One prompt request settles its turn. | A second simultaneous prompt is invalid-request, not a queue. Unopened sessions are invalid-params. Correlation uses request content digest as well as identity; changed content is new work. Use advertised steering for busy input, otherwise wait. | `crates/ego-acp/src/prompt_turn.rs:79`, `:96`; `prompt.rs::a_second_prompt_while_a_turn_is_running_is_refused_and_starts_nothing`, `session_lifecycle.rs::a_reused_request_id_carrying_a_new_prompt_is_new_work_not_a_replay` |
 | Load/resume, C → E → C | Load replays history; resume does not. | `{"sessionId":"S","cwd":"/workspace/repo","mcpServers":[]}` reattaches durable execution and restores creation profile authority. Load replays ordered projectable history and at most one final reduced usage update; resume emits current info but no history/usage replay. Same-connection active replacement refuses. Uncertain effects require close/new, not replay. With no resume capability, use advertised load; never use standard resume to release a hold. | `crates/ego-acp/src/serve.rs:3197`, `:3354`; `session_lifecycle.rs::load_replays_projectable_history_then_one_final_usage_and_current_info`, `resume_emits_current_info_but_no_history_or_usage`; `uncertain_session.rs::uncertain_session_prompt_names_run_and_close_new_chat_recovery` |
 | Permission options, E → C request, C → E answer | Option IDs are opaque; option kind indicates allow/reject once/always. | `{"outcome":{"outcome":"selected","optionId":"allow-session"}}` grants transient session approval, despite its standard kind `allow_always`. IDs `allow-once`, `reject-once`, `allow-session`, and when rememberable `allow-always`/`reject-always` are distinct. Remembered answers write displayed user rules in the active profile. Cancellation, unknown IDs, no seat, transport failure, or persistence failure deny. No timeout is imposed on a legitimate open permission question. Render offered labels and return the exact ID; never infer persistence from kind alone. Fallback is once-only choices when that is all the agent offers, not terminal input. | `crates/ego-acp/src/permission.rs:57`, `:121`, `:235`; `permission.rs::an_option_ego_never_offered_is_a_denial`; `crates/ego-cli/tests/acp_remembered_permissions.rs::session_allow_answers_five_later_calls_without_a_prompt_then_expires`, `allow_always_writes_one_profile_rule_and_revoke_restores_the_question` |
@@ -549,11 +551,12 @@ Tests: `crates/ego-acp/tests/listener_transport.rs::authenticated_websocket_fact
 
 ## Not implemented
 
-The router and current product contract exclude:
+The current router excludes:
 
 - Client filesystem `fs/read_text_file` and `fs/write_text_file`, and client
   `terminal/*` effects. ego executes through its own rooted tools instead.
-- Audio, arbitrary binary resource media, MCP-over-SSE, and non-empty additional directories.
+- Audio formats other than WAV, mixed audio/image prompts, arbitrary binary
+  resource media, and non-empty additional directories.
 - `session/set_mode`: use the advertised mode config option.
 - Dedicated model/provider configuration routes such as draft
   `providers/list`, `providers/set`, and `providers/disable`. They are not a
@@ -561,10 +564,13 @@ The router and current product contract exclude:
 - Protocol-level `authenticate`/`logout` workflows. Transport bearer admission
   and provider login are separate surfaces; no auth methods are advertised here.
 - Next-edit suggestions and document synchronization.
-- Standard slash-command advertisement/dispatch, URL elicitation, and the newer
-  schema's standard notice/compaction update variants. Current notices and
-  compaction use the ego surfaces above. Client form support is the only
-  elicitation capability captured by this adapter.
+- URL elicitation and the newer schema's standard notice/compaction update
+  variants. Current notices and compaction use the ego surfaces above. Client
+  form support is the only elicitation capability captured by this adapter.
+
+Trusted skill commands are advertised through standard `available_commands_update`
+notifications and dispatched through the shared skill-command path. This does not
+make every terminal slash control available to an ACP client.
 - A v2 serving arm. v2 projection code and golden fixtures do not make v2
   reachable on the production router.
 - Permission amendments that return replacement tool arguments. The ACP
@@ -623,3 +629,48 @@ uncertain run returns `-32012` unless force is explicitly true. Invalid IDs or
 force types return `-32602`; missing sessions return `-32002`; store or
 publication failures return `-32603`. Force acknowledges uncertainty; it does
 not claim the external effect was resolved.
+
+## Child activity (negotiated version 1)
+
+The agent advertises `agentCapabilities._meta.ego.childActivity` with `version: 1`,
+`update: "session_info_update"`, and `field: "_meta.ego.childActivity"`.
+The client opts in on `initialize` with
+`clientCapabilities._meta.ego.childActivity: {"version": 1}`.
+Absent, malformed, and unknown versions receive no child updates. ACP protocol
+version remains 1. This is metadata on the standard `session/update`, not a new
+standard variant, custom notification method, tool call, or human wait.
+
+Each `session/update.params.sessionId` is the exact parent session. The
+`update.sessionUpdate` discriminator is `session_info_update`; its
+`_meta.ego.childActivity` value has one of these shapes:
+
+- Lifecycle: `{"version":1,"kind":"lifecycle","turnId":T,"itemId":I,"child":C,"phase":{"phase":"started"}}`.
+- Settlement: the same identity with `phase: {"phase":"settled","outcome":"completed"}`.
+  Outcomes are `completed`, `failed`, `interrupted`, or `cancelled`; cancellation is never success.
+- Turn retraction: `{"version":1,"kind":"clear","turnId":T,"scope":"foreground"}`.
+  Clear only foreground children of that turn, including omitted settlements.
+  A durable child can outlive its parent turn, including parent cancellation;
+  retain it until its exact settlement or session retraction. Do not invent an outcome.
+- Session close/delete retraction: `{"version":1,"kind":"clear","turnId":null}`.
+  Clear the whole session roster. Transport exit also retires its attachment.
+- Load/resume snapshot: `{"version":1,"kind":"snapshot","children":[{"turnId":T,"itemId":I,"child":C}]}`.
+  Resume includes the current durable child roster without message or usage
+  history. Parent completion does not remove a still-active durable child.
+  Replace the session roster, including when the array is empty. Historical
+  starts and settlements are not delivered as new child activity.
+
+`C` is the exact public `ChildIdentity`: `{"kind":"durable","invocation":UUID,"run":{"session_id":UUID,"nonce":UUID}}`
+or `{"kind":"foreground","turn":UUID}`. No durable identity is invented for
+foreground execution. Key a child by the parent session, parent turn, item, and
+complete typed child identity; do not key it by a label. Duplicate starts upsert,
+and settlements remove only their exact identity. Ignore a lifecycle for an
+already cleared foreground turn. Durable children remain eligible for later settlement.
+A child frame never grants permission or answers a question.
+Private task text, results, diagnostic text, and human answers are absent.
+
+Replay uses the durable lifecycle projection and excludes inherited children.
+Foreground task lifecycle is live-only; a process restart cannot recover a
+foreground identity that was never durable. A durable snapshot does not claim
+that such a task survived the process. Existing permission and elicitation RPCs
+remain their only human-request owners and are not replayed by this extension.
+The extension does not replace ordinary ACP permission and question handling.

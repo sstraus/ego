@@ -58,10 +58,14 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
         let automatic = if observed.same_measurement(old) {
             None
         } else {
+            // This boundary has no active config snapshot with which to validate a
+            // permanent receipt. Only session-bound authority can bypass a new answer.
+            let approved = journal.state().session_roots.clone();
             Some(
                 admit_execution_policy(
                     old,
                     &observed,
+                    &approved,
                     CanonPath::new(snapshot.root.as_path()),
                     bindings.human().as_deref(),
                     journal,
@@ -98,13 +102,14 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
 pub async fn admit_execution_policy(
     previous: &ExecObservation,
     observed: &ExecObservation,
+    approved_roots: &[crate::permit::ProfileRoot],
     root: CanonPath,
     human: Option<&dyn crate::permit::HumanApprover>,
     journal: &mut crate::turn::Journal<'_>,
     notice: impl Fn(&str) -> Result<(), String>,
 ) -> Result<bool, RunError> {
     let turn = TurnId::new();
-    let automatic = observed.not_more_permissive_than(previous);
+    let automatic = observed.not_more_permissive_than_with_roots(previous, approved_roots);
     let message = format!(
         "{} {}",
         observed.changes_from(previous),

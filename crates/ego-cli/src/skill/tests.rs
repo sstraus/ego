@@ -68,6 +68,21 @@ fn valid_for(name: &str, frontmatter: &str) -> String {
     format!("name: {name}\ndescription: Explain a failing check.\n{frontmatter}")
 }
 
+// Catches: the default /skills listing leaves the user without commands to inspect or run skills.
+#[test]
+fn skill_summary_names_available_controls() {
+    let roots = Roots::new();
+    let text = capture(&roots.catalogue(false)).render_summary();
+    for command in [
+        "/skills details",
+        "/skills diagnose",
+        "/skills rescan",
+        "/skills invoke NAME",
+    ] {
+        assert!(text.contains(command), "missing {command}: {text}");
+    }
+}
+
 #[test]
 fn shared_yaml_envelope_projects_invocation_skill_hooks_into_typed_core_entries() {
     let text = r#"---

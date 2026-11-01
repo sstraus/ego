@@ -16,6 +16,9 @@ default:
 # Everything CI checks, cheapest failure first.
 gate: portable-paths-check fmt-check catalogue-check lint test
 
+# Local gate plus the Windows cfg check; requires the target and a cross C compiler.
+gate-cross: gate lint-windows
+
 python := if os() == "windows" { "python" } else { "python3" }
 
 # Needs Python 3.11 for tomllib; the generator uses the standard library only.
@@ -45,6 +48,10 @@ fmt-check:
 # Clippy over every target, warnings fatal.
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
+
+# Compile ego-tools' Windows cfg with warnings fatal (GNU cross toolchain on Linux).
+lint-windows target="x86_64-pc-windows-gnu":
+    cargo clippy -p ego-tools --lib --locked --target {{ target }} -- -D warnings
 
 # `cargo test` and not `cargo nextest`, because this recipe is the CI gate too
 # and a runner should not need a second tool installed to reproduce it.
@@ -94,3 +101,7 @@ msrv:
 # Print rust-version from Cargo.toml.
 _msrv:
     @grep -m1 '^rust-version' Cargo.toml | sed -E 's/.*"(.+)".*/\1/'
+
+# Check public command examples against an already-built ego binary before export.
+public-docs-check binary docs_root:
+    {{ python }} -B scripts/check-public-docs.py --binary "{{ binary }}" --docs-root "{{ docs_root }}"

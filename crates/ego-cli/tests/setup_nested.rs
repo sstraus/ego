@@ -28,7 +28,8 @@ fn setup_nested_cli_inherits_config_floor_and_reports_only() {
             .unwrap();
         assert!(
             output.status.success(),
-            "{}",
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
         return;
@@ -76,10 +77,7 @@ fn setup_nested_cli_inherits_config_floor_and_reports_only() {
         .map(|block| block.text.as_str())
         .collect::<Vec<_>>()
         .join("\n");
-    assert!(
-        output.contains("Report only; changes cannot be applied without confirmation"),
-        "{output}"
-    );
+    assert!(output.contains("setup needs a terminal"), "{output}");
     let overwrite = format!("printf forged > '{}'", home.join("config.toml").display());
     let spec = SpawnSpec::new(
         vec!["/bin/sh".into(), "-c".into(), overwrite.into()],

@@ -33,11 +33,21 @@ pub(crate) fn main() -> std::process::ExitCode {
         return exit;
     }
 
-    ordinary_main()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("the process runtime can be created");
+    let (exit, acp_stopped) = runtime.block_on(ordinary_main());
+    if acp_stopped {
+        // ACP has already settled its turns and released their leases. Tokio's
+        // stdin reader cannot cancel a blocking OS read while the host keeps
+        // its pipe open, so do not wait indefinitely for that reader at exit.
+        runtime.shutdown_timeout(std::time::Duration::from_millis(100));
+    }
+    exit
 }
 
-#[tokio::main]
-async fn ordinary_main() -> std::process::ExitCode {
+async fn ordinary_main() -> (std::process::ExitCode, bool) {
     let cancel = CancelToken::new();
     let out = Stdout::new(cancel.clone());
     let evidence = std::sync::Arc::new(EvidenceAdmissionService::new());
@@ -101,6 +111,7 @@ async fn ordinary_main() -> std::process::ExitCode {
         }
         _ => None,
     };
+    let is_acp = matches!(&invocation, Ok(Invocation::Acp(_)));
     let needs_mcp_runtime = matches!(&invocation, Ok(Invocation::Mcp(_)));
     let mcp = if needs_mcp_runtime {
         Some(ego_cli::provider_http::McpProcessScope::online(cancel.clone()).await)
@@ -439,5 +450,9 @@ async fn ordinary_main() -> std::process::ExitCode {
     };
 
     run::diagnose(&ended.termination, out.broken());
-    std::process::ExitCode::from(ended.termination.exit_code())
+    let acp_stopped = is_acp && matches!(ended.termination, RunTermination::Signalled(_));
+    (
+        std::process::ExitCode::from(ended.termination.exit_code()),
+        acp_stopped,
+    )
 }

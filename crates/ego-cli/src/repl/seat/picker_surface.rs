@@ -78,7 +78,7 @@ pub(super) fn run_model_picker(
             model_picker_prompt(&view, width, height, caps.depth),
             Arc::clone(status),
         );
-        let line = answer(false, editor.read_line(&prompt));
+        let line = answer(false, suspend::read_line(editor, &prompt, status));
         let _ = editor.erase_last_prompt();
         let inputs = match &line {
             Line::HostCommand(HostCommand::ModelPicker(_)) => {

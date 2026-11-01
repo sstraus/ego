@@ -17,6 +17,7 @@ This document describes the public command conventions. For exact arguments, use
 <!-- ego-cli-command-set:start -->
 ```
 ego [PROMPT]                  interactive session (prompt submitted if given)
+ego --continua                 directly resume latest saved session in this workspace
 ego run [PROMPT]              headless one-shot; PROMPT from argv or stdin; -f FILE loads an agent file
 ego continue [ID] [PROMPT]    alias of resume; same session selection and options
 ego resume [ID] [PROMPT]      continue a session; no ID = interactive picker or headless latest;
@@ -82,8 +83,8 @@ ego a2a --listen ENDPOINT [--allow-public-bind] [--sandbox LEVEL]
                               unless the operator asks for it
 ego worktree show|cleanup RECEIPT_UUID   inspect or safely remove a retained local checkout
 ego doctor [--json]           read-only redacted health snapshot
-ego setup [PROMPT] [--profile NAME] [--directory PATH]
-                             transient read-only setup inventory
+ego setup [--profile NAME] [--directory PATH]
+                             terminal configuration guide; review and confirm before saving
 ```
 <!-- ego-cli-command-set:end -->
 
@@ -97,9 +98,9 @@ ego setup [PROMPT] [--profile NAME] [--directory PATH]
 | `ego models`, `ego auth` | Inspect models and manage provider login |
 | `ego config`, `ego roots`, `ego rules` | Manage configuration and authority |
 | `ego hooks`, `ego mcp` | Inspect hooks and configure MCP servers |
-| `ego doctor`, `ego setup` | Diagnose the environment and review setup proposals |
+| `ego doctor`, `ego setup` | Diagnose the environment and configure saved settings |
 | `ego acp`, `ego a2a`, `ego mcp-server` | Serve host protocols |
-| `ego orchestrator`, `ego worktree` | Inspect orchestration or retained worktrees |
+| `ego worktree` | Inspect or clean up retained worktrees |
 
 A prompt can come from arguments, a file, or stdin. `-` selects stdin explicitly.
 For agent-file input, see [automation](docs/guides/automation.md).
@@ -308,7 +309,7 @@ Queued prompts, steering, questions, drafts, and cancellation are session contro
 they do not create a second policy path. Session compaction and forks preserve
 explicit constraints through the shared lifecycle.
 
-### Reviewed persistent memory and project initialization
+### Project instructions and external memory
 
 `/init` reviews proposed workspace instructions before writing them.
 External memory integrations use configured hooks. See [memory](docs/guides/memory.md).
@@ -364,3 +365,18 @@ ordinary profile and the reserved `ci` profile have distinct scopes.
 | `auth.PROVIDER.headers` | yes | no | no |
 | `auth.PROVIDER.credential_command` | yes | no | no |
 <!-- ego-managed-config-keys:end -->
+
+## Current interactive controls
+
+`ego --continua` resumes the most recently updated readable session in the current workspace without a picker.
+
+`/goal TEXT` and `/goal set TEXT` save an operator-owned objective and submit its first work turn. `/goal extend N` grants more automatic turns to the active goal.
+
+A human terminal can grant session roots during permission admission. `/config roots revoke EXACT_PATH` revokes an exact admitted path and rebuilds the same session under narrower authority. See the [configuration reference](docs/reference/configuration.md#revoke-a-terminal-root-grant).
+
+`/setup` configures saved settings through a staged screen; `/doctor` reports diagnostics. Interactive shell escapes start with `!`; permission mode and OS confinement still apply.
+
+Configured provider protocol filters transform admitted request and response bytes. See the [protocol-filter guide](docs/integrations/protocol-filter.md). ACP hosts can negotiate child activity independently; see [ACP extensions](docs/integrations/acp-extensions.md#child-activity-negotiated-version-1).
+
+Submitted prompts are echoed in full, including prompts taller than the terminal.
+`/expand` shows the full output of the last tool call.

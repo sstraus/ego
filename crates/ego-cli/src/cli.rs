@@ -45,7 +45,7 @@ pub enum Invocation {
     /// `ego doctor [--json]` — the read-only redacted health snapshot.
     Doctor(DoctorArgs),
     Checkpoint(CheckpointArgs),
-    /// Transient read-only setup diagnostics, outside the ordinary run pipeline.
+    /// Keyboard-driven configuration for saved user settings and profiles.
     Setup(SetupArgs),
     /// `ego run [PROMPT]`: headless one-shot execution.
     Run(Box<Args>),
@@ -324,7 +324,9 @@ fn check_matrix(matches: &clap::ArgMatches) -> Result<(), UsageError> {
 
 /// Metadata may share store/output selection, but never run options or prompts.
 fn headless_run_command() -> clap::Command {
-    RunCommand::command().mut_arg("vim", |argument| argument.hide(true))
+    RunCommand::command()
+        .mut_arg("vim", |argument| argument.hide(true))
+        .mut_arg("continua", |argument| argument.hide(true))
 }
 
 fn resume_command() -> clap::Command {
@@ -406,6 +408,8 @@ pub enum SessionChoice {
     /// Routing it through create-if-absent selection would silently replace a
     /// mistyped session id with an empty session.
     Resume(Option<String>),
+    /// Direct latest-session resume, with no human terminal picker.
+    ResumeLatest,
 }
 
 /// The parsed command line of `ego ls`.
@@ -451,6 +455,7 @@ pub enum NameOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GoalOperation {
     Show,
+    Extend(u32),
     Set(String),
     Achieve,
     Block(String),
@@ -554,9 +559,6 @@ pub struct HooksArgs {
 /// installation, and there is only one of those.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupArgs {
-    pub items: Option<Vec<usize>>,
-    pub judge: Option<String>,
-    pub prompt: Option<String>,
     pub profile: Option<String>,
     pub directory: Option<PathBuf>,
 }
@@ -1094,6 +1096,9 @@ fn parse_goal_operation(value: &str) -> Result<GoalOperation, String> {
         "show" => Ok(GoalOperation::Show),
         "achieve" => Ok(GoalOperation::Achieve),
         _ => {
+            if let Some(turns) = value.strip_prefix("extend=") {
+                return parse_goal_extension(turns).map(GoalOperation::Extend);
+            }
             if let Some(text) = value.strip_prefix("set=").filter(|text| !text.is_empty()) {
                 return Ok(GoalOperation::Set(text.to_owned()));
             }
@@ -1101,9 +1106,21 @@ fn parse_goal_operation(value: &str) -> Result<GoalOperation, String> {
                 .strip_prefix("block=")
                 .filter(|text| !text.is_empty())
                 .map(|text| GoalOperation::Block(text.to_owned()))
-                .ok_or_else(|| "expected show, set=TEXT, achieve, or block=REASON".to_owned())
+                .ok_or_else(|| {
+                    "expected show, set=TEXT, extend=N, achieve, or block=REASON".to_owned()
+                })
         }
     }
+}
+
+pub(crate) fn parse_goal_extension(value: &str) -> Result<u32, String> {
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|turns| *turns > 0)
+        .ok_or_else(|| {
+            "goal extension requires a positive integer turn count (1..=4294967295)".into()
+        })
 }
 
 /// Split `argv` at the first bare `--`.
@@ -1338,10 +1355,14 @@ fn parse_subcommand(
         },
         None => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Interactive(Box::new(into_args(
-                parsed,
-                INTERACTIVE_PROVIDER_RETRIES,
-            )?))),
+            Parsed::Command(parsed) => {
+                let direct_resume = parsed.continua;
+                let mut args = into_args(parsed, INTERACTIVE_PROVIDER_RETRIES)?;
+                if direct_resume {
+                    args.session = SessionChoice::ResumeLatest;
+                }
+                Ok(Invocation::Interactive(Box::new(args)))
+            }
         },
         Some("resume" | "continue") => {
             match clap_command_or_answer::<ResumeCommand>(&tokens, resume_command(), None)? {
@@ -1408,9 +1429,6 @@ fn parse_subcommand(
         Some("setup") => match clap_or_answer::<SetupCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => Ok(Invocation::Setup(SetupArgs {
-                items: parsed.items,
-                judge: parsed.judge,
-                prompt: parsed.prompt,
                 profile: parsed.profile,
                 directory: parsed.directory,
             })),
@@ -1428,7 +1446,12 @@ fn parse_subcommand(
         }
         _ => match clap_command_or_answer::<RunCommand>(&tokens, headless_run_command(), None)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Run(Box::new(into_args(parsed, 0)?))),
+            Parsed::Command(parsed) => {
+                if parsed.continua {
+                    return Err(UsageError("--continua requires an interactive ego launch; use 'ego resume' for headless work".into()));
+                }
+                Ok(Invocation::Run(Box::new(into_args(parsed, 0)?)))
+            }
         },
     }
 }
@@ -1947,7 +1970,14 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
     // Preserve implicit retry authority until terminal/profile resolution chooses
     // the seat, even when an initial prompt provisionally selects headless defaults.
     let implicit_retry = flags.retry.is_none();
-    let mut args = into_args(RunCommand { prompt, flags }, retry_default)?;
+    let mut args = into_args(
+        RunCommand {
+            prompt,
+            continua: false,
+            flags,
+        },
+        retry_default,
+    )?;
     args.provider_recovery = implicit_retry;
     args.session = SessionChoice::Resume(id);
     args.answers = answers;
@@ -1984,7 +2014,11 @@ fn into_session_metadata_args(command: ResumeCommand) -> Result<SessionMetadataA
 pub const INTERACTIVE_PROVIDER_RETRIES: u32 = 6;
 
 fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError> {
-    let RunCommand { prompt, flags } = command;
+    let RunCommand {
+        prompt,
+        continua: _,
+        flags,
+    } = command;
 
     reject_ephemeral(flags.ephemeral)?;
     if flags.vim && retry_default == 0 {

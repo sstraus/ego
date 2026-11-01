@@ -4,10 +4,44 @@ Use εgo to work with a model in your current repository. You control the model,
 workspace trust, tool permission, and confinement. A model credential alone does
 not grant tools access to your machine.
 
-Release `0.4.0` is tagged in the public repository. See the
-[release notes](../release-notes/0.4.0.md) and
-[installation overview](../../README.md#install) for binary asset names
-and checksum procedure. The source procedure below works without publication.
+You can also read this page in the [hosted user guide](https://sstraus.github.io/ego/getting-started/).
+
+## Download a binary
+
+Choose an executable and its checksum from
+[GitHub Releases](https://github.com/sstraus/ego/releases). Release assets are
+available only after the release workflow succeeds; a tag alone is not proof
+of a download.
+
+| Platform | Executable |
+| --- | --- |
+| macOS Apple Silicon | `ego-macos-arm64` |
+| macOS Intel | `ego-macos-x64` |
+| Linux x86_64 | `ego-linux-x64` |
+| Linux ARM64 | `ego-linux-arm64` |
+| Windows x86_64 | `ego-windows-x64.exe` |
+
+Linux binaries require GLIBC 2.35 or newer. Target-triple `.tar.gz` archives
+(`.zip` on Windows) and `SHA256SUMS` are also published. Each archive includes
+Bash, Zsh, Fish, PowerShell, and Elvish scripts in `completions/`.
+
+For example, on macOS Apple Silicon:
+
+```sh
+asset=ego-macos-arm64
+base=https://github.com/sstraus/ego/releases/latest/download
+curl -fLO "$base/$asset"
+curl -fLO "$base/$asset.sha256"
+shasum -a 256 -c "$asset.sha256"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "$asset" "$HOME/.local/bin/ego"
+```
+
+On Linux, choose the matching asset and use `sha256sum -c`. On Windows, compare
+the downloaded checksum with `Get-FileHash -Algorithm SHA256`, then rename the
+executable to `ego.exe` in a directory on `PATH`. Add `~/.local/bin` to `PATH`
+on macOS or Linux if needed. For Homebrew installation, see the
+[installation overview](../../README.md#install).
 
 ## Build and install from source
 

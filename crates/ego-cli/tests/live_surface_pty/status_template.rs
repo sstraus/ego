@@ -59,12 +59,12 @@ fn status_template_footer_does_not_overwrite_composer_at_terminal_height() {
         (
             4,
             "FOOTER-ONE\nFOOTER-TWO\nFOOTER-THREE\nFOOTER-FOUR",
-            vec!["FOOTER-ONE", "FOOTER-TWO", "FOOTER-THREE"],
+            vec!["FOOTER-ONE", "FOOTER-TWO", ""],
         ),
         (
             4,
             "FOOTER-ONE\nFOOTER-TWO\nFOOTER-THREE",
-            vec!["FOOTER-ONE", "FOOTER-TWO", "FOOTER-THREE"],
+            vec!["FOOTER-ONE", "FOOTER-TWO", ""],
         ),
         (
             1,
@@ -115,7 +115,14 @@ fn status_template_footer_does_not_overwrite_composer_at_terminal_height() {
         assert!(session.quit(input).success());
         assert_eq!(rows[0], "> editable-probe", "height={height} {rows:?}");
         assert_eq!(cursor.0, 0, "height={height} {rows:?}");
-        assert_eq!(&rows[1..], expected_footer, "height={height}");
+        assert_eq!(
+            rows[1..]
+                .iter()
+                .map(|row| row.trim_end())
+                .collect::<Vec<_>>(),
+            expected_footer,
+            "height={height}: footer must leave the host overlay row blank"
+        );
         assert!(stub.generations().is_empty());
     }
 }
@@ -155,7 +162,7 @@ fn status_template_diagnostic_is_visible_once_across_live_repaints() {
         input.write_all(b"\x0c").unwrap();
         input.flush().unwrap();
         until_normalized(&reader, &mut output, start, "statusline:");
-        drain_until_quiet(&reader, &mut output);
+        until_notice_prose(&reader, &mut output, start, "(line 1)");
         let mut parser = vt100::Parser::new(24, 120, 0);
         parser.process(&output);
         screens.push(parser.screen().contents());

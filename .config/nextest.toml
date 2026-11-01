@@ -1,8 +1,24 @@
+# Real protocol-filter children have a strict 1 s execution budget. The
+# parallel suite exhausted that budget before Python fixtures could start;
+# serial execution preserves the production timeout and the concurrency test.
+[[profile.default.overrides]]
+filter = 'binary(protocol_filter)'
+threads-required = 'num-test-threads'
+
 # These PTY tests measure a 500 ms wall-clock contract. Reserve the whole
 # nextest budget so unrelated test processes cannot consume that budget.
 # Keep the assertions unchanged: the pre-batching implementation must fail.
 [[profile.default.overrides]]
 filter = 'binary(live_surface_pty) & test(help_latency::)'
+threads-required = 'num-test-threads'
+
+# These startup PTY tests enforce a 1 s end-to-end wall-clock contract.
+# Their fixture must answer keyboard queries and the child must start its
+# composer within that same budget. Concurrent process-heavy tests can starve
+# either peer after detection has already returned.
+# Reserve the budget, as for help latency above; keep both deadlines unchanged.
+[[profile.default.overrides]]
+filter = 'binary(live_surface_pty) & (test(=kitty_keyboard::kitty_keyboard_silent_terminal_reaches_composer_within_one_second) | test(=kitty_keyboard::kitty_keyboard_flags_only_reply_does_not_hang_startup))'
 threads-required = 'num-test-threads'
 
 # This cancellation test waits at most 10 s for a real probe to start. Its

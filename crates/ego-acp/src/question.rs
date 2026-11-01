@@ -22,19 +22,28 @@ pub use ego_core::question::QuestionRequest;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct CapabilityCapture {
     form: bool,
+    child_activity: bool,
 }
 
 impl CapabilityCapture {
     pub fn form() -> Self {
-        Self { form: true }
+        Self {
+            form: true,
+            child_activity: false,
+        }
     }
 
     pub fn capture_initialize(&mut self, capabilities: &ClientCapabilities) {
+        self.child_activity = crate::negotiate::child_activity_requested(capabilities);
         self.form = capabilities
             .elicitation
             .as_ref()
             .and_then(|elicitation| elicitation.form.as_ref())
             .is_some();
+    }
+
+    pub fn child_activity_available(&self) -> bool {
+        self.child_activity
     }
 
     pub fn form_available(&self) -> bool {

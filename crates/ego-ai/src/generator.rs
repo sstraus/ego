@@ -103,6 +103,10 @@ pub struct WireGenerator {
     /// mid-run must not silently change generation identity. Credential failures
     /// are reported at startup, where the missing variable can be named.
     credential: ResolvedCredential,
+    protocol_filter: Option<(
+        ego_core::config::ProtocolFilterConfig,
+        Arc<dyn crate::protocol_filter::ProtocolFilterCommand>,
+    )>,
     codex_session: Arc<futures::lock::Mutex<crate::codex_session::Session>>,
 }
 
@@ -126,12 +130,25 @@ impl WireGenerator {
             http,
             credential,
             codex_session: Arc::default(),
+            protocol_filter: None,
         }
     }
 
     /// Bind a tier to this generation profile, not mutable process state.
     pub fn with_service_tier(mut self, tier: crate::service_tier::ServiceTier) -> Self {
         self.service_tier = tier;
+        self
+    }
+
+    /// Bind an explicitly selected user filter to this provider generator.
+    pub fn with_protocol_filter(
+        mut self,
+        config: ego_core::config::ProtocolFilterConfig,
+        command: Arc<dyn crate::protocol_filter::ProtocolFilterCommand>,
+    ) -> Self {
+        if config.enabled {
+            self.protocol_filter = Some((config, command));
+        }
         self
     }
 
@@ -164,6 +181,14 @@ impl WireGenerator {
         &self,
         req: &GenRequest,
     ) -> Result<(crate::http::HttpRequest, ToolNames), wire::RequestRefused> {
+        if let Some((config, _)) = &self.protocol_filter {
+            config.validate().map_err(wire::RequestRefused::new)?;
+            if self.wire.websocket() {
+                return Err(wire::RequestRefused::new(
+                    "protocol_filter v1 does not support rewriting WebSocket transports",
+                ));
+            }
+        }
         if req.web_search.is_some() && !self.supports_web_search() {
             return Err(wire::RequestRefused::new(
                 "this provider does not support native hosted search; no fallback is used",
@@ -310,20 +335,28 @@ impl Generator for WireGenerator {
             }
         };
 
-        let cache_prefix = request
-            .body
-            .as_deref()
-            .and_then(|body| self.wire.cache_prefix(body))
-            .and_then(|digest| {
-                req.cache
-                    .as_ref()
-                    .map(|cache| ego_core::generator::attempt::CachePrefix {
-                        session: cache.session_id,
-                        provider: self.row.id().to_owned(),
-                        model: req.model.clone(),
-                        digest,
-                    })
-            });
+        let prepared_prefix = Arc::new(std::sync::OnceLock::new());
+        if self.protocol_filter.is_none()
+            && let Some(prefix) = request
+                .body
+                .as_deref()
+                .and_then(|body| self.wire.cache_prefix(body))
+                .and_then(|digest| {
+                    req.cache
+                        .as_ref()
+                        .map(|cache| ego_core::generator::attempt::CachePrefix {
+                            session: cache.session_id,
+                            provider: self.row.id().to_owned(),
+                            model: req.model.clone(),
+                            digest,
+                        })
+                })
+        {
+            let _ = prepared_prefix.set(prefix);
+        }
+        let publish_prefix = Arc::clone(&prepared_prefix);
+        let filter = self.protocol_filter.clone();
+        let attempt_ref = attempt.attempt();
         tracing::debug!(target: "ego_ai::tool_names", provider = self.row.id(), model = %req.model,
             "provider generation request");
         let http = Arc::clone(&self.http);
@@ -336,8 +369,46 @@ impl Generator for WireGenerator {
         let session = self.codex_session.clone();
         let provider = self.row.id().to_owned();
         let limit_model = format!("{}/{}", provider, req.model);
+        let decode_provider = provider.clone();
+        let (filter_events, local_events) = futures::channel::mpsc::unbounded();
         let inner = stream::once(async move {
-            if websocket {
+            let mut request = request;
+            let filtered = filter.is_some();
+            let response_filter = if let Some((config, command)) = filter {
+                Some(
+                    crate::protocol_filter::apply(
+                        &config,
+                        command.as_ref(),
+                        &provider,
+                        &req.model,
+                        attempt_ref,
+                        &mut request,
+                        &filter_events,
+                    )
+                    .await?,
+                )
+            } else {
+                None
+            };
+            if filtered
+                && let Some(prefix) = request
+                    .body
+                    .as_deref()
+                    .and_then(|body| wire.cache_prefix(body))
+                    .and_then(|digest| {
+                        req.cache
+                            .as_ref()
+                            .map(|cache| ego_core::generator::attempt::CachePrefix {
+                                session: cache.session_id,
+                                provider: provider.clone(),
+                                model: req.model.clone(),
+                                digest,
+                            })
+                    })
+            {
+                let _ = publish_prefix.set(prefix);
+            }
+            let response = if websocket {
                 crate::codex_session::execute(
                     session,
                     http,
@@ -348,28 +419,51 @@ impl Generator for WireGenerator {
                 .await
             } else {
                 profile.execute(http.as_ref(), request).await
-            }
+            };
+            Ok::<_, &'static str>(match (response, response_filter) {
+                (Ok(response), Some(filter)) => filter.wrap(response).await,
+                (response, _) => response,
+            })
         })
-        .flat_map(move |response| {
+        .flat_map(move |result| {
+            let response = match result {
+                Ok(response) => response,
+                Err(message) => {
+                    use ego_core::generator::port::AiEvent;
+                    return stream::iter([
+                        AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
+                        AiEvent::Error {
+                            message: message.to_owned(),
+                            kind: ErrorKind::Invalid,
+                        },
+                        AiEvent::LocalFailure {
+                            cause: message.to_owned(),
+                        },
+                        AiEvent::Stop(ego_core::generator::types::StopReason::Error),
+                    ])
+                    .boxed();
+                }
+            };
             let limits = response
                 .as_ref()
                 .ok()
-                .map(|response| crate::usage_limits::response_limits(&provider, &response.headers))
+                .map(|response| {
+                    crate::usage_limits::response_limits(&decode_provider, &response.headers)
+                })
                 .unwrap_or_default();
             let observation =
                 (!limits.is_empty()).then(|| ego_core::generator::port::AiEvent::ProviderLimits {
-                    provider: provider.clone(),
+                    provider: decode_provider.clone(),
                     model: limit_model.clone(),
                     limits,
                 });
-            stream::iter(observation).chain(wire.decode(response, cost.clone()))
+            stream::iter(observation)
+                .chain(wire.decode(response, cost.clone()))
+                .boxed()
         })
         .flat_map(move |event| stream::iter(names.restore(event)))
         .boxed();
-        let stream = AttemptStream::new(attempt, inner);
-        match cache_prefix {
-            Some(prefix) => stream.with_cache_prefix(prefix),
-            None => stream,
-        }
+        AttemptStream::new(attempt, stream::select(inner, local_events).boxed())
+            .with_prepared_cache_prefix(prepared_prefix)
     }
 }

@@ -23,6 +23,11 @@ pub enum UserConfigMutation {
         path: std::path::PathBuf,
         access: Option<crate::permit::RootAccess>,
     },
+    /// Publish one terminal-approved root with its unique journal receipt.
+    GrantRoot {
+        target: UserConfigTarget,
+        root: crate::permit::RootCfg,
+    },
     /// Set one field from the closed managed configuration vocabulary.
     ManagedSet {
         target: UserConfigTarget,
@@ -77,7 +82,7 @@ impl UserConfigMutation {
     /// This runs before the adapter acquires a lock or reads the file.
     pub fn validate(&self) -> Result<(), UserConfigError> {
         match self {
-            Self::Root { .. } => Ok(()),
+            Self::Root { .. } | Self::GrantRoot { .. } => Ok(()),
             Self::ManagedSet { target, key, value } => {
                 validate_managed_target_key(target, key.clone())?;
                 if !managed_value_matches_key(key.clone(), value) {
@@ -149,6 +154,7 @@ impl UserConfigMutation {
     pub fn target(&self) -> UserConfigTarget {
         match self {
             Self::Root { target, .. }
+            | Self::GrantRoot { target, .. }
             | Self::ManagedSet { target, .. }
             | Self::ManagedUnset { target, .. }
             | Self::McpSet { target, .. }
@@ -164,6 +170,10 @@ impl UserConfigMutation {
     /// Canonical facts returned after this mutation succeeds.
     pub fn facts(&self) -> UserConfigMutationFacts {
         match self {
+            Self::GrantRoot { root, .. } => UserConfigMutationFacts::Root {
+                path: root.path.clone(),
+                access: Some(root.access),
+            },
             Self::Root { path, access, .. } => UserConfigMutationFacts::Root {
                 path: path.clone(),
                 access: *access,

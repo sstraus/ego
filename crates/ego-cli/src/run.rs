@@ -106,6 +106,7 @@ use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod executor;
+mod root_revocation;
 mod session_commands;
 mod turns;
 mod windows_unconfined;
@@ -119,7 +120,7 @@ pub(crate) use executor::{protocol_args, protocol_effective};
 pub use session_commands::{compact, export, fork, ls, rm};
 use session_commands::{exported, finalize_ci_bundle, finalize_ci_error};
 use turns::{
-    Driver, InteractiveStatus, RunHost, SeatApprover, SeatSandboxGrants, Turns,
+    Driver, InteractiveStatus, RunHost, SeatApprover, SeatRootGrants, SeatSandboxGrants, Turns,
     last_assistant_message, run_trust,
 };
 pub use turns::{InteractiveSeat, PasteboardKind, Reads, stop_signal};

@@ -51,9 +51,9 @@ fn live_and_replay_preserve_execution_and_approval_measurements() {
             ),
         ];
         let replayed = Recorded::default();
-        render(&events, &replayed, Capabilities::plain());
+        render(&events, &replayed, Capabilities::plain(), None);
         let live = Recorded::default();
-        let sink = TextSink::new(&live, false, Capabilities::plain());
+        let sink = TextSink::new(&live, false, Capabilities::plain(), None);
         let mut state = SessionState::default();
         for event in &events {
             state.apply(event);

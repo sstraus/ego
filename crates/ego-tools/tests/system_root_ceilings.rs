@@ -23,6 +23,7 @@ fn system_root_ceilings_use_canonical_paths_and_preserve_access() {
     let escape = allowed.join("escape");
     std::os::unix::fs::symlink(&sibling, &escape).unwrap();
     let cfg = |path: &std::path::Path, access| RootCfg {
+        consent: None,
         path: path.into(),
         access,
     };

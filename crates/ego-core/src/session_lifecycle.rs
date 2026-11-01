@@ -296,6 +296,8 @@ pub struct SessionAttachment {
     pub meta: SessionMeta,
     pub context_window: Option<u64>,
     pub replay: Vec<ReplayFrame>,
+    /// Local child facts remain available on history-free resume.
+    pub child_activity: Vec<PublicEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -738,7 +740,8 @@ where
             GoalTransition::BlockerObserved { reason } => GoalTransition::BlockerObserved {
                 reason: validate_operator_text(reason)?,
             },
-            achieved @ GoalTransition::Achieved { .. } => achieved,
+            unchanged @ (GoalTransition::Achieved { .. }
+            | GoalTransition::AllowanceExtended { .. }) => unchanged,
         };
         self.meta(session)?;
         let state = self.state(session)?;
@@ -907,6 +910,13 @@ where
                     errors.insert(message.clone());
                 }
                 if let Some(public) = project_public(event) {
+                    frames.push(ReplayFrame {
+                        event: public,
+                        state: state.clone(),
+                        inherited: false,
+                    });
+                }
+                if let Some(public) = crate::public::project_child_lifecycle(event) {
                     frames.push(ReplayFrame {
                         event: public,
                         state: state.clone(),
@@ -1156,6 +1166,16 @@ where
         if self.metadata.store.is_quarantined(id)? {
             return Err(self.metadata.unknown_session(id));
         }
+        let child_activity = frames
+            .iter()
+            .filter(|frame| {
+                matches!(
+                    frame.event,
+                    PublicEvent::ChildLifecycle { .. } | PublicEvent::TurnCompleted { .. }
+                )
+            })
+            .map(|frame| frame.event.clone())
+            .collect();
         if replay && let Some(lineage) = state.lineage {
             let steps = walk_lineage(
                 &*self.metadata.store,
@@ -1188,6 +1208,7 @@ where
             meta,
             context_window,
             replay: if replay { frames } else { Vec::new() },
+            child_activity,
         })
     }
 

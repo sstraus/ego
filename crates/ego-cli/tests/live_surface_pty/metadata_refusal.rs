@@ -27,25 +27,18 @@ fn unknown_metadata_subcommands_print_usage_without_changing_state() {
     input.flush().unwrap();
     until_prompt_from(&reader, &mut output, start);
 
-    for (command, receipt) in [
-        ("/goal set METADATA-AFP-OBJECTIVE", "METADATA-AFP-OBJECTIVE"),
-        ("/name set METADATA-AFP-TITLE", "METADATA-AFP-TITLE"),
-    ] {
-        let start = output.len();
-        input.write_all(format!("{command}\r").as_bytes()).unwrap();
-        input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, receipt);
-        until_prompt_from(&reader, &mut output, start);
-        drain_until_quiet(&reader, &mut output);
-    }
+    let start = output.len();
+    input.write_all(b"/name set METADATA-AFP-TITLE\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "METADATA-AFP-TITLE");
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
     // Echoed input and an intermediate repaint can precede durable metadata
     // application. Establish the real baseline before testing refusal effects.
     let deadline = Instant::now() + PROGRESS_DEADLINE;
     let before = loop {
         let journal = std::fs::read_to_string(&journal).expect("metadata journal");
-        if journal.contains("\"kind\":\"GoalSet\"")
-            && journal.contains("\"kind\":\"SessionTitleChanged\"")
-        {
+        if journal.contains("\"kind\":\"SessionTitleChanged\"") {
             break journal;
         }
         assert!(
@@ -57,8 +50,8 @@ fn unknown_metadata_subcommands_print_usage_without_changing_state() {
     let mut expected_usages = Vec::new();
     for (command, usage) in [
         (
-            "/goal clean",
-            "usage: /goal [show|set TEXT|achieve|block REASON]",
+            "/goal achieve extra",
+            "usage: /goal [TEXT|show|set TEXT|extend N|achieve|block REASON]",
         ),
         ("/name clean", "usage: /name [show|set TEXT|clear]"),
     ] {

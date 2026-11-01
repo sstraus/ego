@@ -57,6 +57,7 @@ fn render(events: &[PublicEvent], quiet: bool) -> Vec<String> {
             progress: false,
             osc: OscProfile::None,
         },
+        None,
     );
     let state = SessionState::default();
     for event in events {

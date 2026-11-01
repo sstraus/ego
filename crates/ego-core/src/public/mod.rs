@@ -3,7 +3,9 @@
 //!
 //! A new internal event never becomes public automatically.
 
+mod child;
 pub mod transcript;
+pub use child::{ChildIdentity, ChildOutcome, ChildPhase, project_child_lifecycle};
 
 use serde::{Deserialize, Serialize};
 
@@ -46,7 +48,8 @@ use crate::state::Usage;
 /// moved it too, and is a reason to stop and look rather than to overwrite.
 // Version 17 adds the durable cost anomaly notice.
 // Version 18 adds the closed pricing-source cause to cost anomalies.
-pub const PUBLIC_EVENT_VERSION: u32 = 18;
+// Version 19 adds typed child lifecycle identity and outcome.
+pub const PUBLIC_EVENT_VERSION: u32 = 19;
 
 /// Shared warning text for terminal and ACP projections of the same notice.
 pub fn cost_anomaly_message(
@@ -225,6 +228,15 @@ pub enum CeilingEffect {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicEvent {
+    /// Admitted child activity, alongside the existing parent item projection.
+    /// Carries exact native identities and a closed outcome, never task or blob content.
+    ChildLifecycle {
+        turn: TurnId,
+        item: ItemId,
+        child: ChildIdentity,
+        #[serde(flatten)]
+        phase: ChildPhase,
+    },
     /// A durable plan operation. Consumers fold it or read the accompanying reduction.
     PlanUpdated {
         turn: TurnId,
@@ -525,7 +537,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // surface — costing a `PUBLIC_EVENT_VERSION` bump — to tell nobody
         // anything they cannot already read. It is exported, because an audit
         // that cannot see a deliberate hold reads it as a crash.
-        EventKind::PinsChanged { .. }
+        EventKind::ProtocolFilterVariablesSaved { .. }
+        | EventKind::PinsChanged { .. }
         | EventKind::ContextRequested { .. }
         | EventKind::ContextCooldown { .. }
         | EventKind::ContextRequestConsumed
@@ -791,6 +804,10 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::UsageCorrected { .. }
         | EventKind::ProviderLimitsObserved { .. }
         | EventKind::SessionSelectionsSelected { .. }
+        | EventKind::SessionRootGranted { .. }
+        | EventKind::PermanentRootGrantPending { .. }
+        | EventKind::PermanentRootGranted { .. }
+        | EventKind::RootRevoked { .. }
         | EventKind::ExecutionObserved { .. }
         | EventKind::ExecutionMeasured { .. }
         | EventKind::JudgeResponse { .. }

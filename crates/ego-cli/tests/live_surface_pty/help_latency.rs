@@ -46,7 +46,9 @@ fn typing_during_long_output_echoes_within_500ms() {
     input.write_all(b"\x03").unwrap();
     input.flush().unwrap();
     until_composer_frame(&reader, &mut output, cleared, |rows| {
-        rows.last().is_some_and(|row| row.trim() == ">")
+        rows.iter()
+            .rfind(|row| !row.trim().is_empty())
+            .is_some_and(|row| row.trim() == ">")
             && !rows.iter().any(|row| row.contains("Esc to interrupt"))
     });
     input.write_all(b"/quit\r").unwrap();

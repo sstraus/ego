@@ -5,7 +5,7 @@ Use [tools](../guides/tools.md) for the complete built-in tool overview and
 
 ## Provider-hosted web search
 
-For an active `openai/...` or `anthropic/...` model, the enabled `web_search` tool uses that provider's hosted search contract and model credential. It does not need `EXA_API_KEY`. Use `--tools web_search` to select it, or `--no-tools` to disable tools. Hosted search can incur provider search fees and model token charges. Each generation allows at most five hosted searches. The currency budget reserves the search fee and a conservative allowance for repeated provider-side model inputs before sending the request.
+For an active `openai/...` or `anthropic/...` model, the enabled `web_search` tool uses that provider's hosted search contract and model credential. It does not need `EXA_API_KEY`. Use `--tools web_search` to select it, or `--no-tools` to disable tools. Hosted search can incur provider search fees and model token charges. Each generation allows at most five hosted searches. The monetary cap checks recorded known response spend before admitting another request; it does not reserve a worst-case search charge. Unknown costs remain unknown, and an admitted request can cross the cap. See [cost accounting](../guides/providers.md#capability-and-cost-facts).
 
 Other providers keep the Exa search adapter and its existing explicit paid-search and network-permission checks. There is no silent fallback between native search and Exa. A provider or model that rejects native search returns that error. Provider-private search history cannot be silently replayed to another provider.
 

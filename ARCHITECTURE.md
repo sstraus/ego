@@ -42,7 +42,7 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-71 variants in the current schema. The list is checked against `EventKind` in
+76 variants in the current schema. The list is checked against `EventKind` in
 `crates/ego-core/src/event/domain.rs`.
 
 Events record prompts,

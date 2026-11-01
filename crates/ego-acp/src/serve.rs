@@ -735,6 +735,7 @@ impl AcpRunBindingsBuilder {
 }
 
 struct AcpSinkFactory {
+    child_activity: bool,
     connection: ConnectionTo<Client>,
     session: v1::SessionId,
     root: RunRoot,
@@ -753,12 +754,15 @@ impl EventSinkFactory for AcpSinkFactory {
     }
 
     fn create(&self, capabilities: &ModelCapabilities) -> Arc<dyn EventSink> {
-        Arc::new(crate::sink::AcpSink::new(
-            self.connection.clone(),
-            self.session.clone(),
-            capabilities.clone(),
-            self.root.as_path().to_path_buf(),
-        ))
+        Arc::new(
+            crate::sink::AcpSink::new(
+                self.connection.clone(),
+                self.session.clone(),
+                capabilities.clone(),
+                self.root.as_path().to_path_buf(),
+            )
+            .with_child_activity(self.child_activity),
+        )
     }
 }
 
@@ -815,6 +819,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
         );
         let bindings = ego_core::run::RunExecutionBindings::new(
             Arc::new(AcpSinkFactory {
+                child_activity: capabilities.child_activity_available(),
                 connection,
                 session,
                 root: root.clone(),
@@ -893,6 +898,7 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
     // literal gated on one flag would have made the two stand or fall
     // together and one of the two claims would always be a lie.
     let mut ego = serde_json::Map::new();
+    ego.insert("childActivity".to_owned(), serde_json::json!({"version":1,"update":"session_info_update","field":"_meta.ego.childActivity"}));
     ego.insert(
         "steer".to_owned(),
         serde_json::json!({"version": 1, "method": "_ego/steer", "contentTypes": ["text"]}),
@@ -3045,6 +3051,7 @@ fn emit_attachment(
     connection: &ConnectionTo<Client>,
     id: &v1::SessionId,
     attachment: &SessionAttachment,
+    child_activity: bool,
     lifecycle: Option<&dyn LifecycleOperations>,
 ) -> Result<(), Error> {
     for update in project_replay_v1(
@@ -3053,6 +3060,12 @@ fn emit_attachment(
         &attachment.root,
     ) {
         connection.send_notification(v1::SessionNotification::new(id.clone(), update))?;
+    }
+    if child_activity {
+        connection.send_notification(v1::SessionNotification::new(
+            id.clone(),
+            crate::project::project_child_snapshot_v1(&attachment.child_activity),
+        ))?;
     }
     emit_info(connection, id, &attachment.meta, lifecycle)
 }
@@ -3706,7 +3719,7 @@ where
                             format!("session {} already has a turn running", request.session_id),
                         ));
                     };
-                    if let Some((key, subscription, execution)) = recovered.active {
+                    let pending_execution = if let Some((key, subscription, execution)) = recovered.active {
                         let (run_id, revision) = recovered.run.expect("active recovery has a run");
                         sessions.install_admission(
                             &request.session_id,
@@ -3715,6 +3728,23 @@ where
                             revision,
                             key,
                         );
+                        Some((execution, subscription))
+                    } else { None };
+                    // Answer before replaying, for the reason `session/new`
+                    // does: every notification below names this session, and a
+                    // client that indexes by the response has not seen the id
+                    // yet. The whole replay, not just the trailing info update,
+                    // would be dropped.
+                    let delivered = (|| { responder.respond(
+                        v1::LoadSessionResponse::new()
+                            .config_options(config_options(controls.as_ref(), id))
+                            .meta(session_meta(hold, attachment.meta.summary.as_deref(), lifecycle.lineage_info(id).map_err(|error| lifecycle_error(&error))?)),
+                    ).and_then(|()| {
+                    notices.register(request.session_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
+                    // Queue the snapshot before execution can publish live updates.
+                    emit_attachment(&cx, &request.session_id, &attachment, client.capabilities.child_activity_available(), Some(lifecycle.as_ref()))
+                    }) })();
+                    if let Some((execution, subscription)) = pending_execution {
                         let controller = Arc::clone(&controller);
                         spawner.spawn(Box::pin(async move {
                             if let Err(error) = controller.execute(execution).await {
@@ -3728,18 +3758,7 @@ where
                             watched.finish(&watched_id, generation, &snapshot);
                         }));
                     }
-                    // Answer before replaying, for the reason `session/new`
-                    // does: every notification below names this session, and a
-                    // client that indexes by the response has not seen the id
-                    // yet. The whole replay, not just the trailing info update,
-                    // would be dropped.
-                    responder.respond(
-                        v1::LoadSessionResponse::new()
-                            .config_options(config_options(controls.as_ref(), id))
-                            .meta(session_meta(hold, attachment.meta.summary.as_deref(), lifecycle.lineage_info(id).map_err(|error| lifecycle_error(&error))?)),
-                    )?;
-                    notices.register(request.session_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
-                    emit_attachment(&cx, &request.session_id, &attachment, Some(lifecycle.as_ref()))
+                    delivered
                     })
                 }
             },
@@ -3870,7 +3889,7 @@ where
                             format!("session {} already has a turn running", request.session_id),
                         ));
                     };
-                    if let Some((key, subscription, execution)) = recovered.active {
+                    let pending_execution = if let Some((key, subscription, execution)) = recovered.active {
                         let (run_id, revision) = recovered.run.expect("active recovery has a run");
                         sessions.install_admission(
                             &request.session_id,
@@ -3879,6 +3898,17 @@ where
                             revision,
                             key,
                         );
+                        Some((execution, subscription))
+                    } else { None };
+                    let delivered = responder.respond(
+                        v1::ResumeSessionResponse::new()
+                            .config_options(config_options(controls.as_ref(), id)),
+                    ).and_then(|()| {
+                    notices.register(request.session_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
+                    // Queue the snapshot before execution can publish live updates.
+                    emit_attachment(&cx, &request.session_id, &attachment, client.capabilities.child_activity_available(), Some(lifecycle.as_ref()))
+                    });
+                    if let Some((execution, subscription)) = pending_execution {
                         let controller = Arc::clone(&controller);
                         spawner.spawn(Box::pin(async move {
                             if let Err(error) = controller.execute(execution).await {
@@ -3892,12 +3922,7 @@ where
                             watched.finish(&watched_id, generation, &snapshot);
                         }));
                     }
-                    responder.respond(
-                        v1::ResumeSessionResponse::new()
-                            .config_options(config_options(controls.as_ref(), id)),
-                    )?;
-                    notices.register(request.session_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
-                    emit_attachment(&cx, &request.session_id, &attachment, Some(lifecycle.as_ref()))
+                    delivered
                     })
                 }
             },
@@ -4055,7 +4080,9 @@ where
                 let bindings_builder = Arc::clone(&bindings_builder);
                 let unadmitted = unadmitted.clone();
                 let notices = notices.clone();
+                let client_capabilities = Arc::clone(&client_capabilities);
                 async move |request: v1::DeleteSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let child_activity = client_capabilities.lock().expect("initialize capability lock poisoned").capabilities.child_activity_available();
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
                     let bindings_builder = Arc::clone(&bindings_builder);
@@ -4088,6 +4115,9 @@ where
                             }
                             bindings_builder.end_session(&request.session_id);
                             notices.unregister(&request.session_id);
+                            if child_activity {
+                                cx.send_notification(v1::SessionNotification::new(request.session_id.clone(), crate::project::child_activity_meta(serde_json::json!({"version":1,"kind":"clear","turnId":null}))))?;
+                            }
                             responder.respond(v1::DeleteSessionResponse::new())
                         }
                         Err(LifecycleError::EffectUncertain) => responder.respond_with_error(Error::new(-32012, "session has an uncertain effect; deletion requires _meta.ego.force=true")),
@@ -4105,7 +4135,9 @@ where
                 let bindings_builder = Arc::clone(&bindings_builder);
                 let unadmitted = unadmitted.clone();
                 let notices = notices.clone();
+                let client_capabilities = Arc::clone(&client_capabilities);
                 async move |request: v1::CloseSessionRequest, responder, cx: ConnectionTo<Client>| {
+                    let child_activity = client_capabilities.lock().expect("initialize capability lock poisoned").capabilities.child_activity_available();
                     let lifecycle = lifecycle.clone();
                     let sessions = sessions.clone();
                     let bindings_builder = Arc::clone(&bindings_builder);
@@ -4130,6 +4162,9 @@ where
                             }
                             bindings_builder.end_session(&request.session_id);
                             notices.unregister(&request.session_id);
+                            if child_activity {
+                                cx.send_notification(v1::SessionNotification::new(request.session_id.clone(), crate::project::child_activity_meta(serde_json::json!({"version":1,"kind":"clear","turnId":null}))))?;
+                            }
                             responder.respond(v1::CloseSessionResponse::new())
                         }
                         Err(error) => responder.respond_with_error(lifecycle_error(&error)),

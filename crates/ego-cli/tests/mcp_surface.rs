@@ -306,7 +306,7 @@ fn one_sorted_sanitized_mcp_error_set_reaches_event_text_and_completion_json() {
     };
 
     let text = CapturedText::default();
-    let sink = TextSink::new(&text, false, Capabilities::plain());
+    let sink = TextSink::new(&text, false, Capabilities::plain(), None);
     sink.publish(&event, &SessionState::default());
     let diagnostics = text.diagnostics.lock().expect("diagnostic capture").clone();
     assert_eq!(diagnostics.len(), 2, "text mode must report each MCP error");

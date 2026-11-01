@@ -52,7 +52,10 @@ pub use prepared_call::{
     Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, NotebookCellEdit, NotebookCellType, Op,
     OpName, PreparedCall, SecretEgressAuthority, SessionProcessAction,
 };
-pub use roots::{ProfileRoot, RootAccess, RootCfg, RootsError, admit_roots, check_root_ceilings};
+pub use roots::{
+    PermanentRootConsent, ProfileRoot, RootAccess, RootCfg, RootConsent, RootsError, admit_roots,
+    check_root_ceilings,
+};
 pub use sandbox_grant::{SandboxAccess, SandboxGrant, SandboxGrantPort};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;

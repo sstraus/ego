@@ -101,7 +101,7 @@ pub(super) fn run_session_picker(
             caps.depth,
         ));
         let prompt = Question::new(rows.join("\n"), Arc::clone(status));
-        let line = answer(false, editor.read_line(&prompt));
+        let line = answer(false, suspend::read_line(editor, &prompt, status));
         let _ = editor.erase_last_prompt();
         if matches!(
             line,

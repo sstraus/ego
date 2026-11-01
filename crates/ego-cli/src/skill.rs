@@ -208,6 +208,10 @@ impl SkillCatalogueCapture {
         if self.retained_last_good() {
             rows.push("skills: retained last good catalogue; /skills diagnose".to_owned());
         }
+        rows.push("/skills details — show every skill and its source".to_owned());
+        rows.push("/skills diagnose — inspect admission problems".to_owned());
+        rows.push("/skills rescan — reload the skill catalogue".to_owned());
+        rows.push("/skills invoke NAME [arguments] — run a user-invocable skill".to_owned());
         rows.join("\n")
     }
 

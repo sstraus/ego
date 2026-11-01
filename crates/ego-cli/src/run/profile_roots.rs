@@ -20,6 +20,29 @@ pub(crate) fn admit(
     let home = OsFs
         .canonicalize(std::path::Path::new(&home))
         .map_err(|error| format!("HOME cannot be resolved: {error}"))?;
+    for configured in &effective.roots {
+        if let Some(receipt) = &configured.consent {
+            let store = ego_tools::store::JsonlStore::new(
+                &receipt.store,
+                workspace.as_path(),
+                Box::new(ego_tools::store::OsIo),
+            );
+            let (state, _) = store
+                .resume(&receipt.session)
+                .map_err(|error| format!("permanent root receipt cannot be verified: {error}"))?;
+            let committed = state.permanent_root_consents.iter().any(|consent| {
+                consent.receipt == *receipt
+                    && consent.root.path().as_path() == configured.path
+                    && consent.root.access() == configured.access
+            });
+            if !committed {
+                return Err(format!(
+                    "permanent root {} has no matching committed receipt; remove it with ego roots rm and approve again",
+                    configured.path.display()
+                ));
+            }
+        }
+    }
     let roots = admit_roots(&effective.roots, &home, &OsFs).map_err(|error| error.to_string())?;
     let mut extra = roots.clone();
     for path in &effective.exec_paths {
@@ -58,6 +81,7 @@ pub(crate) fn clamp(
         let path = OsFs.canonicalize(path).map_err(|error| error.to_string())?;
         if !roots.iter().any(|root| path.is_or_under(root.path())) {
             bounds.push(ego_core::permit::RootCfg {
+                consent: None,
                 path: path.as_path().to_path_buf(),
                 access: ego_core::permit::RootAccess::Read,
             });
@@ -85,6 +109,7 @@ pub(crate) fn clamp(
                     .is_ok()
                 {
                     kept.push(ego_core::permit::RootCfg {
+                        consent: root.consent.clone(),
                         path: root.path.clone(),
                         access: ego_core::permit::RootAccess::Read,
                     });

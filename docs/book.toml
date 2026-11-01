@@ -14,3 +14,4 @@ command = "python3 ../tools/docs/book-source-paths.py"
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"
+site-url = "/ego/"

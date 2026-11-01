@@ -130,3 +130,57 @@ fn replay_keeps_historical_failure_as_a_card_without_changing_live_errors() {
         project_replay_v1(&frames, None, std::path::Path::new("/workspace"))
     );
 }
+
+// Catches: child-only replay frames shift ordinary clients' error-card message IDs.
+#[test]
+fn child_frames_do_not_change_standard_replay_bytes() {
+    use ego_acp::project::project_replay_v1;
+    use ego_core::event::id::{ItemId, TurnId};
+    use ego_core::generator::types::ErrorKind;
+    use ego_core::public::{ChildIdentity, ChildPhase, PublicEvent};
+    use ego_core::session_lifecycle::ReplayFrame;
+
+    let turn = TurnId::new();
+    let frame = |event| ReplayFrame {
+        event,
+        state: Default::default(),
+        inherited: false,
+    };
+    let baseline = [frame(PublicEvent::Error {
+        turn,
+        item: None,
+        message: "provider failed".to_owned(),
+        kind: ErrorKind::Unclassified,
+    })];
+    let root = std::path::Path::new("/workspace");
+    let baseline_bytes = serde_json::to_vec(&project_replay_v1(&baseline, None, root)).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&baseline_bytes).unwrap()[0]["messageId"],
+        format!("replay-error-{turn:?}-None-0")
+    );
+    let child = ChildIdentity::Foreground {
+        turn: TurnId::new(),
+    };
+    let item = ItemId::new();
+    for inherited in [false, true] {
+        for count in [1, 2, 3] {
+            let mut frames = Vec::new();
+            for _ in 0..count {
+                let mut start = frame(PublicEvent::ChildLifecycle {
+                    turn,
+                    item,
+                    child,
+                    phase: ChildPhase::Started,
+                });
+                start.inherited = inherited;
+                frames.push(start);
+            }
+            frames.extend_from_slice(&baseline);
+            let actual = serde_json::to_vec(&project_replay_v1(&frames, None, root)).unwrap();
+            assert_eq!(
+                actual, baseline_bytes,
+                "{count} child frames, inherited={inherited}, changed standard replay bytes"
+            );
+        }
+    }
+}

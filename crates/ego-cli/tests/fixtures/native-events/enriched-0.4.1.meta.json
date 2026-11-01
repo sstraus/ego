@@ -1,0 +1,30 @@
+{
+  "version": "ego 0.4.1",
+  "command": [
+    "/home/example/workspace",
+    "run",
+    "--bare",
+    "--no-tools",
+    "--thinking",
+    "off",
+    "--model",
+    "ollama/fixture",
+    "--session-dir",
+    "/home/example/workspace",
+    "--retry",
+    "0",
+    "--timeout",
+    "15s",
+    "--output",
+    "text",
+    "Report readiness."
+  ],
+  "fixture_provider": "owned loopback server; no remote provider or paid turn",
+  "order": "raw PTY bytes",
+  "exit": 0,
+  "geometry": [
+    80,
+    24
+  ],
+  "tuic_socket_present": true
+}

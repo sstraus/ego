@@ -4509,6 +4509,38 @@ fn sandbox_off_can_open_a_synthetic_credential_file() {
     );
 }
 
+// Catches: a future Linux backend selector treats bwrap's read-only bind as
+// no-execute authority and silently reuses the first run's backend after a read grant.
+#[cfg(target_os = "linux")]
+#[test]
+fn bwrap_read_only_bind_still_executes_a_file_in_the_read_root() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("read-root-executable");
+    std::fs::write(&script, "#!/bin/sh\nprintf READ_ROOT_EXECUTED").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let result = Command::new("/usr/bin/bwrap")
+        .args([
+            "--die-with-parent",
+            "--unshare-user",
+            "--unshare-pid",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+        ])
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"READ_ROOT_EXECUTED");
+}
+
 // Catches: roots reach permission policy but are ignored by the real exec sandbox,
 // or a single-file read root grants its sibling or write access.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -4538,10 +4570,12 @@ fn perimeter_roots_reach_real_children_without_widening_single_file_access() {
     let roots = ego_core::permit::admit_roots(
         &[
             ego_core::permit::RootCfg {
+                consent: None,
                 path: writable.clone(),
                 access: RootAccess::ReadWrite,
             },
             ego_core::permit::RootCfg {
+                consent: None,
                 path: alias,
                 access: RootAccess::Read,
             },

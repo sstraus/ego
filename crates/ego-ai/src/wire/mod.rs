@@ -278,6 +278,10 @@ pub(crate) fn decode_response(
             State::Head {
                 response: Err(error),
                 ..
+            } if error.protocol_filter_message().is_some() => Some((local_filter_failure(&error), State::Done)),
+            State::Head {
+                response: Err(error),
+                ..
             } => Some((
                 // Both readings come off the transport error, and neither is
                 // recoverable from the prose it renders to — see
@@ -306,7 +310,10 @@ pub(crate) fn decode_response(
                 }
                 let kind = classify_status(response.status);
                 let retry_after = retry_after(&response.headers);
-                let (message, cause) = read_error_body(response.status, response.body).await;
+                let (message, cause) = match read_error_body(response.status, response.body).await {
+                    Ok(diagnostic) => diagnostic,
+                    Err(error) => return Some((local_filter_failure(&error), State::Done)),
+                };
                 // The same three events, with the certainty already read off
                 // the status above rather than off a failure: a response at
                 // all proves the request arrived. The provider answered, so
@@ -323,6 +330,12 @@ pub(crate) fn decode_response(
                     let events = decoder.push(&bytes);
                     Some((events, State::Body { body, decoder }))
                 }
+                Some(Err(error)) if error.protocol_filter_message().is_some() => {
+                    let mut events = decoder.finish(None);
+                    events.retain(|event| !matches!(event, AiEvent::Stop(_)));
+                    events.extend(local_filter_failure(&error));
+                    Some((events, State::Done))
+                }
                 Some(Err(error)) => Some((decoder.finish(Some(error)), State::Done)),
                 None => Some((decoder.finish(None), State::Done)),
             },
@@ -331,6 +344,20 @@ pub(crate) fn decode_response(
     })
     .flat_map(stream::iter)
     .boxed()
+}
+
+fn local_filter_failure(error: &HttpError) -> Vec<AiEvent> {
+    vec![
+        AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent),
+        AiEvent::Error {
+            message: error.to_string(),
+            kind: ErrorKind::Invalid,
+        },
+        AiEvent::LocalFailure {
+            cause: error.to_string(),
+        },
+        AiEvent::Stop(StopReason::Error),
+    ]
 }
 
 /// What a non-200 status says about whether the request can ever succeed.
@@ -564,10 +591,10 @@ const IDENTITY_HINT: &str = "if this provider gates on a client identity ego \
      does not ship, `docs/guides/providers.md` is the \
      `[auth.<provider>.headers]` recipe";
 
-pub(crate) async fn read_error_body(
+async fn read_error_body(
     status: u16,
     mut body: crate::http::ByteStream,
-) -> (String, String) {
+) -> Result<(String, String), HttpError> {
     let mut raw = Vec::new();
     while let Some(chunk) = body.next().await {
         match chunk {
@@ -580,6 +607,7 @@ pub(crate) async fn read_error_body(
             }
             // The status is the news; a body that also failed to arrive does
             // not change it.
+            Err(error) if error.protocol_filter_message().is_some() => return Err(error),
             Err(_) => break,
         }
     }
@@ -611,11 +639,11 @@ pub(crate) async fn read_error_body(
     };
     // `402` is deliberately not here. It is the third member of the `Refused`
     // class and it means an empty wallet, which no header fixes.
-    match status {
+    Ok(match status {
         401 | 403 => (
             format!("{said} — {IDENTITY_HINT}"),
             format!("{cause} — {IDENTITY_HINT}"),
         ),
         _ => (said, cause),
-    }
+    })
 }

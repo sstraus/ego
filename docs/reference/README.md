@@ -41,8 +41,8 @@ these accept `--name show|set=TEXT|clear` and
 The [generated reference](cli.md) lists visible commands, including nested
 management commands, and their flags.
 Installed-binary flags are authoritative in `ego COMMAND SUBCOMMAND --help`;
-[the fresh-build help snapshot](help.md) includes their help. [CLI.md](../../CLI.md) describes
-output contracts and design; some examples there predate this checkout.
+[the dated help snapshot](help.md) includes their help. [CLI.md](../../CLI.md) describes
+output contracts and command conventions.
 
 | Group | Controls | Default or constraint |
 | --- | --- | --- |

@@ -28,7 +28,7 @@
 //! one that shows whether anything stretches to fill space it does not need.
 
 use ego_cli::render::caps::Depth;
-use ego_cli::render::{block, markdown};
+use ego_cli::render::{Capabilities, block, markdown};
 
 const SOURCE: &str = include_str!("goldens/render/source.md");
 
@@ -37,7 +37,16 @@ const WIDTHS: [usize; 3] = [40, 80, 120];
 /// The rendering of `SOURCE` at one width and one depth.
 fn transcript(width: usize, depth: Depth) -> String {
     block(
-        &markdown::render(SOURCE, width, ego_cli::render::OscProfile::Standard),
+        &markdown::render(
+            SOURCE,
+            Capabilities {
+                width,
+                hyperlinks: true,
+                osc: ego_cli::render::OscProfile::Standard,
+                ..Capabilities::plain()
+            },
+            None,
+        ),
         depth,
     )
 }
@@ -231,7 +240,16 @@ fn every_row_of_the_table_agrees_and_none_reaches_past_the_edge() {
 #[test]
 fn a_table_too_narrow_to_draw_still_says_everything_it_said() {
     let narrow = block(
-        &markdown::render(SOURCE, 20, ego_cli::render::OscProfile::Standard),
+        &markdown::render(
+            SOURCE,
+            Capabilities {
+                width: 20,
+                hyperlinks: true,
+                osc: ego_cli::render::OscProfile::Standard,
+                ..Capabilities::plain()
+            },
+            None,
+        ),
         Depth::None,
     );
     assert!(

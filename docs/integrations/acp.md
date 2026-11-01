@@ -121,7 +121,10 @@ still have returned `end_turn`. For a cancelled run, agent → host:
   named URI reference, not the referenced bytes. Images use `image` blocks with
   `mimeType` and base64 `data`; consult negotiated prompt capabilities and model
   support. Unsupported content and malformed parameters are refused rather than
-  silently omitted. Existing attachment fixtures are in
+  silently omitted. When audio is advertised, `audio` blocks accept explicit
+  `audio/wav` with valid base64 WAV bytes, at most four clips and 10 MiB total.
+  Mixed audio/image prompts are refused; the selected model must support audio.
+  Existing attachment fixtures are in
   [prompt tests](../../crates/ego-acp/tests/prompt.rs).
 - Keep one prompt in flight per session. Wait for its response before the next
   ordinary prompt; do not treat write completion as turn completion. Dispatch

@@ -200,6 +200,8 @@ pub fn ready_prompt_count(output: &[u8]) -> usize {
 /// What the stub answers a `/v1/chat/completions` request with.
 #[derive(Debug, Clone)]
 pub enum Reply {
+    /// Reflect a selected user block, without confusing host context with a prompt.
+    EchoUserTextContaining(String),
     /// A whole SSE body, written in one go.
     Sse(String),
     /// Close a successful HTTP response before its declared body is complete.
@@ -409,6 +411,7 @@ pub fn tool_call(id: &str, name: &str, arguments: &str) -> String {
 /// One request the stub was sent.
 #[derive(Debug, Clone)]
 pub struct Recorded {
+    pub headers: HashMap<String, String>,
     pub path: String,
     pub body: String,
 }
@@ -523,6 +526,7 @@ fn serve(
         .to_string();
 
     let mut length = 0usize;
+    let mut headers = HashMap::new();
     loop {
         let mut header = String::new();
         if reader.read_line(&mut header)? == 0 {
@@ -531,6 +535,9 @@ fn serve(
         let header = header.trim_end();
         if header.is_empty() {
             break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            headers.insert(name.to_ascii_lowercase(), value.trim().to_owned());
         }
         if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
             length = value.trim().parse().unwrap_or(0);
@@ -542,6 +549,7 @@ fn serve(
     let body = String::from_utf8_lossy(&body).into_owned();
 
     seen.lock().expect("no writer panics").push(Recorded {
+        headers,
         path: path.clone(),
         body: body.clone(),
     });
@@ -644,6 +652,33 @@ fn serve(
                         .cloned()
                 })
                 .unwrap_or(Reply::Status(500));
+            let reply = if let Reply::EchoUserTextContaining(ref marker) = reply {
+                let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+                let reflected = request["messages"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .filter(|m| m["role"] == "user")
+                    .flat_map(|message| {
+                        let content = &message["content"];
+                        if let Some(text) = content.as_str() {
+                            vec![text]
+                        } else {
+                            content
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|block| block["text"].as_str())
+                                .collect()
+                        }
+                    })
+                    .find(|text| text.contains(marker.as_str()))
+                    .expect("the received user prompt contains the test marker");
+                Reply::Sse(text(reflected))
+            } else {
+                reply
+            };
             sse(&mut stream, reply, &path)
         }
     }
@@ -827,6 +862,7 @@ fn as_messages(chat: &str) -> String {
 fn sse(stream: &mut TcpStream, reply: Reply, path: &str) -> std::io::Result<()> {
     let reply = if path.ends_with("/messages") {
         match reply {
+            Reply::EchoUserTextContaining(_) => unreachable!("resolved from the recorded request"),
             Reply::Sse(body) => Reply::Sse(as_messages(&body)),
             Reply::TruncatedSse => Reply::TruncatedSse,
             Reply::Status(status) => Reply::Status(status),
@@ -839,6 +875,7 @@ fn sse(stream: &mut TcpStream, reply: Reply, path: &str) -> std::io::Result<()> 
         reply
     };
     match reply {
+        Reply::EchoUserTextContaining(_) => unreachable!("resolved from the recorded request"),
         Reply::TruncatedSse => {
             write!(
                 stream,
@@ -1786,6 +1823,11 @@ impl AcpHost {
             .as_str()
             .unwrap_or_else(|| panic!("session/new answered without a session id: {opened}"))
             .to_owned()
+    }
+
+    /// The owned child, for process-level signal and exit assertions.
+    pub fn child(&mut self) -> &mut Child {
+        &mut self.running.child
     }
 
     /// Close stdin and collect the process's stderr.

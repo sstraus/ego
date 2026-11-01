@@ -103,5 +103,4 @@ Sources: [root discovery](../../crates/ego-cli/src/capability_roots.rs),
 [Markdown commands](../../crates/ego-cli/src/command.rs),
 [loader](../../crates/ego-cli/src/skill.rs),
 [domain skill service](../../crates/ego-core/src/skill.rs),
-[skill tests](../../crates/ego-cli/src/skill/tests.rs), and
-retained format research.
+[skill tests](../../crates/ego-cli/src/skill/tests.rs).

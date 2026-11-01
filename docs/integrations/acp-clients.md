@@ -10,9 +10,9 @@ For ego's extension payloads, capability advertisements, and fallback rules, see
 [ego extensions to ACP](acp-extensions.md). This guide covers library use; it
 does not duplicate the raw JSON-RPC transcript.
 
-## Library analysis (2026-10-16)
+## Pinned library versions (2026-10-16)
 
-Recommend the official ACP organization library in each language. All three
+Use the official ACP organization library in each language. All three
 repositories were public, not archived, and licensed **Apache-2.0** at this
 audit. The dates below are the GitHub repository `pushed_at` values observed on
 that date, not a support commitment. The package registries returned the stated
@@ -94,7 +94,7 @@ The Python SDK itself supports Python 3.10, but this example uses
 `asyncio.timeout`, which requires 3.11+.
 
 `isolated.sh` creates its own HOME, EGO_HOME, workspace, and config below
-`~/Gits/.tmp/ego-acp-clients/`. It clears inherited environment variables,
+`${TMPDIR:-/tmp}/ego-acp-clients/` (or `ACP_EXAMPLE_ROOT` if set). It clears inherited environment variables,
 including provider credentials, and sets `OLLAMA_HOST=127.0.0.1:1`. The selected
 model is `ollama/qwen3`, with thinking off. ego runs with `--bare --no-tools`.
 The example profile uses sandbox off to avoid host confinement prerequisites;
@@ -121,7 +121,7 @@ package. Package downloads need network access; the client probe does not.
 
 ```sh
 root="$PWD"
-work="$HOME/Gits/.tmp/ego-acp-ts"
+work="${TMPDIR:-/tmp}/ego-acp-ts"
 mkdir -p "$work"
 printf '{"type":"module"}\n' > "$work/package.json"
 npm install --prefix "$work" --cache "$work/npm-cache" --ignore-scripts \
@@ -138,7 +138,7 @@ one outside the temporary tree.
 
 ```sh
 root="$PWD"
-work="$HOME/Gits/.tmp/ego-acp-python"
+work="${TMPDIR:-/tmp}/ego-acp-python"
 mkdir -p "$work"
 UV_CACHE_DIR="$work/uv-cache" uv venv --python "$(command -v python3)" "$work/venv"
 UV_CACHE_DIR="$work/uv-cache" uv pip install --python "$work/venv/bin/python" \
@@ -190,8 +190,7 @@ session/fork ok
 
 The replayed message described the refused
 `http://127.0.0.1:1/api/tags` connection. Ordering of asynchronous updates can
-vary. ego also wrote expected diagnostics to stderr: an absent isolated
-explicit shared-tree roots, sandbox-off warnings, and no effective confinement.
+vary. ego also wrote sandbox-off and no-confinement diagnostics to stderr.
 These are not JSON-RPC stdout. The TypeScript example closes the child's stdin
 before transport teardown; without this EOF, the initial probe hung after the
 last successful method and was stopped by the bounded runner. The corrected

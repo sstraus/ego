@@ -208,10 +208,10 @@ impl TextOutput for Stdout {
     }
 }
 
-/// How many tool calls and collapsed prompts the expand key retains.
+/// How many finished tool calls the expand key retains.
 const EXPANDABLE_CALLS: usize = 16;
 
-/// One history shared by submission receipts and finished tool output.
+/// Tool output shared with the terminal owner for nonblocking expansion.
 #[derive(Default)]
 pub(crate) struct ExpansionHistory(Mutex<VecDeque<String>>);
 
@@ -236,7 +236,7 @@ impl ExpansionHistory {
 /// Interactive text and diagnostics serialized into complete logical rows.
 pub struct InteractiveOutput {
     inner: Mutex<SurfaceOutput>,
-    /// Shared with the terminal owner's prompt submission renderer.
+    /// Shared with the terminal owner's tool expansion action.
     details: Arc<ExpansionHistory>,
 }
 
@@ -625,12 +625,25 @@ struct Streaming {
 }
 
 impl<'a> TextSink<'a> {
-    pub fn new(out: &'a dyn TextOutput, quiet: bool, capabilities: Capabilities) -> Self {
+    pub fn set_workspace(&self, workspace: Option<&std::path::Path>) {
+        self.text
+            .lock()
+            .expect("text sink lock")
+            .answer
+            .set_workspace(workspace);
+    }
+
+    pub fn new(
+        out: &'a dyn TextOutput,
+        quiet: bool,
+        capabilities: Capabilities,
+        workspace: Option<&std::path::Path>,
+    ) -> Self {
         TextSink {
             out,
             quiet,
             text: Mutex::new(Streaming {
-                answer: Answer::new(capabilities),
+                answer: Answer::new(capabilities, workspace),
                 tools: tool_row::ToolRows::default(),
                 open: false,
             }),
@@ -699,12 +712,30 @@ impl<'a> TextSink<'a> {
             if let Some(reason) = &goal.check_stop
                 && prior.is_none_or(|prior| prior.check_stop.as_ref() != Some(reason))
             {
-                let next = "Inspect the goal with '/goal show'.";
-                receipts.push(format!(
-                    "Goal stopped: {} — turns {}/{allowance}; {reason}; last unmet condition: {}. {next}",
-                    goal.objective, goal.continuation_turns,
-                    goal.blocker_reason.as_deref().unwrap_or("none recorded")
-                ));
+                if goal.state == GoalState::Active
+                    && reason == "waiting for user after blocked progress"
+                {
+                    receipts.push(format!(
+                        "Goal paused, waiting for you: {}. It continues after your reply.",
+                        goal.objective
+                    ));
+                } else {
+                    let mut receipt = format!("Goal stopped: {} — {reason}", goal.objective);
+                    if goal.continuation_turns > 0 {
+                        receipt
+                            .push_str(&format!("; turns {}/{allowance}", goal.continuation_turns));
+                    }
+                    if let Some(condition) = &goal.blocker_reason {
+                        receipt.push_str(&format!("; last unmet condition: {condition}"));
+                    }
+                    receipt.push_str(". Inspect the goal with '/goal show'.");
+                    if goal.state == GoalState::Active
+                        && reason.starts_with("goal continuation budget exhausted")
+                    {
+                        receipt.push_str(" Grant N more automatic turns with '/goal extend N' or 'ego resume ID --goal-operation extend=N', then continue work.");
+                    }
+                    receipts.push(receipt);
+                }
             }
             for receipt in receipts {
                 self.finish();
@@ -887,16 +918,19 @@ impl EventSink for TextSink<'_> {
                 && provider_notice.is_none()
             {
                 self.finish();
-                let colour = if matches!(event, PublicEvent::TurnCompleted { ok: false, .. }) {
+                let failed = matches!(event, PublicEvent::TurnCompleted { ok: false, .. });
+                let colour = if failed {
                     crate::render::style::Palette::ERROR
                 } else {
                     crate::render::style::Palette::ADDED_FG
                 };
+                let style = crate::render::style::Style::fg(colour);
                 let capabilities = self.capabilities.with_current_width();
-                let receipt = crate::render::Line::styled(
-                    format!("{DISPLAY_NAME}: {cause} — retry finished"),
-                    crate::render::style::Style::fg(colour),
-                )
+                let receipt = crate::render::Line::of(vec![
+                    crate::render::Span::new(format!("{DISPLAY_NAME}: "), style),
+                    crate::render::Span::new(cause, if failed { style } else { style.strike() }),
+                    crate::render::Span::new(" — retry finished", style),
+                ])
                 .wrap(capabilities.width)
                 .into_iter()
                 .map(|line| line.render(capabilities.depth))
@@ -972,9 +1006,23 @@ impl EventSink for TextSink<'_> {
                 }
             }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
-                for error in mcp_errors {
+                if !mcp_errors.is_empty() {
                     self.finish();
-                    self.out.note(error);
+                    if self.capabilities.on_screen() {
+                        let servers = if mcp_errors.len() == 1 {
+                            "server needs"
+                        } else {
+                            "servers need"
+                        };
+                        self.out.note(&format!(
+                            "MCP: {} {servers} attention; run /mcp for status or 'ego mcp ls' for diagnostics",
+                            mcp_errors.len()
+                        ));
+                    } else {
+                        for error in mcp_errors {
+                            self.out.note(error);
+                        }
+                    }
                 }
             }
             // `AgentMessage` and not "either message kind": stdout is the
@@ -1462,6 +1510,216 @@ mod tests {
         fn line(&self, _text: &str) {}
     }
 
+    // Catches: blocked progress labels an active goal as stopped and prints empty audit fields.
+    #[test]
+    fn blocked_progress_receipt_says_paused() {
+        use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+        use ego_core::event::id::{EventId, GoalId, Producer, Seq};
+        use ego_core::event::time::Timestamp;
+        use ego_core::goal::{GoalOwner, GoalState};
+
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+        let turn = TurnId::new();
+        let id = GoalId::new();
+        let mut state = SessionState::default();
+        let mut seq = Seq::ZERO;
+        for kind in [
+            EventKind::GoalSet {
+                id,
+                objective: "Verify the artifact".into(),
+                owner: GoalOwner::Operator,
+                ceilings: Default::default(),
+                derived_from: None,
+            },
+            EventKind::GoalCheckStopped {
+                id,
+                reason: "waiting for user after blocked progress".into(),
+            },
+        ] {
+            state.apply(&DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn,
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::EPOCH,
+                    producer: Producer::Main,
+                },
+                kind,
+            });
+            sink.goal_receipts(
+                &PublicEvent::TurnCompleted {
+                    turn,
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+                &state,
+            );
+        }
+        assert_eq!(state.goal.as_ref().unwrap().state, GoalState::Active);
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(
+            notes.as_slice(),
+            [
+                "Goal (operator): Verify the artifact",
+                "Goal paused, waiting for you: Verify the artifact. It continues after your reply.",
+            ]
+        );
+    }
+
+    // Catches: an OR guard offers extension for active non-budget stops or terminal goals.
+    #[test]
+    fn goal_extension_hint_requires_active_budget_stop() {
+        use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
+        use ego_core::event::id::{EventId, GoalId, Producer, Seq};
+        use ego_core::event::time::Timestamp;
+        use ego_core::goal::{GoalOwner, GoalState, GoalTransition};
+
+        for (terminal, reason, offers_extension) in [
+            (false, "goal check failed: provider unavailable", false),
+            (true, "goal continuation budget exhausted", false),
+            (false, "goal continuation budget exhausted", true),
+            (true, "goal check failed: provider unavailable", false),
+        ] {
+            let out = Recorded::default();
+            let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+            let turn = TurnId::new();
+            let id = GoalId::new();
+            let mut state = SessionState::default();
+            let mut seq = Seq::ZERO;
+            let mut events = vec![EventKind::GoalSet {
+                id,
+                objective: "Verify the artifact".into(),
+                owner: GoalOwner::Operator,
+                ceilings: Default::default(),
+                derived_from: None,
+            }];
+            if terminal {
+                events.push(EventKind::GoalTransitioned {
+                    id,
+                    transition: GoalTransition::Blocked {
+                        reason: "operator action required".into(),
+                    },
+                });
+            }
+            events.push(EventKind::GoalCheckStopped {
+                id,
+                reason: reason.into(),
+            });
+            for kind in events {
+                state.apply(&DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn,
+                        item: None,
+                        parent: None,
+                        ts: Timestamp::EPOCH,
+                        producer: Producer::Main,
+                    },
+                    kind,
+                });
+                sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+            }
+            assert_eq!(
+                state.goal.as_ref().unwrap().state,
+                if terminal {
+                    GoalState::Blocked
+                } else {
+                    GoalState::Active
+                }
+            );
+            let notes = out.notes.lock().unwrap();
+            let receipt = notes
+                .iter()
+                .find(|note| note.starts_with("Goal stopped:"))
+                .expect("the stop must remain visible");
+            assert!(receipt.contains(reason), "{receipt}");
+            assert!(receipt.contains("/goal show"), "{receipt}");
+            for hint in ["/goal extend N", "ego resume ID --goal-operation extend=N"] {
+                assert_eq!(receipt.contains(hint), offers_extension, "{receipt}");
+            }
+        }
+    }
+
+    // Catches: a recovered provider error turns green but still reads as a current error.
+    #[test]
+    fn recovered_retry_strikes_only_the_original_cause() {
+        #[derive(Default)]
+        struct LiveRows(Mutex<Vec<String>>);
+        impl Diagnostics for LiveRows {
+            fn note(&self, _: &str) {}
+        }
+        impl TextOutput for LiveRows {
+            fn write(&self, _: &str) {}
+            fn line(&self, text: &str) {
+                self.0.lock().unwrap().push(text.to_owned());
+            }
+            fn live_retry(&self) -> bool {
+                true
+            }
+        }
+
+        let cause = "the provider is temporarily unavailable or the network failed";
+        let screen = Capabilities::of(&crate::render::caps::Terminal {
+            stdout_is_terminal: true,
+            columns: Some(160),
+            colorterm: Some("truecolor"),
+            term: Some("xterm-256color"),
+            ..Default::default()
+        });
+        for success in [true, false] {
+            let out = LiveRows::default();
+            let sink = TextSink::new(&out, false, screen, None);
+            let turn = TurnId::new();
+            sink.publish(
+                &PublicEvent::ProviderRetry {
+                    turn,
+                    attempt: 1,
+                    limit: 3,
+                    delay_ms: 100,
+                    kind: ego_core::generator::types::ErrorKind::Transient,
+                    cause: cause.into(),
+                    recovery_remaining_ms: None,
+                },
+                &SessionState::default(),
+            );
+            let settled = if success {
+                PublicEvent::ItemStarted {
+                    turn,
+                    item: ItemId::new(),
+                    kind: ItemKind::AgentMessage,
+                    name: None,
+                    text: None,
+                }
+            } else {
+                PublicEvent::TurnCompleted {
+                    turn,
+                    ok: false,
+                    exit_reason: ego_core::event::domain::ExitReason::Usage,
+                }
+            };
+            sink.publish(&settled, &SessionState::default());
+            let rows = out.0.lock().unwrap();
+            let receipt = rows
+                .iter()
+                .find(|row| row.contains("retry finished"))
+                .unwrap();
+            assert!(receipt.contains(cause), "{receipt:?}");
+            assert_eq!(
+                receipt.matches("\x1b[9;").count(),
+                usize::from(success),
+                "{receipt:?}"
+            );
+            assert!(receipt.contains(" — retry finished"), "{receipt:?}");
+            if success {
+                assert!(receipt.contains(&format!("m{cause}\x1b[0m")), "{receipt:?}");
+            }
+        }
+    }
+
     fn started(item: ItemId, name: &str, args: &str) -> PublicEvent {
         PublicEvent::ItemStarted {
             turn: ego_core::event::id::TurnId::new(),
@@ -1472,11 +1730,86 @@ mod tests {
         }
     }
 
+    /// Catches: one failed MCP connection emitting a separate alarming row per server.
+    #[test]
+    fn startup_mcp_failures_are_one_actionable_notice() {
+        let out = Recorded::default();
+        let screen = Capabilities::of(&crate::render::caps::Terminal {
+            stdout_is_terminal: true,
+            term: Some("xterm"),
+            ..Default::default()
+        });
+        let sink = TextSink::new(&out, false, screen, None);
+        sink.publish(
+            &PublicEvent::SessionStarted {
+                v: PUBLIC_EVENT_VERSION,
+                session: SessionId::new(),
+                capabilities: vec![],
+                mcp_errors: vec![
+                    "MCP server 'a': invalid".into(),
+                    "MCP server 'b': offline".into(),
+                ],
+                hook_errors: vec![],
+                instructions: vec![],
+            },
+            &SessionState::default(),
+        );
+        let notes = out.notes.lock().unwrap();
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].contains("2 servers need attention"));
+        assert!(notes[0].contains("/mcp"));
+        assert!(!notes[0].contains("invalid"));
+    }
+
+    /// Catches: one failed server showing an ungrammatical plural warning.
+    #[test]
+    fn startup_one_mcp_failure_uses_singular_notice() {
+        let out = Recorded::default();
+        let screen = Capabilities::of(&crate::render::caps::Terminal {
+            stdout_is_terminal: true,
+            term: Some("xterm"),
+            ..Default::default()
+        });
+        let sink = TextSink::new(&out, false, screen, None);
+        sink.publish(
+            &PublicEvent::SessionStarted {
+                v: PUBLIC_EVENT_VERSION,
+                session: SessionId::new(),
+                capabilities: vec![],
+                mcp_errors: vec!["MCP server 'a': offline".into()],
+                hook_errors: vec![],
+                instructions: vec![],
+            },
+            &SessionState::default(),
+        );
+        assert!(out.notes.lock().unwrap()[0].contains("1 server needs attention"));
+    }
+
+    /// Catches: interactive grouping silently deleting headless per-server diagnostics.
+    #[test]
+    fn headless_startup_keeps_each_mcp_error() {
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+        let errors = ["MCP server 'a': invalid", "MCP server 'b': offline"];
+        sink.publish(
+            &PublicEvent::SessionStarted {
+                v: PUBLIC_EVENT_VERSION,
+                session: SessionId::new(),
+                capabilities: vec![],
+                mcp_errors: errors.iter().map(|error| (*error).into()).collect(),
+                hook_errors: vec![],
+                instructions: vec![],
+            },
+            &SessionState::default(),
+        );
+        assert_eq!(*out.notes.lock().unwrap(), errors);
+    }
+
     /// Catches: quiet mode hiding missing cost or estimates being called actual cost.
     #[test]
     fn cost_anomaly_remains_visible_in_quiet_mode_without_fabricating_actual_cost() {
         let out = Recorded::default();
-        let sink = TextSink::new(&out, true, Capabilities::plain());
+        let sink = TextSink::new(&out, true, Capabilities::plain(), None);
         let state = SessionState::default();
         let turn = ego_core::event::id::TurnId::new();
         for bound in [
@@ -1512,7 +1845,7 @@ mod tests {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
-        let sink = TextSink::new(&out, false, caps);
+        let sink = TextSink::new(&out, false, caps, None);
         let state = SessionState::default();
         let turn = ego_core::event::id::TurnId::new();
         for cached in [0, 18_400] {
@@ -1542,7 +1875,7 @@ mod tests {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
-        let sink = TextSink::new(&out, false, caps);
+        let sink = TextSink::new(&out, false, caps, None);
         let original = CachePrefix {
             session: SessionId::new(),
             provider: "anthropic".into(),
@@ -1604,7 +1937,7 @@ mod tests {
             if interactive {
                 caps.osc = crate::render::caps::OscProfile::Standard;
             }
-            let sink = TextSink::new(&out, quiet, caps);
+            let sink = TextSink::new(&out, quiet, caps, None);
             sink.cache_observed(&prefix, Some(hit));
             sink.cache_observed(&prefix, None);
             sink.cache_observed(&prefix, Some(ego_core::state::Usage::IDENTITY));
@@ -1626,8 +1959,8 @@ mod tests {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
-        let interactive = TextSink::new(&out, false, caps);
-        let headless = TextSink::new(&out, false, Capabilities::plain());
+        let interactive = TextSink::new(&out, false, caps, None);
+        let headless = TextSink::new(&out, false, Capabilities::plain(), None);
         let state = SessionState::default();
         let turn = ego_core::event::id::TurnId::new();
         let start = PublicEvent::TurnStarted { turn };
@@ -1657,7 +1990,7 @@ mod tests {
             if colour {
                 caps.depth = crate::render::caps::Depth::Ansi16;
             }
-            let sink = TextSink::new(&out, false, caps);
+            let sink = TextSink::new(&out, false, caps, None);
             let state = SessionState::default();
             let turn = TurnId::new();
             sink.publish(&PublicEvent::TurnStarted { turn }, &state);
@@ -1697,7 +2030,7 @@ mod tests {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
-        let sink = TextSink::new(&out, false, caps);
+        let sink = TextSink::new(&out, false, caps, None);
         let turn = TurnId::new();
         let mut state = SessionState::default();
         sink.publish(&PublicEvent::TurnStarted { turn }, &state);
@@ -1757,7 +2090,7 @@ mod tests {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
-        let sink = TextSink::new(&out, true, caps);
+        let sink = TextSink::new(&out, true, caps, None);
         let state = SessionState::default();
         let turn = TurnId::new();
         sink.publish(&PublicEvent::TurnStarted { turn }, &state);
@@ -1864,7 +2197,7 @@ mod tests {
                 let mut caps = Capabilities::plain();
                 caps.width = width;
                 caps.depth = depth;
-                TextSink::new(&out, false, caps).publish(&event, &state);
+                TextSink::new(&out, false, caps, None).publish(&event, &state);
                 let notes = out.notes.lock().unwrap();
                 assert_eq!(notes.len(), 1, "one update must be one block");
                 assert_eq!(
@@ -1903,7 +2236,7 @@ mod tests {
         let out = Recorded::default();
         let mut caps = Capabilities::plain();
         caps.width = 40;
-        TextSink::new(&out, false, caps).publish(&event, &state);
+        TextSink::new(&out, false, caps, None).publish(&event, &state);
         let notes = out.notes.lock().unwrap();
         assert_eq!(notes.len(), 1);
         assert!(!notes[0].contains("\n\n"));
@@ -1942,21 +2275,21 @@ mod tests {
             },
         };
         let out = Recorded::default();
-        let sink = TextSink::new(&out, false, Capabilities::plain());
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
         sink.publish(&event, &state);
         assert_eq!(*out.notes.lock().unwrap(), ["Plan 0/1\n! Verify output"]);
         state.plan.steps.clear();
         sink.publish(&event, &state);
         assert_eq!(out.notes.lock().unwrap().last().unwrap(), "Plan cleared");
         let quiet_out = Recorded::default();
-        TextSink::new(&quiet_out, true, Capabilities::plain()).publish(&event, &state);
+        TextSink::new(&quiet_out, true, Capabilities::plain(), None).publish(&event, &state);
         assert!(quiet_out.notes.lock().unwrap().is_empty());
     }
 
     #[test]
     fn a_tool_call_is_drawn_once_when_it_finishes_and_never_as_raw_json() {
         let out = Recorded::default();
-        let sink = TextSink::new(&out, false, Capabilities::plain());
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
         let state = SessionState::default();
         let item = ItemId::new();
 
@@ -1983,7 +2316,7 @@ mod tests {
     #[test]
     fn overlapping_calls_are_matched_to_their_own_start() {
         let out = Recorded::default();
-        let sink = TextSink::new(&out, false, Capabilities::plain());
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
         let state = SessionState::default();
         let (first, second) = (ItemId::new(), ItemId::new());
 
@@ -2002,7 +2335,7 @@ mod tests {
     #[test]
     fn child_tool_groups_keep_ownership_across_interleaved_output() {
         let out = Recorded::default();
-        let sink = TextSink::new(&out, false, Capabilities::plain());
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
         let state = SessionState::default();
         for name in [
             "alpha › exec",
@@ -2055,13 +2388,13 @@ mod tests {
     #[test]
     fn quiet_draws_no_tool_rows_and_a_stray_completion_draws_none() {
         let out = Recorded::default();
-        let quiet = TextSink::new(&out, true, Capabilities::plain());
+        let quiet = TextSink::new(&out, true, Capabilities::plain(), None);
         let state = SessionState::default();
         let item = ItemId::new();
         quiet.publish(&started(item, "read", r#"{"path":"a.rs"}"#), &state);
         quiet.publish(&completed(item, true, "x"), &state);
 
-        let loud = TextSink::new(&out, false, Capabilities::plain());
+        let loud = TextSink::new(&out, false, Capabilities::plain(), None);
         loud.publish(&completed(ItemId::new(), true, "x"), &state);
         assert!(out.rows.lock().unwrap().is_empty());
     }
@@ -2078,7 +2411,7 @@ mod tests {
         ))
         .unwrap();
         let (output, rows) = interactive();
-        let sink = TextSink::new(&output, false, Capabilities::plain());
+        let sink = TextSink::new(&output, false, Capabilities::plain(), None);
         let mut state = SessionState::default();
         for event in &events {
             state.apply(event);

@@ -42,6 +42,22 @@ impl ExecutionPolicy {
         }
     }
 
+    /// Recognize only exact roots approved by the terminal in this session.
+    /// Every other authority dimension still uses the normal readmission proof.
+    pub fn not_more_permissive_than_with_roots(
+        &self,
+        old: &Self,
+        approved: &[ProfileRoot],
+    ) -> bool {
+        let mut previous = old.clone();
+        for root in approved {
+            if !previous.roots.contains(root) {
+                previous.roots.push(root.clone());
+            }
+        }
+        self.not_more_permissive_than(&previous)
+    }
+
     /// Conservative proof: an unrecognized change requires the human seat.
     pub fn not_more_permissive_than(&self, old: &Self) -> bool {
         self.level.within(old.level)

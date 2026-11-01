@@ -17,6 +17,7 @@ pub(crate) struct PromptLines<'prompt> {
     pub(crate) before_cursor: Cow<'prompt, str>,
     pub(crate) after_cursor: Cow<'prompt, str>,
     pub(crate) footer: Cow<'prompt, str>,
+    pub(crate) bottom_padding: u16,
     pub(crate) hint: Cow<'prompt, str>,
     pub(crate) right_prompt_on_last_line: bool,
 }
@@ -56,6 +57,7 @@ impl<'prompt> PromptLines<'prompt> {
             footer: coerce_crlf(&prompt.render_prompt_footer())
                 .into_owned()
                 .into(),
+            bottom_padding: prompt.bottom_padding(),
             right_prompt_on_last_line,
         }
     }
@@ -68,6 +70,7 @@ impl<'prompt> PromptLines<'prompt> {
             before_cursor: self.before_cursor.into_owned().into(),
             after_cursor: self.after_cursor.into_owned().into(),
             footer: self.footer.into_owned().into(),
+            bottom_padding: self.bottom_padding,
             hint: self.hint.into_owned().into(),
             right_prompt_on_last_line: self.right_prompt_on_last_line,
         }
@@ -110,7 +113,8 @@ impl<'prompt> PromptLines<'prompt> {
     /// Layout and painting both consume this same bounded view.
     pub(crate) fn with_bounded_footer(&self, columns: u16, height: u16) -> Self {
         let mut lines = self.clone();
-        let mut remaining = usize::from(height.saturating_sub(1));
+        let padding = self.bottom_padding.min(height.saturating_sub(1));
+        let mut remaining = usize::from(height.saturating_sub(1 + padding));
         let mut end = 0;
         let mut offset = 0;
         for line in self.footer.split_inclusive('\n') {
@@ -123,7 +127,16 @@ impl<'prompt> PromptLines<'prompt> {
             end = offset + text.len();
             offset += line.len();
         }
-        lines.footer = Cow::Owned(self.footer[..end].trim_end_matches(['\r', '\n']).to_owned());
+        let mut footer = self.footer[..end].trim_end_matches(['\r', '\n']).to_owned();
+        for _ in 0..padding {
+            if !footer.is_empty() {
+                footer.push('\n');
+            }
+            // A space is visibly blank but survives string line counting.
+            footer.push(' ');
+        }
+        lines.footer = Cow::Owned(footer);
+        lines.bottom_padding = 0;
         lines
     }
 
@@ -133,6 +146,7 @@ impl<'prompt> PromptLines<'prompt> {
             .lines()
             .map(|line| footer_line_rows(line, terminal_columns))
             .sum::<usize>()
+            .saturating_add(usize::from(self.bottom_padding))
             .min(u16::MAX as usize) as u16
     }
 
@@ -320,6 +334,7 @@ mod tests {
             after_cursor: Cow::Borrowed(""),
             hint: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            bottom_padding: 0,
             right_prompt_on_last_line: false,
         };
 

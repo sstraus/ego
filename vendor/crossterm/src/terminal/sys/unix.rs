@@ -217,7 +217,7 @@ fn query_keyboard_enhancement_flags_raw() -> io::Result<Option<KeyboardEnhanceme
         poll_internal, read_internal, InternalEvent,
     };
     use std::io::Write;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     // This is the recommended method for testing support for the keyboard enhancement protocol.
     // We send a query for the flags supported by the terminal and then the primary device attributes
@@ -240,29 +240,30 @@ fn query_keyboard_enhancement_flags_raw() -> io::Result<Option<KeyboardEnhanceme
         stdout.flush()?;
     }
 
-    loop {
-        match poll_internal(
-            Some(Duration::from_millis(2000)),
-            &KeyboardEnhancementFlagsFilter,
-        ) {
-            Ok(true) => {
-                match read_internal(&KeyboardEnhancementFlagsFilter) {
-                    Ok(InternalEvent::KeyboardEnhancementFlags(current_flags)) => {
-                        // Flush the PrimaryDeviceAttributes out of the event queue.
-                        read_internal(&PrimaryDeviceAttributesFilter).ok();
-                        return Ok(Some(current_flags));
-                    }
-                    _ => return Ok(None),
-                }
+    // Detection and the optional attributes drain share one deadline. Some
+    // terminals answer only the flags query, and others answer neither query.
+    // Never issue a blocking read until its matching event has been polled.
+    let deadline = Instant::now() + Duration::from_millis(200);
+    if !poll_internal(
+        Some(deadline.saturating_duration_since(Instant::now())),
+        &KeyboardEnhancementFlagsFilter,
+    )? {
+        return Ok(None);
+    }
+
+    match read_internal(&KeyboardEnhancementFlagsFilter)? {
+        InternalEvent::KeyboardEnhancementFlags(current_flags) => {
+            if poll_internal(
+                Some(deadline.saturating_duration_since(Instant::now())),
+                &PrimaryDeviceAttributesFilter,
+            )
+            .unwrap_or(false)
+            {
+                read_internal(&PrimaryDeviceAttributesFilter).ok();
             }
-            Ok(false) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    "The keyboard enhancement status could not be read within a normal duration",
-                ));
-            }
-            Err(_) => {}
+            Ok(Some(current_flags))
         }
+        _ => Ok(None),
     }
 }
 

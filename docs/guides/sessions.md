@@ -1,5 +1,7 @@
 # Sessions and history
 
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/sessions.html).
+
 Durable sessions let you continue work after a terminal exits, inspect what
 happened, or branch without overwriting the source. Terminal state and durable
 conversation state are different: clearing the composer does not erase history.

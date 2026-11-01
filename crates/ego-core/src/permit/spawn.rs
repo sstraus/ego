@@ -795,11 +795,18 @@ impl ExecObservation {
     }
 
     pub fn not_more_permissive_than(&self, old: &Self) -> bool {
+        self.not_more_permissive_than_with_roots(old, &[])
+    }
+
+    pub fn not_more_permissive_than_with_roots(
+        &self,
+        old: &Self,
+        approved: &[super::ProfileRoot],
+    ) -> bool {
         self.backend == old.backend
             && self
                 .capabilities
                 .union(if self.capabilities.contains(ExecCaps::WRITE_DENIED) {
-                    // Denying all writes also guarantees that writes cannot escape scoped roots.
                     ExecCaps::WRITE_SCOPED
                 } else {
                     ExecCaps::empty()
@@ -809,7 +816,9 @@ impl ExecObservation {
                 .policy
                 .as_ref()
                 .zip(old.policy.as_ref())
-                .is_some_and(|(current, previous)| current.not_more_permissive_than(previous))
+                .is_some_and(|(current, previous)| {
+                    current.not_more_permissive_than_with_roots(previous, approved)
+                })
     }
 
     pub fn changes_from(&self, old: &Self) -> String {

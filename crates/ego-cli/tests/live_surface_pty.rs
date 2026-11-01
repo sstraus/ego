@@ -4,24 +4,34 @@ mod answer_wrap;
 mod background_notice;
 #[path = "live_surface_pty/blank_prompt.rs"]
 mod blank_prompt;
+#[path = "live_surface_pty/bottom_row.rs"]
+mod bottom_row;
+#[path = "live_surface_pty/bottom_row_capture.rs"]
+mod bottom_row_capture;
 #[path = "live_surface_pty/busy_commands.rs"]
 mod busy_commands;
 #[path = "live_surface_pty/busy_notice.rs"]
 mod busy_notice;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
 mod exec_risk_reason;
+#[path = "live_surface_pty/expand_finish.rs"]
+mod expand_finish;
 #[path = "live_surface_pty/finish_queue.rs"]
 mod finish_queue;
 #[path = "live_surface_pty/foreign_judge_reason.rs"]
 mod foreign_judge_reason;
 #[path = "live_surface_pty/goal_ancestry.rs"]
 mod goal_ancestry;
+#[path = "live_surface_pty/goal_launch.rs"]
+mod goal_launch;
 #[path = "live_surface_pty/goal_visibility.rs"]
 mod goal_visibility;
 #[path = "live_surface_pty/help_latency.rs"]
 mod help_latency;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
+#[path = "live_surface_pty/kitty_keyboard.rs"]
+mod kitty_keyboard;
 #[path = "live_surface_pty/live_width.rs"]
 mod live_width;
 #[path = "live_surface_pty/mcp_inventory.rs"]
@@ -39,6 +49,8 @@ mod modal_answers;
 mod mode_picker;
 #[path = "live_surface_pty/notice_wrap.rs"]
 mod notice_wrap;
+#[path = "live_surface_pty/owned_footprint.rs"]
+mod owned_footprint;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
 #[path = "live_surface_pty/picker_roles.rs"]
@@ -61,10 +73,18 @@ mod remembered_exec;
 mod render_efficiency;
 #[path = "live_surface_pty/retry_line.rs"]
 mod retry_line;
+#[path = "live_surface_pty/root_grants.rs"]
+mod root_grants;
+#[path = "live_surface_pty/root_prompt_evidence.rs"]
+mod root_prompt_evidence;
+#[path = "live_surface_pty/root_revoke.rs"]
+mod root_revoke;
 #[path = "live_surface_pty/sandbox_grants.rs"]
 mod sandbox_grants;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
+#[path = "live_surface_pty/shell_escape.rs"]
+mod shell_escape;
 #[path = "live_surface_pty/shell_rows.rs"]
 mod shell_rows;
 #[path = "live_surface_pty/slash_completion.rs"]
@@ -83,6 +103,8 @@ mod status_history;
 mod status_providers;
 #[path = "live_surface_pty/status_template.rs"]
 mod status_template;
+#[path = "live_surface_pty/stuck_turn.rs"]
+mod stuck_turn;
 mod support;
 #[path = "live_surface_pty/task_rows.rs"]
 mod task_rows;
@@ -2578,6 +2600,16 @@ impl PtySession {
         cols: u16,
         screen: Option<(u16, u16)>,
     ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
+        Self::start_command_with_cursor_replies(command, rows, cols, screen, None)
+    }
+
+    fn start_command_with_cursor_replies(
+        command: portable_pty::CommandBuilder,
+        rows: u16,
+        cols: u16,
+        screen: Option<(u16, u16)>,
+        cursor_replies: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows,
@@ -2587,8 +2619,10 @@ impl PtySession {
             })
             .expect("pty");
         let child = pair.slave.spawn_command(command).expect("spawn");
-        let (input, responder, writer_join) =
-            writer_owner(pair.master.take_writer().expect("writer"));
+        let (input, responder, writer_join) = writer_owner_with_cursor_replies(
+            pair.master.take_writer().expect("writer"),
+            cursor_replies,
+        );
         let (reader, reader_join) = stream_with_screen(
             pair.master.try_clone_reader().expect("reader"),
             responder,
@@ -2618,7 +2652,18 @@ impl PtySession {
 }
 
 fn writer_owner(
+    writer: Box<dyn Write + Send>,
+) -> (
+    PtyWriter,
+    mpsc::SyncSender<WriteRequest>,
+    thread::JoinHandle<()>,
+) {
+    writer_owner_with_cursor_replies(writer, None)
+}
+
+fn writer_owner_with_cursor_replies(
     mut writer: Box<dyn Write + Send>,
+    cursor_replies: Option<Arc<std::sync::atomic::AtomicBool>>,
 ) -> (
     PtyWriter,
     mpsc::SyncSender<WriteRequest>,
@@ -2629,7 +2674,17 @@ fn writer_owner(
     let join = thread::spawn(move || {
         for request in requests {
             let result = match request {
-                WriteRequest::Bytes(bytes) => writer.write_all(&bytes),
+                WriteRequest::Bytes(bytes) => {
+                    if bytes.starts_with(b"\x1b[")
+                        && bytes.ends_with(b"R")
+                        && cursor_replies.as_ref().is_some_and(|enabled| {
+                            !enabled.load(std::sync::atomic::Ordering::SeqCst)
+                        })
+                    {
+                        continue;
+                    }
+                    writer.write_all(&bytes)
+                }
                 WriteRequest::Flush => writer.flush(),
             };
             if result.is_err() {
@@ -2974,8 +3029,25 @@ fn until_with_context(
     needle: &[u8],
     context: impl Fn() -> String,
 ) {
+    until_with_context_and_budget(receiver, output, needle, context, PROGRESS_DEADLINE);
+}
+
+fn until_with_context_and_budget(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    needle: &[u8],
+    context: impl Fn() -> String,
+    budget: Duration,
+) {
+    let deadline = Instant::now() + budget;
     while !output.windows(needle.len()).any(|window| window == needle) {
-        let chunk = match receiver.recv_timeout(PROGRESS_DEADLINE) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let received = if remaining.is_zero() {
+            Err(mpsc::RecvTimeoutError::Timeout)
+        } else {
+            receiver.recv_timeout(remaining)
+        };
+        let chunk = match received {
             Ok(chunk) => chunk,
             Err(error) => {
                 drain(receiver, output);
@@ -2990,6 +3062,32 @@ fn until_with_context(
         };
         output.extend(chunk);
     }
+}
+
+// Catches: busy redraws resetting the semantic wait's budget forever while
+// the expected event never arrives. A late marker must not make that pass.
+#[test]
+#[should_panic(expected = "semantic PTY wait failed for needle")]
+fn semantic_pty_wait_deadline_is_not_extended_by_redraws() {
+    let (sender, receiver) = mpsc::channel();
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            for _ in 0..25 {
+                if sender.send(b"Working redraw".to_vec()).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            let _ = sender.send(b"expected event".to_vec());
+        });
+        until_with_context_and_budget(
+            &receiver,
+            &mut Vec::new(),
+            b"expected event",
+            || "busy redraw regression".to_owned(),
+            Duration::from_millis(50),
+        );
+    });
 }
 
 fn strip_csi(bytes: &[u8]) -> Vec<u8> {
@@ -6337,7 +6435,9 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("mode", "Choose permission mode"),
         ("permissions", "Choose permission operation"),
         ("statusline", "Choose status-line setup"),
-        ("setup", "Select setup proposal items"),
+        ("setup", "Setup · Choose where to save"),
+        ("mcp", "Choose MCP server or action"),
+        ("skills", "Choose skill action or skill to invoke"),
     ] {
         let start = output.len();
         input
@@ -6357,7 +6457,6 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
 
     for (command, expected) in [
         ("fast off", Some("standard (this session only)")),
-        ("mcp", Some("mcp:")),
         ("fork", None),
         // The inherited model permits a checkpoint request; its empty reply must fail.
         ("compact", Some("compaction failed")),
@@ -6383,7 +6482,6 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("tasks", Some("background tasks: none")),
         ("tools", Some("tools:")),
         ("expand", Some("no tool call to expand yet")),
-        ("skills", None),
         ("hooks", Some("no hooks are configured and enabled")),
         ("retry", Some("no provider retry wait is active")),
         ("version", Some(concat!("ego ", env!("CARGO_PKG_VERSION")))),
@@ -7548,12 +7646,17 @@ fn tool_turn_with_completions(
             .collect::<Vec<_>>()
     };
     // The answer arrives before the composer is idle again: the screen is
-    // read only once its last row is the idle composer.
+    // read only once its last nonblank row is the idle composer. The final
+    // physical row is deliberately reserved for terminal-host overlays.
     let idle_by = Instant::now() + PROGRESS_DEADLINE;
     let after_turn = loop {
         drain_until_quiet(&reader, &mut output);
         let lines = screen_lines(&output);
-        if lines.last().is_some_and(|line| line.starts_with('>')) {
+        if lines
+            .iter()
+            .rfind(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.starts_with('>'))
+        {
             break lines;
         }
         assert!(Instant::now() < idle_by, "composer never idle: {lines:?}");
@@ -8531,6 +8634,10 @@ struct Job {
 impl Job {
     /// Start ego under the job parent and answer the trust question.
     fn start(ego: &Ego, rows: u16, cols: u16) -> Self {
+        Self::start_with_keyboard(ego, rows, cols, false)
+    }
+
+    fn start_with_keyboard(ego: &Ego, rows: u16, cols: u16, keyboard: bool) -> Self {
         let ego_command = ego.pty_command();
         let mut command = portable_pty::CommandBuilder::new("/usr/bin/python3");
         command.env_clear();
@@ -8557,11 +8664,13 @@ impl Job {
             .expect("spawn the job parent");
         let (input, dsr_responder, writer_join) =
             writer_owner(pair.master.take_writer().expect("writer"));
-        let (reader, reader_join) = stream_with_screen(
-            pair.master.try_clone_reader().expect("reader"),
-            dsr_responder,
-            Some((rows, cols)),
-        );
+        let reader = pair.master.try_clone_reader().expect("reader");
+        let reader = if keyboard {
+            kitty_keyboard::terminal(reader, dsr_responder.clone())
+        } else {
+            reader
+        };
+        let (reader, reader_join) = stream_with_screen(reader, dsr_responder, Some((rows, cols)));
         let mut job = Self {
             child,
             pair,
@@ -9295,7 +9404,10 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
         );
     }
     assert!(
-        lines.last().is_some_and(|line| line.starts_with('>')),
+        lines
+            .iter()
+            .rfind(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.starts_with('>')),
         "{lines:?}"
     );
 }
@@ -9334,7 +9446,8 @@ fn esc_cancels_both_task_children_and_restores_one_idle_composer() {
     assert!(
         screens
             .after_turn
-            .last()
+            .iter()
+            .rfind(|line| !line.trim().is_empty())
             .is_some_and(|line| line.starts_with('>')),
         "{visible}"
     );
@@ -9524,6 +9637,14 @@ fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
     until(&reader, &mut output, b"/help");
     let list_start = output.len();
     input.write_all(b"/mcp\r").expect("list");
+    input.flush().expect("flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        list_start,
+        "Choose MCP server or action",
+    );
+    input.write_all(b"\r").expect("show server status");
     input.flush().expect("flush");
     until_normalized(&reader, &mut output, list_start, "admitted");
     let off_start = output.len();

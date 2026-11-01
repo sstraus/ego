@@ -16,11 +16,13 @@
 use pulldown_cmark::{Event, Parser};
 
 use super::caps::Capabilities;
-use super::{block, markdown};
+use super::{block_with, markdown};
+use std::path::Path;
 
 /// Buffers a streaming answer and hands back whatever is finished.
 pub struct Answer {
     capabilities: Capabilities,
+    link_base: Option<url::Url>,
     /// Text received and not yet rendered.
     pending: String,
     /// Whether anything has been emitted, so a run can know it has to close
@@ -29,12 +31,18 @@ pub struct Answer {
 }
 
 impl Answer {
-    pub fn new(capabilities: Capabilities) -> Self {
+    pub fn new(capabilities: Capabilities, workspace: Option<&Path>) -> Self {
         Answer {
             capabilities,
+            link_base: workspace.and_then(|path| url::Url::from_directory_path(path).ok()),
             pending: String::new(),
             started: false,
         }
+    }
+
+    /// Refresh the link base after the owner activates another workspace.
+    pub fn set_workspace(&mut self, workspace: Option<&Path>) {
+        self.link_base = workspace.and_then(|path| url::Url::from_directory_path(path).ok());
     }
 
     /// Update the geometry before rendering the next buffered block.
@@ -80,7 +88,7 @@ impl Answer {
         if source.trim().is_empty() {
             return String::new();
         }
-        let lines = markdown::render(source, self.capabilities.width, self.capabilities.osc);
+        let lines = markdown::render(source, self.capabilities, self.link_base.as_ref());
         if lines.is_empty() {
             return String::new();
         }
@@ -89,7 +97,7 @@ impl Answer {
         // and only the writer knows it has written before.
         let separator = if self.started { "\n" } else { "" };
         self.started = true;
-        format!("{separator}{}", block(&lines, self.capabilities.depth))
+        format!("{separator}{}", block_with(&lines, self.capabilities))
     }
 
     /// Return the last completed top-level block boundary. Parser depth prevents blank lines
@@ -167,7 +175,7 @@ mod tests {
     }
 
     fn drain(capabilities: Capabilities, deltas: &[&str]) -> String {
-        let mut answer = Answer::new(capabilities);
+        let mut answer = Answer::new(capabilities, Some(&std::env::current_dir().unwrap()));
         let mut out = String::new();
         for delta in deltas {
             out.push_str(&answer.push(delta));
@@ -353,6 +361,73 @@ mod tests {
         assert_eq!(drain(Capabilities::plain(), &deltas), source);
     }
 
+    // Catches: styled Markdown labels discard actionable local-link destinations.
+    #[test]
+    fn answer_links_resolve_local_paths_and_emit_osc8() {
+        let source = "[Rapporto](docs/report.md) e [web](https://example.com/guide).\n";
+        let root = std::env::current_dir().unwrap();
+        let expected = url::Url::from_file_path(root.join("docs/report.md")).unwrap();
+        let out = drain(screen(), &[source]);
+        assert!(out.contains(&format!("\x1b]8;;{expected}\x07")), "{out:?}");
+        assert!(
+            out.contains("\x1b]8;;https://example.com/guide\x07"),
+            "{out:?}"
+        );
+        let mut unsupported = screen();
+        unsupported.hyperlinks = false;
+        let fallback = bare(&drain(unsupported, &[source]));
+        assert!(
+            fallback.contains("docs/report.md"),
+            "fallback retains a copyable relative destination: {fallback}"
+        );
+        assert!(!fallback.contains("\x1b]8;"));
+        assert_eq!(drain(Capabilities::plain(), &[source]), source);
+    }
+
+    // Catches: code-styled labels lose their URI, or a workspace switch retargets links to the old root.
+    #[test]
+    fn code_links_follow_the_selected_workspace_without_expanding_the_label() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let source = "[`docs/guida.md`](<docs/guida è.md#part>)\n";
+        let mut caps = screen();
+        caps.depth = Depth::None;
+        let mut answer = Answer::new(caps, Some(first.path()));
+        answer.push(source);
+        let first_out = answer.finish();
+        let first_base = url::Url::from_directory_path(first.path()).unwrap();
+        assert!(
+            first_out.contains(&format!(
+                "\x1b]8;;{first_base}docs/guida%20%C3%A8.md#part\x07"
+            )),
+            "{first_out:?}"
+        );
+        assert!(first_out.contains("docs/guida.md"));
+        assert!(
+            !first_out.contains("(docs/"),
+            "supported links retain the short code label"
+        );
+        answer.set_workspace(Some(second.path()));
+        answer.push(source);
+        let second_out = answer.finish();
+        let second_base = url::Url::from_directory_path(second.path()).unwrap();
+        assert!(second_out.contains(&format!(
+            "\x1b]8;;{second_base}docs/guida%20%C3%A8.md#part\x07"
+        )));
+        assert!(!second_out.contains(first_base.as_str()));
+
+        caps.hyperlinks = false;
+        let mut fallback = Answer::new(caps, Some(second.path()));
+        fallback.push("[**Rapporto** completo](docs/report.md)\n");
+        let text = fallback.finish();
+        assert_eq!(
+            text.matches("docs/report.md").count(),
+            1,
+            "one fallback destination per link"
+        );
+        assert!(!text.contains('\x1b'));
+    }
+
     #[test]
     fn a_screen_receives_a_rendering() {
         let out = drain(screen(), &["Some **bold** text.\n"]);
@@ -364,7 +439,7 @@ mod tests {
     /// next one is still arriving.
     #[test]
     fn a_finished_block_is_drawn_before_the_next_one_arrives() {
-        let mut answer = Answer::new(screen());
+        let mut answer = Answer::new(screen(), None);
         assert_eq!(answer.push("First paragraph."), "");
         let flushed = answer.push("\n\nSecond para");
         assert!(flushed.contains("First paragraph."), "{flushed:?}");
@@ -380,7 +455,7 @@ mod tests {
     /// half a code block as prose.
     #[test]
     fn a_blank_line_inside_a_fence_is_not_a_boundary() {
-        let mut answer = Answer::new(screen());
+        let mut answer = Answer::new(screen(), None);
         answer.push("```rust\nfn a() {}\n");
         let flushed = answer.push("\nfn b() {}\n");
         assert_eq!(flushed, "", "still inside the fence: {flushed:?}");

@@ -228,6 +228,13 @@ impl JudgeGeneration<'_, '_, '_> {
                     break;
                 }
             };
+            if let AiEvent::FilterState(exchange) = event {
+                if let Err(error) = self.journal.filter_state(turn, exchange) {
+                    failure = Some(error);
+                    break;
+                }
+                continue;
+            }
             decoder.observe(&event);
             match &event {
                 AiEvent::Usage(delta) => {

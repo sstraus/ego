@@ -30,6 +30,7 @@ pub(crate) fn apply(
     }
     let mut candidate = effective.clone();
     candidate.roots.push(RootCfg {
+        consent: None,
         path: canonical,
         access: RootAccess::Read,
     });

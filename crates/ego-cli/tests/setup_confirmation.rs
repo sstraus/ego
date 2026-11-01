@@ -1,41 +1,96 @@
-//! Real PTY setup confirmation is distinct from provider and piped text.
+//! Setup must save only an explicitly reviewed human choice.
 mod support;
 
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use support::{Plan, Reply, Stub, text};
 
-fn confirmation_case(answer: &[u8], applied: bool) {
-    let root = tempfile::tempdir().unwrap();
-    let home = root.path().join("home");
-    let workspace = root.path().join("workspace");
-    let needed = root.path().join("needed");
-    for path in [&home, &workspace, &needed] {
-        std::fs::create_dir(path).unwrap();
+fn wait_for(
+    receive: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    seen: &mut usize,
+    deadline: Instant,
+    needle: &str,
+) -> Result<(), mpsc::RecvTimeoutError> {
+    assert!(!needle.is_empty(), "terminal marker must not be empty");
+    loop {
+        if let Some(offset) = output[*seen..]
+            .windows(needle.len())
+            .position(|bytes| bytes == needle.as_bytes())
+        {
+            *seen += offset + needle.len();
+            return Ok(());
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        output.extend(receive.recv_timeout(remaining)?);
     }
-    let file = needed.join("task.md");
-    std::fs::write(&file, "read-only task fixture").unwrap();
-    let original = "model='ollama/qwen3'\nsandbox='off'\nroots=[]\n";
-    std::fs::write(home.join("config.toml"), original).unwrap();
-    let selection =
-        serde_json::json!([{"kind":"read", "path":file, "reason":"user-selected task"}])
-            .to_string();
-    let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text(&selection))],
-        ..Plan::default()
-    });
+}
+
+// Catches: one read consumes a later marker before its ordered wait.
+#[test]
+fn wait_for_preserves_coalesced_markers() {
+    let (send, receive) = mpsc::channel();
+    send.send(b"Not saved.Settings (".to_vec()).unwrap();
+    drop(send);
+    let mut output = Vec::new();
+    let mut seen = 0;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    wait_for(&receive, &mut output, &mut seen, deadline, "Not saved.").unwrap();
+    wait_for(&receive, &mut output, &mut seen, deadline, "Settings (").unwrap();
+}
+
+// Catches: split markers or lossy UTF-8 offsets skip or corrupt later matches.
+#[test]
+fn wait_for_matches_split_markers_with_byte_offsets() {
+    let (send, receive) = mpsc::channel();
+    send.send(b"\xffReady \xc3".to_vec()).unwrap();
+    send.send(b"\xa9Next".to_vec()).unwrap();
+    drop(send);
+    let mut output = Vec::new();
+    let mut seen = 0;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    wait_for(&receive, &mut output, &mut seen, deadline, "Ready é").unwrap();
+    wait_for(&receive, &mut output, &mut seen, deadline, "Next").unwrap();
+}
+
+// Catches: choosing the last match loses repeats, or reusing a consumed match passes falsely.
+#[test]
+fn wait_for_consumes_each_repeated_marker_once() {
+    let (send, receive) = mpsc::channel();
+    send.send(b"Settings (Settings (".to_vec()).unwrap();
+    drop(send);
+    let mut output = Vec::new();
+    let mut seen = 0;
+    let deadline = Instant::now() + Duration::from_secs(1);
+    for _ in 0..2 {
+        wait_for(&receive, &mut output, &mut seen, deadline, "Settings (").unwrap();
+    }
+    assert_eq!(
+        wait_for(&receive, &mut output, &mut seen, deadline, "Settings ("),
+        Err(mpsc::RecvTimeoutError::Disconnected)
+    );
+}
+
+fn drive(approve: bool) -> String {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&home).unwrap();
+    std::fs::create_dir(&workspace).unwrap();
+    let file = home.join("config.toml");
+    let original = "# preserve this comment\nmode='plan'\n";
+    std::fs::write(&file, original).unwrap();
     let pair = NativePtySystem::default()
         .openpty(PtySize {
-            rows: 32,
-            cols: 120,
+            rows: 24,
+            cols: 100,
             pixel_width: 0,
             pixel_height: 0,
         })
         .unwrap();
     let mut command = CommandBuilder::new(env!("CARGO_BIN_EXE_ego"));
-    command.args(["setup", "inspect this task"]);
+    command.arg("setup");
     command.cwd(&workspace);
     command.env_clear();
     for (key, value) in support::coverage_environment() {
@@ -43,86 +98,98 @@ fn confirmation_case(answer: &[u8], applied: bool) {
     }
     command.env("EGO_HOME", &home);
     command.env("HOME", &home);
-    command.env("OLLAMA_HOST", &stub.address);
     command.env("PATH", support::fixture_path());
     let mut child = pair.slave.spawn_command(command).unwrap();
     drop(pair.slave);
     let mut input = pair.master.take_writer().unwrap();
     let mut reader = pair.master.try_clone_reader().unwrap();
     let (send, receive) = mpsc::channel();
-    let thread = std::thread::spawn(move || {
+    let reader_thread = std::thread::spawn(move || {
         let mut bytes = [0; 4096];
         while let Ok(count) = reader.read(&mut bytes) {
-            if count == 0 {
-                break;
-            }
-            if send.send(bytes[..count].to_vec()).is_err() {
+            if count == 0 || send.send(bytes[..count].to_vec()).is_err() {
                 break;
             }
         }
     });
-    let deadline = Instant::now() + Duration::from_secs(20);
     let mut output = Vec::new();
-    while !String::from_utf8_lossy(&output).contains("Apply? [y/N]") {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match receive.recv_timeout(remaining) {
-            Ok(bytes) => output.extend(bytes),
-            Err(error) => {
-                child.kill().unwrap();
-                child.wait().unwrap();
-                panic!(
-                    "setup confirmation missing: {error}: {}",
-                    String::from_utf8_lossy(&output)
-                );
-            }
+    let deadline = Instant::now() + Duration::from_secs(12);
+    let mut seen = 0;
+    let mut wait_for = |needle: &str| {
+        if let Err(error) = wait_for(&receive, &mut output, &mut seen, deadline, needle) {
+            child.kill().unwrap();
+            panic!(
+                "missing {needle}: {error}: {}",
+                String::from_utf8_lossy(&output)
+            );
         }
+    };
+    wait_for("Choose where to save");
+    input.write_all(b"\r").unwrap();
+    wait_for("Settings (");
+    // The base vocabulary orders model, thinking, then mode.
+    input.write_all(b"\x1b[B\x1b[B\r").unwrap();
+    wait_for("Stored: \"plan\"");
+    input.write_all(b"\r").unwrap();
+    wait_for("Choose mode");
+    input.write_all(b"\x1b[B\r").unwrap();
+    wait_for("mode = \"default\"");
+    // End reaches Exit; one Up selects the preceding review action.
+    input.write_all(b"\x1b[F\x1b[A\r").unwrap();
+    wait_for("No changes have been saved.");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+    input
+        .write_all(if approve { b"\x1b[B\r" } else { b"\r" })
+        .unwrap();
+    if !approve {
+        wait_for("Not saved.");
+        wait_for("Settings (");
+        input.write_all(b"\x1b[F\r").unwrap();
+        wait_for("Discard unsaved changes?");
+        input.write_all(b"\x1b[B\r").unwrap();
     }
-    assert_eq!(
-        std::fs::read_to_string(home.join("config.toml")).unwrap(),
-        original
-    );
-    input.write_all(answer).unwrap();
-    input.flush().unwrap();
     drop(input);
-    while let Ok(bytes) = receive.recv_timeout(Duration::from_secs(5)) {
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("setup did not exit: {}", String::from_utf8_lossy(&output));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    drop(pair.master);
+    reader_thread.join().unwrap();
+    for bytes in receive.try_iter() {
         output.extend(bytes);
     }
-    let status = child.try_wait().unwrap();
-    if status.is_none() {
-        child.kill().unwrap();
-    }
-    let status = child.wait().unwrap();
-    drop(pair.master);
-    thread.join().unwrap();
     assert!(status.success(), "{}", String::from_utf8_lossy(&output));
-    let current = std::fs::read_to_string(home.join("config.toml")).unwrap();
-    if applied {
-        assert!(current.contains(&needed.display().to_string()), "{current}");
-        assert!(String::from_utf8_lossy(&output).contains("fixed (policy-only)"));
+    let after = std::fs::read_to_string(&file).unwrap();
+    if approve {
+        let parsed =
+            ego_core::config::ConfigLayer::parse(ego_core::config::Source::User, &after).unwrap();
+        assert_eq!(
+            parsed.value.mode.map(|mode| mode.as_str()),
+            Some("default"),
+            "{after}"
+        );
+        assert!(after.contains("# preserve this comment"));
     } else {
-        assert_eq!(current, original);
+        assert_eq!(after, original);
     }
-    assert_eq!(
-        std::fs::read_to_string(&file).unwrap(),
-        "read-only task fixture"
-    );
-    assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
+    String::from_utf8_lossy(&output).into_owned()
 }
 
-// Catches: model-selected probes publish before explicit terminal confirmation.
+// Catches: setup writes a draft before the person reviews and confirms it.
 #[test]
-fn setup_cli_real_terminal_confirms_exact_candidate_and_reprobes() {
-    confirmation_case(b"yes\r", true);
+fn setup_terminal_saves_only_a_confirmed_candidate() {
+    let output = drive(true);
+    assert!(output.contains("Saved:"), "{output}");
 }
 
-// Catches: declining a setup prompt publishes the prepared candidate anyway.
+// Catches: declining a preview still publishes the staged setting.
 #[test]
-fn setup_cli_real_terminal_decline_preserves_authority() {
-    confirmation_case(b"no\r", false);
-}
-
-// Catches: EOF/cancel at the human confirmation prompt publishes a candidate.
-#[test]
-fn setup_cli_real_terminal_eof_preserves_authority() {
-    confirmation_case(b"\x04", false);
+fn setup_terminal_decline_preserves_the_original_document() {
+    drive(false);
 }

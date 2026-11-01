@@ -1,0 +1,184 @@
+{
+  "version": "ego 0.4.1",
+  "binary": "/home/example/workspace",
+  "transport": "stdio",
+  "provider": "owned loopback; no remote or paid turn",
+  "cases": {
+    "child": {
+      "jsonrpc": "2.0",
+      "id": 4,
+      "result": {
+        "stopReason": "end_turn"
+      }
+    },
+    "no_child": {
+      "jsonrpc": "2.0",
+      "id": 5,
+      "result": {
+        "stopReason": "end_turn"
+      }
+    },
+    "question": {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "result": {
+        "stopReason": "end_turn"
+      }
+    },
+    "permission": {
+      "jsonrpc": "2.0",
+      "id": 9,
+      "error": {
+        "code": -32603,
+        "message": "the turn stopped because exec may not spawn /home/example/workspace permission was refused"
+      }
+    },
+    "cancel": {
+      "jsonrpc": "2.0",
+      "id": 11,
+      "result": {
+        "stopReason": "cancelled"
+      }
+    },
+    "reconnect": {
+      "jsonrpc": "2.0",
+      "id": 2,
+      "result": {
+        "configOptions": [
+          {
+            "id": "model",
+            "name": "Model",
+            "description": "The model the next generation uses.",
+            "category": "model",
+            "type": "select",
+            "currentValue": "ollama/fixture",
+            "options": [
+              {
+                "value": "ollama/fixture",
+                "name": "ollama/fixture"
+              }
+            ]
+          },
+          {
+            "id": "effort",
+            "name": "Reasoning effort",
+            "description": "How much the model is asked to think, within what it supports.",
+            "category": "thought_level",
+            "type": "select",
+            "currentValue": "off",
+            "options": [
+              {
+                "value": "off",
+                "name": "off"
+              },
+              {
+                "value": "low",
+                "name": "low"
+              },
+              {
+                "value": "medium",
+                "name": "medium"
+              },
+              {
+                "value": "high",
+                "name": "high"
+              },
+              {
+                "value": "max",
+                "name": "max"
+              }
+            ]
+          },
+          {
+            "id": "mode",
+            "name": "Mode",
+            "description": "The permission mode the next generation is judged under. auto is unavailable in this session. It needs a configured [permissions] judge: ego config set 'permissions.judge=\"openai-codex/gpt-6.1-sol\"'. If this session uses a profile, add --profile <name> to that command. Start a new session after configuration. The session max_mode can also restrict auto.",
+            "category": "mode",
+            "type": "select",
+            "currentValue": "default",
+            "options": [
+              {
+                "value": "plan",
+                "name": "plan"
+              },
+              {
+                "value": "default",
+                "name": "default"
+              },
+              {
+                "value": "accept-edits",
+                "name": "accept-edits"
+              },
+              {
+                "value": "yolo",
+                "name": "yolo"
+              }
+            ]
+          },
+          {
+            "id": "sandbox",
+            "name": "Sandbox",
+            "description": "How much of the filesystem a command this session runs can reach. The list is what the operator who started this process allowed and this machine can enforce; it can be narrowed here and not widened.",
+            "category": "sandbox",
+            "type": "select",
+            "currentValue": "off",
+            "options": [
+              {
+                "value": "ro",
+                "name": "ro"
+              },
+              {
+                "value": "workspace",
+                "name": "workspace"
+              },
+              {
+                "value": "adaptive",
+                "name": "adaptive"
+              },
+              {
+                "value": "off",
+                "name": "off"
+              }
+            ]
+          }
+        ],
+        "_meta": {
+          "ego": {
+            "hold": {
+              "state": "running"
+            },
+            "summary": "CAPTURE_CHILD \u2014 Recorded ACP completion."
+          }
+        }
+      }
+    },
+    "close": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {}
+    },
+    "extension_absent": {
+      "jsonrpc": "2.0",
+      "id": 3,
+      "result": {
+        "stopReason": "end_turn"
+      }
+    }
+  },
+  "sessions": [
+    "522092b2-63fe-5cab-8e0f-bd37d288fbe6",
+    "c50dc1c8-1057-5889-9d79-db41d2bb3f93"
+  ],
+  "first_process": {
+    "exit": 0,
+    "stderr": "\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: the process backend provides no effective confinement\n\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: sandbox is off; commands can access any file your user account can access\n"
+  },
+  "second_process": {
+    "exit": 0,
+    "stderr": "\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: the process backend provides no effective confinement\n"
+  },
+  "last_process": {
+    "exit": 0,
+    "stderr": "\u03b5go: sandbox is off; commands can access any file your user account can access\n\u03b5go: the process backend provides no effective confinement\n\u03b5go: sandbox is off; commands can access any file your user account can access\n"
+  }
+}

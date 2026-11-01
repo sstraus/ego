@@ -215,7 +215,7 @@ async fn finished_turn_inside_model_modal_accepts_the_next_prompt() {
         |visible| {
             visible
                 .lines()
-                .last()
+                .rfind(|row| !row.trim().is_empty())
                 .is_some_and(|row| row.trim_end() == "> retained-BIJ-draft")
         },
     );
@@ -229,7 +229,7 @@ async fn finished_turn_inside_model_modal_accepts_the_next_prompt() {
         |visible| {
             visible
                 .lines()
-                .last()
+                .rfind(|row| !row.trim().is_empty())
                 .is_some_and(|row| row.trim_end() == ">")
         },
     );

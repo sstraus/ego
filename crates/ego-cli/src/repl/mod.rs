@@ -70,6 +70,8 @@ pub enum HostCommand {
     Hooks,
     Init(String),
     Config(String),
+    /// A shell command submitted by the native editor, never by model text.
+    Shell(String),
     Fast(bool),
     Setup(String),
     Tasks(String),
@@ -77,7 +79,7 @@ pub enum HostCommand {
     Mcp(String),
     McpContext(actions::McpContextCommand),
     Background,
-    /// A process outcome is ready; not human-authored input.
+    /// A background process or task outcome is ready; not human-authored input.
     BackgroundExecSettled,
     ModelSwitch(crate::model_picker::ModelSwitchRequest),
     Draft,
@@ -107,6 +109,10 @@ pub enum HostCommand {
 }
 
 impl HostCommand {
+    pub(crate) fn is_root_revocation(&self) -> bool {
+        matches!(self, Self::Config(arguments) if arguments.starts_with("roots revoke "))
+    }
+
     pub(crate) fn is_read_only_inspection(&self) -> bool {
         match self {
             Self::Tasks(arguments) => {
@@ -201,10 +207,25 @@ impl Line {
     /// [`Line::Refused`] is produced by the key interception path before this
     /// conversion. Host and lifecycle signals retain distinct owned variants,
     /// so neither can be mistaken for submitted input.
+    pub(crate) fn bang_from_editor(text: &str) -> Option<Self> {
+        if let Some(prompt) = text.strip_prefix("!!") {
+            return Some(Self::Submitted(format!("!{prompt}")));
+        }
+        let command = text.strip_prefix('!')?.trim();
+        if command.contains('\n') {
+            return None;
+        }
+        Some(if command.is_empty() {
+            Self::Blank
+        } else {
+            Self::HostCommand(HostCommand::Shell(command.to_owned()))
+        })
+    }
+
     pub fn of(signal: Signal) -> Self {
         match signal {
             Signal::Success(text) if text.trim().is_empty() => Self::Blank,
-            Signal::Success(text) => Self::Submitted(text),
+            Signal::Success(text) => Self::bang_from_editor(&text).unwrap_or(Self::Submitted(text)),
             Signal::CtrlC => Self::Interrupted,
             Signal::CtrlD => Self::Ended,
             Signal::HostCommand(command) => HostCommand::from_editor(command)
@@ -242,6 +263,20 @@ mod tests {
         SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillSourceAuthority,
         SkillSourceLocation,
     };
+
+    // Catches: a terminal-authored `!` line is sent to the model as prompt text
+    // instead of staying on the host-only command path.
+    #[test]
+    fn terminal_bang_is_a_host_command_not_a_model_prompt() {
+        assert_eq!(
+            Line::of(Signal::Success("! echo ready".to_owned())),
+            Line::HostCommand(HostCommand::Shell("echo ready".to_owned()))
+        );
+        assert_eq!(
+            Line::of(Signal::Success("!! explain this".to_owned())),
+            Line::Submitted("! explain this".to_owned())
+        );
+    }
 
     #[test]
     fn a_pasted_stack_trace_is_one_prompt_and_not_its_first_line() {

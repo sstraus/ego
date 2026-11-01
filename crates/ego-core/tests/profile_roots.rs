@@ -181,6 +181,7 @@ fn a_profile_without_roots_keeps_the_single_workspace_boundary() {
 
 fn cfg(path: &str, access: RootAccess) -> RootCfg {
     RootCfg {
+        consent: None,
         path: path.into(),
         access,
     }

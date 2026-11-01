@@ -125,5 +125,5 @@ They test the native server boundary, not a particular editor's UI:
 | A new connection reattaches the durable session | `ego-acp/tests/session_lifecycle.rs::reconnecting_a_header_only_session_starts_its_first_run_under_the_same_id` |
 | Host trust metadata cannot grant arbitrary unprofiled workspace trust | `ego-cli/tests/acp_host_trust.rs::unprofiled_attestation_is_ignored_and_the_form_is_used` |
 
-Batch integration runs these through the repository build runner; passing a
-local fixture is not a real-editor compatibility result.
+These tests cover the protocol boundary; passing them does not establish
+compatibility with a particular editor.

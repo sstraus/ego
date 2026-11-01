@@ -10,6 +10,7 @@ pub mod attempt;
 pub mod audio;
 pub mod capabilities;
 pub mod fake;
+pub mod filter_state;
 pub mod history;
 pub mod port;
 pub mod types;

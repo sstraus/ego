@@ -240,34 +240,6 @@ pub struct Reedline {
     idle_callback: Option<Box<dyn FnMut() -> bool + Send>>,
 }
 
-/// A submitted host receipt has no composer indicator or live status prefix.
-struct ReceiptPrompt;
-
-impl Prompt for ReceiptPrompt {
-    fn render_prompt_left(&self) -> std::borrow::Cow<'_, str> {
-        "".into()
-    }
-
-    fn render_prompt_right(&self) -> std::borrow::Cow<'_, str> {
-        "".into()
-    }
-
-    fn render_prompt_indicator(&self, _mode: PromptEditMode) -> std::borrow::Cow<'_, str> {
-        "".into()
-    }
-
-    fn render_prompt_multiline_indicator(&self) -> std::borrow::Cow<'_, str> {
-        "".into()
-    }
-
-    fn render_prompt_history_search_indicator(
-        &self,
-        _search: PromptHistorySearch,
-    ) -> std::borrow::Cow<'_, str> {
-        "".into()
-    }
-}
-
 struct BufferEditor {
     command: Command,
     temp_file: PathBuf,
@@ -990,8 +962,10 @@ impl Reedline {
     pub fn accept_buffer(&mut self, prompt: &dyn Prompt) -> Result<()> {
         self.last_prompt = None;
         self.submit_buffer(prompt)?;
-        self.painter.move_cursor_to_end()?;
-        self.suspended = false;
+        self.painter.finish_submission()?;
+        // Acceptance retires one prompt, not this owner's tty. The painter
+        // knows the next row from its final CRLF; do not query the terminal.
+        self.suspended = true;
         Ok(())
     }
 
@@ -1002,17 +976,23 @@ impl Reedline {
     /// a settled question. Call it before anything else writes to the
     /// terminal: the rows are where Reedline painted them only while nothing
     /// else has moved the screen. Returns `false`, writing nothing, when there
-    /// is no such prompt, the terminal was resized, or the cursor is not where
-    /// the return left it.
+    /// is no such prompt or the terminal was resized. This transition uses the
+    /// owner's saved coordinates, not a terminal cursor-position reply.
     pub fn erase_last_prompt(&mut self) -> Result<bool> {
         let Some(footprint) = self.last_prompt.take() else {
             return Ok(false);
         };
         let erased = self.painter.erase_footprint(&footprint)?;
         if erased {
-            self.suspended = false;
+            self.suspended = true;
         }
         Ok(erased)
+    }
+
+    /// Rediscover the prompt position after another process has owned the tty.
+    pub fn invalidate_prompt_position(&mut self) {
+        self.painter.invalidate_prompt_start_row();
+        self.suspended = false;
     }
 
     /// Writes `msg` to the terminal with a following carriage return and newline
@@ -2827,10 +2807,8 @@ impl Reedline {
         // no host-side erase or second terminal writer can race the next read.
         if let Some(receipt) = prompt.render_prompt_submission(&buffer, self.painter.screen_width())
         {
-            self.editor.set_buffer(receipt, UndoBehavior::NoOp);
-            let painted = self.repaint(&ReceiptPrompt);
-            self.editor.set_buffer(buffer.clone(), UndoBehavior::NoOp);
-            painted?;
+            self.painter.print_submission(&receipt)?;
+            self.last_render_snapshot = None;
         } else if let Some(transient_prompt) = self.transient_prompt.take() {
             self.repaint(transient_prompt.as_ref())?;
             self.transient_prompt = Some(transient_prompt);

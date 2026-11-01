@@ -99,7 +99,119 @@ enum Settlement {
 pub async fn run_secret_child(
     request: SecretChildRequest,
 ) -> Result<SecretChildOutput, SecretChildError> {
+    run_child(request, None).await
+}
+
+/// A bounded exchange with no inherited application environment.
+/// Cancellation of the caller still leaves an owner to reap the child tree.
+pub async fn run_protocol_child(
+    request: SecretChildRequest,
+    max_stdout: usize,
+) -> Result<SecretChildOutput, SecretChildError> {
+    validate_secret_request(&request)?;
+    let cancel = request.cancel.clone();
+    let owned_cancel = CancelToken::new();
+    let request = SecretChildRequest {
+        cancel: owned_cancel.clone(),
+        ..request
+    };
+    let (sender, mut receiver) = tokio::sync::oneshot::channel();
+    // The private runtime can complete process cleanup after the caller's
+    // runtime stops. The caller waits only for a bounded cleanup interval.
+    let external_cancel = cancel.clone();
+    let worker_cancel = owned_cancel.clone();
+    let thread = std::thread::Builder::new()
+        .name("ego-protocol-filter".into())
+        .spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(SecretChildError::Launch)
+                .and_then(|runtime| {
+                    runtime.block_on(async {
+                        if external_cancel.is_cancelled() {
+                            worker_cancel.cancel(ego_core::event::domain::CancelCause::Host);
+                        }
+                        let mut task = tokio::spawn(run_child(request, Some(max_stdout)));
+                        tokio::select! {
+                            result = &mut task => result,
+                            _ = external_cancel.cancelled() => {
+                                worker_cancel.cancel(ego_core::event::domain::CancelCause::Host);
+                                task.await
+                            }
+                        }
+                        .map_err(|_| {
+                            SecretChildError::InvalidRequest("protocol_filter child owner failed")
+                        })?
+                    })
+                });
+            let _ = sender.send(result);
+        })
+        .map_err(SecretChildError::Launch)?;
+    struct ProtocolThread {
+        cancel: CancelToken,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl ProtocolThread {
+        fn finish(&mut self) -> bool {
+            self.cancel
+                .cancel(ego_core::event::domain::CancelCause::Host);
+            // At the product maximum, command execution is 1s; group and
+            // pipe cleanup add at most four 100ms graces under a responsive
+            // OS. Keep additional startup room, but never block the caller
+            // indefinitely if OS spawn or wait cannot complete.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while let Some(thread) = self.thread.as_ref() {
+                if thread.is_finished() {
+                    return self.thread.take().expect("finished thread").join().is_ok();
+                }
+                if Instant::now() >= deadline {
+                    self.thread.take(); // Owner continues cleanup off-runtime.
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            true
+        }
+    }
+    impl Drop for ProtocolThread {
+        fn drop(&mut self) {
+            if !self.finish() {
+                tracing::warn!("protocol_filter process-tree cleanup is uncertain");
+            }
+        }
+    }
+    let mut owner = ProtocolThread {
+        cancel: owned_cancel,
+        thread: Some(thread),
+    };
+    let result = tokio::select! {
+        result = &mut receiver => result.ok(),
+        _ = cancel.cancelled() => None,
+    };
+    let complete = owner.finish();
+    if !complete {
+        return Err(SecretChildError::CleanupUncertain {
+            cause: Some(Box::new(SecretChildError::Cancelled)),
+        });
+    }
+    let result = result.or_else(|| receiver.try_recv().ok());
+    match result {
+        Some(Err(error @ SecretChildError::CleanupUncertain { .. })) => Err(error),
+        _ if cancel.is_cancelled() => Err(SecretChildError::Cancelled),
+        Some(result) => result,
+        None => Err(SecretChildError::InvalidRequest(
+            "protocol_filter child owner failed",
+        )),
+    }
+}
+
+async fn run_child(
+    request: SecretChildRequest,
+    max_stdout: Option<usize>,
+) -> Result<SecretChildOutput, SecretChildError> {
     let program = validate_secret_request(&request)?;
+    let pipe_grace = max_stdout.map(|_| request.termination_grace);
 
     let mut command = tokio::process::Command::new(program);
     command
@@ -111,6 +223,17 @@ pub async fn run_secret_child(
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    if max_stdout.is_some() {
+        command.env_clear();
+        #[cfg(unix)]
+        command.env("PATH", "/usr/bin:/bin");
+        #[cfg(windows)]
+        for name in ["SystemRoot", "WINDIR"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
+        }
+    }
     if let Some(cwd) = &request.cwd {
         command.current_dir(cwd.as_path());
     }
@@ -121,12 +244,12 @@ pub async fn run_secret_child(
             "credential command stdout pipe was not installed",
         ));
     };
-    let mut stdout_task = Some(tokio::spawn(read_secret(stdout)));
+    let mut stdout_task = Some(tokio::spawn(read_secret(stdout, max_stdout)));
     let mut stdin_task = match (request.stdin, child.take_stdin()) {
         (Some(secret), Some(stdin)) => Some(tokio::spawn(write_secret(stdin, secret))),
         (Some(_), None) => {
             child.terminate(request.termination_grace).await;
-            let _ = finish_stdout(stdout_task.take()).await;
+            let _ = finish_stdout(stdout_task.take(), pipe_grace).await;
             return Err(SecretChildError::InvalidRequest(
                 "credential command stdin pipe was not installed",
             ));
@@ -153,8 +276,8 @@ pub async fn run_secret_child(
         ),
         Settlement::Failed(error) => {
             let cleanup = child.terminate(request.termination_grace).await;
-            let _ = finish_stdin(stdin_task.take()).await;
-            let _ = finish_stdout(stdout_task.take()).await;
+            let _ = finish_stdin(stdin_task.take(), pipe_grace).await;
+            let _ = finish_stdout(stdout_task.take(), pipe_grace).await;
             return if cleanup {
                 Err(error)
             } else {
@@ -165,10 +288,19 @@ pub async fn run_secret_child(
         }
     };
 
-    finish_stdin(stdin_task.take()).await?;
-    if stdout_result.is_none() {
-        stdout_result = Some(finish_stdout(stdout_task.take()).await?);
-    }
+    let stdin_result = finish_stdin(stdin_task.take(), pipe_grace).await;
+    let pending_stdout = if pipe_grace.is_none() && stdin_result.is_err() {
+        // The legacy credential path used to return on this input error.
+        // Do not introduce an unbounded wait for an inherited stdout pipe.
+        if let Some(task) = stdout_task.take() {
+            task.abort();
+        }
+        None
+    } else if stdout_result.is_none() {
+        Some(finish_stdout(stdout_task.take(), pipe_grace).await)
+    } else {
+        None
+    };
     if !cleanup_complete {
         return Err(SecretChildError::CleanupUncertain {
             cause: match status.as_ref() {
@@ -177,6 +309,10 @@ pub async fn run_secret_child(
                 None => None,
             },
         });
+    }
+    stdin_result?;
+    if let Some(output) = pending_stdout {
+        stdout_result = Some(output?);
     }
     let status = status.expect("an exited settlement has a status");
     if !status.success() {
@@ -273,35 +409,65 @@ async fn write_secret(
     stdin.shutdown().await
 }
 
-async fn read_secret(mut stdout: tokio::process::ChildStdout) -> std::io::Result<SecretMaterial> {
+async fn read_secret(
+    stdout: tokio::process::ChildStdout,
+    limit: Option<usize>,
+) -> std::io::Result<SecretMaterial> {
     let mut bytes = Zeroizing::new(Vec::new());
+    let mut stdout = stdout.take(limit.map_or(u64::MAX, |limit| limit as u64 + 1));
     if let Err(error) = stdout.read_to_end(&mut bytes).await {
         bytes.zeroize();
         return Err(error);
+    }
+    if limit.is_some_and(|limit| bytes.len() > limit) {
+        return Err(std::io::Error::other(
+            "protocol_filter stdout exceeds limits",
+        ));
     }
     Ok(SecretMaterial::new(std::mem::take(&mut *bytes)))
 }
 
 async fn finish_stdin(
     task: Option<JoinHandle<std::io::Result<()>>>,
+    grace: Option<Duration>,
 ) -> Result<(), SecretChildError> {
     let Some(task) = task else {
         return Ok(());
     };
-    task.await
-        .map_err(|error| SecretChildError::Io(std::io::Error::other(error)))?
-        .map_err(SecretChildError::Io)
+    join_pipe(task, grace).await
 }
 
 async fn finish_stdout(
     task: Option<JoinHandle<std::io::Result<SecretMaterial>>>,
+    grace: Option<Duration>,
 ) -> Result<SecretMaterial, SecretChildError> {
     let Some(task) = task else {
         return Err(SecretChildError::InvalidRequest(
             "credential command stdout task was absent",
         ));
     };
-    task.await
+    join_pipe(task, grace).await
+}
+
+async fn join_pipe<T>(
+    mut task: JoinHandle<std::io::Result<T>>,
+    grace: Option<Duration>,
+) -> Result<T, SecretChildError> {
+    let result = if let Some(grace) = grace {
+        match tokio::time::timeout(grace, &mut task).await {
+            Ok(result) => result,
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                return Err(SecretChildError::InvalidRequest(
+                    "protocol_filter pipe cleanup timed out",
+                ));
+            }
+        }
+    } else {
+        task.await
+    };
+    result
         .map_err(|error| SecretChildError::Io(std::io::Error::other(error)))?
         .map_err(SecretChildError::Io)
 }

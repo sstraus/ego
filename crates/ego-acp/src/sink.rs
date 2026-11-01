@@ -59,6 +59,7 @@ pub struct AcpSink {
     /// another's ceiling. See `project::usage_figures`.
     caps: ModelCapabilities,
     root: PathBuf,
+    child_activity: bool,
     /// Whether the failure below has already been reported.
     reported: Mutex<bool>,
     /// Whether a provider retry status is showing and must be cleared.
@@ -79,6 +80,7 @@ impl AcpSink {
             session,
             caps,
             root,
+            child_activity: false,
             reported: Mutex::new(false),
             retrying: Mutex::new(false),
             commands_generation: Mutex::new(None),
@@ -88,6 +90,11 @@ impl AcpSink {
 }
 
 impl AcpSink {
+    pub fn with_child_activity(mut self, enabled: bool) -> Self {
+        self.child_activity = enabled;
+        self
+    }
+
     fn available_commands(&self, state: &SessionState) -> Vec<v1::AvailableCommand> {
         let mut commands: Vec<_> = state
             .skill_catalogue()
@@ -176,6 +183,9 @@ impl EventSink for AcpSink {
             }
         }
         updates.extend(project_acp_updates_v1(event, state, &self.caps, &self.root));
+        if self.child_activity {
+            updates.extend(crate::project::project_child_activity_v1(event));
+        }
         for update in updates {
             let notification = v1::SessionNotification::new(self.session.clone(), update);
             if let Err(err) = self.connection.send_notification(notification) {

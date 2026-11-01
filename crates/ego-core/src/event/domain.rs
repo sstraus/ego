@@ -206,6 +206,7 @@ pub struct ToolTiming {
 ///
 /// ```text
 /// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
+/// ProtocolFilterVariablesSaved |
 /// SessionPaused | SessionPauseObserved | SessionResumed | SessionSelectionsSelected | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
 /// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | PromptQueued | PromptDeliveryExpedited |
@@ -214,7 +215,7 @@ pub struct ToolTiming {
 /// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
 /// DetachedExecSettled | QuestionRequested | QuestionSettled | QuestionMemberSettled |
 /// PermissionRequested | PermissionAmended | PermissionDecided |
-/// GenerationStarted | FallbackDecision | ExecutionObserved |
+/// SessionRootGranted | PermanentRootGrantPending | PermanentRootGranted | RootRevoked | GenerationStarted | FallbackDecision | ExecutionObserved |
 /// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
 /// AttemptSettled | CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved |
 /// TurnCompleted | PinsChanged | CompactionSeeded | Compacted | Forked |
@@ -239,6 +240,13 @@ pub struct ToolTiming {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
+    /// Private write-once state accepted before a filter's provider dispatch.
+    ProtocolFilterVariablesSaved {
+        session_id: SessionId,
+        namespace: String,
+        expected_revision: u64,
+        state: crate::generator::filter_state::FilterVariables,
+    },
     /// An authoritative plan replacement or step progress transition.
     PlanUpdated { update: crate::plan::PlanUpdate },
     /// Operator-facing metadata. The session identity and lineage do not change.
@@ -474,6 +482,18 @@ pub enum EventKind {
     },
     /// Admitted direct-session selections retained across process restarts.
     SessionSelectionsSelected { selections: RunSelections },
+    /// A terminal-approved root bound to this session's durable log.
+    SessionRootGranted { root: crate::permit::ProfileRoot },
+    /// Durable intent before publishing the configured root; never grants authority.
+    PermanentRootGrantPending {
+        consent: crate::permit::PermanentRootConsent,
+    },
+    /// A profile mutation consented to at this terminal; it does not bind the root to this session.
+    PermanentRootGranted {
+        consent: crate::permit::PermanentRootConsent,
+    },
+    /// A terminal revocation removes all saved consent for this exact canonical path.
+    RootRevoked { path: crate::permit::CanonPath },
     /// The process backend evidence for an admitted execution authority.
     ExecutionObserved {
         observation: ExecObservation,
@@ -829,6 +849,7 @@ impl EventKind {
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
             EventKind::PromptRetracted { .. } => "prompt_retracted",
+            EventKind::ProtocolFilterVariablesSaved { .. } => "protocol_filter_variables_saved",
             EventKind::UserPrompt { .. } => "user_prompt",
             EventKind::AssistantDelta { .. } => "assistant_delta",
             EventKind::AssistantMessage { .. } => "assistant_message",
@@ -852,6 +873,10 @@ impl EventKind {
             EventKind::GenerationStarted { .. } => "generation_started",
             EventKind::FallbackDecision { .. } => "fallback_decision",
             EventKind::SessionSelectionsSelected { .. } => "session_selections_selected",
+            EventKind::SessionRootGranted { .. } => "session_root_granted",
+            EventKind::PermanentRootGrantPending { .. } => "permanent_root_grant_pending",
+            EventKind::PermanentRootGranted { .. } => "permanent_root_granted",
+            EventKind::RootRevoked { .. } => "root_revoked",
             EventKind::ExecutionObserved { .. } => "execution_observed",
             EventKind::ExecutionMeasured { .. } => "execution_measured",
             EventKind::JudgeResponse { .. } => "judge_response",

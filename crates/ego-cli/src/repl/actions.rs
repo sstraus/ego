@@ -48,7 +48,8 @@ pub enum ActionId {
 }
 
 pub(crate) const NAME_GRAMMAR: &str = "usage: /name [show|set TEXT|clear]";
-pub(crate) const GOAL_GRAMMAR: &str = "usage: /goal [show|set TEXT|achieve|block REASON]";
+pub(crate) const GOAL_GRAMMAR: &str =
+    "usage: /goal [TEXT|show|set TEXT|extend N|achieve|block REASON]";
 pub(crate) const MCP_GRAMMAR: &str = "usage: /mcp [login NAME | toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -561,7 +562,7 @@ impl ActionRegistry {
             enabled(
                 Config,
                 "config",
-                "Inspect configuration — /config [perimeter | set KEY VALUE]",
+                "Inspect configuration — /config [perimeter | set KEY VALUE | roots revoke EXACT_PATH]",
             ),
             enabled(Setup, "setup", "Inspect expected work without effects"),
             enabled(Doctor, "doctor", "Show health — /doctor [details]"),
@@ -583,7 +584,7 @@ impl ActionRegistry {
             enabled(
                 Expand,
                 "expand",
-                "Show the last tool output or collapsed prompt",
+                "Show the full output of the last tool call",
             )
             .shortcut('o'),
             enabled(
@@ -1123,11 +1124,14 @@ impl ActionRegistry {
         let arguments = raw_arguments.trim();
         if arguments.is_empty() {
             Dispatch::Action(ActionId::Config)
-        } else if arguments == "perimeter" || arguments.starts_with("set ") {
+        } else if arguments == "perimeter"
+            || arguments.starts_with("set ")
+            || arguments.starts_with("roots revoke ")
+        {
             Dispatch::Config(arguments.to_owned())
         } else {
             Dispatch::Refused {
-                reason: "usage: /config [perimeter | set KEY TOML_VALUE]",
+                reason: "usage: /config [perimeter | set KEY TOML_VALUE | roots revoke EXACT_PATH]",
             }
         }
     }
@@ -1419,28 +1423,57 @@ fn parse_goal_action(arguments: &str) -> Dispatch {
     let operation = match arguments {
         "" | "show" => GoalOperation::Show,
         "achieve" => GoalOperation::Achieve,
-        _ => {
-            let (keyword, operation) = if let Some(tail) = arguments.strip_prefix("set") {
-                (tail, GoalOperation::Set as fn(String) -> GoalOperation)
-            } else if let Some(tail) = arguments.strip_prefix("block") {
-                (tail, GoalOperation::Block as fn(String) -> GoalOperation)
-            } else {
-                return Dispatch::Refused {
-                    reason: GOAL_GRAMMAR,
-                };
-            };
-            match keyword
-                .strip_prefix(char::is_whitespace)
-                .map(|tail| tail.trim_start_matches(char::is_whitespace))
-                .filter(|text| !text.is_empty())
-            {
-                Some(text) => operation(text.to_owned()),
-                None => {
+        _ if arguments == "extend"
+            || arguments
+                .strip_prefix("extend")
+                .is_some_and(|tail| tail.starts_with(char::is_whitespace)) =>
+        {
+            let turns = arguments.strip_prefix("extend").unwrap_or_default().trim();
+            match crate::cli::parse_goal_extension(turns) {
+                Ok(turns) => GoalOperation::Extend(turns),
+                Err(_) => {
                     return Dispatch::Refused {
-                        reason: GOAL_GRAMMAR,
+                        reason: "goal extension requires a positive integer turn count: /goal extend N",
                     };
                 }
             }
+        }
+        _ => {
+            let (text, operation) = if let Some(tail) = arguments
+                .strip_prefix("set")
+                .and_then(|tail| tail.strip_prefix(char::is_whitespace))
+            {
+                (
+                    tail.trim_start(),
+                    GoalOperation::Set as fn(String) -> GoalOperation,
+                )
+            } else if let Some(tail) = arguments
+                .strip_prefix("block")
+                .and_then(|tail| tail.strip_prefix(char::is_whitespace))
+            {
+                (
+                    tail.trim_start(),
+                    GoalOperation::Block as fn(String) -> GoalOperation,
+                )
+            } else if matches!(arguments, "set" | "block")
+                || ["show", "achieve"].iter().any(|keyword| {
+                    arguments
+                        .strip_prefix(keyword)
+                        .is_some_and(|tail| tail.starts_with(char::is_whitespace))
+                })
+            {
+                return Dispatch::Refused {
+                    reason: GOAL_GRAMMAR,
+                };
+            } else {
+                (arguments, GoalOperation::Set as fn(String) -> GoalOperation)
+            };
+            if text.is_empty() {
+                return Dispatch::Refused {
+                    reason: GOAL_GRAMMAR,
+                };
+            }
+            operation(text.to_owned())
         }
     };
     Dispatch::SessionMetadata(SessionMetadataOperation::Goal(operation))

@@ -7,7 +7,14 @@ impl Invocation {
     pub fn with_terminal(self, stdin_terminal: bool, stdout_terminal: bool) -> Self {
         let mut args = match self {
             Self::Resume(args) => args,
-            Self::Interactive(args) if matches!(args.session, SessionChoice::Resume(_)) => args,
+            Self::Interactive(args)
+                if matches!(
+                    args.session,
+                    SessionChoice::Resume(_) | SessionChoice::ResumeLatest
+                ) =>
+            {
+                args
+            }
             other => return other,
         };
         if stdin_terminal

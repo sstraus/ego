@@ -5,6 +5,7 @@ use super::*;
 async fn admit_saved_session_policy(
     active: &mut ActiveSession<'_>,
     observation: &ExecObservation,
+    effective: &Effective,
     root: &Path,
     journal_ports: (&SystemClock, &dyn EventSink),
     diagnostics: &dyn Diagnostics,
@@ -26,9 +27,30 @@ async fn admit_saved_session_policy(
         Producer::Main,
         active.state().clone(),
     );
+    let approved_roots = active
+        .state()
+        .session_roots
+        .iter()
+        .chain(
+            active
+                .state()
+                .permanent_root_consents
+                .iter()
+                .filter(|consent| {
+                    effective.roots.iter().any(|root| {
+                        root.path == consent.root.path().as_path()
+                            && root.access == consent.root.access()
+                            && root.consent.as_ref() == Some(&consent.receipt)
+                    })
+                })
+                .map(|consent| &consent.root),
+        )
+        .cloned()
+        .collect::<Vec<_>>();
     ego_core::run::admit_execution_policy(
         &previous,
         observation,
+        &approved_roots,
         CanonPath::new(root),
         human,
         &mut journal,
@@ -181,6 +203,9 @@ enum EpochStart {
 }
 
 enum EpochTransition<'store> {
+    RevokeRoot {
+        path: CanonPath,
+    },
     Resume {
         meta: ego_core::store::session_store::SessionMeta,
     },
@@ -322,6 +347,7 @@ pub(super) async fn drive_execution<S: EventSink>(
     let mut refresh_prompt = false;
 
     let turns = Turns {
+        parent_cancel: cancel.clone(),
         schema: compiled.as_ref(),
         retries: args.schema_retries,
         max_turns: args.max_turns,
@@ -384,6 +410,7 @@ pub(super) async fn drive_execution<S: EventSink>(
             admit_saved_session_policy(
                 &mut active,
                 &observation,
+                &effective,
                 &root,
                 (&clock, sink),
                 diagnostics,
@@ -509,15 +536,17 @@ pub(super) async fn drive_execution<S: EventSink>(
                     )
                     .await?;
                     let wake_seat = Arc::clone(&seat);
-                    session_hook_ports.set_background_waker(Arc::new(move || {
+                    let background_waker: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
                         wake_seat.wake_background_exec();
-                    }));
+                    });
+                    session_hook_ports.set_background_waker(Arc::clone(&background_waker));
                     let human = seat
                         .has_human()
                         .then(|| SeatApprover { seat: seat.clone() });
                     admit_saved_session_policy(
                         &mut active,
                         &observation,
+                        &effective,
                         &root,
                         (&clock, sink),
                         diagnostics,
@@ -580,6 +609,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                         )
                         .with_token_family(Arc::clone(jsonl_store), active.id())
                         .with_task_blobs(active.evidence().clone())
+                        .with_task_waker(background_waker)
                         .with_task_surface(
                             status
                                 .as_ref()
@@ -736,59 +766,63 @@ pub(super) async fn drive_execution<S: EventSink>(
                             // before yielding at pressure, so the next checkpoint includes
                             // the prompt rather than refusing it forever after a failure.
                             automatic_compaction_failed = false;
-                            let (exit, next_perimeter) = drive_interactive_turn_phase(
-                                InteractiveTurnPhase {
-                                    seat: seat.as_ref(),
-                                    status: status.as_ref(),
-                                    confinement: &confinement,
-                                    active: &active,
-                                    run_deadline,
-                                    residual: residual.clone(),
-                                    sandbox_grants: sandbox_grants.clone(),
-                                    perimeter,
-                                    session_hook_ports: &session_hook_ports,
-                                    pending_attachments: &mut pending_attachments,
-                                    source: &source,
-                                    cwd: &cwd,
-                                    diagnostics,
-                                    state: &mut state,
-                                    args: &args,
-                                    effective: &effective,
-                                    policy_source: &policy_source,
-                                    gate: &gate,
-                                    config: &config,
-                                    evidence: &evidence,
-                                    invocation,
-                                    registry: &registry,
-                                    admitted_tools: &admitted_tools,
-                                    mcp_runtime: mcp_runtime.as_ref(),
-                                    skill_resource_roots: &skill_resource_roots,
-                                    elicitor: &elicitor,
-                                    judge_available,
-                                    skill_trust,
-                                    session_hooks: &session_hooks,
-                                    session_journal: &session_journal,
-                                    skill_owner: skill_owner.clone(),
-                                    refresh_prompt: &mut refresh_prompt,
-                                    control: &mut control,
-                                    turns: &turns,
-                                    last_generation_request: &mut last_generation_request,
-                                    policy_selection: &policy_selection,
-                                    selection: &selection,
-                                    between,
-                                    cancel: &cancel,
-                                    last: &mut last,
-                                    mcp_errors: &mcp_errors,
-                                    jsonl_store,
-                                    root: &root,
-                                    clock: &clock,
-                                    skill_profile_layers: skill_profile_layers.as_deref(),
-                                },
-                                resumed_turn,
-                                asked,
-                            )
-                            .await?;
+                            let (exit, next_perimeter, revoked_root) =
+                                drive_interactive_turn_phase(
+                                    InteractiveTurnPhase {
+                                        seat: seat.as_ref(),
+                                        status: status.as_ref(),
+                                        confinement: &confinement,
+                                        active: &active,
+                                        run_deadline,
+                                        residual: residual.clone(),
+                                        sandbox_grants: sandbox_grants.clone(),
+                                        perimeter,
+                                        session_hook_ports: &session_hook_ports,
+                                        pending_attachments: &mut pending_attachments,
+                                        source: &source,
+                                        cwd: &cwd,
+                                        diagnostics,
+                                        state: &mut state,
+                                        args: &args,
+                                        effective: &effective,
+                                        policy_source: &policy_source,
+                                        gate: &gate,
+                                        config: &config,
+                                        evidence: &evidence,
+                                        invocation,
+                                        registry: &registry,
+                                        admitted_tools: &admitted_tools,
+                                        mcp_runtime: mcp_runtime.as_ref(),
+                                        skill_resource_roots: &skill_resource_roots,
+                                        elicitor: &elicitor,
+                                        judge_available,
+                                        skill_trust,
+                                        session_hooks: &session_hooks,
+                                        session_journal: &session_journal,
+                                        skill_owner: skill_owner.clone(),
+                                        refresh_prompt: &mut refresh_prompt,
+                                        control: &mut control,
+                                        turns: &turns,
+                                        last_generation_request: &mut last_generation_request,
+                                        policy_selection: &policy_selection,
+                                        selection: &selection,
+                                        between,
+                                        cancel: &cancel,
+                                        last: &mut last,
+                                        mcp_errors: &mcp_errors,
+                                        jsonl_store,
+                                        root: &root,
+                                        clock: &clock,
+                                        skill_profile_layers: skill_profile_layers.as_deref(),
+                                    },
+                                    resumed_turn,
+                                    asked,
+                                )
+                                .await?;
                             perimeter = next_perimeter;
+                            if let Some(path) = revoked_root {
+                                break 'epoch EpochTransition::RevokeRoot { path };
+                            }
                             if exit {
                                 break 'epoch EpochTransition::Exit;
                             }
@@ -815,6 +849,28 @@ pub(super) async fn drive_execution<S: EventSink>(
                 };
 
                 match transition {
+                    EpochTransition::RevokeRoot { path } => {
+                        // The lexical epoch has dropped every old effect owner and
+                        // settled its child trees. Re-enter admission through the
+                        // existing outer same-session loop; never mutate a live guard.
+                        session_end?;
+                        active.replace_state(source_state);
+                        let meta = root_revocation::revoke(
+                            &mut active,
+                            path,
+                            &args,
+                            &clock,
+                            sink,
+                            jsonl_store,
+                        )?;
+                        last.state = active.state().clone();
+                        last.termination = RunTermination::Done;
+                        last.selected_session = Some(meta);
+                        seat.restore_control(control);
+                        diagnostics
+                            .note("Root revoked; children stopped; rebuilding session authority");
+                        break 'sessions Ok(last);
+                    }
                     EpochTransition::Exit => {
                         finish_interactive_session(
                             &mut active,
@@ -872,6 +928,13 @@ fn activate_session_transition<'store>(
         registry,
         config,
     } = activation;
+    // The process policy and OS guard were built for the source session.
+    // A successor must never reuse its session-only filesystem authority.
+    if !source_state.session_roots.is_empty() {
+        return Err(RunTermination::Failed {
+            message: "session roots cannot cross an in-process session transition; exit and resume in a new process".into(),
+        });
+    }
     match transition {
         EpochTransition::New { target } => activate_new_session(
             active,
@@ -912,7 +975,9 @@ fn activate_session_transition<'store>(
                 config,
             },
         ),
-        EpochTransition::Exit | EpochTransition::Resume { .. } => {
+        EpochTransition::Exit
+        | EpochTransition::Resume { .. }
+        | EpochTransition::RevokeRoot { .. } => {
             unreachable!("terminal transitions retain the driver control owner")
         }
     }
@@ -1311,123 +1376,97 @@ async fn answer_image_request(
     accepted
 }
 
-fn setup_picker_label(path: &Path, home: Option<&Path>, width: usize) -> String {
-    let label = match home.and_then(|home| path.strip_prefix(home).ok()) {
-        Some(relative) if relative.as_os_str().is_empty() => "~".to_string(),
-        Some(relative) => format!("~/{}", relative.display()),
-        None => path.display().to_string(),
-    };
-    let label = ego_core::permit::terminal_safe(&label);
-    if crate::render::line::Line::plain(&label).width() <= width {
-        return label;
-    }
-    if width == 0 {
-        return String::new();
-    }
-    // Keep complete words/path segments, even when a single segment is wider
-    // than the row. The full path remains in the setup report.
-    let boundary = label
-        .char_indices()
-        .filter(|(_, ch)| ch.is_whitespace() || *ch == '/' || *ch == '\\')
-        .map(|(index, ch)| index + ch.len_utf8())
-        .take_while(|end| crate::render::line::Line::plain(&label[..*end]).width() < width)
-        .last()
-        .unwrap_or(0);
-    format!("{}…", label[..boundary].trim_end())
-}
-
 async fn run_interactive_setup(
     prompt: String,
-    proxy: Option<ego_tools::http::ProviderProxy>,
-    selection: &model::GenerationSelection,
     root: &Path,
     status: Option<&InteractiveStatus>,
+    effective: &Effective,
     diagnostics: &dyn Diagnostics,
 ) {
-    match selection.snapshot() {
-        Ok(selected) => diagnostics.note(&format!(
-            "Session model: {}. Setup interpreter uses persistent user/profile configuration, not this session selection.",
-            selected.identity.0
-        )),
-        Err(error) => diagnostics.note(&format!("Session model unavailable: {error}. Setup interpreter uses persistent user/profile configuration.")),
+    use ego_core::question::{
+        QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
+    };
+
+    if !prompt.is_empty() {
+        diagnostics.note("Setup configures saved settings; use /doctor for diagnostics.");
+        return;
     }
-    let setup_args = crate::cli::SetupArgs {
-        items: None,
-        judge: None,
-        prompt: (!prompt.is_empty()).then_some(prompt),
-        profile: None,
-        directory: Some(root.to_path_buf()),
+    let Some(status) = status.filter(|status| status.human) else {
+        diagnostics.note("Setup needs a human terminal seat; no settings were changed.");
+        return;
     };
-    let confirm = |question: String| {
-        status
-            .as_ref()
-            .filter(|status| status.human)
-            .is_some_and(|status| {
-                matches!(
-                    status.seat.confirm_setup(question),
-                    repl::Confirmation::Confirmed
-                )
-            })
+    let Some(home) = crate::config::ego_home() else {
+        diagnostics.note("Setup needs EGO_HOME or HOME; no settings were changed.");
+        return;
     };
-    let select = |findings: &[ego_core::setup::Finding]| {
-        use ego_core::question::{
-            QuestionAnswer, QuestionMode, QuestionOption, QuestionOutcome, QuestionRequest,
-        };
-        let status = status.as_ref().filter(|status| status.human)?;
-        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-        // The selector owns the ordinal. Reserve its widest prefix and one
-        // terminal cell so the terminal never wraps an item itself.
-        let label_width = status.seat.width().saturating_sub(10);
-        let options = findings
-            .iter()
-            .map(|finding| {
-                QuestionOption::new(
-                    finding.id.to_string(),
-                    setup_picker_label(&finding.requested, home.as_deref(), label_width),
-                )
-            })
-            .collect::<Vec<_>>();
-        if options.is_empty() {
-            return Some(Vec::new());
-        }
-        let request = QuestionRequest::new(
-            "Select setup proposal items; only selected items enter the preview.\nFinal confirmation still required; Esc cancels without changes.",
-            QuestionMode::Multiple,
-            options,
-            false,
-        );
-        match status.seat.select_setup(request) {
-            QuestionOutcome::Answered(QuestionAnswer::Multiple(ids)) => {
-                ids.into_iter().map(|id| id.parse::<usize>().ok()).collect()
+    struct SeatScreen<'a> {
+        status: &'a InteractiveStatus,
+        diagnostics: &'a dyn Diagnostics,
+    }
+    impl crate::setup_config::Screen for SeatScreen<'_> {
+        fn choose(&mut self, title: &str, options: &[String]) -> Option<usize> {
+            const PAGE: usize = 10;
+            let mut start = 0;
+            loop {
+                let end = (start + PAGE).min(options.len());
+                let mut rows = options[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, label)| {
+                        QuestionOption::new((start + offset).to_string(), label.clone())
+                    })
+                    .collect::<Vec<_>>();
+                if start > 0 {
+                    rows.push(QuestionOption::new("previous", "Previous page…"));
+                }
+                if end < options.len() {
+                    rows.push(QuestionOption::new("next", "Next page…"));
+                }
+                let heading = if options.len() > PAGE {
+                    format!("{title} · {}–{} of {}", start + 1, end, options.len())
+                } else {
+                    title.to_owned()
+                };
+                let request = QuestionRequest::new(heading, QuestionMode::Single, rows, false);
+                match self.status.seat.select_setup(request) {
+                    QuestionOutcome::Answered(QuestionAnswer::Single(index))
+                        if index == "previous" =>
+                    {
+                        start = start.saturating_sub(PAGE);
+                    }
+                    QuestionOutcome::Answered(QuestionAnswer::Single(index)) if index == "next" => {
+                        start = end;
+                    }
+                    QuestionOutcome::Answered(QuestionAnswer::Single(index)) => {
+                        return index.parse().ok();
+                    }
+                    _ => return None,
+                }
             }
-            _ => None,
         }
-    };
-    let mut setup_cancel = status
-        .as_ref()
-        .map(|status| status.seat.setup_cancellation());
-    let terminal_cancel = async {
-        match setup_cancel.as_mut() {
-            Some(cancel) => cancel.cancelled().await,
-            None => std::future::pending::<()>().await,
+        fn input(&mut self, prompt: &str) -> Option<String> {
+            let request = QuestionRequest::new(prompt, QuestionMode::FreeText, Vec::new(), true);
+            match self.status.seat.select_setup(request) {
+                QuestionOutcome::Answered(QuestionAnswer::FreeText(value)) => Some(value),
+                _ => None,
+            }
         }
+        fn confirm(&mut self, preview: &str) -> bool {
+            matches!(
+                self.status.seat.confirm_setup(preview.to_owned()),
+                repl::Confirmation::Confirmed
+            )
+        }
+        fn notice(&mut self, text: &str) {
+            self.diagnostics.note(text);
+        }
+    }
+    let mut screen = SeatScreen {
+        status,
+        diagnostics,
     };
-    let setup_result = tokio::select! {
-        biased;
-        _ = terminal_cancel => Err(crate::cli::UsageError("Setup cancelled; no configuration was changed".into())),
-        _ = super::turns::stop_signal(None) => Err(crate::cli::UsageError("Setup cancelled; no configuration was changed".into())),
-        result = crate::setup::observed_selection_host(
-            root.to_path_buf(),
-            &setup_args,
-            Some(&confirm),
-            Some(&select),
-            proxy,
-        ) => result,
-    };
-    drop(setup_cancel);
-    match setup_result {
-        Ok(report) => diagnostics.note(&report),
-        Err(error) => diagnostics.note(&error.to_string()),
+    if let Err(error) = crate::setup_config::run(&mut screen, root, &home, None, Some(effective)) {
+        diagnostics.note(&format!("Setup: {error}"));
     }
 }
 
@@ -1702,12 +1741,17 @@ async fn fork_session_transition<'store>(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "interactive input needs its admitted exec environment and turn controls"
+)]
 async fn drive_interactive_input<'session: 'turn, 'turn>(
     turns: &Turns<'_>,
     loop_: &mut TurnLoop<'session, 'turn>,
     resumed_turn: Option<RuntimeResume>,
     asked: Option<InteractiveTurnInput>,
     images: Vec<ImageRef>,
+    exec_environment: ego_core::permit::EnvPolicy,
     turn_cancel: &CancelToken,
     diagnostics: &dyn Diagnostics,
 ) -> Option<(RunTermination, Value)> {
@@ -1750,6 +1794,11 @@ async fn drive_interactive_input<'session: 'turn, 'turn>(
             Some(InteractiveTurnInput::McpContext(command)) => Some(
                 turns
                     .drive_mcp_context(loop_, command, turn_cancel, diagnostics)
+                    .await,
+            ),
+            Some(InteractiveTurnInput::Shell(command)) => Some(
+                turns
+                    .drive_user_shell(loop_, command, exec_environment, turn_cancel, diagnostics)
                     .await,
             ),
             Some(InteractiveTurnInput::Skill(operation)) => {
@@ -2117,6 +2166,7 @@ struct InteractiveTurnBuild<'a, 'session> {
     mcp_runtime: &'a dyn McpRuntimeBinding,
     skill_resource_roots: &'a Option<ego_core::skill::SkillResourceRoots>,
     elicitor: &'a Option<Arc<dyn Elicitor>>,
+    root_grants: Option<Arc<dyn ego_core::turn::RootGrantPort>>,
     judge_available: bool,
     confinement: &'a RunConfinement,
     skill_trust: Trust,
@@ -2151,6 +2201,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         mcp_runtime,
         skill_resource_roots,
         elicitor,
+        root_grants,
         judge_available,
         confinement,
         skill_trust,
@@ -2241,6 +2292,10 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
     };
     let loop_ = match elicitor.as_ref() {
         Some(elicitor) => loop_.with_elicitor(Arc::clone(elicitor)),
+        None => loop_,
+    };
+    let loop_ = match root_grants {
+        Some(grants) => loop_.with_root_grants(grants),
         None => loop_,
     };
     let loop_ = if judge_available {
@@ -2721,6 +2776,24 @@ async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
     line: repl::Line,
     posture: (bool, bool, bool),
 ) -> Result<CommandOutcome<'store>, RunTermination> {
+    if let repl::Line::HostCommand(repl::HostCommand::Config(arguments)) = &line
+        && arguments.starts_with("roots revoke ")
+    {
+        return match root_revocation::requested(
+            arguments,
+            input.seat.as_ref(),
+            input.state,
+            input.cwd,
+        ) {
+            Ok(path) => Ok(CommandOutcome::Transition(Box::new(
+                EpochTransition::RevokeRoot { path },
+            ))),
+            Err(error) => {
+                input.diagnostics.note(&error);
+                Ok(CommandOutcome::Continue)
+            }
+        };
+    }
     match line {
         repl::Line::HostCommand(
             repl::HostCommand::Images(_)
@@ -2892,10 +2965,8 @@ async fn dispatch_workspace_command<'session: 'a, 'a, 'store: 'session>(
     line: repl::Line,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     let InteractiveCommand {
-        args,
         diagnostics,
         status,
-        selection,
         effective,
         skill_profile_layers,
         perimeter,
@@ -2936,15 +3007,7 @@ async fn dispatch_workspace_command<'session: 'a, 'a, 'store: 'session>(
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Setup(prompt)) => {
-            run_interactive_setup(
-                prompt,
-                args.proxy.clone(),
-                selection,
-                root,
-                status.as_ref(),
-                diagnostics,
-            )
-            .await;
+            run_interactive_setup(prompt, root, status.as_ref(), effective, diagnostics).await;
             Ok(CommandOutcome::Continue)
         }
         _ => unreachable!("only workspace commands are dispatched here"),
@@ -2960,6 +3023,7 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
         repl::Line::HostCommand(
             repl::HostCommand::SubmittedDraft { .. }
             | repl::HostCommand::AdmitPrompt { .. }
+            | repl::HostCommand::Shell(_)
             | repl::HostCommand::BackgroundExecSettled,
         ) => dispatch_session_input(input, line).await,
         repl::Line::HostCommand(
@@ -3003,6 +3067,7 @@ async fn dispatch_session_input<'session: 'a, 'a, 'store: 'session>(
         state,
         diagnostics,
         session_hook_ports,
+        task_owner,
         ..
     } = input;
     match line {
@@ -3010,6 +3075,9 @@ async fn dispatch_session_input<'session: 'a, 'a, 'store: 'session>(
             text,
             images: None,
         })),
+        repl::Line::HostCommand(repl::HostCommand::Shell(command)) => {
+            Ok(CommandOutcome::Input(InteractiveTurnInput::Shell(command)))
+        }
         repl::Line::HostCommand(repl::HostCommand::SubmittedDraft { text, images }) => {
             Ok(CommandOutcome::Input(InteractiveTurnInput::Prompt {
                 text,
@@ -3018,14 +3086,17 @@ async fn dispatch_session_input<'session: 'a, 'a, 'store: 'session>(
         }
         repl::Line::HostCommand(repl::HostCommand::BackgroundExecSettled) => {
             // A stale/coalesced wake must not buy another generation. The
-            // generation boundary settles every ready ID in the journal.
+            // generation boundary settles every ready process and task in the journal.
             let ready = state.unsettled_detached_execs().into_iter().any(|id| {
                 session_hook_ports
                     .process()
                     .background_status(id)
                     .is_ok_and(|snapshot| snapshot.outcome.is_some())
             });
-            Ok(if ready {
+            let task_ready = task_owner
+                .has_ready_tasks()
+                .map_err(|message| RunTermination::Failed { message })?;
+            Ok(if ready || task_ready {
                 CommandOutcome::Input(InteractiveTurnInput::Checkpoint)
             } else {
                 CommandOutcome::Continue
@@ -3424,6 +3495,12 @@ async fn dispatch_session_navigation<'session: 'a, 'a, 'store: 'session>(
         ..
     } = input;
     let (pending_work, _, _) = posture;
+    if !state.session_roots.is_empty() && matches!(line, repl::Line::HostCommand(_)) {
+        diagnostics.note(
+            "session roots belong to this session; exit and resume in a new process before changing sessions",
+        );
+        return Ok(CommandOutcome::Continue);
+    }
     match line {
         repl::Line::HostCommand(
             command @ (repl::HostCommand::Action(repl::actions::ActionId::Sessions)
@@ -3516,7 +3593,13 @@ fn update_session_metadata<'store>(
         );
         return Ok(CommandOutcome::Continue);
     }
-    if let Err(error) = crate::metadata::execute_interactive(
+    let goal_prompt = match &operation {
+        crate::cli::SessionMetadataOperation::Goal(crate::cli::GoalOperation::Set(text)) => {
+            Some(text.clone())
+        }
+        _ => None,
+    };
+    let updated = match crate::metadata::execute_interactive(
         interactive_metadata,
         leased_session_journal,
         session_journal,
@@ -3524,8 +3607,12 @@ fn update_session_metadata<'store>(
         interactive_metadata_ceilings,
         &mut |message| diagnostics.note(message),
     ) {
-        diagnostics.note(&format!("session metadata operation failed: {error}"));
-    }
+        Ok(()) => true,
+        Err(error) => {
+            diagnostics.note(&format!("session metadata operation failed: {error}"));
+            false
+        }
+    };
     *state = match session_journal.inspect(Clone::clone) {
         Ok(state) => state,
         Err(error) => {
@@ -3544,7 +3631,12 @@ fn update_session_metadata<'store>(
             )),
         }
     }
-    Ok(CommandOutcome::Continue)
+    Ok(match (updated, goal_prompt) {
+        (true, Some(text)) => {
+            CommandOutcome::Input(InteractiveTurnInput::Prompt { text, images: None })
+        }
+        _ => CommandOutcome::Continue,
+    })
 }
 
 async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
@@ -3591,6 +3683,21 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     let (pending_work, model_compaction, automatic_compaction) = posture;
 
     if compaction_availability(pending_work) != repl::actions::Availability::Enabled {
+        return Ok(CommandOutcome::Continue);
+    }
+    if !state.session_roots.is_empty() {
+        let message =
+            "session roots cannot cross a compaction session; exit and resume in a new process";
+        *automatic_compaction_failed = true;
+        if automatic_compaction && ego_core::turn::compaction_due(state.context) {
+            return Ok(compaction_failure_outcome(
+                last,
+                diagnostics,
+                true,
+                message.to_owned(),
+            ));
+        }
+        diagnostics.note(message);
         return Ok(CommandOutcome::Continue);
     }
     if !automatic_compaction && !seat.confirm_compaction(active.id()) {
@@ -3944,7 +4051,10 @@ fn replay_interactive_session(
     diagnostics: &dyn Diagnostics,
 ) {
     if seat.has_human()
-        && matches!(&args.session, crate::cli::SessionChoice::Resume(_))
+        && matches!(
+            &args.session,
+            crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
+        )
         && let Some(output) = text_output
     {
         let environment = crate::render::caps::Environment::read();
@@ -3952,9 +4062,13 @@ fn replay_interactive_session(
             flag_plain: args.plain,
             ..crate::render::caps::Terminal::from_process(args.no_color, &environment)
         });
-        if let Err(error) =
-            crate::render::replay::replay(active.writer(), active.id(), output, capabilities)
-        {
+        if let Err(error) = crate::render::replay::replay(
+            active.writer(),
+            active.id(),
+            output,
+            capabilities,
+            workspace(args.directory.as_ref()).ok().as_deref(),
+        ) {
             diagnostics.note(&format!("the transcript could not be replayed: {error}"));
         }
     }
@@ -4189,7 +4303,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     input: InteractiveTurnPhase<'a, 'session, 'store>,
     resumed_turn: Option<RuntimeResume>,
     asked: Option<InteractiveTurnInput>,
-) -> Result<(bool, crate::perimeter::Perimeter), RunTermination> {
+) -> Result<(bool, crate::perimeter::Perimeter, Option<CanonPath>), RunTermination> {
     let InteractiveTurnPhase {
         seat,
         status,
@@ -4271,7 +4385,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     })
     .await?
     else {
-        return Ok((false, perimeter));
+        return Ok((false, perimeter, None));
     };
     let settled_before = state
         .detached_execs
@@ -4295,6 +4409,31 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
             mcp_runtime,
             skill_resource_roots,
             elicitor,
+            root_grants: seat
+                .has_human()
+                .then(|| {
+                    elicitor.as_ref().map(|elicitor| {
+                        let target =
+                            config::profile(args).map_or(UserConfigTarget::Base, |profile| {
+                                UserConfigTarget::Profile(
+                                    ego_core::config::ProfileName::parse(profile.name())
+                                        .expect("selected profile was validated at admission"),
+                                )
+                            });
+                        Arc::new(SeatRootGrants {
+                            elicitor: Arc::clone(elicitor),
+                            effective: effective.clone(),
+                            workspace: CanonPath::new(root),
+                            target,
+                            store_root: rooted_path(
+                                root,
+                                session::store_root(args.session_dir.as_ref())
+                                    .expect("session store already admitted"),
+                            ),
+                        }) as Arc<dyn ego_core::turn::RootGrantPort>
+                    })
+                })
+                .flatten(),
             judge_available,
             confinement,
             skill_trust,
@@ -4324,6 +4463,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     let mut loop_ = loop_
         .with_automatic_compaction()
         .with_interactive_control(control);
+    let mut revoked_root = None;
     let driven = {
         let driving = drive_interactive_input(
             turns,
@@ -4331,6 +4471,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
             resumed_turn,
             asked,
             images,
+            effective.exec.policy().expect("admitted environment"),
             &turn_cancel,
             diagnostics,
         );
@@ -4340,6 +4481,20 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
             match futures::future::select(driving.as_mut(), inspection).await {
                 futures::future::Either::Left((result, _)) => break result,
                 futures::future::Either::Right((command, _)) => {
+                    if let repl::HostCommand::Config(arguments) = &command
+                        && command.is_root_revocation()
+                    {
+                        let current = session_hooks.state.state();
+                        match root_revocation::requested(arguments, seat, &current, cwd) {
+                            Ok(path) => {
+                                revoked_root = Some(path);
+                                turn_cancel.cancel(CancelCause::User);
+                                break driving.await;
+                            }
+                            Err(error) => diagnostics.note(&error),
+                        }
+                        continue;
+                    }
                     if let repl::HostCommand::Images(request) = command {
                         let admission = answer_image_request(
                             &request,
@@ -4409,6 +4564,10 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     *last_generation_request = loop_.last_generation_request();
     drop(loop_);
     *state = session_hooks.state.state();
+    if revoked_root.is_some() {
+        between();
+        return Ok((false, perimeter, revoked_root));
+    }
     report_settled_execs(state, &settled_before, diagnostics);
     if state
         .prompt_snapshot
@@ -4421,7 +4580,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     refresh_turn_status(status, policy_selection, selection, state, diagnostics);
     seat.refresh_queue(state);
     let Some((termination, result)) = driven else {
-        return Ok((false, perimeter));
+        return Ok((false, perimeter, None));
     };
     report_interactive_turn_end(&termination, cancel, seat, turn_started, diagnostics);
     between();
@@ -4438,9 +4597,9 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     // the process. A broken stdout or a SIGTERM is not a turn to
     // return to a prompt from.
     if cancel.is_cancelled() {
-        return Ok((true, perimeter));
+        return Ok((true, perimeter, None));
     }
-    Ok((false, perimeter))
+    Ok((false, perimeter, None))
 }
 
 fn finish_interactive_session(
@@ -4503,30 +4662,6 @@ fn activate_new_session<'store>(
     *active = target;
     admit_successor_context(evidence, active, run_context)?;
     Ok(EpochStart::New)
-}
-
-#[cfg(test)]
-mod setup_picker_label_tests {
-    use super::*;
-
-    /// Catches: shortening a home path hides a sibling prefix or breaks a segment.
-    #[test]
-    fn home_labels_preserve_path_boundaries_and_terminal_cells() {
-        let home = Some(Path::new("/home/operator"));
-        for (path, width, expected) in [
-            ("/home/operator/.cargo/registry", 70, "~/.cargo/registry"),
-            ("/home/operator", 70, "~"),
-            ("/home/operator-other/file", 70, "/home/operator-other/file"),
-            ("/home/operator/.cargo/registry", 12, "~/.cargo/…"),
-            ("/home/operator/indivisiblesegment", 8, "~/…"),
-            ("/workspace/日本語/segment", 19, "/workspace/日本語/…"),
-            ("indivisiblesegment", 8, "…"),
-        ] {
-            let label = setup_picker_label(Path::new(path), home, width);
-            assert_eq!(label, expected);
-            assert!(crate::render::line::Line::plain(label).width() <= width);
-        }
-    }
 }
 
 #[cfg(test)]
