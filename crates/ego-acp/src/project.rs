@@ -572,6 +572,9 @@ pub fn project_replay_v1(
 ) -> Vec<v1::SessionUpdate> {
     let mut updates = frames
         .iter()
+        // Child-only frames were not part of standard replay before the extension.
+        // Keep the existing error-card positions stable for ordinary clients.
+        .filter(|frame| !matches!(frame.event, PublicEvent::ChildLifecycle { .. }))
         .enumerate()
         .flat_map(|(position, frame)| {
             // The original prompt RPC carried this failure live. On load
@@ -800,6 +803,7 @@ fn project_v1_with_root(
         // list, plus v1's own note for `TurnCompleted`. The two usage-shaped
         // events need reduced state and are handled by `project_acp_v1`.
         PublicEvent::ChildProgress { .. }
+        | PublicEvent::ChildLifecycle { .. }
         | PublicEvent::SessionStarted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
@@ -1015,6 +1019,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         // list. The two usage-shaped events need reduced state and are
         // handled by `project_acp_v2`.
         PublicEvent::ChildProgress { .. }
+        | PublicEvent::ChildLifecycle { .. }
         | PublicEvent::SessionStarted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
@@ -1042,4 +1047,61 @@ fn tool_status_v2(ok: bool) -> v2::ToolCallStatus {
         true => v2::ToolCallStatus::Completed,
         false => v2::ToolCallStatus::Failed,
     }
+}
+
+/// A negotiated ego extension on the existing v1 session-info metadata surface.
+/// This is not a standard child SessionUpdate variant or a human-input request.
+pub fn child_activity_meta(activity: serde_json::Value) -> v1::SessionUpdate {
+    v1::SessionUpdate::SessionInfoUpdate(v1::SessionInfoUpdate::new().meta(
+        serde_json::Map::from_iter([(
+            "ego".to_owned(),
+            serde_json::json!({"childActivity": activity}),
+        )]),
+    ))
+}
+
+/// Live identity and outcome. Turn end retracts foreground work, not durable children.
+pub fn project_child_activity_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
+    match event {
+        PublicEvent::ChildLifecycle {
+            turn,
+            item,
+            child,
+            phase,
+        } => Some(child_activity_meta(serde_json::json!({
+            "version":1,"kind":"lifecycle","turnId":turn,"itemId":item,"child":child,"phase":phase,
+        }))),
+        PublicEvent::TurnCompleted { turn, .. } => Some(child_activity_meta(serde_json::json!({
+            "version":1,"kind":"clear","turnId":turn,"scope":"foreground",
+        }))),
+        _ => None,
+    }
+}
+
+/// Reattach reports only the current roster, never historical starts or human prompts.
+pub fn project_child_snapshot_v1(events: &[PublicEvent]) -> v1::SessionUpdate {
+    use ego_core::public::ChildPhase;
+    let mut children = Vec::new();
+    for event in events {
+        match event {
+            PublicEvent::ChildLifecycle {
+                turn,
+                item,
+                child,
+                phase,
+            } => {
+                children.retain(|(t, i, c)| (t, i, c) != (turn, item, child));
+                if matches!(phase, ChildPhase::Started) {
+                    children.push((*turn, *item, *child));
+                }
+            }
+            PublicEvent::TurnCompleted { turn, .. } => children.retain(|(t, _, child)| {
+                t != turn || matches!(child, ego_core::public::ChildIdentity::Durable { .. })
+            }),
+            _ => {}
+        }
+    }
+    child_activity_meta(serde_json::json!({
+        "version":1,"kind":"snapshot","children":children.into_iter().map(|(turn,item,child)| serde_json::json!({"turnId":turn,"itemId":item,"child":child})).collect::<Vec<_>>()
+    }))
 }

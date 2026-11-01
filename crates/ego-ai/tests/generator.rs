@@ -1717,3 +1717,543 @@ async fn usage_limits_key_boundary_preserves_recorded_absence_mutations() {
         );
     }
 }
+
+struct TestProtocolFilter {
+    calls: std::sync::atomic::AtomicUsize,
+    result: Result<Vec<u8>, &'static str>,
+}
+impl ego_ai::protocol_filter::ProtocolFilterCommand for TestProtocolFilter {
+    fn open_response(
+        &self,
+    ) -> Result<Box<dyn ego_ai::protocol_filter::ProtocolFilterResponse>, &'static str> {
+        Ok(Box::new(PassthroughResponse))
+    }
+    fn run(&self, input: Vec<u8>) -> BoxFuture<'_, Result<Vec<u8>, &'static str>> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let input: serde_json::Value = serde_json::from_slice(&input).unwrap();
+        assert!(input.get("headers").is_none());
+        assert!(input.get("url").is_none());
+        Box::pin(futures::future::ready(self.result.clone()))
+    }
+}
+
+struct PassthroughResponse;
+impl ego_ai::protocol_filter::ProtocolFilterResponse for PassthroughResponse {
+    fn exchange(&mut self, input: Vec<u8>) -> BoxFuture<'_, Result<Vec<u8>, &'static str>> {
+        let input: serde_json::Value = serde_json::from_slice(&input).unwrap();
+        Box::pin(futures::future::ready(Ok(serde_json::to_vec(
+            &serde_json::json!({
+                "version":1,"sequence":input["sequence"],"body_base64":input["body_base64"]
+            }),
+        )
+        .unwrap())))
+    }
+    fn finish(&mut self) -> BoxFuture<'_, Result<(), &'static str>> {
+        Box::pin(futures::future::ready(Ok(())))
+    }
+}
+fn protocol_config() -> ego_core::config::ProtocolFilterConfig {
+    ego_core::config::ProtocolFilterConfig {
+        command: if cfg!(windows) {
+            "C:/filters/filter.exe"
+        } else {
+            "/filters/filter"
+        }
+        .into(),
+        timeout_ms: 1000,
+        identity_headers: vec![],
+        enabled: true,
+    }
+}
+
+#[derive(Default)]
+struct FilterJournalStore {
+    events: Mutex<Vec<ego_core::event::domain::DomainEvent>>,
+    fail: std::sync::atomic::AtomicBool,
+}
+impl ego_core::store::session_store::SessionStore for FilterJournalStore {
+    fn append(
+        &self,
+        _: &ego_core::event::id::SessionId,
+        event: &ego_core::event::domain::DomainEvent,
+    ) -> Result<(), ego_core::store::session_store::StoreError> {
+        if self.fail.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(ego_core::store::session_store::StoreError::Io(
+                std::io::Error::other("disk refused append"),
+            ));
+        }
+        self.events.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+    fn read(
+        &self,
+        _: &ego_core::event::id::SessionId,
+    ) -> Result<
+        futures::stream::BoxStream<
+            'static,
+            Result<
+                ego_core::store::session_store::SessionEntry,
+                ego_core::store::session_store::StoreError,
+            >,
+        >,
+        ego_core::store::session_store::StoreError,
+    > {
+        Ok(futures::stream::iter(
+            self.events
+                .lock()
+                .unwrap()
+                .clone()
+                .into_iter()
+                .map(|event| Ok(ego_core::store::session_store::SessionEntry::Event(event))),
+        )
+        .boxed())
+    }
+    fn list(
+        &self,
+    ) -> Result<
+        Vec<ego_core::store::session_store::SessionMeta>,
+        ego_core::store::session_store::StoreError,
+    > {
+        Ok(vec![])
+    }
+    fn compare_and_append_run(
+        &self,
+        _: &ego_core::event::id::SessionId,
+        _: Option<ego_core::run::RunRevision>,
+        _: ego_core::run::RunTransaction,
+    ) -> Result<ego_core::run::RunAppend, ego_core::store::session_store::StoreError> {
+        Err(ego_core::store::session_store::StoreError::Io(
+            std::io::Error::other("not a run-control store"),
+        ))
+    }
+}
+struct FilterClock;
+impl ego_core::event::time::Clock for FilterClock {
+    fn now(&self) -> ego_core::event::time::Timestamp {
+        ego_core::event::time::Timestamp::EPOCH
+    }
+}
+
+async fn observe_filtered(
+    stream: &mut ego_core::generator::attempt::AttemptStream,
+    session: Option<ego_core::event::id::SessionId>,
+) -> Vec<AiEvent> {
+    use ego_core::event::id::{Producer, TurnId};
+    use ego_core::turn::{Journal, SharedJournal};
+    let store = FilterJournalStore::default();
+    let journal = SharedJournal::new(Journal::new(
+        session.unwrap_or_default(),
+        &store,
+        &FilterClock,
+        &ego_core::sink::NullSink,
+        Producer::Main,
+        ego_core::state::SessionState::default(),
+    ));
+    let mut observed = Vec::new();
+    while let Some(event) = stream.next().await {
+        if let AiEvent::FilterState(exchange) = event {
+            journal.filter_state(TurnId::new(), exchange).unwrap();
+        } else {
+            observed.push(event);
+        }
+    }
+    observed
+}
+
+fn state_filter_generator(
+    http: Arc<StubHttp>,
+    revision: u64,
+    writes: serde_json::Value,
+) -> WireGenerator {
+    let config = protocol_config();
+    generator(http).with_protocol_filter(
+        config,
+        Arc::new(TestProtocolFilter {
+            calls: 0.into(),
+            result: Ok(serde_json::to_vec(&serde_json::json!({
+                "version":1, "body_base64":"e30=", "identity_headers":[],
+                "expected_revision":revision, "state_writes":writes,
+            }))
+            .unwrap()),
+        }),
+    )
+}
+
+// Catches: dispatch before durable variable acceptance, including a failed
+// journal write, a forged revision, invalid variable names or oversized state.
+#[tokio::test]
+async fn protocol_filter_invalid_state_or_failed_persistence_never_dispatches() {
+    use ego_core::event::id::{Producer, SessionId, TurnId};
+    use ego_core::turn::{Journal, SharedJournal};
+    for (name, revision, writes, fail_store) in [
+        (
+            "disk failure",
+            0,
+            serde_json::json!({"captured":"first"}),
+            true,
+        ),
+        (
+            "wrong revision",
+            1,
+            serde_json::json!({"captured":"first"}),
+            false,
+        ),
+        (
+            "oversized value",
+            0,
+            serde_json::json!({"captured":"x".repeat(4097)}),
+            false,
+        ),
+        (
+            "invalid key",
+            0,
+            serde_json::json!({"bad key":"first"}),
+            false,
+        ),
+    ] {
+        let store = FilterJournalStore::default();
+        store
+            .fail
+            .store(fail_store, std::sync::atomic::Ordering::SeqCst);
+        let journal = SharedJournal::new(Journal::new(
+            SessionId::new(),
+            &store,
+            &FilterClock,
+            &ego_core::sink::NullSink,
+            Producer::Main,
+            ego_core::state::SessionState::default(),
+        ));
+        let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+        let generator = state_filter_generator(http.clone(), revision, writes);
+        let mut gate = BudgetGate::new(usd("10"));
+        let mut stream = generator.generate(request(), attempt_for(&mut gate, &request()));
+        let mut error = false;
+        while let Some(event) = stream.next().await {
+            match event {
+                AiEvent::FilterState(exchange) => {
+                    let _ = journal.filter_state(TurnId::new(), exchange);
+                }
+                AiEvent::Error { .. } => error = true,
+                _ => {}
+            }
+        }
+        assert!(error, "{name}");
+        assert_eq!(http.calls(), 0, "{name}");
+        assert!(store.events.lock().unwrap().is_empty(), "{name}");
+        assert_eq!(
+            stream.settle(&mut gate).unwrap().outcome.delivery(),
+            DeliveryCertainty::DefinitelyUnsent,
+            "{name}"
+        );
+    }
+}
+
+// Catches: using stale prepared bytes after another attempt has committed state.
+#[tokio::test]
+async fn protocol_filter_concurrent_snapshot_conflict_prevents_second_delivery() {
+    use ego_core::event::id::{Producer, SessionId, TurnId};
+    use ego_core::turn::{Journal, SharedJournal};
+    let store = FilterJournalStore::default();
+    let journal = SharedJournal::new(Journal::new(
+        SessionId::new(),
+        &store,
+        &FilterClock,
+        &ego_core::sink::NullSink,
+        Producer::Main,
+        ego_core::state::SessionState::default(),
+    ));
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let generator =
+        state_filter_generator(http.clone(), 0, serde_json::json!({"captured":"first"}));
+    let mut gate = BudgetGate::new(usd("10"));
+    let mut first = generator.generate(request(), attempt_for(&mut gate, &request()));
+    let mut second = generator.generate(request(), attempt_for(&mut gate, &request()));
+    let turn = TurnId::new();
+    for stream in [&mut first, &mut second] {
+        let Some(AiEvent::FilterState(exchange)) = stream.next().await else {
+            panic!("missing state read")
+        };
+        journal.filter_state(turn, exchange).unwrap();
+    }
+    // The first response cannot even open HTTP until the journal accepts it.
+    let Some(AiEvent::FilterState(exchange)) = first.next().await else {
+        panic!("missing state save")
+    };
+    assert_eq!(http.calls(), 0);
+    journal.filter_state(turn, exchange).unwrap();
+    let Some(AiEvent::FilterState(exchange)) = second.next().await else {
+        panic!("missing second state save")
+    };
+    journal.filter_state(turn, exchange).unwrap();
+    while first.next().await.is_some() {}
+    let second_events: Vec<_> = second.by_ref().collect().await;
+    assert!(second_events.iter().any(|event| matches!(event, AiEvent::Error { message, .. } if message.contains("revision conflict"))));
+    assert_eq!(http.calls(), 1);
+    assert_eq!(
+        second.settle(&mut gate).unwrap().outcome.delivery(),
+        DeliveryCertainty::DefinitelyUnsent
+    );
+    first.settle(&mut gate).unwrap();
+    let events = store.events.lock().unwrap().clone();
+    assert_eq!(events.len(), 1);
+    let mut replayed = ego_core::state::SessionState::default();
+    // Replay serialized durable bytes, not the already reduced in-memory state.
+    let event = serde_json::from_slice(&serde_json::to_vec(&events[0]).unwrap()).unwrap();
+    replayed.apply(&event);
+    let saved = replayed.protocol_filter_variables.values().next().unwrap();
+    assert_eq!(saved.revision, 1);
+    assert_eq!(
+        saved.values.get("captured").map(String::as_str),
+        Some("first")
+    );
+    // Fork/lineage replay may retain a parent's events, but a new session
+    // instance must never inherit the parent's filter variables.
+    let ego_core::event::domain::EventKind::ProtocolFilterVariablesSaved { namespace, .. } =
+        &events[0].kind
+    else {
+        panic!("missing state event")
+    };
+    let new_instance = SharedJournal::new(Journal::new(
+        SessionId::new(),
+        &store,
+        &FilterClock,
+        &ego_core::sink::NullSink,
+        Producer::Main,
+        replayed,
+    ));
+    let (read, reply) =
+        ego_core::generator::filter_state::FilterStateExchange::read(namespace.clone());
+    new_instance.filter_state(turn, read).unwrap();
+    assert!(reply.await.unwrap().unwrap().state.values.is_empty());
+}
+
+// Catches: running a user command during pure preflight, or treating a filter failure as possibly sent/retryable provider I/O.
+#[tokio::test]
+async fn protocol_filter_preflight_is_pure_and_failure_is_definitely_unsent() {
+    let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+    let command = Arc::new(TestProtocolFilter {
+        calls: 0.into(),
+        result: Err("protocol_filter test refusal"),
+    });
+    let generator =
+        generator(http.clone()).with_protocol_filter(protocol_config(), command.clone());
+    generator.ensure_expressible(&request()).unwrap();
+    assert_eq!(command.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &request());
+    let mut stream = generator.generate(request(), attempt);
+    let events = observe_filtered(&mut stream, None).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AiEvent::Error {
+            kind: ErrorKind::Invalid,
+            ..
+        }
+    )));
+    let settlement = stream.settle(&mut gate).unwrap();
+    assert_eq!(
+        settlement.outcome.delivery(),
+        DeliveryCertainty::DefinitelyUnsent
+    );
+    assert_eq!(http.calls(), 0);
+    assert_eq!(command.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+// Catches: successful filtering reclassifying an uncertain provider exchange as
+// definitely unsent, making an automatic duplicate request appear safe.
+#[tokio::test]
+async fn protocol_filter_preserves_uncertain_delivery_after_dispatch() {
+    use ego_core::permit::TransportFailure;
+    let http = StubHttp::new(Err(TransportError::possibly_sent(
+        TransportFailure::Exchange("connection lost after write".into()),
+    )));
+    let command = Arc::new(TestProtocolFilter {
+        calls: 0.into(),
+        result: Ok(br#"{"version":1,"body_base64":"e30=","identity_headers":[],"expected_revision":0,"state_writes":{}}"#.to_vec()),
+    });
+    let generator =
+        generator(http.clone()).with_protocol_filter(protocol_config(), command.clone());
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &request());
+    let mut stream = generator.generate(request(), attempt);
+    observe_filtered(&mut stream, None).await;
+    let settlement = stream.settle(&mut gate).unwrap();
+    assert_eq!(
+        settlement.outcome.delivery(),
+        DeliveryCertainty::PossiblySent
+    );
+    assert!(!settlement.outcome.retry_is_safe());
+    assert_eq!(command.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(http.calls(), 1);
+    assert_eq!(
+        http.seen.lock().unwrap()[0].body.as_deref(),
+        Some(b"{}".as_slice())
+    );
+}
+
+// Catches: hashing the unfiltered cache prefix or publishing an identity for bytes never dispatched.
+#[tokio::test]
+async fn protocol_filter_cache_identity_follows_final_bytes() {
+    use base64::Engine as _;
+    use ego_ai::wire::anthropic_messages::AnthropicMessages;
+    use ego_core::event::id::SessionId;
+    let http = StubHttp::responding(200, "");
+    let row = ProviderRow::anthropic(Url::parse("https://api.example/").unwrap());
+    let credential = row
+        .credential
+        .resolve(&FakeCredentials::holding(KEY))
+        .unwrap();
+    let body = br#"{ "model":"filtered-model", "system":[{"type":"text","text":"filtered stable prefix","cache_control":{"type":"ephemeral"}}],"messages":[{"role":"user","content":"x"}] }"#;
+    let output = serde_json::to_vec(&serde_json::json!({"version":1,
+        "body_base64":base64::engine::general_purpose::STANDARD.encode(body),"identity_headers":[],"expected_revision":0,"state_writes":{}})).unwrap();
+    let command = Arc::new(TestProtocolFilter {
+        calls: 0.into(),
+        result: Ok(output),
+    });
+    let generator = WireGenerator::new(row, &AnthropicMessages, http.clone(), credential)
+        .with_protocol_filter(protocol_config(), command);
+    let mut req = request();
+    let session = SessionId::new();
+    req.cache = Some(ego_core::generator::types::PromptCache {
+        session_id: session,
+        lineage_root: session,
+        retention: CacheRetention::Short,
+        stable_messages: 0,
+    });
+    let mut gate = BudgetGate::new(usd("10"));
+    let attempt = attempt_for(&mut gate, &req);
+    let mut stream = generator.generate(req, attempt);
+    assert!(stream.cache_prefix().is_none());
+    observe_filtered(&mut stream, Some(session)).await;
+    let prefix = stream.cache_prefix().unwrap();
+    assert_eq!(prefix.session, session);
+    // Independently calculated from the insertion-order JSON prefix with messages=[]:
+    // SHA-256, not the production cache_prefix helper as its own oracle.
+    assert_eq!(
+        prefix.digest,
+        "cb81975d1351d0e9058ed9afd1ffa0337df5ca2f85e19c7ebab6f2901e7d989e"
+    );
+    assert_eq!(
+        http.seen.lock().unwrap()[0].body.as_deref(),
+        Some(body.as_slice())
+    );
+    stream.settle(&mut gate).unwrap();
+}
+
+struct InboundFailureCommand(&'static str);
+impl ego_ai::protocol_filter::ProtocolFilterCommand for InboundFailureCommand {
+    fn run(&self, _: Vec<u8>) -> BoxFuture<'_, Result<Vec<u8>, &'static str>> {
+        Box::pin(futures::future::ready(Ok(br#"{"version":1,"body_base64":"e30=","identity_headers":[],"expected_revision":0,"state_writes":{}}"#.to_vec())))
+    }
+    fn open_response(
+        &self,
+    ) -> Result<Box<dyn ego_ai::protocol_filter::ProtocolFilterResponse>, &'static str> {
+        Ok(Box::new(InboundFailureResponse(self.0)))
+    }
+}
+struct InboundFailureResponse(&'static str);
+impl ego_ai::protocol_filter::ProtocolFilterResponse for InboundFailureResponse {
+    fn exchange(&mut self, input: Vec<u8>) -> BoxFuture<'_, Result<Vec<u8>, &'static str>> {
+        let input: serde_json::Value = serde_json::from_slice(&input).unwrap();
+        let mut output = serde_json::json!({"version":1,"sequence":input["sequence"],"body_base64":input["body_base64"]});
+        let result = match self.0 {
+            "late failure" if input["eof"] == true => Err("protocol_filter final frame refused"),
+            "sequence" => {
+                output["sequence"] = serde_json::json!(999);
+                Ok(serde_json::to_vec(&output).unwrap())
+            }
+            "response writes" => {
+                output["state_writes"] = serde_json::json!({"forbidden":"value"});
+                Ok(serde_json::to_vec(&output).unwrap())
+            }
+            _ => Ok(serde_json::to_vec(&output).unwrap()),
+        };
+        Box::pin(futures::future::ready(result))
+    }
+    fn finish(&mut self) -> BoxFuture<'_, Result<(), &'static str>> {
+        Box::pin(futures::future::ready(if self.0 == "cleanup failure" {
+            Err("protocol_filter process-tree cleanup uncertain")
+        } else {
+            Ok(())
+        }))
+    }
+}
+
+// Catches: ignoring local filter failure after a provider terminal marker,
+// accepting unsolicited response state writes, or declaring sent HTTP unsent.
+#[tokio::test]
+async fn protocol_filter_inbound_failures_override_complete_provider_terminal() {
+    for mode in [
+        "late failure",
+        "sequence",
+        "response writes",
+        "cleanup failure",
+    ] {
+        let http = StubHttp::responding(200, TEXT_TRANSCRIPT);
+        let generator = generator(http.clone())
+            .with_protocol_filter(protocol_config(), Arc::new(InboundFailureCommand(mode)));
+        let mut gate = BudgetGate::new(usd("10"));
+        let attempt = attempt_for(&mut gate, &request());
+        let mut stream = generator.generate(request(), attempt);
+        let events = observe_filtered(&mut stream, None).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AiEvent::LocalFailure { .. })),
+            "{mode}: {events:?}"
+        );
+        assert_eq!(
+            events.last(),
+            Some(&AiEvent::Stop(StopReason::Error)),
+            "{mode}: {events:?}"
+        );
+        let settlement = stream.settle(&mut gate).unwrap();
+        assert_eq!(
+            settlement.outcome.delivery(),
+            DeliveryCertainty::PossiblySent,
+            "{mode}"
+        );
+        assert_eq!(settlement.outcome.stop(), StopReason::Error, "{mode}");
+        assert!(!settlement.outcome.retry_is_safe(), "{mode}");
+        assert_eq!(http.calls(), 1, "{mode}");
+    }
+}
+
+// Catches: truncating a filtered HTTP error before EOF hides final filter
+// failure, or treating oversized filtered diagnostics as provider retry advice.
+#[tokio::test]
+async fn protocol_filter_error_responses_require_bounded_final_validation() {
+    for (mode, body) in [
+        ("late failure", "provider refused".to_owned()),
+        ("pass", "x".repeat(65_537)),
+    ] {
+        let http = StubHttp::responding(429, &body);
+        let generator = generator(http.clone())
+            .with_protocol_filter(protocol_config(), Arc::new(InboundFailureCommand(mode)));
+        let mut gate = BudgetGate::new(usd("10"));
+        let attempt = attempt_for(&mut gate, &request());
+        let mut stream = generator.generate(request(), attempt);
+        let events = observe_filtered(&mut stream, None).await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AiEvent::LocalFailure { .. })),
+            "{mode}: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AiEvent::ProviderFailure { .. })),
+            "{mode}: {events:?}"
+        );
+        assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
+        let settlement = stream.settle(&mut gate).unwrap();
+        assert_eq!(
+            settlement.outcome.delivery(),
+            DeliveryCertainty::PossiblySent
+        );
+        assert_eq!(settlement.outcome.stop(), StopReason::Error);
+        assert!(!settlement.outcome.retry_is_safe());
+        assert_eq!(http.calls(), 1);
+    }
+}

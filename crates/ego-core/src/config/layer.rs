@@ -904,11 +904,102 @@ pub struct UiLayer {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthProviderLayer {
+    /// Explicit user-owned transformation of final generation bytes.
+    pub protocol_filter: Option<ProtocolFilterConfig>,
     /// Program invoked with `login` or `refresh`; its stdout is the secret.
     pub credential_command: Option<String>,
     /// Profile identity headers. Credential and wire headers are forbidden.
     #[serde(default, deserialize_with = "auth_headers")]
     pub headers: HashMap<String, String>,
+}
+
+/// One user-owned executable. No shell, arguments or inherited environment.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProtocolFilterConfig {
+    pub command: PathBuf,
+    #[serde(default)]
+    pub identity_headers: Vec<String>,
+    #[serde(default = "protocol_filter_timeout")]
+    pub timeout_ms: u64,
+    #[serde(default = "protocol_filter_enabled")]
+    pub enabled: bool,
+}
+
+fn protocol_filter_timeout() -> u64 {
+    1000
+}
+fn protocol_filter_enabled() -> bool {
+    true
+}
+
+impl ProtocolFilterConfig {
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if !self.command.is_absolute()
+            || self.command.as_os_str().is_empty()
+            || self.command.to_string_lossy().contains('\0')
+            || !(1..=1000).contains(&self.timeout_ms)
+            || self.identity_headers.len() > 16
+        {
+            return Err(
+                "protocol_filter requires an absolute executable, at most 16 identity headers and 1..1000ms",
+            );
+        }
+        let mut seen = std::collections::HashSet::new();
+        for name in &self.identity_headers {
+            if !is_protocol_filter_identity_header(name) || !seen.insert(name.to_ascii_lowercase())
+            {
+                return Err(
+                    "protocol_filter contains a forbidden, invalid or duplicate identity header",
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Identity fields cannot change authentication, routing or the wire contract.
+pub fn is_protocol_filter_identity_header(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    !name.is_empty()
+        && name.len() <= 128
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        && !["proxy-", "sec-", "content-", "accept-", "x-forwarded-"]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+        && !name.contains("token")
+        && !name.contains("api-key")
+        && !name.contains("auth")
+        && !name.contains("cookie")
+        && !name.ends_with("-version")
+        && !name.ends_with("-beta")
+        && !matches!(
+            name.as_str(),
+            "host"
+                | "connection"
+                | "content-length"
+                | "content-type"
+                | "content-encoding"
+                | "content-range"
+                | "content-digest"
+                | "digest"
+                | "trailer"
+                | "transfer-encoding"
+                | "te"
+                | "upgrade"
+                | "accept"
+                | "accept-encoding"
+                | "accept-language"
+                | "expect"
+                | "range"
+                | "chatgpt-account-id"
+                | "forwarded"
+                | "via"
+                | "x-forwarded-host"
+                | "x-forwarded-for"
+                | "x-forwarded-proto"
+                | "x-http-method-override"
+        )
 }
 
 /// Header names an operator's `[auth.<provider>.headers]` table may not set.
@@ -1010,6 +1101,20 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
+        for provider in value.auth.values() {
+            if let Some(filter) = &provider.protocol_filter {
+                if source != Source::User {
+                    return Err(ConfigError::Invalid {
+                        source,
+                        message: "protocol_filter requires user configuration".into(),
+                    });
+                }
+                filter.validate().map_err(|message| ConfigError::Invalid {
+                    source,
+                    message: message.into(),
+                })?;
+            }
+        }
         if let Some(instructions) = &value.instructions
             && (source != Source::User
                 || instructions

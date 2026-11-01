@@ -22,6 +22,9 @@ use crate::state::Usage;
 /// not a design choice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AiEvent {
+    /// Local preparation must be acknowledged by the session owner before send.
+    #[serde(skip)]
+    FilterState(super::filter_state::FilterStateExchange),
     /// Provider-owned block; visible blocks replace the matching assistant history item.
     ProviderContent {
         state: ReasoningState,
@@ -118,6 +121,10 @@ pub enum AiEvent {
     /// message is not matchable without matching on a provider's prose, and a
     /// kind cannot say which parameter was wrong.
     Error { message: String, kind: ErrorKind },
+    /// Host-safe diagnostic constructed by local request preparation.
+    /// Unlike provider content, this does not prove that any request arrived.
+    /// Raw command output and upstream bodies must never be supplied here.
+    LocalFailure { cause: String },
     /// What a host may be told about the failure the provider just reported.
     ///
     /// Beside [`Error`](Self::Error) and not a field on it, because the two

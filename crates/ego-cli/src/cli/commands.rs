@@ -14,6 +14,10 @@ pub(super) struct RunCommand {
     /// The prompt. `-` reads it from stdin.
     pub(super) prompt: Option<String>,
 
+    /// Resume the latest saved session in this workspace without the terminal picker.
+    #[arg(long, conflicts_with_all = ["prompt", "file", "session", "session_id", "worktree"])]
+    pub(super) continua: bool,
+
     #[command(flatten)]
     pub(super) flags: Flags,
 }
@@ -47,7 +51,7 @@ pub(super) struct ResumeCommand {
     #[arg(long, value_parser = parse_name_operation, requires = "id", conflicts_with_all = ["goal_operation", "prompt", "answers", "resume-run-options"])]
     pub(super) name: Option<NameOperation>,
 
-    /// Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON.
+    /// Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON.
     #[arg(long, value_parser = parse_goal_operation, requires = "id", conflicts_with_all = ["name", "prompt", "answers", "resume-run-options"])]
     pub(super) goal_operation: Option<GoalOperation>,
 
@@ -821,7 +825,7 @@ pub(super) struct Flags {
     pub(super) context_interval: u32,
 
     /// Maximum automatic goal continuation turns.
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = ego_core::goal::DEFAULT_CONTINUATION_BUDGET)]
     pub(super) goal_turns: u32,
 
     /// Evaluator argv as a JSON string array; reads evidence JSON on stdin.
@@ -929,20 +933,15 @@ impl clap::ValueEnum for RootAccessValue {
 #[derive(Debug, Parser)]
 #[command(
     name = "ego setup",
-    about = "Inspect expected work without running effects.",
+    about = "Configure saved user settings in an interactive terminal.",
     disable_help_subcommand = true
 )]
 pub(super) struct SetupCommand {
-    /// Select proposal item IDs as one comma-separated list; repeat to add IDs.
-    #[arg(long, value_name = "ID[,ID...]", value_delimiter = ',', num_args = 1, action = ArgAction::Append)]
-    pub(super) items: Option<Vec<usize>>,
-    /// Offer a validated judge for unresolved policy; never authorizes an action.
-    #[arg(long)]
-    pub(super) judge: Option<String>,
-    pub(super) prompt: Option<String>,
+    /// Edit one user profile rather than the base user settings.
     #[arg(long)]
     pub(super) profile: Option<String>,
-    #[arg(long)]
+    /// Resolve effective settings for this workspace.
+    #[arg(short = 'C', long)]
     pub(super) directory: Option<PathBuf>,
 }
 

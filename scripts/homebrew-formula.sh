@@ -11,7 +11,7 @@ directory=${3:?}
 printf '%s\n' 'class Ego < Formula' '  desc "Provider-agnostic coding agent harness"'
 printf '  homepage "https://github.com/%s"\n' "$repository"
 printf '  version "%s"\n' "${tag#v}"
-printf '%s\n' '  license "MIT"'
+printf '%s\n' '  license "Apache-2.0"'
 for os in macos linux; do
   echo "  on_$os do"
   for cpu in arm intel; do

@@ -25,6 +25,7 @@ fn resume_metadata_operations_are_non_interactive_for_every_output_format() {
     for operation in [
         "show",
         "set=Ship the product",
+        "extend=3",
         "achieve",
         "block=API unavailable",
     ] {
@@ -66,6 +67,10 @@ fn resume_metadata_rejects_prompt_answers_mixed_operations_and_malformed_values(
         vec!["resume", SOME_ID, "--name", "set="],
         vec!["resume", SOME_ID, "--goal-operation", "set="],
         vec!["resume", SOME_ID, "--goal-operation", "block="],
+        vec!["resume", SOME_ID, "--goal-operation", "extend="],
+        vec!["resume", SOME_ID, "--goal-operation", "extend=0"],
+        vec!["resume", SOME_ID, "--goal-operation", "extend=-1"],
+        vec!["resume", SOME_ID, "--goal-operation", "extend=4294967296"],
         vec!["resume", SOME_ID, "--name", "rename=old"],
         vec!["resume", SOME_ID, "--goal-operation", "finish"],
     ] {

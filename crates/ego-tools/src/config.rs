@@ -199,10 +199,8 @@ fn batch_candidate(text: &str, changes: &[UserConfigMutation]) -> Result<String,
             change,
             UserConfigMutation::Root { .. }
                 | UserConfigMutation::Rules { .. }
-                | UserConfigMutation::ManagedSet {
-                    key: ManagedConfigKey::ExecPaths | ManagedConfigKey::PermissionsJudge,
-                    ..
-                }
+                | UserConfigMutation::ManagedSet { .. }
+                | UserConfigMutation::ManagedUnset { .. }
         ) {
             return Err(UserConfigError::new(
                 "setup batch contains unsupported mutation",
@@ -564,6 +562,22 @@ fn apply(
     mutation: UserConfigMutation,
 ) -> Result<bool, UserConfigError> {
     match mutation {
+        UserConfigMutation::GrantRoot { target, root } => {
+            let mut roots = match managed_value(parsed, &target, &ManagedConfigKey::Roots, document)
+            {
+                Some(ManagedConfigValue::Roots(roots)) => roots,
+                _ => Vec::new(),
+            };
+            roots.retain(|existing| existing.path != root.path);
+            roots.push(root);
+            apply_managed_set(
+                document,
+                &target,
+                ManagedConfigKey::Roots,
+                &ManagedConfigValue::Roots(roots),
+            )?;
+            Ok(true)
+        }
         UserConfigMutation::Root {
             target,
             path,
@@ -578,8 +592,13 @@ fn apply(
             if let Some(access) = access {
                 if let Some(root) = roots.iter_mut().find(|root| root.path == path) {
                     root.access = access;
+                    root.consent = None;
                 } else {
-                    roots.push(ego_core::permit::RootCfg { path, access });
+                    roots.push(ego_core::permit::RootCfg {
+                        consent: None,
+                        path,
+                        access,
+                    });
                 }
             } else {
                 roots.retain(|root| root.path != path);

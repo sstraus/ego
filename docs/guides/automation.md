@@ -1,5 +1,7 @@
 # Automation and agent files
 
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/automation.html).
+
 Headless runs put the harness into a script: an explicit prompt enters, structured
 output and an exit status leave. They never stop to ask for trust or permission.
 Choose the model, instructions, permitted effects, and limits explicitly.
@@ -31,7 +33,7 @@ workspace trust; `--no-tools` restricts the catalogue.
 | --- | --- |
 | `--timeout 30s`, `--max-turns N` | Bound elapsed work or turns |
 | `--max-output-tokens N` | Limit generated tokens per request, under model and system ceilings |
-| `--budget 20k` / `--budget '2.5$'` | Bound tokens or money; monetary admission needs known pricing |
+| `--budget 20k` / `--budget '2.5$'` | Bound tokens or money; money caps cover known recorded spend only |
 | `--schema @FILE` or inline schema | Validate the final answer; the validated object becomes the result |
 | `--schema-retries N` | Re-prompt after mismatch, then fail if still invalid |
 | `--retry N`, repeatable `--fallback PROVIDER/MODEL` | Retry or change provider only after a delivery-safe failure |

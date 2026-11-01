@@ -1,13 +1,13 @@
 # CLI help from a verified binary
 
-Captured from `ego 0.4.0` on 2026-10-30. Binary SHA-256: `9edc678efbbcf456311bc9db1c7583e996b08d57839163e254cdb89a4382fa7b`.
+Captured from `ego 0.4.3` on 2026-11-01. Binary SHA-256: `13c4ea47c1bfdeee8530ac304f01bd518c15f97d647c69b72b0d9a2e68b02c0e`.
 
 This is a dated help-only snapshot, not a separate command specification. The [generated reference](cli.md) follows the source parser. For your installed binary, use `ego COMMAND SUBCOMMAND --help`.
 
 ## `ego --help`
 
 ```text
-ego 0.4.0 — an agent you run from a terminal.
+ego 0.4.3 — an agent you run from a terminal.
 
 Usage:
   ego [OPTIONS] [PROMPT]
@@ -41,6 +41,8 @@ Commands:
   mcp-server  Serve scoped ego runs over MCP on stdio
   worktree    Inspect or safely remove a retained local worktree
 
+      --continua
+          Resume the latest saved session in this workspace without the terminal picker
       --worktree <BRANCH>
           Create a retained managed worktree on this explicitly approved new branch
   -f, --file <FILE>
@@ -282,7 +284,7 @@ Options:
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
-          Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON
+          Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON
   -f, --file <FILE>
           Read the instruction and its invocation configuration from an agent file
       --var <KEY=VALUE>
@@ -404,7 +406,7 @@ Options:
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
-          Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON
+          Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON
   -f, --file <FILE>
           Read the instruction and its invocation configuration from an agent file
       --var <KEY=VALUE>
@@ -729,18 +731,13 @@ Options:
 ## `ego setup --help`
 
 ```text
-Inspect expected work without running effects.
+Configure saved user settings in an interactive terminal.
 
-Usage: ego setup [OPTIONS] [PROMPT]
-
-Arguments:
-  [PROMPT]
+Usage: ego setup [OPTIONS]
 
 Options:
-      --items <ID[,ID...]>     Select proposal item IDs as one comma-separated list; repeat to add IDs
-      --judge <JUDGE>          Offer a validated judge for unresolved policy; never authorizes an action
-      --profile <PROFILE>
-      --directory <DIRECTORY>
+      --profile <PROFILE>      Edit one user profile rather than the base user settings
+  -C, --directory <DIRECTORY>  Resolve effective settings for this workspace
   -h, --help                   Print help
 ```
 
@@ -1366,7 +1363,7 @@ Options:
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
-          Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON
+          Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON
   -f, --file <FILE>
           Read the instruction and its invocation configuration from an agent file
       --var <KEY=VALUE>

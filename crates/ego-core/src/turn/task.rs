@@ -62,7 +62,7 @@ pub(super) fn descriptor() -> ToolDescriptor {
         parameters: json!({"type":"object", "additionalProperties":false,
             "required":["name","prompt"], "properties": {
                 "background":{"type":"boolean", "default":false, "description":"Launch a durable child and return its ID without waiting. Parent interruption does not cancel it."},
-                "plan_step":{"type":"string", "description":"Existing durable plan step ID. Child execution marks it in_progress, then completed or blocked."},
+                "plan_step":{"type":"string", "description":"Optional foreground-only binding to an existing durable plan step. Omit or leave empty when unbound. Child execution marks a bound step in_progress, then completed or blocked. Background tasks do not accept a plan binding."},
                 "name":{"type":"string", "minLength":1,"maxLength":80},
                 "prompt":{"type":"string", "minLength":1,"maxLength":65536},
                 "agent":{"type":"string", "minLength":1,"maxLength":80}
@@ -71,8 +71,9 @@ pub(super) fn descriptor() -> ToolDescriptor {
 }
 
 pub(super) fn parse(params: Value) -> Result<TaskRequest, String> {
-    let request: TaskRequest = serde_json::from_value(params)
+    let mut request: TaskRequest = serde_json::from_value(params)
         .map_err(|error| format!("task was called with invalid arguments: {error}"))?;
+    request.plan_step = request.plan_step.filter(|id| !id.trim().is_empty());
     if request.name.trim().is_empty()
         || request.name.chars().count() > 80
         || request.name.chars().any(char::is_control)
@@ -113,7 +114,7 @@ pub trait BackgroundTaskPort: Send + Sync {
 
 /// Task guidance is the same in every host; external coordination uses its own API.
 pub fn delegation_guidance() -> &'static str {
-    "For delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Use /tasks to inspect or cancel it."
+    "For delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Continue ready, non-overlapping work while the child runs, including independent validation; do not end your turn merely to wait for unrelated research. Wait only when the next action depends on the child's result or no independent work remains. A launch receipt or running lifecycle status is not a completed result; report the child as running until its final result or failure is delivered. Use /tasks to inspect or cancel it."
 }
 
 /// Only accounting crosses into the parent's durable log. Conversation and
@@ -229,9 +230,50 @@ struct TaskSink<'s> {
     turn: TurnId,
     name: String,
     item: ItemId,
+    child_turn: Mutex<Option<TurnId>>,
+}
+
+impl TaskSink<'_> {
+    fn settle(&self, outcome: crate::public::ChildOutcome) {
+        let Some(turn) = self.child_turn.lock().expect("child lifecycle lock").take() else {
+            return;
+        };
+        if let Err(error) = self.parent.publish(&PublicEvent::ChildLifecycle {
+            turn: self.turn,
+            item: self.item,
+            child: crate::public::ChildIdentity::Foreground { turn },
+            phase: crate::public::ChildPhase::Settled { outcome },
+        }) {
+            tracing::error!(%error, "child settlement publication failed");
+        }
+    }
 }
 impl EventSink for TaskSink<'_> {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        use crate::public::{ChildIdentity, ChildOutcome, ChildPhase};
+        match event {
+            PublicEvent::TurnStarted { turn } => {
+                *self.child_turn.lock().expect("child lifecycle lock") = Some(*turn);
+                if let Err(error) = self.parent.publish(&PublicEvent::ChildLifecycle {
+                    turn: self.turn,
+                    item: self.item,
+                    child: ChildIdentity::Foreground { turn: *turn },
+                    phase: ChildPhase::Started,
+                }) {
+                    tracing::error!(%error, "child admission publication failed");
+                }
+            }
+            PublicEvent::TurnCompleted {
+                ok, exit_reason, ..
+            } => {
+                self.settle(match exit_reason {
+                    ExitReason::Cancelled(_) => ChildOutcome::Interrupted,
+                    ExitReason::Completed if *ok => ChildOutcome::Completed,
+                    _ => ChildOutcome::Failed,
+                });
+            }
+            _ => {}
+        }
         // Keep progress on the same serialized publication path as nested tools.
         let activity = child_activity(event);
         if let Some(activity) = activity
@@ -382,6 +424,7 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
                 turn: self.turn,
                 name: request.name,
                 item,
+                child_turn: Mutex::new(None),
             };
             let mut child = TurnLoop::new(
                 Session {
@@ -412,10 +455,11 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
             child.analysis_observation = self.analysis_observation;
             child.inherited_effect_tools = self.effect_ceiling;
             child.elicitor = self.elicitor;
-            let outcome = child
-                .run(&request.prompt)
-                .await
-                .map_err(|error| error.cause)?;
+            let outcome = child.run(&request.prompt).await;
+            // Storage/accounting errors can abandon a turn without TurnCompleted.
+            // The actual foreground owner still retracts its admitted child once.
+            sink.settle(crate::public::ChildOutcome::Failed);
+            let outcome = outcome.map_err(|error| error.cause)?;
             let state = child.state();
             let final_text = state
                 .items
@@ -561,7 +605,27 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     status: crate::plan::StepStatus::InProgress,
                 };
                 let valid = if claimed_steps.insert(id.clone()) {
-                    self.state().plan.apply(&update)
+                    let mut plan = self.state().plan;
+                    plan.apply(&update).map_err(|error| {
+                        if plan.steps.iter().any(|step| &step.id == id) {
+                            return error;
+                        }
+                        let advice = if plan.steps.is_empty() {
+                            "no plan steps are defined; omit plan_step for an unbound task"
+                                .to_owned()
+                        } else {
+                            let ids = plan
+                                .steps
+                                .iter()
+                                .map(|step| step.id.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            format!(
+                                "available plan steps: {ids}; omit plan_step for an unbound task"
+                            )
+                        };
+                        format!("{error}; {advice}")
+                    })
                 } else {
                     Err(format!("plan step already assigned in this batch: {id}"))
                 };

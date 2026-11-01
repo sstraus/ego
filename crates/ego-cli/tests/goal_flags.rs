@@ -433,3 +433,92 @@ fn goal_visibility_headless_quiet_keeps_receipts_on_stderr() {
     }
     assert_eq!(stub.generations().len(), 2);
 }
+
+/// Catches: the allowance stays exhausted after the operator extends it.
+#[cfg(unix)]
+#[test]
+fn goal_extend_grants_more_turns_to_an_exhausted_goal() {
+    use support::{Places, Plan, Reply, Stub, text};
+    let places = Places::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("first")),
+            Reply::Sse(text("continued")),
+            Reply::Sse(text("resumed")),
+            Reply::Sse(text("extended")),
+        ],
+        ..Plan::default()
+    });
+    let checker = serde_json::json!(["/bin/sh", "-c",
+        "cat >/dev/null; printf '%s\\n' '{\"verdict\":\"continue\",\"reason\":\"artifact missing\"}'"
+    ]).to_string();
+    let first = places
+        .ego(&stub)
+        .args([
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--goal",
+            "Keep goal identity",
+            "--goal-turns",
+            "1",
+            "--goal-check-command",
+            &checker,
+            "--allow",
+            "exec(/bin/sh *)",
+            "work",
+        ])
+        .run();
+    assert_eq!(first.code, Some(0), "{}", first.stderr);
+    assert!(first.stderr.contains("turns 1/1"), "{}", first.stderr);
+    let metadata = |operation: &str| {
+        support::Ego::at(places.home_path(), places.workspace_path(), None)
+            .subcommand("resume")
+            .args([
+                support::FIXTURE_SESSION_ID,
+                "--goal-operation",
+                operation,
+                "--output",
+                "json",
+            ])
+            .run()
+    };
+    let before = metadata("show").report();
+    let extended = metadata("extend=1");
+    assert_eq!(extended.code, Some(0), "{}", extended.stderr);
+    let after = metadata("show").report();
+    assert_eq!(before["goal"]["id"], after["goal"]["id"]);
+    assert_eq!(before["goal"]["created_seq"], after["goal"]["created_seq"]);
+    assert_eq!(stub.generations().len(), 2, "metadata must not start work");
+    let resumed = places
+        .ego(&stub)
+        .subcommand("resume")
+        .args([
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--model",
+            "ollama/qwen3",
+            "--goal-check-command",
+            &checker,
+            "--allow",
+            "exec(/bin/sh *)",
+            "continue work",
+        ])
+        .run();
+    assert_eq!(resumed.code, Some(0), "{}", resumed.stderr);
+    assert!(
+        resumed.stderr.contains("Goal turn 2 of 2:"),
+        "{}",
+        resumed.stderr
+    );
+    assert!(
+        resumed.stderr.contains("/goal extend N"),
+        "{}",
+        resumed.stderr
+    );
+    assert_eq!(stub.generations().len(), 4);
+}

@@ -48,3 +48,17 @@ pub fn negotiate(wanted: ProtocolVersion) -> Option<ProtocolVersion> {
     // or below the ask, so every version from `SERVED` upward reaches this one.
     (wanted >= SERVED).then_some(SERVED)
 }
+
+/// The client explicitly accepts version 1 of the ego child activity extension.
+pub fn child_activity_requested(
+    capabilities: &agent_client_protocol_schema::v1::ClientCapabilities,
+) -> bool {
+    capabilities
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("ego"))
+        .and_then(|ego| ego.get("childActivity"))
+        .and_then(|activity| activity.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        == Some(1)
+}

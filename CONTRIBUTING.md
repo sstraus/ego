@@ -62,7 +62,7 @@ workflow as a local validation command.
 
 ## License and private information
 
-Contributions are provided under the project's [MIT License](LICENSE). Preserve
+Contributions are provided under the project's [Apache License 2.0](LICENSE). Preserve
 third-party copyright and license notices. Do not commit API keys, access tokens,
 personal paths, private host inventories, or local diagnostic output. Use
 anonymized fixtures and record which fields were changed.

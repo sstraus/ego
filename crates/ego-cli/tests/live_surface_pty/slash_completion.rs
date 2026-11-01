@@ -44,12 +44,22 @@ fn selected_completion(accept: &[u8], tab_first: bool) {
             input.write_all(b"\t").expect("insert selection");
             input.flush().expect("flush");
             drain_until_quiet(&reader, &mut output);
-            assert!(!normalized(&output[before..]).contains("mcp:"));
+            assert!(!normalized(&output[before..]).contains("Choose MCP server or action"));
             assert!(stub.generations().is_empty());
         }
         input.write_all(accept).expect("accept selection");
         input.flush().expect("flush");
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            until_normalized_without_new_generation(
+                &reader,
+                &mut output,
+                start,
+                "Choose MCP server or action",
+                &stub,
+                0,
+            );
+            input.write_all(b"\r").expect("show server status");
+            input.flush().expect("flush");
             until_normalized_without_new_generation(&reader, &mut output, start, "mcp:", &stub, 0);
             until_prompt_from(&reader, &mut output, start);
             drain_until_quiet(&reader, &mut output);
@@ -215,6 +225,16 @@ fn delete_and_horizontal_arrows_keep_the_open_menu_acceptable() {
         .expect("delete, left, right, accept");
     input.flush().expect("flush");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        until_normalized_without_new_generation(
+            &reader,
+            &mut output,
+            start,
+            "Choose MCP server or action",
+            &stub,
+            0,
+        );
+        input.write_all(b"\r").expect("show server status");
+        input.flush().expect("flush");
         until_normalized_without_new_generation(&reader, &mut output, start, "mcp:", &stub, 0);
         until_prompt_from(&reader, &mut output, start);
         drain_until_quiet(&reader, &mut output);

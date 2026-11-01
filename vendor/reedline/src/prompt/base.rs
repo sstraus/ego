@@ -271,7 +271,8 @@ pub trait Prompt: Send {
 
     /// Replace the submitted prompt and buffer with a host receipt. The original
     /// buffer is still returned and saved in history. `None` keeps the ordinary
-    /// prompt echo. The receipt must fit the supplied terminal width.
+    /// prompt echo. The receipt is committed in full, including rows above the
+    /// terminal viewport; `width` is available for host-specific formatting.
     fn render_prompt_submission(&self, _buffer: &str, _width: u16) -> Option<String> {
         None
     }
@@ -279,6 +280,12 @@ pub trait Prompt: Send {
     /// Content below the editable buffer. It is measured and retired with the prompt.
     fn render_prompt_footer(&self) -> Cow<'_, str> {
         Cow::Borrowed("")
+    }
+
+    /// Blank rows below the editor and footer, leaving at least one editable row.
+    /// Padding shares the footer's measured layout and is not transcript content.
+    fn bottom_padding(&self) -> u16 {
+        0
     }
 
     /// Provide content of the left full prompt

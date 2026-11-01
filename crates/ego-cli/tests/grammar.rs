@@ -1207,6 +1207,8 @@ fn every_command_the_document_offers_is_in_exactly_one_table() {
         .nth(1)
         .expect("the command set is a fenced block");
 
+    // Root session selectors are flags, not subcommands in BUILT.
+    let root_selectors = ["--continua"];
     let mut seen = 0;
     for line in block.lines() {
         // `ego [PROMPT]` is the interactive form, which is not a command name;
@@ -1221,7 +1223,7 @@ fn every_command_the_document_offers_is_in_exactly_one_table() {
             continue;
         }
         seen += 1;
-        let built = cli::BUILT.contains(&name);
+        let built = cli::BUILT.contains(&name) || root_selectors.contains(&name);
         let unbuilt = cli::UNBUILT.iter().any(|(listed, _)| *listed == name);
         assert!(
             built ^ unbuilt,
@@ -1236,7 +1238,7 @@ fn every_command_the_document_offers_is_in_exactly_one_table() {
     }
     assert_eq!(
         seen,
-        cli::BUILT.len() + cli::UNBUILT.len(),
+        cli::BUILT.len() + cli::UNBUILT.len() + root_selectors.len(),
         "every table entry must be a command §2 actually offers"
     );
 }

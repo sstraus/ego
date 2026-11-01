@@ -59,9 +59,8 @@ pub fn store_root(explicit: Option<&PathBuf>) -> Result<PathBuf, UsageError> {
 
 /// The id this run writes under.
 ///
-/// `store` is consulted for exactly one choice — [`SessionChoice::Resume`],
-/// which selects a session that already exists rather than deriving or
-/// inventing an id.
+/// `store` is consulted for the resume choices, which select an existing session,
+/// rather than deriving or inventing an id.
 pub fn id_for(
     choice: &SessionChoice,
     workspace: &std::path::Path,
@@ -77,6 +76,7 @@ pub fn id_for(
             SessionId::from_str(&derived.to_string())
                 .map_err(|err| UsageError(format!("a derived session id was not one: {err}")))
         }
+        SessionChoice::ResumeLatest => crate::catalogue::resolve(store, workspace, None),
         SessionChoice::Resume(named) => {
             let wanted =
                 match named {

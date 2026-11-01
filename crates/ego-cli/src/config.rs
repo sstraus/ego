@@ -1476,7 +1476,7 @@ fn quote(value: &str) -> String {
     format!("\"{escaped}\"")
 }
 
-fn user_store() -> Result<OsUserConfigStore<Arc<OsIo>>, RunTermination> {
+pub(crate) fn user_store() -> Result<OsUserConfigStore<Arc<OsIo>>, RunTermination> {
     let path = ego_home()
         .ok_or_else(|| RunTermination::Failed {
             message: "config management needs EGO_HOME or HOME for user configuration".to_owned(),

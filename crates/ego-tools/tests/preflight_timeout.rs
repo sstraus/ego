@@ -91,21 +91,74 @@ fn wait_for(path: &Path) {
     assert!(path.exists(), "secret-child fixture did not write {path:?}");
 }
 
+fn recorded_pid(path: &Path) -> Option<i32> {
+    std::fs::read_to_string(path)
+        .ok()?
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+}
+
 fn assert_gone(path: &Path) {
-    let pid = std::fs::read_to_string(path).expect("process marker");
+    let pid = recorded_pid(path)
+        .expect("positive process ID in marker")
+        .to_string();
     let deadline = Instant::now() + OBSERVATION_WINDOW;
     while Instant::now() < deadline {
         let alive = Command::new("/bin/kill")
             .args(["-0", pid.trim()])
-            .status()
+            .output()
             .expect("kill utility")
+            .status
             .success();
         if !alive {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("secret child {} survived cleanup", pid.trim());
+    let state = Command::new("ps")
+        .args(["-p", pid.trim(), "-o", "pid,ppid,pgid,state,command"])
+        .output()
+        .expect("process state");
+    panic!(
+        "secret child {} survived cleanup: {}",
+        pid.trim(),
+        String::from_utf8_lossy(&state.stdout)
+    );
+}
+
+fn assert_not_running(path: &Path) {
+    let pid = recorded_pid(path)
+        .expect("positive process ID in marker")
+        .to_string();
+    let deadline = Instant::now() + OBSERVATION_WINDOW;
+    while Instant::now() < deadline {
+        let state = Command::new("ps")
+            .args(["-p", pid.trim(), "-o", "state="])
+            .output()
+            .expect("process state");
+        assert!(
+            state.stderr.is_empty(),
+            "process inspection failed: {}",
+            String::from_utf8_lossy(&state.stderr)
+        );
+        if !state.status.success() {
+            assert!(
+                state.stdout.is_empty(),
+                "unexpected process inspection output"
+            );
+            return;
+        }
+        if state.stdout.first() == Some(&b'Z') {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!(
+        "secret child {} is still running after runtime shutdown",
+        pid.trim()
+    );
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -252,4 +305,106 @@ fn partial_secret_stdout_is_discarded_on_failure_and_errors_are_redacted() {
         !display.contains("stderr-secret"),
         "stderr leaked in error display"
     );
+}
+
+// Catches: cancellation of a filter leaving its child or descendants running.
+#[test]
+fn protocol_filter_cancellation_reaps_owned_tree() {
+    let fixture = fixture(None);
+    let cancel = fixture.cancel.clone();
+    let descendant = fixture.descendant.clone();
+    let canceller = std::thread::spawn(move || {
+        wait_for(&descendant);
+        cancel.cancel(CancelCause::User);
+    });
+    let result = runtime().block_on(ego_tools::exec::run_protocol_child(
+        spec(
+            &fixture,
+            tree_body(),
+            None,
+            Some(SecretMaterial::new(vec![])),
+        ),
+        1024,
+    ));
+    canceller.join().unwrap();
+    assert!(
+        matches!(result, Err(SecretChildError::Cancelled)),
+        "{result:?}"
+    );
+    assert_gone(&fixture.direct);
+    assert_gone(&fixture.descendant);
+}
+
+// Catches: Tokio shutdown aborting filter cleanup before a TERM-ignoring descendant is killed.
+#[test]
+fn protocol_filter_runtime_shutdown_kills_term_ignoring_descendant() {
+    let fixture = fixture(None);
+    let request = spec(
+        &fixture,
+        r#"
+printf '%s\n' "$$" > "$1"
+trap '' TERM
+/bin/sh -c 'trap "" TERM; printf "%s\n" "$$" > "$1"; while :; do sleep 1; done' fixture "$2" &
+while :; do sleep 1; done
+"#,
+        Some(Duration::from_secs(30)),
+        Some(SecretMaterial::new(vec![])),
+    );
+    let runtime = runtime();
+    runtime.block_on(async {
+        let running = tokio::spawn(ego_tools::exec::run_protocol_child(request, 1024));
+        let deadline = Instant::now() + OBSERVATION_WINDOW;
+        while recorded_pid(&fixture.descendant).is_none() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            recorded_pid(&fixture.direct).is_some() && recorded_pid(&fixture.descendant).is_some(),
+            "child and grandchild never recorded valid process IDs"
+        );
+        assert!(
+            !running.is_finished(),
+            "filter ended before runtime shutdown"
+        );
+        drop(running); // Keep the filter active until runtime shutdown.
+    });
+    let shutdown_started = Instant::now();
+    drop(runtime);
+    assert!(
+        shutdown_started.elapsed() < Duration::from_secs(4),
+        "runtime shutdown exceeded the bounded cleanup interval"
+    );
+    // The test process is still the shell's parent: a killed child can stay a
+    // zombie until that parent exits, but it must not execute again.
+    assert_not_running(&fixture.direct);
+    assert_not_running(&fixture.descendant);
+}
+
+// Catches: dropping the generation future orphaning the filter supervisor and its process tree.
+#[test]
+fn protocol_filter_dropped_future_still_reaps_owned_tree() {
+    let fixture = fixture(None);
+    let request = spec(
+        &fixture,
+        tree_body(),
+        None,
+        Some(SecretMaterial::new(vec![])),
+    );
+    runtime().block_on(async {
+        let running = tokio::spawn(ego_tools::exec::run_protocol_child(request, 1024));
+        let deadline = Instant::now() + OBSERVATION_WINDOW;
+        while !fixture.descendant.exists() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(fixture.descendant.exists());
+        running.abort();
+        let _ = running.await;
+        let direct = fixture.direct.clone();
+        let descendant = fixture.descendant.clone();
+        tokio::task::spawn_blocking(move || {
+            assert_gone(&direct);
+            assert_gone(&descendant);
+        })
+        .await
+        .unwrap();
+    });
 }

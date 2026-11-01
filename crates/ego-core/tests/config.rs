@@ -215,6 +215,7 @@ fn auth_precedence_merges_command_and_headers_per_field_and_name() {
                 auth: std::collections::HashMap::from([(
                     "openai-codex".to_string(),
                     AuthProviderLayer {
+                        protocol_filter: None,
                         credential_command: Some("system-mint".to_string()),
                         headers: std::collections::HashMap::from([
                             ("Originator".to_string(), "system".to_string()),
@@ -231,6 +232,7 @@ fn auth_precedence_merges_command_and_headers_per_field_and_name() {
                 auth: std::collections::HashMap::from([(
                     "openai-codex".to_string(),
                     AuthProviderLayer {
+                        protocol_filter: None,
                         credential_command: None,
                         headers: std::collections::HashMap::from([
                             ("originator".to_string(), "operator".to_string()),
@@ -1956,6 +1958,72 @@ fn private_bridge_configuration_is_rejected() {
         ConfigLayer::parse(
             Source::User,
             "[profile.coordinator.orchestration]\nmode='active'"
+        )
+        .is_err()
+    );
+}
+
+// Catches: project code gaining execution authority or an allowlist granting auth/routing mutation.
+#[test]
+fn protocol_filter_config_is_strict_user_only_and_identity_only() {
+    let command = if cfg!(windows) {
+        "C:/filters/filter.exe"
+    } else {
+        "/filters/filter"
+    };
+    let valid = format!(
+        "[auth.example.protocol_filter]\ncommand = '{command}'\nidentity_headers = ['user-agent', 'x-request-identity']\n"
+    );
+    let parsed = ConfigLayer::parse(Source::User, &valid).unwrap();
+    let effective = resolve(&[parsed], Trust::Untrusted, None).unwrap();
+    let filter = effective.auth["example"].protocol_filter.as_ref().unwrap();
+    assert!(filter.enabled);
+    assert_eq!(filter.timeout_ms, 1000);
+    for source in [
+        Source::System,
+        Source::Project,
+        Source::Local,
+        Source::Flags,
+        Source::Env,
+    ] {
+        assert!(ConfigLayer::parse(source, &valid).is_err(), "{source:?}");
+    }
+    for forbidden in [
+        "Authorization",
+        "Proxy-Authorization",
+        "X-Api-Key",
+        "x-goog-api-key",
+        "Host",
+        "Content-Length",
+        "Content-Type",
+        "Transfer-Encoding",
+        "Connection",
+        "Accept",
+        "Cookie",
+        "OpenAI-Beta",
+        "anthropic-version",
+        "chatgpt-account-id",
+        "x-forwarded-host",
+        "sec-websocket-key",
+        "x-client-token",
+    ] {
+        let text = valid.replace(
+            "'user-agent', 'x-request-identity'",
+            &format!("'{forbidden}'"),
+        );
+        assert!(
+            ConfigLayer::parse(Source::User, &text).is_err(),
+            "{forbidden}"
+        );
+    }
+    for extra in ["timeout_ms = 0", "timeout_ms = 1001", "unexpected = true"] {
+        assert!(ConfigLayer::parse(Source::User, &format!("{valid}{extra}\n")).is_err());
+    }
+    assert!(ConfigLayer::parse(Source::User, &valid.replace(command, "relative-command")).is_err());
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            &valid.replace("'user-agent', 'x-request-identity'", "'x-id', 'X-ID'")
         )
         .is_err()
     );

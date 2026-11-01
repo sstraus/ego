@@ -6,6 +6,103 @@ use std::io::Read;
 use std::time::{Duration, Instant};
 use support::{FIXTURE_SESSION_ID, Places, Plan, Reply, Stub, text, tool_call};
 
+// Catches: --continua opens the picker or a new session rather than the last saved workspace session.
+#[test]
+fn continua_directly_resumes_latest_workspace_session() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("FIRST-SAVED")),
+            Reply::Sse(text("SECOND-SAVED")),
+            Reply::Sse(text("LATEST-RESUMED")),
+        ],
+        ..Plan::default()
+    });
+    let places = Places::new();
+    let first = "c2b477a4-14bc-4a31-9a9e-2147810e0632";
+    let second = "c2b477a4-14bc-4a31-9a9e-2147810e0633";
+    for (id, prompt) in [(first, "first saved"), (second, "second saved")] {
+        let saved = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--session-id",
+                id,
+                prompt,
+            ])
+            .run();
+        assert_eq!(saved.code, Some(0), "{}", saved.stderr);
+    }
+    let resumed = places
+        .ego(&stub)
+        .conversing()
+        .args(["--continua", "--sandbox", "off"])
+        .run_pty("continue latest");
+    assert_eq!(resumed.code, Some(0), "{}", resumed.stdout);
+    assert!(
+        resumed.stdout.contains("LATEST-RESUMED"),
+        "{}",
+        resumed.stdout
+    );
+    assert!(
+        !resumed.stdout.contains("Type to filter"),
+        "{}",
+        resumed.stdout
+    );
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 3);
+    let latest = requests[2].to_string();
+    assert!(latest.contains("second saved"), "{latest}");
+    assert!(!latest.contains("first saved"), "{latest}");
+}
+
+// Catches: --continua silently creates a session when the workspace has no saved history.
+#[test]
+fn continua_without_saved_session_refuses_instead_of_creating() {
+    let stub = Stub::start(Plan::default());
+    let places = Places::new();
+    let result = places.ego(&stub).conversing().args(["--continua"]).run();
+    assert_eq!(result.code, Some(2), "{} {}", result.stdout, result.stderr);
+    assert!(
+        result.stderr.contains("no session belongs"),
+        "{}",
+        result.stderr
+    );
+    assert!(stub.generations().is_empty());
+}
+
+// Catches: direct resume accepts a second session identity or loses headless seat resolution.
+#[test]
+fn continua_rejects_creation_flags_and_preserves_resume_seat_rules() {
+    for flags in [
+        vec!["--continua", "prompt"],
+        vec!["--continua", "--session", "named"],
+        vec!["--continua", "--session-id", FIXTURE_SESSION_ID],
+        vec!["--continua", "--file", "agent.md"],
+        vec!["run", "--continua"],
+    ] {
+        let argv = std::iter::once("ego")
+            .chain(flags.iter().copied())
+            .map(str::to_owned)
+            .collect();
+        assert!(cli::parse(argv).is_err(), "{flags:?}");
+    }
+    for (stdin, stdout, interactive) in [
+        (true, true, true),
+        (false, true, false),
+        (true, false, false),
+    ] {
+        let argv = ["ego", "--continua"].map(str::to_owned).to_vec();
+        let invocation = cli::parse(argv).unwrap().with_terminal(stdin, stdout);
+        assert_eq!(
+            matches!(invocation, Invocation::Interactive(_)),
+            interactive
+        );
+    }
+}
+
 // Catches: a positional resume on a human TTY has no approver and exits 3.
 #[test]
 fn tty_resume_task_asks_permission_and_stays_interactive() {

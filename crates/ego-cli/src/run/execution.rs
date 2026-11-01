@@ -28,20 +28,51 @@ async fn resolve_invocation_phase(
             refresh,
             ready,
             chosen,
-        }) => Ok(ResolvedInvocation {
-            settings: Some(settings),
-            ci,
-            refresh: Some(refresh),
-            ready,
-            auto_preflight: None,
-            chosen_session: Some(chosen),
-        }),
+        }) => {
+            if matches!(
+                args.session,
+                crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
+            ) {
+                use ego_core::store::session_store::{SessionEntry, SessionStore};
+                use futures::TryStreamExt as _;
+                let entries = SessionStore::read(chosen.store.as_ref(), &chosen.id)
+                    .map_err(|error| RunTermination::Failed {
+                        message: format!(
+                            "cannot read session roots before direct preflight: {error}"
+                        ),
+                    })?
+                    .try_collect::<Vec<_>>()
+                    .await
+                    .map_err(|error| RunTermination::Failed {
+                        message: format!(
+                            "cannot replay session roots before direct preflight: {error}"
+                        ),
+                    })?;
+                if entries.iter().any(|entry| matches!(entry, SessionEntry::Event(event) if matches!(event.kind, EventKind::SessionRootGranted { .. }))) {
+                    return Err(RunTermination::Failed {
+                        message: "direct CI preflight cannot restore session roots before confinement; use an ordinary fresh-process resume".into(),
+                    });
+                }
+            }
+            Ok(ResolvedInvocation {
+                settings: Some(settings),
+                ci,
+                refresh: Some(refresh),
+                ready,
+                auto_preflight: None,
+                chosen_session: Some(chosen),
+            })
+        }
         None => {
             let home = config::ego_home();
             let cwd = workspace(args.directory.as_ref()).map_err(usage)?;
             let chosen_session = chosen(args, &cwd, None).map_err(usage)?;
             let mut resumed = args.clone();
-            if matches!(args.session, crate::cli::SessionChoice::Resume(_)) {
+            let mut session_roots = Vec::new();
+            if matches!(
+                args.session,
+                crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
+            ) {
                 use ego_core::store::session_store::SessionEntry;
                 use futures::TryStreamExt as _;
                 let entries = ego_core::store::session_store::SessionStore::read(
@@ -52,6 +83,21 @@ async fn resolve_invocation_phase(
                 .try_collect::<Vec<_>>()
                 .await
                 .map_err(|error| usage(UsageError(error.to_string())))?;
+                for entry in &entries {
+                    if let SessionEntry::Event(event) = entry {
+                        match &event.kind {
+                            EventKind::SessionRootGranted { root }
+                                if !session_roots.contains(root) =>
+                            {
+                                session_roots.push(root.clone());
+                            }
+                            EventKind::RootRevoked { path } => {
+                                session_roots.retain(|root| root.path() != path);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 for entry in entries.into_iter().rev() {
                     if let SessionEntry::Event(event) = entry
                         && let EventKind::SessionSelectionsSelected { selections } = event.kind
@@ -79,6 +125,7 @@ async fn resolve_invocation_phase(
                 diagnostics,
             )
             .map_err(usage)?;
+            restore_session_roots(&mut settings, &session_roots).map_err(usage)?;
             admit_windows_unconfined_start(
                 args,
                 &mut settings,
@@ -98,7 +145,10 @@ async fn resolve_invocation_phase(
                     message: "direct CI execution is missing its preflight token".to_owned(),
                 });
             }
-            let recorded_model = if matches!(args.session, crate::cli::SessionChoice::Resume(_)) {
+            let recorded_model = if matches!(
+                args.session,
+                crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
+            ) {
                 chosen_session
                     .store
                     .readable_meta(&chosen_session.id)
@@ -156,6 +206,51 @@ async fn resolve_invocation_phase(
             })
         }
     }
+}
+
+/// Re-admit saved authority before either the generation policy or OS guard
+/// is constructed for a fresh process. A changed symlink fails closed.
+fn restore_session_roots(
+    settings: &mut Settings,
+    grants: &[ego_core::permit::ProfileRoot],
+) -> Result<(), UsageError> {
+    if grants.is_empty() {
+        return Ok(());
+    }
+    for grant in grants {
+        let actual = std::fs::canonicalize(grant.path().as_path())
+            .map(CanonPath::new)
+            .map_err(|error| {
+                UsageError(format!(
+                    "saved session root {} is unavailable: {error}",
+                    grant.path()
+                ))
+            })?;
+        if actual != *grant.path() {
+            return Err(UsageError(format!(
+                "saved session root {} changed since approval",
+                grant.path()
+            )));
+        }
+        settings.effective.roots.push(ego_core::permit::RootCfg {
+            consent: None,
+            path: actual.as_path().to_path_buf(),
+            access: grant.access(),
+        });
+    }
+    let admitted =
+        super::profile_roots::admit(&settings.effective, settings.confinement.workspace())
+            .map_err(UsageError)?;
+    for grant in grants {
+        if !admitted.contains(grant) {
+            return Err(UsageError(format!(
+                "saved session root {} was not admitted",
+                grant.path()
+            )));
+        }
+    }
+    settings.confinement = settings.confinement.clone().with_roots(admitted);
+    Ok(())
 }
 
 /// The terminal's normal trusted-workspace flow is automatic analysis. An
@@ -282,7 +377,10 @@ fn prepare_resume_phase<'store>(
         .expect("resume preparation observes resolved settings before materialization");
     let direct_ci_ready = resolved.ready.is_some();
     let terminal_resume = matches!(host.driver, Driver::Interactive { .. })
-        && matches!(args.session, crate::cli::SessionChoice::Resume(_));
+        && matches!(
+            args.session,
+            crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
+        );
     let early_opened = if direct_ci_ready || !args.answers.is_empty() || terminal_resume {
         Some(Opened::Durable(Box::new(
             session::open(

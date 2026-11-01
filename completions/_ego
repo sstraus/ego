@@ -57,6 +57,7 @@ _ego() {
 '--mode=[Permission mode\: plan|default|auto|accept-edits|yolo (alias\: edits)]:MODE:_default' \
 '*-c+[Dotted-path config override, value parsed as TOML]:K=V:_default' \
 '*--set=[Dotted-path config override, value parsed as TOML]:K=V:_default' \
+'(-f --file --session --session-id --worktree)--continua[Resume the latest saved session in this workspace without the terminal picker]' \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
@@ -143,6 +144,7 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
 '--vim[Use Vim normal/insert editing in the interactive composer]' \
+'(-f --file --session --session-id --worktree)--continua[Resume the latest saved session in this workspace without the terminal picker]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::prompt -- The prompt. `-` reads it from stdin:_default' \
@@ -152,7 +154,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '*--answer=[Settle a pending question. Repeat for multiple sibling questions]:QUESTION_ID=JSON:_default' \
 '(--goal-operation --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--name=[Read or change the session title without starting a turn\: show, set=TEXT, clear]:NAME:_default' \
-'(--name --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, achieve, block=REASON]:GOAL_OPERATION:_default' \
+'(--name --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, extend=N, achieve, block=REASON]:GOAL_OPERATION:_default' \
 '()-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '()--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '()*--var=[Supply one declared agent-file template variable. Requires --file]:KEY=VALUE:_default' \
@@ -219,7 +221,7 @@ _arguments "${_arguments_options[@]}" : \
 _arguments "${_arguments_options[@]}" : \
 '*--answer=[Settle a pending question. Repeat for multiple sibling questions]:QUESTION_ID=JSON:_default' \
 '(--goal-operation --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--name=[Read or change the session title without starting a turn\: show, set=TEXT, clear]:NAME:_default' \
-'(--name --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, achieve, block=REASON]:GOAL_OPERATION:_default' \
+'(--name --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, extend=N, achieve, block=REASON]:GOAL_OPERATION:_default' \
 '()-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '()--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '()*--var=[Supply one declared agent-file template variable. Requires --file]:KEY=VALUE:_default' \
@@ -435,13 +437,11 @@ esac
 ;;
 (setup)
 _arguments "${_arguments_options[@]}" : \
-'*--items=[Select proposal item IDs as one comma-separated list; repeat to add IDs]:ID[,ID...]:_default' \
-'--judge=[Offer a validated judge for unresolved policy; never authorizes an action]:JUDGE:_default' \
-'--profile=[]:PROFILE:_default' \
-'--directory=[]:DIRECTORY:_files' \
+'--profile=[Edit one user profile rather than the base user settings]:PROFILE:_default' \
+'-C+[Resolve effective settings for this workspace]:DIRECTORY:_files' \
+'--directory=[Resolve effective settings for this workspace]:DIRECTORY:_files' \
 '-h[Print help]' \
 '--help[Print help]' \
-'::prompt:_default' \
 && ret=0
 ;;
 (acp)
@@ -848,7 +848,7 @@ _ego_commands() {
 'hooks:Inspect the admitted system and user hook catalogue.' \
 'doctor:Report a read-only redacted health snapshot of this installation.' \
 'checkpoint:Preview or selectively restore session-owned Git file checkpoints.' \
-'setup:Inspect expected work without running effects.' \
+'setup:Configure saved user settings in an interactive terminal.' \
 'acp:Serve the Agent Client Protocol on stdio or an endpoint.' \
 'a2a:Serve the Agent2Agent protocol on a local or loopback endpoint.' \
 'auth:Manage subscription credentials.' \

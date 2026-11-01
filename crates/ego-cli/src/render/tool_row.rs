@@ -25,6 +25,9 @@ use unicode_segmentation::UnicodeSegmentation;
 /// Output lines an exec row shows under its header.
 pub(crate) const PREVIEW_LINES: usize = 3;
 
+/// Bound inline edit output while retaining the full diff for expansion.
+const INLINE_DIFF_ROWS: usize = 12;
+
 /// Most bytes of one call's detail kept for the expand key. A result larger
 /// than this is cut with a visible mark: the store is a bounded log of recent
 /// calls, not a second copy of the evidence store.
@@ -122,6 +125,14 @@ fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let mut rows = vec![heading.clone()];
     if call.name == "exec" {
         rows.extend(tail(call, width));
+    } else if call.ok
+        && call.name == "edit"
+        && args.get("replace_all").and_then(Value::as_bool) != Some(true)
+    {
+        rows.extend(body.iter().take(INLINE_DIFF_ROWS).cloned());
+        if body.len() > INLINE_DIFF_ROWS {
+            rows.push(hidden_lines(body.len() - INLINE_DIFF_ROWS, width));
+        }
     } else if !body.is_empty() {
         rows.push(hidden_lines(body.len(), width));
     }
@@ -457,15 +468,32 @@ pub(crate) fn hidden_lines(hidden: usize, width: usize) -> Line {
     .truncate_to(width)
 }
 
-/// The last lines of an exec's output, and a count of the ones left out.
+/// The last useful lines of an exec's output, and a count of all omitted rows.
 fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
     let lines = output_lines(call);
-    let hidden = lines.len().saturating_sub(PREVIEW_LINES);
+    let mut preview: Vec<_> = lines
+        .iter()
+        .rev()
+        .filter(|line| {
+            // Keep diagnostics. Ignore whitespace when counting the one to
+            // three non-alphanumeric characters of a disposable syntax row.
+            if !call.ok || line.starts_with("stderr: ") {
+                return true;
+            }
+            let mut characters = line.chars().filter(|ch| !ch.is_whitespace());
+            let short_symbols = characters.by_ref().take(3).all(|ch| !ch.is_alphanumeric())
+                && characters.next().is_none();
+            !short_symbols
+        })
+        .take(PREVIEW_LINES)
+        .collect();
+    preview.reverse();
+    let hidden = lines.len() - preview.len();
     let mut rows = Vec::new();
     if hidden > 0 {
         rows.push(hidden_lines(hidden, width));
     }
-    rows.extend(lines[hidden..].iter().flat_map(|line| {
+    rows.extend(preview.into_iter().flat_map(|line| {
         let row = dim(format!("  {line}"));
         // Recovery is an operator action, not disposable command output:
         // keep it visible without requiring the user to expand the tool.
@@ -991,9 +1019,9 @@ mod tests {
         println!("read after:\n{}", rendered.rows);
     }
 
-    // Catches: an edit hides the diff without naming its context and change rows.
+    // Catches: successful edits hide every changed row behind Option+O.
     #[test]
-    fn collapsed_edit_counts_diff_rows() {
+    fn edits_show_a_bounded_diff_without_expansion() {
         let rendered = record(
             &call(
                 "edit",
@@ -1003,12 +1031,35 @@ mod tests {
             ),
             at(80),
         );
-        assert_eq!(
-            rendered.rows,
-            "✓ edit a.rs +2 -1 · 1.5s\n  … 4 more lines · Option+O or /expand"
+        assert!(rendered.rows.contains(" 2 -y"), "{}", rendered.rows);
+        assert!(rendered.rows.contains(" 2 +z"), "{}", rendered.rows);
+        assert!(rendered.rows.contains(" 3 +w"), "{}", rendered.rows);
+        assert!(
+            !rendered.rows.contains("more lines"),
+            "the complete small diff is visible"
         );
-        assert!(rendered.detail.contains(" 2 -y"));
-        println!("edit after:\n{}", rendered.rows);
+        assert_eq!(rendered.rows, rendered.detail);
+
+        let args = serde_json::json!({
+            "path": "long.rs", "old_string": "old\n".repeat(30), "new_string": "new\n".repeat(30)
+        })
+        .to_string();
+        let long = record(&call("edit", &args, true, "ok"), at(80));
+        assert!(
+            long.rows.contains("-old"),
+            "the preview includes real diff rows"
+        );
+        assert!(long.rows.contains("48 more lines"), "{}", long.rows);
+        assert_eq!(
+            long.rows.lines().count(),
+            14,
+            "header, twelve diff rows, expansion hint"
+        );
+        assert_eq!(
+            long.detail.lines().count(),
+            61,
+            "expansion retains the entire diff"
+        );
     }
 
     // Catches: a write confuses file lines with the receipt rows actually hidden.
@@ -1211,6 +1262,69 @@ mod tests {
         assert_eq!(rows[2..], ["  18", "  19", "  20"]);
         assert!(record.detail.contains("  1\n"));
         assert!(record.detail.contains("  20"));
+    }
+
+    // Catches: short symbol-only rows consume the preview budget or disappear from expansion.
+    #[test]
+    fn compact_exec_preview_skips_short_symbol_rows() {
+        for (output, visible, hidden) in [
+            (
+                "older\nfirst\n}\nsecond\n  });\nthird\n ]\n);\n",
+                vec!["first", "second", "third"],
+                "5 more lines",
+            ),
+            ("value\n }\n});\n", vec!["value"], "2 more lines"),
+            ("}\n });\n ] ,\n", vec![], "3 more lines"),
+            (" \t;\t\n \t{ }\t\n \t[ ] ;\t\n", vec![], "3 more lines"),
+            ("…\n‘’\n— • !\n", vec![], "3 more lines"),
+        ] {
+            let rendered = record(
+                &call("exec", r#"{"argv":["cat","source.rs"]}"#, true, output),
+                at(120),
+            );
+            let rows: Vec<_> = rendered.rows.lines().skip(1).collect();
+            assert!(rows[0].contains(hidden), "{}", rendered.rows);
+            assert_eq!(
+                rows[1..],
+                visible
+                    .iter()
+                    .map(|line| format!("  {line}"))
+                    .collect::<Vec<_>>(),
+                "{output:?}"
+            );
+            assert_eq!(
+                rendered.detail.split_once('\n').unwrap().1,
+                output
+                    .lines()
+                    .map(|line| format!("  {}", line.replace('\t', " ").trim_end()))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                "expansion must retain all rows"
+            );
+        }
+    }
+
+    // Catches: the filter hides diagnostics, alphanumeric rows or four-symbol boundary rows.
+    #[test]
+    fn compact_exec_preview_keeps_errors_and_meaningful_punctuation() {
+        for (ok, output, expected) in [
+            (
+                true,
+                "call();\n}; // end\n;;;;\n",
+                vec!["  call();", "  }; // end", "  ;;;;"],
+            ),
+            (
+                true,
+                "[stderr]\n}\n);\n",
+                vec!["  stderr: }", "  stderr: );"],
+            ),
+            (false, "}\n);\n", vec!["  }", "  );"]),
+            (true, "a\n7\né\n", vec!["  a", "  7", "  é"]),
+            (true, "} ) ] ;\n", vec!["  } ) ] ;"]),
+        ] {
+            let rendered = record(&call("exec", r#"{"argv":["cat"]}"#, ok, output), at(120));
+            assert_eq!(rendered.rows.lines().skip(1).collect::<Vec<_>>(), expected);
+        }
     }
 
     #[test]

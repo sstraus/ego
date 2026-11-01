@@ -1,0 +1,27 @@
+{
+  "version": "ego 0.4.1",
+  "command": [
+    "/home/example/workspace",
+    "run",
+    "--bare",
+    "--offline",
+    "--no-tools",
+    "--thinking",
+    "off",
+    "--model",
+    "ollama/fixture",
+    "--session-dir",
+    "/home/example/workspace",
+    "--retry",
+    "0",
+    "--timeout",
+    "15s",
+    "--output",
+    "jsonl",
+    "Report readiness."
+  ],
+  "terminal": false,
+  "exit": 0,
+  "order": "stdout rows retain emission order",
+  "fixture_provider": "owned loopback server; no remote provider or paid turn"
+}

@@ -4,10 +4,42 @@
 //! `SIGTSTP`; the key reaches the editor as an ordinary event, and stopping is
 //! ego's own job. It is done in place, on the thread that reads keys, so every
 //! read — the composer and each modal — suspends the same way and none of them
-//! answers its question: `raise` does not return until `SIGCONT` has resumed
-//! the process, and what follows it is the whole of the continue handling.
+//! answers its question. The read boundary first lets Reedline release its
+//! terminal guards, then stops the job and resumes the same editor on `fg`.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+pub(super) const COMMAND: &str = "ego:suspend";
+
+/// One read boundary for the composer and all modals. Returning from Reedline
+/// pops keyboard enhancement before job control gives the tty to the shell.
+/// No modal or driver sees the suspend command as submitted input.
+pub(super) fn read_line(
+    editor: &mut reedline::Reedline,
+    prompt: &dyn reedline::Prompt,
+    status: &super::SharedStatus,
+) -> std::io::Result<reedline::Signal> {
+    loop {
+        let result = editor.read_line(prompt);
+        if !matches!(&result, Ok(reedline::Signal::HostCommand(command)) if command == COMMAND) {
+            return result;
+        }
+        // The shell may print its job notification or resize the tty. Retire
+        // the old footprint; the next read paints the retained draft afresh.
+        let _ = editor.erase_last_prompt();
+        match suspend_job() {
+            Ok((width, _)) => {
+                status.lock().expect("surface status lock").width = usize::from(width);
+            }
+            Err(reason) => {
+                status.lock().expect("surface status lock").notice = Some(reason.to_owned());
+            }
+        }
+        // The shell owned the tty while stopped; the erased anchor no longer
+        // describes where its job notifications or other output left us.
+        editor.invalidate_prompt_position();
+    }
+}
 
 /// `Ctrl+Z`, with or without `Shift`. A third modifier asks for another key.
 pub(super) fn is_suspend_key(key: &KeyEvent) -> bool {
@@ -24,13 +56,12 @@ pub(super) fn is_suspend_key(key: &KeyEvent) -> bool {
 /// is recorded so a running command's timeout does not charge it.
 #[cfg(unix)]
 pub(super) fn suspend_job() -> Result<(u16, u16), &'static str> {
-    use crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
     use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
     use nix::sys::signal::{Signal, raise};
     use std::io::Write as _;
 
     let mut out = std::io::stdout();
-    let _ = crossterm::execute!(out, DisableBracketedPaste, Clear(ClearType::FromCursorDown));
+    let _ = crossterm::execute!(out, Clear(ClearType::FromCursorDown));
     let _ = out.write_all(b"\r\n");
     let _ = out.flush();
     let _ = disable_raw_mode();
@@ -44,7 +75,6 @@ pub(super) fn suspend_job() -> Result<(u16, u16), &'static str> {
         let _ = raise(Signal::SIGTSTP);
     }
     let _ = enable_raw_mode();
-    let _ = crossterm::execute!(out, EnableBracketedPaste);
     size().map_err(|_| "the terminal size could not be read after resuming")
 }
 

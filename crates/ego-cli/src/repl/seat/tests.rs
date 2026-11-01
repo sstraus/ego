@@ -530,14 +530,11 @@ fn expand_writes_scrollback_without_waiting_for_the_host() {
     ))));
 
     let (sender, rows) = crossbeam::channel::unbounded();
-    let output = Arc::new(crate::output::InteractiveOutput::new(SurfaceOutput::new(
-        sender,
-        CancelToken::new(),
-    )));
-    let diagnostics: Arc<dyn crate::output::Diagnostics> = output.clone();
-    diagnostics.tool_row("compact row", "full output".to_owned());
-    rows.try_iter().for_each(drop);
-    status.lock().unwrap().diagnostics = Some(Arc::downgrade(&diagnostics));
+    {
+        let mut current = status.lock().unwrap();
+        current.transcript = Some(sender);
+        current.details.remember("full output".to_owned());
+    }
 
     let line = apply_surface_effect(
         &mut editor,
@@ -548,7 +545,9 @@ fn expand_writes_scrollback_without_waiting_for_the_host() {
     );
 
     assert_eq!(line, None);
-    assert_eq!(rows.try_iter().collect::<Vec<_>>(), ["\n", "full output\n"]);
+    assert!(
+        matches!(rows.try_recv().unwrap(), SurfaceMessage::Row(row) if row == "\nfull output\n")
+    );
     assert_eq!(status.lock().unwrap().notice, None);
 }
 
@@ -1425,7 +1424,7 @@ fn slash_help_shows_name_goal_and_mcp_grammar() {
     let help = render_action_help(&registry, 120);
     for grammar in [
         "/name [show|set TEXT|clear]",
-        "/goal [show|set TEXT|achieve|block REASON]",
+        "/goal [TEXT|show|set TEXT|extend N|achieve|block REASON]",
         "/mcp [login NAME | toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]",
     ] {
         assert!(help.contains(grammar), "missing {grammar}: {help}");
@@ -1657,25 +1656,23 @@ fn configured_shortcuts_reach_the_surface_and_both_help_projections() {
     }
 }
 
-// Catches: a submitted prompt longer than the preview limit floods the transcript.
+// Catches: the previous collapse still hides lines of a submitted prompt.
 #[test]
-fn long_prompt_echo_is_collapsed() {
+fn long_prompt_echo_keeps_every_line_in_the_editor_receipt() {
     let waiting = Waiting::new(Arc::new(Mutex::new(SurfaceStatus::default())));
-    let prompt = (1..=20)
+    let prompt = (1..=130)
         .map(|n| format!("brief line {n}\n"))
         .collect::<String>();
-    let receipt = waiting
-        .render_prompt_submission(&prompt, 120)
-        .expect("long submissions need a compact receipt");
-    assert_eq!(
-        receipt,
-        "> brief line 1\n… brief line 2\n… brief line 3\n  … 17 more lines · Option+O or /expand"
-    );
+    let receipt = waiting.render_prompt_submission(&prompt, 120).unwrap();
+    for n in 1..=130 {
+        assert!(receipt.contains(&format!("brief line {n}\n")), "{receipt}");
+    }
+    assert!(!receipt.contains("more lines"), "{receipt}");
 }
 
-// Catches: collapsed input is not reachable through the tool expansion action.
+// Catches: prompt submission replaces the last tool call as /expand's target.
 #[test]
-fn collapsed_prompt_and_tool_output_share_expansion_history() {
+fn prompt_echo_does_not_replace_tool_expansion() {
     use crate::output::{Diagnostics, InteractiveOutput};
     let status = Arc::new(Mutex::new(SurfaceStatus::default()));
     let waiting = Waiting::new(Arc::clone(&status));
@@ -1685,24 +1682,15 @@ fn collapsed_prompt_and_tool_output_share_expansion_history() {
     let output = InteractiveOutput::new(surface);
     output.tool_row("old tool", "old detail".into());
     let _ = rows.try_iter().collect::<Vec<_>>();
-    let prompt = "one\ntwo\nthree\nfour";
-    assert!(waiting.render_prompt_submission(prompt, 80).is_some());
-    output.expand_last_tool();
-    assert!(
-        rows.try_iter()
-            .collect::<String>()
-            .contains("> one\n… two\n… three\n… four")
-    );
-    // A short submission, including /expand itself, must not replace the detail.
-    assert_eq!(
-        waiting.render_prompt_submission("/expand", 80).as_deref(),
-        Some("> /expand")
-    );
-    output.expand_last_tool();
-    assert_eq!(
-        rows.try_iter().collect::<String>(),
-        "\n> one\n… two\n… three\n… four\n"
-    );
+    for prompt in [
+        "one\ntwo\nthree\nfour",
+        "界".repeat(130).as_str(),
+        "/expand",
+    ] {
+        let _ = waiting.render_prompt_submission(prompt, 40);
+        output.expand_last_tool();
+        assert_eq!(rows.try_iter().collect::<String>(), "\nold detail\n");
+    }
     output.tool_row("new tool", "new detail".into());
     let _ = rows.try_iter().collect::<Vec<_>>();
     output.expand_last_tool();

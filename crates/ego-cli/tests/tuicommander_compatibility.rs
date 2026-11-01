@@ -39,6 +39,13 @@
 //! this deliberate false-to-true change exposes the implemented surface and
 //! does not reshape lifecycle methods or extensions.
 
+//! regression case reconciles the child activity v1 advertisement from regression case.
+//! Advertising support is not subscribing the client: only initialize requests
+//! with `clientCapabilities._meta.ego.childActivity.version=1` enable updates.
+//! The pinned host's `capability_snapshot` reads named hold/compact entries via
+//! `ego_extensions` and ignores this extra metadata key. The recorded client
+//! request remains unchanged. See `ARCHITECTURE.md`.
+
 use std::io::{BufRead, BufReader, Write};
 
 mod support;

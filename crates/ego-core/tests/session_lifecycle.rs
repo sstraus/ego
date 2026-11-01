@@ -600,6 +600,43 @@ fn fork_preserves_lineage_and_title_but_not_session_identity() {
     assert_eq!(meta.goal(source.id).unwrap().unwrap(), source_goal.value);
 }
 
+/// Catches: a fork copies the source session's terminal-approved root event
+/// into the target log and then treats it as the target's own consent.
+#[test]
+fn fork_does_not_copy_session_root_consent() {
+    use ego_core::permit::{CanonPath, ProfileRoot, RootAccess};
+
+    let (service, store, _runs) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap();
+    let approved = ProfileRoot::new(CanonPath::new("/outside/exact"), RootAccess::Read);
+    let mut grant = event("source consent", 1);
+    grant.kind = EventKind::SessionRootGranted {
+        root: approved.clone(),
+    };
+    store.append_event(source.id, grant);
+    let target = futures::executor::block_on(service.fork(source.id)).unwrap();
+    let read_roots = |id| {
+        let events = store
+            .0
+            .0
+            .lock()
+            .unwrap()
+            .entries
+            .iter()
+            .filter_map(|(session, entry)| match entry {
+                SessionEntry::Event(event) if *session == id => Some(event.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        ego_core::state::SessionState::replay(events).session_roots
+    };
+    assert_eq!(read_roots(source.id), vec![approved]);
+    assert!(
+        read_roots(target.id).is_empty(),
+        "fork inherited terminal consent"
+    );
+}
+
 #[test]
 fn fork_does_not_copy_terminal_goal() {
     let (service, store, _runs) = service();
@@ -1502,4 +1539,64 @@ fn delete_force_only_overrides_uncertainty_not_active_leased_or_held_sessions() 
         futures::executor::block_on(service.delete_with_force(held, true)),
         Err(LifecycleError::Held)
     ));
+}
+
+/// Catches: extension creates a goal, wraps the allowance, or revives a terminal goal.
+#[test]
+fn goal_extension_refuses_invalid_state_and_overflow_without_append() {
+    let (service, control, _runs) = service();
+    let meta = metadata_fixture(&control);
+    let id = service.create(PathBuf::from("/workspace")).unwrap().id;
+    let extend = |turns| {
+        meta.transition_goal(
+            &lease(&control, id),
+            expected(&control, id),
+            GoalTransition::AllowanceExtended { turns },
+        )
+    };
+    let before = control.event_count(id);
+    assert!(matches!(
+        extend(1),
+        Err(LifecycleError::Goal(GoalRefusal::NoActiveGoal))
+    ));
+    assert_eq!(control.event_count(id), before);
+    meta.set_goal(
+        &lease(&control, id),
+        expected(&control, id),
+        "ship".into(),
+        GoalOwner::Operator,
+        ego_core::ceiling::Ceilings::default(),
+    )
+    .unwrap();
+    let original = meta.goal(id).unwrap().unwrap();
+    let before = control.event_count(id);
+    for turns in [0, u32::MAX] {
+        assert!(matches!(
+            extend(turns),
+            Err(LifecycleError::Goal(GoalRefusal::InvalidExtension))
+        ));
+        assert_eq!(control.event_count(id), before);
+        assert_eq!(meta.goal(id).unwrap().unwrap(), original);
+    }
+    extend(3).unwrap();
+    let mut expected_goal = original;
+    expected_goal.continuation_budget = Some(23);
+    assert_eq!(meta.goal(id).unwrap().unwrap(), expected_goal);
+    meta.transition_goal(
+        &lease(&control, id),
+        expected(&control, id),
+        GoalTransition::Achieved {
+            attested_by: GoalOwner::Operator,
+            evidence: None,
+        },
+    )
+    .unwrap();
+    let before = control.event_count(id);
+    assert!(matches!(
+        extend(1),
+        Err(LifecycleError::Goal(GoalRefusal::AlreadyTerminal(
+            GoalState::Achieved
+        )))
+    ));
+    assert_eq!(control.event_count(id), before);
 }

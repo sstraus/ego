@@ -58,6 +58,47 @@ fn removing_a_nested_read_restriction_requires_readmission() {
     assert!(frozen.not_more_permissive_than(&frozen));
 }
 
+// Catches: a saved exact read consent also excuses a sibling path, write access,
+// or a backend change at the fresh-process execution-policy gate.
+#[test]
+fn root_consent_only_readmits_the_exact_measured_root() {
+    let base =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new("/workspace")).unwrap();
+    let approved = ProfileRoot::new(CanonPath::new("/outside/approved"), RootAccess::Read);
+    let sibling = ProfileRoot::new(CanonPath::new("/outside/sibling"), RootAccess::Read);
+    let caps = Confinement::Workspace.required_caps();
+    let old = observation(&base, "sandbox", caps, "1");
+    let exact = observation(
+        &base.clone().with_roots(vec![approved.clone()]),
+        "sandbox",
+        caps,
+        "2",
+    );
+    let with_sibling = observation(
+        &base.clone().with_roots(vec![approved.clone(), sibling]),
+        "sandbox",
+        caps,
+        "2",
+    );
+    let writable = observation(
+        &base.clone().with_roots(vec![ProfileRoot::new(
+            approved.path().clone(),
+            RootAccess::ReadWrite,
+        )]),
+        "sandbox",
+        caps,
+        "2",
+    );
+    let changed_backend = observation(&base.with_roots(vec![approved.clone()]), "other", caps, "2");
+    assert!(!exact.not_more_permissive_than(&old));
+    assert!(exact.not_more_permissive_than_with_roots(&old, std::slice::from_ref(&approved)));
+    for forbidden in [with_sibling, writable, changed_backend] {
+        assert!(
+            !forbidden.not_more_permissive_than_with_roots(&old, std::slice::from_ref(&approved))
+        );
+    }
+}
+
 // Catches: equal/narrower policies being refused or wider/unknown authority bypassing consent.
 #[test]
 fn changed_policy_uses_normal_permission_only_when_narrowing_cannot_be_proven() {

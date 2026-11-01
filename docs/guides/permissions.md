@@ -1,5 +1,7 @@
 # Permissions and confinement
 
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/permissions.html).
+
 Permissions decide which prepared effects may run. Confinement limits what the
 operating system allows an executor to do. Workspace trust decides whether project
 configuration and instructions are admitted. These are separate authorities.
@@ -31,14 +33,9 @@ or clearing the draft. Modals ignore it. During a turn, selections wait until
 the turn ends and then stage the next generation. Unavailable modes report why
 and leave the previous mode unchanged. The fixed sandbox cannot be relaxed.
 
-Default remains a normal public mode with its existing policy. This selection
-feature adds no new permission or session-approval mechanism. Existing rules,
-ACP permission answers, denies and confinement checks keep their behavior.
-`edits` remains an input alias for accept-edits and config emits `accept-edits`.
-Snapshot v1 preserves its historical bytes and digests for saved-session resume.
-Missing mode still uses default except for existing trusted-interactive auto.
-Busy cycle intents resolve in the owner's queue order, so repeated keys and
-preceding direct selections compose from the latest accepted staged mode.
+`edits` is an input alias for `accept-edits`; configuration emits the canonical
+name. Repeated mode changes during a turn are applied in queue order. Rules,
+ACP permission answers, denies, and confinement still apply after a mode change.
 
 A prepared call can contain several operations: `edit` needs read and write,
 external tools need connection and opaque-call authority. Every required operation
@@ -67,8 +64,7 @@ will not match. It is not a general grant for `bash` or for commands in the scri
 Current code can suggest `exec(git status *)` for a bare recognized program and
 subcommand; absolute program paths and interpreters retain exact argv. Cwd,
 timeout, and environment are not represented in the persistent exec rule.
-The live E2E used shell wrappers and absolute paths, so its remembered commands
-stayed exact.
+Shell wrappers and absolute paths therefore keep their exact invocation rules.
 
 `Risk: unknown` means the analyzer cannot establish bounded effects. It does not
 mean the command is known to be harmful. An exec can report `runs a program`,
@@ -276,8 +272,8 @@ remind the user that running sessions keep their current permissions.
 Use `--profile NAME` consistently when editing a profile's roots.
 
 `ego roots` accepts `read` and `read-write`, not exec. For extra executable
-access, configure `exec_paths` through `ego config edit`; it is not a managed
-`config set` key. A read or read-write root alone cannot authorize execution.
+access, use `ego config set 'exec_paths=["/absolute/path/to/bin"]'` or
+edit `exec_paths` through `ego config edit`. A read or read-write root alone cannot authorize execution.
 The workspace and backend runtime paths have separate built-in exec access.
 System ceilings can refuse extra paths. See the macOS recovery entries in
 [troubleshooting](troubleshooting.md).
@@ -289,8 +285,9 @@ resolution, not that session.
 
 System sandbox configuration is a floor. Extra roots specify canonical paths
 and access; system roots cap them and configured executable paths. A read-only
-root nested beneath a broader writable grant is refused rather than advertised
-as subtraction that the backend cannot enforce.
+root nested beneath a broader writable grant restricts built-in tools. macOS
+also enforces it for child processes. Linux Landlock reports that the writable
+ancestor wins for child processes; it cannot subtract the nested grant.
 
 ```sh
 ego config ls --effective --json
@@ -307,7 +304,7 @@ control an independent local model daemon's upstream behavior. A requested
 unsupported guarantee fails; no automatic fallback weakens it.
 
 macOS uses Seatbelt. Linux uses admitted/proven Linux backends. Windows confinement
-is open product work; transport/private-state support does not establish the
+is not supported; transport/private-state support does not establish the
 same filesystem/network boundary. See [troubleshooting](troubleshooting.md).
 
 Mode names, input aliases, and cycle order come from

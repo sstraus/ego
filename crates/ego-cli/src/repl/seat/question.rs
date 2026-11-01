@@ -2,7 +2,13 @@ use super::edit_mode::PICKER_KEYS;
 use super::permission_modal::{compact_prompt, details_prompt, settled_receipt};
 use super::picker_surface::{PickerRole, picker_capabilities, picker_row};
 use super::*;
-use crate::render::osc::State;
+
+#[path = "native_wait.rs"]
+mod native_wait;
+
+#[cfg(test)]
+#[path = "native_wait_tests.rs"]
+mod native_wait_tests;
 
 pub(super) fn enter_modal(
     editor: &mut Reedline,
@@ -233,6 +239,14 @@ pub(super) fn answer_control(
         }
         control => control,
     };
+    if matches!(&control, Control::Shutdown) {
+        return false;
+    }
+    if matches!(&control, Control::Permission { reply, .. } if reply.is_canceled())
+        || matches!(&control, Control::Question { reply, .. } if reply.is_canceled())
+    {
+        return true;
+    }
     if matches!(&control, Control::Activate { .. }) {
         return true;
     }
@@ -334,9 +348,7 @@ pub(super) fn answer_control(
                 compact_prompt(&request, capabilities.width),
                 Arc::clone(surface.status),
             );
-            tell_host(surface.status, |osc, quiet| {
-                osc.awaiting(request.tool(), !quiet)
-            });
+            let wait = native_wait::Wait::permission(surface, &request);
             let mut notice = None;
             let decision = loop {
                 match permission_line(editor, surface, &prompt) {
@@ -399,7 +411,14 @@ pub(super) fn answer_control(
                     Line::Blank | Line::Refused(_) | Line::HostCommand(_) => continue,
                 }
             };
-            tell_host(surface.status, |osc, _| osc.state(State::Busy));
+            wait.settle(
+                surface.status,
+                if matches!(decision, PermissionDecision::Deny) {
+                    "rejected"
+                } else {
+                    "answered"
+                },
+            );
             let receipt = settled_receipt(&request, &decision, notice.as_deref());
             (
                 Reply::Permission(reply, decision, receipt),
@@ -407,14 +426,19 @@ pub(super) fn answer_control(
                 true,
             )
         }
-        Control::Question {
-            id: _id,
-            request,
-            reply,
-        } => {
-            tell_host(surface.status, |osc, _| osc.state(State::Awaiting));
+        Control::Question { id, request, reply } => {
+            let wait = native_wait::Wait::question(surface, id, &request);
             let outcome = answer_question(editor, surface, &request);
-            tell_host(surface.status, |osc, _| osc.state(State::Busy));
+            wait.settle(
+                surface.status,
+                match &outcome {
+                    QuestionOutcome::Answered(_) | QuestionOutcome::MemberCompleted { .. } => {
+                        "answered"
+                    }
+                    QuestionOutcome::Declined => "rejected",
+                    _ => "cancelled",
+                },
+            );
             (Reply::Question(reply, outcome), EditPhase::Busy, true)
         }
         Control::Shutdown => return false,
@@ -1118,7 +1142,7 @@ fn read_permission_parameter(
     loop {
         editor.run_edit_commands(&[EditCommand::Clear, EditCommand::InsertString(value.clone())]);
         let prompt = Question::new(prompt.clone(), Arc::clone(status));
-        let result = match answer(false, editor.read_line(&prompt)) {
+        let result = match answer(false, suspend::read_line(editor, &prompt, status)) {
             Line::Submitted(raw) => set(raw),
             Line::Blank => set(blank.to_owned()),
             line @ (Line::Ended | Line::ExternalBreak(_)) => {
@@ -1566,12 +1590,31 @@ fn remember_permission(
 /// painting. It does not go through the row output: that holds text until a
 /// newline, and a wait has no more rows coming.
 pub(super) fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
-    let signals = status.lock().expect("surface status lock").signals;
+    tell_host_current(status, |osc, quiet, _| signal(osc, quiet));
+}
+
+fn tell_host_current(
+    status: &SharedStatus,
+    signal: impl FnOnce(Osc, bool, &SurfaceStatus) -> String,
+) {
+    // Serialize the write with driver activity updates. A modal cannot restore
+    // a state sampled before a concurrent turn completion.
+    let current = status.lock().expect("surface status lock");
+    let signals = current.signals;
     let Some((osc, quiet)) = signals else {
         return;
     };
-    let bytes = signal(osc, quiet);
+    let bytes = signal(osc, quiet, &current);
     if bytes.is_empty() {
+        return;
+    }
+    #[cfg(test)]
+    if TERMINAL_SCRIPT.with_borrow_mut(|script| {
+        script.as_mut().is_some_and(|script| {
+            script.signals.push(bytes.clone());
+            true
+        })
+    }) {
         return;
     }
     let mut stdout = std::io::stdout().lock();
@@ -1636,12 +1679,17 @@ fn decline(editor: &mut Reedline, surface: &mut ModalSurface<'_>) -> PermissionD
 
 /// One row into the existing output pump; only the pump waits on Reedline.
 pub(super) fn commit_to_transcript(status: &SharedStatus, row: &str) {
+    let row = crate::output::wrap_notice(row, Some(picker_capabilities(status).width));
+    commit_transcript_block(status, &row);
+}
+
+/// Preformatted rows must not be laid out again (tool details can contain ANSI).
+pub(super) fn commit_transcript_block(status: &SharedStatus, row: &str) {
     let transcript = status
         .lock()
         .expect("surface status lock")
         .transcript
         .clone();
-    let row = crate::output::wrap_notice(row, Some(picker_capabilities(status).width));
     if let Some(transcript) = transcript
         && transcript
             .send(SurfaceMessage::Row(format!("{row}\n")))
@@ -1985,21 +2033,14 @@ impl Prompt for Waiting {
         )
     }
 
+    fn bottom_padding(&self) -> u16 {
+        // Terminal hosts can overlay controls on the final physical row.
+        1
+    }
+
     fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
-        let width = usize::from(width).saturating_sub(1);
-        if let Some(receipt) = background_notice::row(buffer, width) {
-            return Some(receipt);
-        }
-        let Some((receipt, detail)) = crate::render::prompt_echo::collapsed(buffer, width) else {
-            // A short submission still retires the live status and notices.
-            return Some(format!("> {}", buffer.replace('\n', "\n… ")));
-        };
-        self.status
-            .lock()
-            .expect("surface status lock")
-            .details
-            .remember(detail);
-        Some(receipt)
+        background_notice::row(buffer, usize::from(width).saturating_sub(1))
+            .or_else(|| Some(format!("> {}", buffer.replace('\n', "\n… "))))
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {
@@ -2306,6 +2347,7 @@ struct TerminalScript {
     lines: std::collections::VecDeque<Line>,
     prompts: Vec<String>,
     launches: Vec<String>,
+    signals: Vec<String>,
 }
 
 #[cfg(test)]

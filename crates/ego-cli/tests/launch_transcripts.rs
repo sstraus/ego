@@ -100,7 +100,7 @@ fn redact_session_id(text: &str) -> String {
 fn readable(raw: &str) -> String {
     let mut lines: Vec<String> = Vec::new();
     for line in strip_escapes(raw).replace("\r\n", "\n").split(['\n', '\r']) {
-        let mut line = line.replace("^D", "");
+        let mut line = line.replace("^D", "").trim_start().to_owned();
         while let Some(rest) = line.strip_prefix("> ").or_else(|| line.strip_prefix("… ")) {
             line = rest.to_owned();
         }

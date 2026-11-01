@@ -1,14 +1,14 @@
 # εgo documentation
 
 εgo supplies the operational layer between a model and work on your machine.
-These guides describe the implemented user surfaces in this checkout. Start with
+These guides explain how to use ego. Start with
 what you want to do; each guide explains the feature before its controls.
 
-This is also the introduction to the mdBook user guide. Its sidebar follows
+Read the [hosted user guide](https://sstraus.github.io/ego/) for chapter
+navigation, search, and a print view. Its sidebar follows
 [the book summary](SUMMARY.md): user tasks first, then integrations and reference.
-Build with `mdbook build docs` from the repository root, or use `mdbook serve docs`
-for a local preview. See [build and maintenance](maintaining.md) for requirements,
-checks, and output paths. No hosted website is implied.
+GitHub Actions builds and publishes the guide; you do not need documentation tools
+to read it. Contributors can use [build and maintenance](maintaining.md).
 
 | Your task | Guide |
 | --- | --- |
@@ -23,16 +23,16 @@ checks, and output paths. No hosted website is implied.
 | Set authority and confinement | [Permissions and confinement](guides/permissions.md) |
 | Resume, branch, compact, inspect usage, and export | [Sessions and history](guides/sessions.md) |
 | Isolate work in a retained Git checkout | [Git worktrees](guides/worktrees.md) |
-| Initialize instructions and review persistent memory | [Instructions and memory](guides/memory.md) |
+| Initialize project instructions | [Project instructions](guides/memory.md) |
 | Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
 | Implement an ACP client for ego's wire extensions | [ACP extensions](integrations/acp-extensions.md) |
 | Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
-| Read the locally prepared release changes | [Release notes: 0.4.1](release-notes/0.4.1.md) |
+| Read the upcoming release changes | [Release notes: 0.4.3](release-notes/0.4.3.md) |
+| Read the previous preparation changes | [Release notes: 0.4.2](release-notes/0.4.2.md) |
+| Read the previous preparation changes | [Release notes: 0.4.1](release-notes/0.4.1.md) |
 | Read the previous release changes | [Release notes: 0.4.0](release-notes/0.4.0.md) |
 | Understand crate responsibilities and design | [Architecture](architecture.md) |
 
 The [generated command reference](reference/cli.md) remains at its generator-owned
 path. [Configuration](reference/configuration.md) identifies the source schemas.
-[CLI.md](../CLI.md) describes command conventions, and
-[ARCHITECTURE.md](../ARCHITECTURE.md) describes crate and authority boundaries.
-Use the installed binary help for exact invocation details.
+[CLI.md](../CLI.md) describes command conventions; [ARCHITECTURE.md](../ARCHITECTURE.md) describes the source model. Use the source-backed guides and current binary help for invocation details.

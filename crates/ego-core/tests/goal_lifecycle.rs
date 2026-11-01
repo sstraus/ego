@@ -319,3 +319,39 @@ fn checked_operator_block_is_durable_without_a_repeated_condition_audit() {
     assert_eq!(goal.continuation_turns, 0);
     assert!(goal.achievement_evidence.is_none());
 }
+
+// Catches: a successful formatter silently drops the actionable refusal reason.
+#[test]
+fn goal_refusal_display_preserves_each_actionable_reason() {
+    use ego_core::goal::GoalRefusal;
+
+    for (refusal, expected) in [
+        (GoalRefusal::NoActiveGoal, "session has no active goal"),
+        (
+            GoalRefusal::InvalidExtension,
+            "goal extension requires a positive turn count and must not overflow the allowance",
+        ),
+        (
+            GoalRefusal::AlreadyTerminal(GoalState::Achieved),
+            "goal is already Achieved",
+        ),
+        (
+            GoalRefusal::AlreadyTerminal(GoalState::Blocked),
+            "goal is already Blocked",
+        ),
+        (
+            GoalRefusal::ActiveGoalExists,
+            "session already has an active goal",
+        ),
+        (
+            GoalRefusal::EvidenceRequired,
+            "automated goal achievement requires evidence",
+        ),
+        (
+            GoalRefusal::AttestationWouldWiden,
+            "goal achievement would widen automated authority",
+        ),
+    ] {
+        assert_eq!(refusal.to_string(), expected, "{refusal:?}");
+    }
+}

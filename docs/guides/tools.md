@@ -1,5 +1,7 @@
 # Tools
 
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/tools.html).
+
 Tools let a model perform work. Each tool prepares canonical operations; policy
 permits those operations before a guarded port executes them. Listing a tool or
 including it in `--tools` does not grant access.

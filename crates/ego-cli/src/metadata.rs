@@ -101,6 +101,11 @@ fn execute_inner(args: &SessionMetadataArgs, out: &Stdout) -> Result<(), RunTerm
                         reason: reason.clone(),
                     },
                 ),
+                GoalOperation::Extend(turns) => metadata.transition_goal(
+                    &opened.writer,
+                    expected,
+                    GoalTransition::AllowanceExtended { turns: *turns },
+                ),
                 GoalOperation::Show => unreachable!(),
             };
             match changed {
@@ -173,6 +178,11 @@ where
                     GoalTransition::BlockerObserved {
                         reason: reason.clone(),
                     },
+                ),
+                GoalOperation::Extend(turns) => metadata.transition_goal(
+                    append,
+                    expected,
+                    GoalTransition::AllowanceExtended { turns: *turns },
                 ),
                 GoalOperation::Show => unreachable!(),
             };
@@ -398,6 +408,75 @@ mod interactive_metadata_tests {
         fn now(&self) -> Timestamp {
             Timestamp::from_millis(1)
         }
+    }
+
+    /// Catches: interactive extension saves the allowance but leaves the live journal exhausted.
+    #[test]
+    fn goal_extension_refreshes_interactive_journal_without_replacing_goal() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let store = Arc::new(JsonlStore::new(
+            root.path(),
+            workspace.path(),
+            Box::new(OsIo),
+        ));
+        let id = SessionId::new();
+        store
+            .publish_empty_session(id, workspace.path(), Timestamp::from_millis(1))
+            .unwrap();
+        let opened = crate::session::open(store.as_ref(), &id, &FixedClock).unwrap();
+        let metadata = SessionMetadata::new(Arc::clone(&store), Arc::new(FixedClock));
+        let journal = LeasedSharedJournal::new(
+            &opened.writer,
+            &FixedClock,
+            &NullSink,
+            Producer::Main,
+            opened.state.clone(),
+        );
+        let shared = journal.shared();
+        let ceilings = ego_core::ceiling::Ceilings::default();
+        execute_interactive(
+            &metadata,
+            &journal,
+            &shared,
+            &SessionMetadataOperation::Goal(GoalOperation::Set("ship".into())),
+            &ceilings,
+            &mut |_| {},
+        )
+        .unwrap();
+        let original = shared.inspect(|state| state.goal.clone().unwrap()).unwrap();
+        for kind in [
+            EventKind::GoalCheckConfigured {
+                id: original.id,
+                continuation_budget: 1,
+            },
+            EventKind::GoalContinuation {
+                id: original.id,
+                text: "continue".into(),
+            },
+            EventKind::GoalCheckStopped {
+                id: original.id,
+                reason: "goal continuation budget exhausted (1)".into(),
+            },
+        ] {
+            shared.append(TurnId::new(), None, None, kind).unwrap();
+        }
+        execute_interactive(
+            &metadata,
+            &journal,
+            &shared,
+            &SessionMetadataOperation::Goal(GoalOperation::Extend(2)),
+            &ceilings,
+            &mut |_| {},
+        )
+        .unwrap();
+        let goal = shared.inspect(|state| state.goal.clone().unwrap()).unwrap();
+        assert_eq!(goal.id, original.id);
+        assert_eq!(goal.created_seq, original.created_seq);
+        assert_eq!(goal.continuation_budget, Some(3));
+        assert_eq!(goal.continuation_turns, 1);
+        assert_eq!(goal.check_stop, None);
+        assert_eq!(metadata.goal(id).unwrap().unwrap(), goal);
     }
 
     /// Catches: metadata reports /3 although the durable goal blocks on observation five.

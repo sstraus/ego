@@ -6,7 +6,9 @@ use crate::{CursorConfig, PromptEditMode, PromptViMode};
 #[cfg(feature = "external_printer")]
 use crate::LineBuffer;
 use {
-    super::utils::{coerce_crlf, deferred_wrap_row, estimate_required_lines, line_width},
+    super::utils::{
+        coerce_crlf, deferred_wrap_row, estimate_required_lines, line_width, printed_cursor,
+    },
     crate::{
         menu::{Menu, ReedlineMenu},
         painting::PromptLines,
@@ -169,20 +171,15 @@ pub struct PromptFootprint {
     start_row: u16,
     /// Rows the cursor can be on while nothing else has written.
     cursor_rows: RangeInclusive<u16>,
-    /// Column the cursor is on, when the return left it at a known one.
-    cursor_column: Option<u16>,
     /// Terminal size the prompt was painted for.
     screen: (u16, u16),
 }
 
 impl PromptFootprint {
-    /// The row to erase from, if the screen and the cursor are still where
-    /// the return left them.
-    fn erasable_from(&self, (column, row): (u16, u16), screen: (u16, u16)) -> Option<u16> {
-        (screen == self.screen
-            && self.cursor_rows.contains(&row)
-            && self.cursor_column.is_none_or(|expected| expected == column))
-        .then_some(self.start_row)
+    /// The caller retains exclusive terminal ownership until this footprint is
+    /// retired. Only an OS-observed resize invalidates those painted coordinates.
+    fn erasable_in(&self, screen: (u16, u16)) -> Option<u16> {
+        (screen == self.screen).then_some(self.start_row)
     }
 }
 
@@ -538,7 +535,6 @@ impl Painter {
         PromptFootprint {
             start_row,
             cursor_rows: start_row..=self.last_prompt_row(start_row),
-            cursor_column: None,
             screen: self.terminal_size,
         }
     }
@@ -558,7 +554,6 @@ impl Painter {
         PromptFootprint {
             start_row,
             cursor_rows: cursor_row..=cursor_row,
-            cursor_column: Some(0),
             screen: self.terminal_size,
         }
     }
@@ -569,16 +564,20 @@ impl Painter {
             .min(self.screen_height().saturating_sub(1))
     }
 
-    /// Erase a finished prompt when the screen and the cursor are still where
-    /// its return left them, leaving the cursor on its first row.
+    /// Erase the footprint before the owner writes anything else. A terminal
+    /// reply is not needed to rediscover coordinates this owner just painted.
     pub(crate) fn erase_footprint(&mut self, footprint: &PromptFootprint) -> Result<bool> {
         self.last_frame = None;
-        let Some(row) = footprint.erasable_from(cursor::position()?, terminal::size()?) else {
+        let Some(row) = footprint.erasable_in(terminal::size()?) else {
             return Ok(false);
         };
         self.stdout.queue(MoveTo(0, row))?;
         self.stdout.queue(Clear(ClearType::FromCursorDown))?;
         self.stdout.flush()?;
+        self.prompt_start_row.mark_verified(row);
+        self.last_required_lines = 1;
+        self.after_cursor_lines = None;
+        self.just_resized = false;
         Ok(true)
     }
 
@@ -1451,6 +1450,46 @@ impl Painter {
         }
     }
 
+    /// Commit an entire submission receipt, without the editing viewport limit.
+    /// The normal exit transition adds its final newline.
+    pub(crate) fn print_submission(&mut self, receipt: &str) -> Result<()> {
+        let start = self.prompt_start_row.last_known_row();
+        self.invalidate_prompt_start_row();
+        self.last_layout = None;
+        self.after_cursor_lines = None;
+        self.clear_from_anchor(start)?;
+        self.stdout.queue(SetAttribute(Attribute::Reset))?;
+        if let Some(markers) = &self.semantic_markers {
+            self.stdout
+                .queue(Print(markers.prompt_start(PromptKind::Primary)))?
+                .queue(Print(markers.command_input_start()))?;
+        }
+        self.stdout.queue(Print(&coerce_crlf(receipt)))?;
+        // Materialize a pending right-margin wrap before exit clears from the
+        // cursor; otherwise that clear would erase the receipt's final glyph.
+        let (offset, column) = printed_cursor([receipt], self.screen_width());
+        let margin = self.screen_width() > 0 && column >= usize::from(self.screen_width());
+        if margin {
+            self.stdout
+                .queue(Print(" "))?
+                .queue(cursor::MoveToColumn(0))?;
+        }
+        self.stdout.flush()?;
+
+        // This owner painted from a known anchor. Each emitted line feed or
+        // wrap advances one row, scrolling at the bottom; no CPR is needed.
+        let offset = offset.saturating_add(u16::from(margin));
+        let row = start
+            .saturating_add(offset)
+            .min(self.screen_height().saturating_sub(1));
+        let rows = offset.saturating_add(1).min(self.screen_height().max(1));
+        let start = row.saturating_sub(rows - 1);
+        self.prompt_start_row = PromptStartRow::Verified(start);
+        self.last_required_lines = row - start + 1;
+        self.last_cursor_margin_row = None;
+        Ok(())
+    }
+
     /// Writes `line` to the terminal followed by `\r\n` and
     /// invalidates the cached prompt anchor since the line scrolls the
     /// terminal independently of the painter.
@@ -1505,6 +1544,17 @@ impl Painter {
             self.stdout.queue(Print(after_cursor))?;
         }
         self.print_crlf()
+    }
+
+    /// Commit a host-accepted buffer without yielding terminal ownership. The
+    /// final CRLF determines the next anchor, including bottom-row scrolling.
+    pub(crate) fn finish_submission(&mut self) -> Result<()> {
+        let next_row = *self.footprint_after_end().cursor_rows.start();
+        self.move_cursor_to_end()?;
+        self.prompt_start_row.mark_verified(next_row);
+        self.last_required_lines = 1;
+        self.after_cursor_lines = None;
+        Ok(())
     }
 
     /// Prints an external message
@@ -1809,53 +1859,6 @@ mod tests {
         );
     }
 
-    // A suspended prompt is erasable from its first row while the cursor is
-    // still inside it; a resize or a cursor above it means something moved
-    // the screen, so nothing may be erased.
-    #[rstest]
-    #[case::cursor_inside(5, 2, (2, 6), (80, 8), Some(5))]
-    #[case::cursor_on_bottom_row_of_a_flush_prompt(6, 2, (2, 7), (80, 8), Some(6))]
-    #[case::cursor_above_the_prompt(5, 2, (0, 4), (80, 8), None)]
-    #[case::resized(5, 2, (2, 6), (60, 8), None)]
-    fn test_suspended_footprint_erases_only_where_it_was_left(
-        #[case] start_row: u16,
-        #[case] required_lines: u16,
-        #[case] cursor: (u16, u16),
-        #[case] screen: (u16, u16),
-        #[case] erasable: Option<u16>,
-    ) {
-        let mut painter = Painter::new(W::sink());
-        painter.handle_resize(80, 8); // rows 0..=7
-        painter.prompt_start_row.mark_verified(start_row);
-        painter.last_required_lines = required_lines;
-
-        let footprint = painter.footprint_in_place();
-        assert_eq!(footprint.erasable_from(cursor, screen), erasable);
-    }
-
-    // A returned prompt leaves the cursor at column 0 below its last row; one
-    // that ended on the bottom row scrolled up by the line feed, so its first
-    // row moved up with it.
-    #[rstest]
-    #[case::room_below(2, 2, (0, 4), Some(2))]
-    #[case::ended_on_the_bottom_row(6, 2, (0, 7), Some(5))]
-    #[case::cursor_not_at_column_zero(2, 2, (3, 4), None)]
-    #[case::cursor_moved_on(2, 2, (0, 5), None)]
-    fn test_returned_footprint_follows_the_final_line_feed(
-        #[case] start_row: u16,
-        #[case] required_lines: u16,
-        #[case] cursor: (u16, u16),
-        #[case] erasable: Option<u16>,
-    ) {
-        let mut painter = Painter::new(W::sink());
-        painter.handle_resize(80, 8); // rows 0..=7
-        painter.prompt_start_row.mark_verified(start_row);
-        painter.last_required_lines = required_lines;
-
-        let footprint = painter.footprint_after_end();
-        assert_eq!(footprint.erasable_from(cursor, (80, 8)), erasable);
-    }
-
     fn base_snapshot() -> RenderSnapshot {
         RenderSnapshot {
             screen_width: 20,
@@ -1974,6 +1977,7 @@ mod tests {
             after_cursor: Cow::Borrowed(after),
             hint: Cow::Borrowed(""),
             footer: Cow::Borrowed(""),
+            bottom_padding: 0,
             right_prompt_on_last_line: false,
         }
     }

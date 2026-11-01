@@ -472,6 +472,12 @@ fn resolve_inner(
             });
         }
         merge_auth(&mut auth, &sourced.value.auth);
+        if sourced.source == Source::User {
+            for (id, provider) in &sourced.value.auth {
+                auth.entry(id.clone()).or_default().protocol_filter =
+                    provider.protocol_filter.clone();
+            }
+        }
         if let Some(template) = sourced
             .value
             .ui

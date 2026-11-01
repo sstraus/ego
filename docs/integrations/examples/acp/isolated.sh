@@ -2,7 +2,7 @@
 # Run a client with no inherited credentials, config, or provider daemon.
 set -eu
 : "${EGO_BIN:=$(command -v ego)}"
-base="${HOME}/Gits/.tmp/ego-acp-clients"
+base="${ACP_EXAMPLE_ROOT:-${TMPDIR:-/tmp}/ego-acp-clients}"
 mkdir -p "$base"
 run=$(mktemp -d "$base/run.XXXXXX")
 mkdir -p "$run/home" "$run/workspace"

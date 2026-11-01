@@ -1,5 +1,155 @@
 use super::*;
 
+fn choose_mcp_control(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+) -> Option<Line> {
+    use super::permission::{PermissionField, read_permission_field, select_permission_value};
+    let actions = status
+        .lock()
+        .expect("surface status lock")
+        .mcp_actions
+        .clone()?;
+    let current = actions.registry.status();
+    let names = actions
+        .servers
+        .iter()
+        .map(|(name, disabled)| {
+            let state = if *disabled {
+                "off (session)"
+            } else {
+                current
+                    .server(name)
+                    .map(|server| crate::mcp::server_state_text(server.state()))
+                    .unwrap_or("absent")
+            };
+            (format!("server:{name}"), format!("{name}  {state}"))
+        })
+        .collect::<Vec<_>>();
+    let mut choices = vec![
+        ("action:status", "Show server status"),
+        ("action:add", "Add server"),
+    ];
+    let borrowed = names
+        .iter()
+        .map(|(id, label)| (id.as_str(), label.as_str()))
+        .collect::<Vec<_>>();
+    choices.extend(borrowed);
+    let selected = match select_permission_value(
+        editor,
+        phase,
+        status,
+        false,
+        "Choose MCP server or action",
+        &choices,
+        (true, false, None),
+    ) {
+        PermissionField::Value(value) => value,
+        PermissionField::Cancelled => return None,
+        PermissionField::Propagate(line) => return Some(line),
+    };
+    if selected == "action:status" {
+        return Some(Line::HostCommand(HostCommand::Mcp(String::new())));
+    }
+    if selected == "action:add" {
+        return match read_permission_field(
+            editor,
+            phase,
+            status,
+            false,
+            "Add: NAME --http URL or NAME --stdio -- COMMAND ...: ",
+        ) {
+            PermissionField::Value(value) => {
+                Some(Line::HostCommand(HostCommand::Mcp(format!("add {value}"))))
+            }
+            PermissionField::Cancelled => None,
+            PermissionField::Propagate(line) => Some(line),
+        };
+    }
+    let action = match select_permission_value(
+        editor,
+        phase,
+        status,
+        false,
+        "Choose MCP server control",
+        &[
+            ("toggle", "Turn on/off for this session"),
+            ("login", "Authorize and reconnect"),
+        ],
+        (true, false, None),
+    ) {
+        PermissionField::Value(value) => value,
+        PermissionField::Cancelled => return None,
+        PermissionField::Propagate(line) => return Some(line),
+    };
+    Some(Line::HostCommand(HostCommand::Mcp(format!(
+        "{action} {}",
+        selected.strip_prefix("server:")?
+    ))))
+}
+
+fn choose_skill_control(
+    editor: &mut Reedline,
+    phase: &SurfacePhase,
+    status: &SharedStatus,
+) -> Option<Line> {
+    use super::permission::{PermissionField, select_permission_value};
+    let registry = status
+        .lock()
+        .expect("surface status lock")
+        .actions
+        .as_ref()?
+        .registry
+        .clone();
+    let skills = registry.skill_menu("");
+    let mut choices = vec![
+        ("action:list", "Show skills"),
+        ("action:details", "Show sources and details"),
+        ("action:diagnose", "Inspect admission problems"),
+        ("action:rescan", "Reload skill catalogue"),
+    ];
+    let named = skills
+        .iter()
+        .map(|(name, description)| (format!("skill:{name}"), format!("{name} — {description}")))
+        .collect::<Vec<_>>();
+    let borrowed = named
+        .iter()
+        .map(|(id, description)| (id.as_str(), description.as_str()))
+        .collect::<Vec<_>>();
+    choices.extend(borrowed);
+    let selected = match select_permission_value(
+        editor,
+        phase,
+        status,
+        false,
+        "Choose skill action or skill to invoke",
+        &choices,
+        (true, false, None),
+    ) {
+        PermissionField::Value(value) => value,
+        PermissionField::Cancelled => return None,
+        PermissionField::Propagate(line) => return Some(line),
+    };
+    let action = match selected.as_str() {
+        "action:list" => SkillSurfaceAction::List,
+        "action:details" => SkillSurfaceAction::Details,
+        "action:diagnose" => SkillSurfaceAction::Diagnose,
+        "action:rescan" => SkillSurfaceAction::Rescan,
+        _ => {
+            let name = selected.strip_prefix("skill:")?;
+            let text = format!("/skills invoke {name}");
+            return match registry.classify(registry.submit(text, InputOrigin::Typed)) {
+                Dispatch::Skill(operation) => {
+                    Some(Line::HostCommand(HostCommand::Skill(operation)))
+                }
+                _ => Some(Line::Refused("the selected skill is no longer available")),
+            };
+        }
+    };
+    Some(Line::HostCommand(HostCommand::Skills(action)))
+}
+
 pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> String {
     const SECTIONS: [(&str, &[ActionId]); 6] = [
         (
@@ -206,6 +356,18 @@ fn refuse_busy_dispatch(status: &SharedStatus, dispatch: &Dispatch) -> bool {
     true
 }
 
+pub(super) fn refuse_busy_shell(status: &SharedStatus, text: &str) -> bool {
+    if Line::bang_from_editor(text).is_none() {
+        return false;
+    }
+    commit_to_transcript(
+        status,
+        "shell escapes require an idle terminal; wait for the current turn",
+    );
+    repaint_status(status);
+    true
+}
+
 fn submit_busy_line(
     editor: &mut Reedline,
     prompt: &dyn Prompt,
@@ -216,6 +378,9 @@ fn submit_busy_line(
     steer: bool,
 ) -> Option<(Line, bool)> {
     let buffer = editor.current_buffer_contents().to_string();
+    if refuse_busy_shell(status, &buffer) {
+        return None;
+    }
     let dispatch = {
         let status = status.lock().expect("surface status lock");
         status.actions.as_ref().map_or(Dispatch::Prompt, |actions| {
@@ -361,7 +526,7 @@ pub(super) fn surface_line(
                 .concat()
             });
         }
-        let signal = editor.read_line(prompt);
+        let signal = suspend::read_line(editor, prompt, status);
         if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == MODE_CYCLE_COMMAND)
         {
             // Preserve intent until the owner consumes this queued command. During
@@ -486,8 +651,9 @@ pub(super) fn surface_line(
                     .expect("surface status lock")
                     .inspections
                     .clone();
-                if let Some(command) = command.filter(HostCommand::is_read_only_inspection)
-                    && let Some((sender, waker)) = inspections
+                if let Some(command) = command.filter(|command| {
+                    command.is_read_only_inspection() || command.is_root_revocation()
+                }) && let Some((sender, waker)) = inspections
                 {
                     if sender.send(command).is_err() {
                         return (Line::Ended, failed);
@@ -545,6 +711,12 @@ pub(super) fn surface_line(
                 Dispatch::Skill(operation) => {
                     return (Line::HostCommand(HostCommand::Skill(operation)), failed);
                 }
+                Dispatch::Skills(SkillSurfaceAction::List) if text.trim() == "/skills" => {
+                    if let Some(line) = choose_skill_control(editor, phase, status) {
+                        return (line, failed);
+                    }
+                    continue;
+                }
                 Dispatch::Skills(action) => {
                     return (Line::HostCommand(HostCommand::Skills(action)), failed);
                 }
@@ -562,6 +734,12 @@ pub(super) fn surface_line(
                 }
                 Dispatch::McpContext(command) => {
                     return (Line::HostCommand(HostCommand::McpContext(command)), failed);
+                }
+                Dispatch::Mcp(arguments) if arguments.is_empty() => {
+                    if let Some(line) = choose_mcp_control(editor, phase, status) {
+                        return (line, failed);
+                    }
+                    continue;
                 }
                 Dispatch::Mcp(arguments) => {
                     return (Line::HostCommand(HostCommand::Mcp(arguments)), failed);
@@ -1069,14 +1247,16 @@ pub(super) fn apply_surface_effect(
             );
         }
         SurfaceActionEffect::Expand => {
-            let diagnostics = status
-                .lock()
-                .expect("surface status lock")
-                .diagnostics
-                .as_ref()
-                .and_then(std::sync::Weak::upgrade);
-            if let Some(diagnostics) = diagnostics {
-                diagnostics.expand_last_tool();
+            // The driver can hold its output lock while finish waits for this
+            // thread to drain the printer. Enqueue through the owner's pump,
+            // just like help and permission receipts, never through diagnostics.
+            let detail = status.lock().expect("surface status lock").details.latest();
+            match detail {
+                Some(detail) => commit_transcript_block(status, &format!("\n{detail}")),
+                None => commit_to_transcript(
+                    status,
+                    &format!("{}: no tool call to expand yet", crate::DISPLAY_NAME),
+                ),
             }
         }
         SurfaceActionEffect::Help if busy => {
@@ -1138,7 +1318,7 @@ pub(super) fn apply_surface_effect(
             return None;
         }
         SurfaceActionEffect::Mcp if !busy => {
-            return Some(Line::HostCommand(HostCommand::Mcp(String::new())));
+            return choose_mcp_control(editor, phase, status);
         }
         SurfaceActionEffect::Mcp => {
             let actions = status
@@ -1209,9 +1389,7 @@ pub(super) fn apply_surface_effect(
                     "cannot run skill actions during a reply; wait for it to finish".to_owned(),
                 );
             } else {
-                return Some(Line::HostCommand(HostCommand::Skills(
-                    SkillSurfaceAction::List,
-                )));
+                return choose_skill_control(editor, phase, status);
             }
         }
         SurfaceActionEffect::Hooks => {
@@ -1292,5 +1470,63 @@ pub(super) fn route_session_metadata(
         None
     } else {
         Some(Line::HostCommand(HostCommand::SessionMetadata(operation)))
+    }
+}
+
+#[cfg(test)]
+mod integration_control_tests {
+    use super::*;
+
+    // Catches: the live Skills action bypasses the selector and only lists skills.
+    #[test]
+    fn skill_picker_routes_selected_control_and_preserves_composer() {
+        let registry = Arc::new(ActionRegistry::final_surface());
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            picker_keys: vec!["down".into(), "enter".into()],
+            ..SurfaceStatus::with_registry(registry)
+        }));
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[EditCommand::InsertString("draft".into())]);
+        let phase = SurfacePhase::new(EditPhase::Idle);
+        let selected = apply_surface_effect(
+            &mut editor,
+            &phase,
+            &status,
+            SurfaceActionEffect::Skills,
+            false,
+        );
+        assert!(matches!(
+            selected,
+            Some(Line::HostCommand(HostCommand::Skills(
+                SkillSurfaceAction::Details
+            )))
+        ));
+        assert_eq!(editor.current_buffer_contents(), "draft");
+        assert_eq!(phase.get(), EditPhase::Idle);
+    }
+
+    // Catches: canceling a skill selector destroys the draft or runs the default action.
+    #[test]
+    fn skill_picker_escape_does_not_dispatch_or_destroy_draft() {
+        let registry = Arc::new(ActionRegistry::final_surface());
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            picker_keys: vec!["escape".into()],
+            ..SurfaceStatus::with_registry(registry)
+        }));
+        let mut editor = Reedline::create();
+        editor.run_edit_commands(&[EditCommand::InsertString("draft".into())]);
+        let phase = SurfacePhase::new(EditPhase::Idle);
+        assert!(
+            apply_surface_effect(
+                &mut editor,
+                &phase,
+                &status,
+                SurfaceActionEffect::Skills,
+                false,
+            )
+            .is_none()
+        );
+        assert_eq!(editor.current_buffer_contents(), "draft");
+        assert_eq!(phase.get(), EditPhase::Idle);
     }
 }

@@ -1,0 +1,9 @@
+{"type":"session_started","v":18,"session":"01a19627-fc4e-7524-8374-6112ba932b3a","capabilities":["jsonl"]}
+{"type":"turn_started","turn":"01a19628-0f30-72c7-99b0-d9517162630e"}
+{"type":"item_completed","turn":"01a19628-0f30-72c7-99b0-d9517162630e","item":"01a19628-0f40-7385-9a01-8beef3d07d48","kind":"user_message","ok":true,"text":"Report readiness."}
+{"type":"metering_selected","turn":"01a19628-0f30-72c7-99b0-d9517162630e","metering":"unmetered","ceiling":{"effect":"none"},"rates":{"source":"none"}}
+{"type":"item_delta","turn":"01a19628-0f30-72c7-99b0-d9517162630e","item":"01a19628-0f6e-713b-a30b-39d9348faa79","kind":"agent_message","text":"Recorded native run."}
+{"type":"usage_updated","turn":"01a19628-0f30-72c7-99b0-d9517162630e","usage_delta":{"uncached_input_tokens":10,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":4},"cost_delta":{"cost":"known","amount":{"amount":"0","currency":"USD"},"attribution":{"source":"metering_policy","revision":"ego/builtin/ollama-local-unmetered/v1"}}}
+{"type":"item_completed","turn":"01a19628-0f30-72c7-99b0-d9517162630e","item":"01a19628-0f6e-713b-a30b-39d9348faa79","kind":"agent_message","ok":true,"text":"Recorded native run."}
+{"type":"context_window_updated","turn":"01a19628-0f30-72c7-99b0-d9517162630e","used_tokens":14,"provenance":"generation_boundary"}
+{"type":"turn_completed","turn":"01a19628-0f30-72c7-99b0-d9517162630e","ok":true,"exit_reason":"Completed"}

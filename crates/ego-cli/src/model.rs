@@ -787,15 +787,29 @@ impl CliGenerationModelSource {
         {
             previous.generator.clone()
         } else {
-            let generator = Arc::new(
-                ego_ai::generator::WireGenerator::new(
-                    resolved.row,
-                    resolved.wire,
-                    Arc::clone(http),
-                    credential,
-                )
-                .with_service_tier(service_tier),
-            );
+            let filter = self
+                .auth
+                .get(provider_id)
+                .and_then(|auth| auth.protocol_filter.clone());
+            let generator = ego_ai::generator::WireGenerator::new(
+                resolved.row,
+                resolved.wire,
+                Arc::clone(http),
+                credential,
+            )
+            .with_service_tier(service_tier);
+            let generator = match filter {
+                Some(config) if config.enabled => generator.with_protocol_filter(
+                    config.clone(),
+                    Arc::new(crate::protocol_filter::OsProtocolFilter {
+                        config,
+                        cancel: cancel.clone(),
+                        deadline: run_deadline,
+                    }),
+                ),
+                _ => generator,
+            };
+            let generator = Arc::new(generator);
             if role == GenerationRole::Main {
                 *retained = Some(RetainedGenerator {
                     model: request_model.clone(),

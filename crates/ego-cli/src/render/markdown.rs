@@ -15,7 +15,7 @@
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
-use super::caps::{Depth, OscProfile};
+use super::caps::{Capabilities, Depth, OscProfile};
 use super::line::{Line, Span};
 use super::style::{Palette, Style};
 use super::table::{Align, Table};
@@ -25,9 +25,11 @@ use super::table::{Align, Table};
 /// `width` lays out containers and tables. Top-level prose stays on logical
 /// lines so each terminal viewer can wrap it at its own edge. Only the TUIC
 /// OSC profile preserves host protocol marker boundaries.
-pub fn render(source: &str, width: usize, host: OscProfile) -> Vec<Line> {
-    let tuic = host == OscProfile::Tuic;
-    let mut renderer = Renderer::new(width);
+pub fn render(source: &str, capabilities: Capabilities, base: Option<&url::Url>) -> Vec<Line> {
+    let tuic = capabilities.osc == OscProfile::Tuic;
+    let mut renderer = Renderer::new(capabilities.width);
+    renderer.hyperlinks = capabilities.hyperlinks;
+    renderer.link_base = base.cloned();
     let mut paragraph = false;
     for (event, range) in Parser::new_ext(source, options()).into_offset_iter() {
         let top_level = renderer.lists.is_empty()
@@ -111,6 +113,10 @@ struct Renderer {
     table: Option<TableBuilder>,
     /// The link the current spans belong to, if any.
     link: Option<String>,
+    link_destination: Option<String>,
+    link_label: String,
+    hyperlinks: bool,
+    link_base: Option<url::Url>,
     /// The list marker owed to the first row of the item being built. Held
     /// out of `current` so it is not measured twice — see [`Renderer::flush`].
     marker: Option<Line>,
@@ -142,10 +148,34 @@ impl Renderer {
             code: None,
             table: None,
             link: None,
+            link_destination: None,
+            link_label: String::new(),
+            hyperlinks: false,
+            link_base: None,
             marker: None,
             host_line: false,
             paragraph: false,
         }
+    }
+
+    fn resolve_link(&self, destination: &str) -> Option<String> {
+        if cfg!(windows) && std::path::Path::new(destination).is_absolute() {
+            return url::Url::from_file_path(destination).ok().map(Into::into);
+        }
+        url::Url::parse(destination)
+            .ok()
+            .or_else(|| self.link_base.as_ref()?.join(destination).ok())
+            .or_else(|| url::Url::from_file_path(destination).ok())
+            .map(Into::into)
+    }
+
+    fn start_link(&mut self, destination: &str) {
+        self.link_destination = Some(destination.to_owned());
+        self.link_label.clear();
+        self.link = self
+            .hyperlinks
+            .then(|| self.resolve_link(destination))
+            .flatten();
     }
 
     fn style(&self) -> Style {
@@ -158,6 +188,9 @@ impl Renderer {
     }
 
     fn text(&mut self, text: &str) {
+        if self.link_destination.is_some() {
+            self.link_label.push_str(text);
+        }
         let style = self.style();
         let link = self.link.clone();
         self.current.push(match link {
@@ -271,7 +304,13 @@ impl Renderer {
             }
             Event::Code(code) => {
                 let style = self.style().with_fg(Palette::CODE);
-                self.current.push(Span::new(code.to_string(), style));
+                if self.link_destination.is_some() {
+                    self.link_label.push_str(&code);
+                }
+                self.current.push(match &self.link {
+                    Some(uri) => Span::linked(code.to_string(), style, uri),
+                    None => Span::new(code.to_string(), style),
+                });
             }
             // A soft break is a newline the author typed inside a paragraph.
             // It becomes a space: the viewer owns the prose wrap column, and
@@ -390,14 +429,28 @@ impl Renderer {
             Tag::Strong => self.push_style(Style::bold),
             Tag::Strikethrough => self.push_style(Style::strike),
             Tag::Link { dest_url, .. } => {
-                self.link = Some(dest_url.to_string());
-                self.push_style(|style| style.with_fg(Palette::LINK).underline());
+                self.start_link(dest_url.as_ref());
+                let actionable = self.link.is_some();
+                self.push_style(|style| {
+                    if actionable {
+                        style.with_fg(Palette::LINK).underline()
+                    } else {
+                        style
+                    }
+                });
             }
             Tag::Image { dest_url, .. } => {
                 // Without image protocol support, name the image instead of dropping it.
                 self.text("🖼 ");
-                self.link = Some(dest_url.to_string());
-                self.push_style(|style| style.with_fg(Palette::LINK).underline());
+                self.start_link(dest_url.as_ref());
+                let actionable = self.link.is_some();
+                self.push_style(|style| {
+                    if actionable {
+                        style.with_fg(Palette::LINK).underline()
+                    } else {
+                        style
+                    }
+                });
             }
             Tag::Table(alignments) => {
                 self.flush();
@@ -472,6 +525,13 @@ impl Renderer {
             TagEnd::Link | TagEnd::Image => {
                 self.styles.pop();
                 self.link = None;
+                if let Some(destination) = self.link_destination.take()
+                    && (!self.hyperlinks || self.resolve_link(&destination).is_none())
+                    && self.link_label != destination
+                {
+                    self.text(&format!(" ({destination})"));
+                }
+                self.link_label.clear();
             }
             TagEnd::Table => {
                 let Some(builder) = self.table.take() else {
@@ -542,15 +602,27 @@ fn convert_alignment(alignment: &Alignment) -> Align {
 mod tests {
     use super::*;
 
+    fn at(width: usize, osc: OscProfile) -> Capabilities {
+        Capabilities {
+            width,
+            osc,
+            hyperlinks: true,
+            ..Capabilities::plain()
+        }
+    }
+
     fn text(source: &str, width: usize) -> Vec<String> {
-        render(source, width, OscProfile::Tuic)
+        render(source, at(width, OscProfile::Tuic), None)
             .iter()
             .map(Line::text)
             .collect()
     }
 
     fn bytes(source: &str, width: usize) -> String {
-        crate::render::block(&render(source, width, OscProfile::Tuic), Depth::TrueColor)
+        crate::render::block(
+            &render(source, at(width, OscProfile::Tuic), None),
+            Depth::TrueColor,
+        )
     }
 
     // Catches: non-TUIC profiles accidentally retain marker-specific Markdown boundaries.
@@ -560,7 +632,7 @@ mod tests {
             let source =
                 "intent: task\nsuggest: **try this**\nTUICommander v2.0.0 is connected.\n💬 answer";
             assert_eq!(
-                render(source, 80, host)
+                render(source, at(80, host), None)
                     .iter()
                     .map(Line::text)
                     .collect::<Vec<_>>(),
@@ -768,7 +840,7 @@ mod tests {
     #[test]
     fn a_styled_cell_survives_layout_and_does_not_break_the_alignment() {
         let source = "| flag | note |\n|---|---|\n| `--no-color` | off |\n";
-        let lines = render(source, 60, OscProfile::Standard);
+        let lines = render(source, at(60, OscProfile::Standard), None);
         let rendered = crate::render::block(&lines, Depth::TrueColor);
         assert!(rendered.contains("38;2;174;185;213m--no-color"));
         let widths: Vec<usize> = lines
@@ -799,7 +871,10 @@ mod tests {
     #[test]
     fn nothing_escapes_at_depth_none() {
         let source = "# h\n\n**b** *i* `c` [l](http://x) ~~s~~\n\n> q\n\n- i\n\n| a |\n|---|\n| 1 |\n\n---\n";
-        let out = crate::render::block(&render(source, 60, OscProfile::Standard), Depth::None);
+        let out = crate::render::block(
+            &render(source, at(60, OscProfile::Standard), None),
+            Depth::None,
+        );
         assert!(!out.contains('\x1b'), "{out:?}");
     }
 
@@ -817,7 +892,7 @@ mod tests {
 
     #[test]
     fn an_empty_document_renders_nothing() {
-        assert!(render("", 80, OscProfile::Standard).is_empty());
-        assert!(render("   \n\n  \n", 80, OscProfile::Standard).is_empty());
+        assert!(render("", at(80, OscProfile::Standard), None).is_empty());
+        assert!(render("   \n\n  \n", at(80, OscProfile::Standard), None).is_empty());
     }
 }

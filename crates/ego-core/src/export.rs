@@ -206,6 +206,8 @@ pub enum ExportRunSettlement {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExportEvent {
     SessionTitleChanged,
+    /// Variable names and values stay in the local session log.
+    ProtocolFilterVariablesSaved,
     SessionDeleted,
     /// A pause was asked for. Exported with its request id and no redaction
     /// count: the id is one the host minted for correlation and carries no
@@ -305,6 +307,16 @@ pub enum ExportEvent {
     SessionSelectionsSelected {
         selections: crate::run::RunSelections,
     },
+    SessionRootGranted {
+        access: crate::permit::RootAccess,
+    },
+    PermanentRootGrantPending {
+        access: crate::permit::RootAccess,
+    },
+    PermanentRootGranted {
+        access: crate::permit::RootAccess,
+    },
+    RootRevoked,
     ExecutionObserved {
         observation: ExecObservation,
         probe_evidence: Option<crate::store::evidence::EvidenceRef>,
@@ -820,6 +832,15 @@ fn project_run_command(command: &RunCommand, redactions: &mut Redactions) -> Exp
 
 fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
     match kind {
+        EventKind::ProtocolFilterVariablesSaved {
+            session_id: _,
+            namespace: _,
+            expected_revision: _,
+            state,
+        } => {
+            redactions.opaque_prose += state.values.len() as u64;
+            ExportEvent::ProtocolFilterVariablesSaved
+        }
         EventKind::SessionTitleChanged { title } => {
             redactions.opaque_prose += title.is_some() as u64;
             ExportEvent::SessionTitleChanged
@@ -1071,6 +1092,28 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::SessionSelectionsSelected {
                 selections: selections.clone(),
             }
+        }
+        EventKind::SessionRootGranted { root } => {
+            redactions.path += 1;
+            ExportEvent::SessionRootGranted {
+                access: root.access(),
+            }
+        }
+        EventKind::PermanentRootGrantPending { consent } => {
+            redactions.path += 2;
+            ExportEvent::PermanentRootGrantPending {
+                access: consent.root.access(),
+            }
+        }
+        EventKind::PermanentRootGranted { consent } => {
+            redactions.path += 2;
+            ExportEvent::PermanentRootGranted {
+                access: consent.root.access(),
+            }
+        }
+        EventKind::RootRevoked { path: _ } => {
+            redactions.path += 1;
+            ExportEvent::RootRevoked
         }
         EventKind::ExecutionObserved {
             observation,

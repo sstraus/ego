@@ -2148,6 +2148,223 @@ fn an_auto_decidable_permission_request_announces_nothing() {
     assert_eq!(inside.signal(&permission_answered(true), &state), "");
 }
 
+// Catches: native tool and child activity reaches the host only as painted text.
+#[test]
+fn native_tool_and_child_events_reach_host_without_text() {
+    use base64::Engine as _;
+    let out = Stdout::new(CancelToken::new());
+    let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    let state = SessionState::default();
+    let turn = TurnId::new();
+    let session = SessionId::new();
+    inside.signal(
+        &PublicEvent::SessionStarted {
+            v: ego_core::public::PUBLIC_EVENT_VERSION,
+            session,
+            capabilities: vec![],
+            mcp_errors: vec![],
+            hook_errors: vec![],
+            instructions: vec![],
+        },
+        &state,
+    );
+    inside.signal(&PublicEvent::TurnStarted { turn }, &state);
+    {
+        let kind = ego_core::public::ItemKind::Tool;
+        let item = ItemId::new();
+        for event in [
+            PublicEvent::ItemStarted {
+                turn,
+                item,
+                kind,
+                name: Some("read".into()),
+                text: Some("private arguments".into()),
+            },
+            PublicEvent::ItemCompleted {
+                turn,
+                item,
+                kind,
+                ok: true,
+                text: Some("private result".into()),
+            },
+        ] {
+            let bytes = inside.signal(&event, &state);
+            assert!(
+                bytes.contains("\x1b]7770;agent-event="),
+                "missing native event: {event:?}: {bytes:?}"
+            );
+            assert!(
+                !bytes.contains("private"),
+                "raw arguments/results must not be rendered"
+            );
+            let payload = bytes
+                .split("\x1b]7770;agent-event=")
+                .nth(1)
+                .unwrap()
+                .split("\x1b\\")
+                .next()
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(value["session"], session.to_string());
+            assert_eq!(value["turn"], serde_json::to_value(turn).unwrap());
+            assert_eq!(value["id"], item.to_string());
+            assert!(!value.to_string().contains("private"));
+        }
+    }
+    let item = ItemId::new();
+    let child = ego_core::run::RunId::new(SessionId::new(), uuid::Uuid::now_v7());
+    let invocation = ego_core::event::id::SubagentInvocationId::new();
+    for identity in [
+        ego_core::public::ChildIdentity::Durable {
+            invocation,
+            run: child,
+        },
+        ego_core::public::ChildIdentity::Foreground {
+            turn: TurnId::new(),
+        },
+    ] {
+        for activity in [
+            ego_core::public::ChildPhase::Started,
+            ego_core::public::ChildPhase::Settled {
+                outcome: ego_core::public::ChildOutcome::Interrupted,
+            },
+        ] {
+            let bytes = inside.signal(
+                &PublicEvent::ChildLifecycle {
+                    turn,
+                    item,
+                    child: identity,
+                    phase: activity,
+                },
+                &state,
+            );
+            let payload = bytes
+                .split("\x1b]7770;agent-event=")
+                .nth(1)
+                .unwrap()
+                .split("\x1b\\")
+                .next()
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(payload)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(value["id"], item.to_string());
+            assert_eq!(
+                value["data"]["child"],
+                serde_json::to_value(identity).unwrap()
+            );
+            if matches!(activity, ego_core::public::ChildPhase::Settled { .. }) {
+                assert_eq!(value["data"]["outcome"], "interrupted");
+            }
+        }
+    }
+}
+
+// Catches: cancellation looks successful, or exit clears the same turn twice.
+#[test]
+fn native_cancelled_turn_settles_once_and_rejects_late_activity() {
+    use base64::Engine as _;
+    let out = Stdout::new(CancelToken::new());
+    let announce = Announce::new(&out, capabilities(OscProfile::Tuic), false);
+    let state = SessionState::default();
+    let turn = TurnId::new();
+    announce.signal(
+        &PublicEvent::SessionStarted {
+            v: ego_core::public::PUBLIC_EVENT_VERSION,
+            session: SessionId::new(),
+            capabilities: vec![],
+            mcp_errors: vec![],
+            hook_errors: vec![],
+            instructions: vec![],
+        },
+        &state,
+    );
+    announce.signal(&PublicEvent::TurnStarted { turn }, &state);
+    let done = PublicEvent::TurnCompleted {
+        turn,
+        ok: false,
+        exit_reason: ego_core::event::domain::ExitReason::Cancelled(
+            ego_core::event::domain::CancelCause::User,
+        ),
+    };
+    let bytes = announce.signal(&done, &state);
+    let payload = bytes
+        .split("\x1b]7770;agent-event=")
+        .nth(1)
+        .unwrap()
+        .split("\x1b\\")
+        .next()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(
+        &base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(value["event"], "turn_end");
+    assert_eq!(value["data"]["outcome"], "interrupted");
+    assert!(!announce.signal(&done, &state).contains("agent-event="));
+    assert!(
+        !announce
+            .signal(
+                &PublicEvent::ChildProgress {
+                    turn,
+                    item: ItemId::new(),
+                    activity: "late".into(),
+                    output_tokens: 1
+                },
+                &state
+            )
+            .contains("agent-event=")
+    );
+    let closing = announce.postamble(&RunTermination::Done, Duration::ZERO);
+    assert_eq!(
+        closing.matches("agent-event=").count(),
+        1,
+        "only session_end remains"
+    );
+    assert!(
+        !announce
+            .postamble(&RunTermination::Done, Duration::ZERO)
+            .contains("agent-event=")
+    );
+}
+
+// Catches: the native emitter assumes event order or fields absent from the installed CLI.
+#[test]
+fn recorded_cli_stream_replays_through_native_emitter() {
+    let out = Stdout::new(CancelToken::new());
+    for profile in [OscProfile::Tuic, OscProfile::Standard, OscProfile::None] {
+        let announce = Announce::new(&out, capabilities(profile), false);
+        let state = SessionState::default();
+        let stream = include_str!("../../tests/fixtures/native-events/installed-0.4.1.jsonl");
+        let bytes = stream
+            .lines()
+            .map(|line| {
+                let event =
+                    serde_json::from_str::<PublicEvent>(line).expect("recorded installed event");
+                announce.signal(&event, &state)
+            })
+            .collect::<String>();
+        assert_eq!(
+            bytes.matches("agent-event=").count(),
+            if profile == OscProfile::Tuic { 3 } else { 0 }
+        );
+        assert!(
+            !stream.contains("\x1b]"),
+            "JSONL must carry public events only"
+        );
+    }
+}
+
 /// catches: a TUIC tab with no intent or title for a turn, and a first turn
 /// whose title is empty because the session has none yet.
 #[test]
@@ -3704,7 +3921,7 @@ fn recorded_unrun_tools_keep_failure_receipt_and_host_signal() {
             if !colour {
                 caps.depth = Depth::None;
             }
-            let sink = TextSink::new(&out, quiet, caps);
+            let sink = TextSink::new(&out, quiet, caps, None);
             let announce = Announce::new(&out, caps, quiet);
             let mut state = SessionState::default();
             let turn = events[0].env.turn;
@@ -3784,7 +4001,7 @@ fn provider_failure_notices_are_scoped_to_the_failed_turn() {
     ] {
         let out = FailureReceiptOutput::default();
         let caps = capabilities(OscProfile::Tuic);
-        let sink = TextSink::new(&out, false, caps);
+        let sink = TextSink::new(&out, false, caps, None);
         let announce = Announce::new(&out, caps, false);
         let state = SessionState::default();
         let first = TurnId::new();
@@ -3902,4 +4119,75 @@ fn portable_defaults_do_not_offer_private_coordinator_tools() {
             .all(|tool| !tool.descriptor().name.starts_with("orchestrator_")
                 && tool.descriptor().name != "memory_lookup")
     );
+}
+
+#[tokio::test]
+async fn background_task_wake_readiness_excludes_live_and_delivered_children() {
+    // Catches: stale wakes generating turns for a live child or an already delivered result.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let executor = Arc::new(LaunchBarrierExecutor {
+        crossed: Mutex::new(None),
+        release: Some(release.clone()),
+        interrupt_failure: false,
+        submit_error: false,
+    });
+    let crossed = executor.arm();
+    let fixture = DrainFixture::new(root.path(), &store, executor);
+    let id = fixture.background_task().await;
+    crossed.await.unwrap();
+    assert!(!fixture.owner.has_ready_tasks().unwrap());
+    release.notify_one();
+    fixture.execution_finished(id).await;
+    assert!(fixture.owner.has_ready_tasks().unwrap());
+    assert_eq!(
+        fixture.deliveries(),
+        0,
+        "wake readiness must not deliver mid-generation"
+    );
+    fixture
+        .owner
+        .refresh_tasks(fixture.owner.hooks.hook_state().state())
+        .await
+        .unwrap();
+    assert!(!fixture.owner.has_ready_tasks().unwrap());
+    assert_eq!(fixture.deliveries(), 1);
+}
+
+#[tokio::test]
+async fn background_task_recovered_settlement_uses_the_same_stale_safe_waker() {
+    // Catches: recovered settled tasks having no executor callback, or buying a duplicate turn.
+    use ego_core::turn::BackgroundTaskPort;
+    let root = tempdir().unwrap();
+    let store = Arc::new(crate::session::jsonl(
+        root.path().join("sessions"),
+        root.path().to_path_buf(),
+    ));
+    let mut fixture = DrainFixture::new(root.path(), &store, drain_executor());
+    let (wake, ready) = crossbeam::channel::bounded(1);
+    fixture.owner = fixture.owner.with_task_waker(Arc::new(move || {
+        let _ = wake.try_send(());
+    }));
+    let id = fixture.background_task().await;
+    fixture.execution_finished(id).await;
+    ready.try_recv().expect("live settlement wake");
+    fixture.owner.tasks.lock().unwrap().clear();
+    fixture
+        .owner
+        .refresh_tasks(fixture.owner.hooks.hook_state().state())
+        .await
+        .unwrap();
+    ready
+        .try_recv()
+        .expect("recovered settlement reuses seat wake callback");
+    assert!(
+        !fixture.owner.has_ready_tasks().unwrap(),
+        "boundary already delivered the recovered result"
+    );
+    assert_eq!(fixture.deliveries(), 1);
 }

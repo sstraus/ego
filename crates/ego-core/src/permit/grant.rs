@@ -1356,6 +1356,27 @@ impl PolicyEngine {
     /// unresolved operations. System denies cannot be cleared by higher layers.
     /// Supporting foreign transport may reuse an already admitted delegation,
     /// never bypass an independent operation's decision.
+    /// A shell command submitted by the terminal owner, not by a model tool.
+    /// The editor is the approval party; boundary, deny rules and confinement
+    /// remain in force. Only the turn loop may call this for its own `exec`.
+    pub(crate) fn classify_user_exec(&self, call: PreparedCall) -> Classification {
+        assert!(
+            call.tool() == "exec" && matches!(call.ops(), [Op::Spawn { .. }]),
+            "terminal shell must prepare exactly one exec spawn"
+        );
+        for op in call.ops() {
+            if let Err(denied) = self.judge(&call, op, true) {
+                return Classification::Settled(Err(*denied));
+            }
+        }
+        let permit = self.mint(scope_of(&call));
+        Classification::Settled(Ok(Authorized {
+            call,
+            permit,
+            by: Authority::Party,
+        }))
+    }
+
     pub fn classify(&self, call: PreparedCall) -> Classification {
         if matches!(call.ops(), [Op::ReadEvidence { .. }]) {
             let permit = self.mint(scope_of(&call));
@@ -1383,7 +1404,7 @@ impl PolicyEngine {
             }));
         }
         for op in call.ops() {
-            if let Err(denied) = self.judge(&call, op) {
+            if let Err(denied) = self.judge(&call, op, false) {
                 return Classification::Settled(Err(*denied));
             }
         }
@@ -1600,7 +1621,12 @@ impl PolicyEngine {
     }
 
     /// Steps 0 to 2: everything that can refuse an operation outright.
-    fn judge(&self, call: &PreparedCall, op: &Op) -> Result<(), Box<PolicyDenied>> {
+    fn judge(
+        &self,
+        call: &PreparedCall,
+        op: &Op,
+        user_exec: bool,
+    ) -> Result<(), Box<PolicyDenied>> {
         let path = op.subject_path(&self.workspace);
 
         // 0. The workspace boundary. Evaluated before the rules because it is not one of
@@ -1665,7 +1691,7 @@ impl PolicyEngine {
         // 2. The mode floor. Above the allow list, so an allow rule cannot
         //    relax it: `plan` means the run does not change anything, and a
         //    mode a rule could switch off would not mean that.
-        if self.mode == Mode::Plan && op.mutates() {
+        if !user_exec && self.mode == Mode::Plan && op.mutates() {
             return Err(Box::new(match path {
                 Some(path) => PolicyDenied::ModeForbids {
                     tool: call.tool().to_owned(),

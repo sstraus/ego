@@ -34,7 +34,7 @@ pub(super) fn permission_menu() -> [PermissionMenuId; 6] {
     ]
 }
 
-enum PermissionField {
+pub(super) enum PermissionField {
     Value(String),
     Cancelled,
     Propagate(Line),
@@ -163,7 +163,7 @@ fn build_permission_request(
     Some(Line::HostCommand(HostCommand::Policy(request)))
 }
 
-fn read_permission_field(
+pub(super) fn read_permission_field(
     editor: &mut Reedline,
     phase: &SurfacePhase,
     status: &SharedStatus,
@@ -172,7 +172,7 @@ fn read_permission_field(
 ) -> PermissionField {
     let saved = enter_modal(editor, phase, status);
     let prompt = Question::new(text.to_owned(), Arc::clone(status));
-    let field = match answer(false, editor.read_line(&prompt)) {
+    let field = match answer(false, suspend::read_line(editor, &prompt, status)) {
         Line::Submitted(value) => PermissionField::Value(value),
         line @ (Line::Ended | Line::ExternalBreak(_)) => PermissionField::Propagate(line),
         Line::Blank | Line::Interrupted | Line::Refused(_) | Line::HostCommand(_) => {
@@ -296,7 +296,7 @@ fn read_permission_call(
     PermissionCallField::Value { call, workspace }
 }
 
-fn select_permission_value(
+pub(super) fn select_permission_value(
     editor: &mut Reedline,
     phase: &SurfacePhase,
     status: &SharedStatus,
@@ -344,7 +344,7 @@ fn select_permission_value(
             Arc::clone(status),
         );
         match queued_selector_line(status).unwrap_or_else(|| {
-            let line = answer(false, editor.read_line(&question));
+            let line = answer(false, suspend::read_line(editor, &question, status));
             let _ = editor.erase_last_prompt();
             line
         }) {
@@ -485,7 +485,7 @@ pub(super) fn confirm_surface_action(
     let saved = enter_modal(editor, phase, status);
     let prompt = Question::new(text.to_string(), Arc::clone(status));
     let answer = loop {
-        match answer(false, editor.read_line(&prompt)) {
+        match answer(false, suspend::read_line(editor, &prompt, status)) {
             Line::Submitted(answer) => match parse_trust(&answer) {
                 Some(Trust::Trusted) => break Confirmation::Confirmed,
                 Some(Trust::Untrusted) => break Confirmation::Declined,

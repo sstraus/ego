@@ -132,6 +132,9 @@ fn mcp_login_denial_preserves_session_state_without_fallback() {
     let start = output.len();
     input.write_all(b"/mcp\r").unwrap();
     input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Choose MCP server or action");
+    input.write_all(b"\r").unwrap();
+    input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "off (session)");
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
@@ -231,6 +234,9 @@ fn mcp_login_cancelled_inline_choice_restores_prompt_without_registration() {
     until_prompt_from(&reader, &mut output, start);
     let start = output.len();
     input.write_all(b"/mcp\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Choose MCP server or action");
+    input.write_all(b"\r").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "/mcp toggle NAME");
     until_prompt_from(&reader, &mut output, start);

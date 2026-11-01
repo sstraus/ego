@@ -18,6 +18,11 @@
 //! and are not mixed into the text being sanitised.
 
 use super::caps::{Capabilities, OscProfile};
+use base64::Engine as _;
+
+#[cfg(test)]
+#[path = "osc_native_tests.rs"]
+mod native_tests;
 
 /// The escape that opens every sequence here.
 const OSC: &str = "\x1b]";
@@ -245,6 +250,33 @@ impl Osc {
         )
     }
 
+    /// Bounded native metadata; coarse state remains a separate signal.
+    pub(crate) fn agent_event(
+        &self,
+        session: ego_core::event::id::SessionId,
+        turn: Option<ego_core::event::id::TurnId>,
+        event: &str,
+        id: Option<ego_core::event::id::ItemId>,
+        data: serde_json::Value,
+    ) -> String {
+        if self.profile != OscProfile::Tuic {
+            return String::new();
+        }
+        let frame = serde_json::json!({
+            "version": 1, "agent": "ego", "session": session, "turn": turn,
+            "event": event, "id": id, "data": data,
+        });
+        let Ok(bytes) = serde_json::to_vec(&frame) else {
+            return String::new();
+        };
+        // The consumer's decoded metadata limit is 16 KiB, including identity.
+        if bytes.len() > 16 * 1024 {
+            return String::new();
+        }
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        format!("{OSC}7770;agent-event={encoded}\x1b\\")
+    }
+
     /// Bounded numeric snapshots for TUIC's provider-recovery overlay.
     pub fn recovery(&self, attempt: u32, next_attempt_ms: Option<u64>) -> String {
         let (phase, next) = match next_attempt_ms {
@@ -281,19 +313,13 @@ fn sanitise(text: &str) -> String {
         .collect()
 }
 
-/// The same, plus the two characters that would be read as OSC 8's own field
-/// separators.
-///
-/// A URI containing `;` splits the sequence into a different parameter list —
-/// which for OSC 8 means the *rest of the URL becomes the link text position*.
-/// Percent-encoding is the correct answer for a URI and is what this does for
-/// the two structural characters; the rest of the string is left alone,
-/// because a path with a space in it is a path a terminal opens correctly and
-/// an over-eager encoder would break.
+/// Remove protocol controls and encode literal semicolons, without changing
+/// existing URI escapes. Percent-encoded bytes remain part of the target URI;
+/// the terminal does not decode them when it parses OSC fields.
 fn sanitise_uri(uri: &str) -> String {
-    // `%` first, or the `%3B` written by the next step would itself be
-    // encoded into `%253B`.
-    sanitise(uri).replace('%', "%25").replace(';', "%3B")
+    // URI escapes are already encoded. OSC does not decode them while parsing
+    // its fields, so preserving `%` cannot introduce a control or separator.
+    sanitise(uri).replace(';', "%3B")
 }
 
 #[cfg(test)]
@@ -410,6 +436,20 @@ mod tests {
         assert!(emitted.contains("file:///ws/a%3Bb.rs"));
         // The visible text is untouched — it is text, not a parameter.
         assert!(emitted.contains("\x07a;b.rs\x1b"));
+    }
+
+    // Catches: OSC serialization changes an already escaped URI to a different target.
+    #[test]
+    fn hyperlink_preserves_uri_escapes_while_removing_protocol_controls() {
+        let uri = "file:///ws/guida%20%C3%A8%25%3B.md#part";
+        assert_eq!(
+            standard().hyperlink(uri, "guide"),
+            "\x1b]8;;file:///ws/guida%20%C3%A8%25%3B.md#part\x07guide\x1b]8;;\x07"
+        );
+        assert_eq!(
+            standard().hyperlink("https://example.com/a\x07;b\x1b", "guide"),
+            "\x1b]8;;https://example.com/a%3Bb\x07guide\x1b]8;;\x07"
+        );
     }
 
     #[test]

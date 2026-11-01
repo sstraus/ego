@@ -160,6 +160,85 @@ impl<'s> SharedJournal<'s> {
     }
 
     /// Append through the existing journal sequence.
+    pub fn filter_state(
+        &self,
+        turn: TurnId,
+        exchange: crate::generator::filter_state::FilterStateExchange,
+    ) -> Result<(), StoreError> {
+        use crate::generator::filter_state::{FilterStateOperation, FilterStateSnapshot};
+        let Some((namespace, operation, reply)) = exchange.take() else {
+            return Ok(());
+        };
+        let mut journal = match self.lock() {
+            Ok(journal) => journal,
+            Err(error) => {
+                let _ = reply.send(Err("protocol_filter journal unavailable"));
+                return Err(error.into());
+            }
+        };
+        if journal.uncertain_append.is_some()
+            || namespace.len() != 64
+            || !namespace.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            let _ = reply.send(Err("protocol_filter journal state unavailable"));
+            return Ok(());
+        }
+        // Lineage replay may include a parent's events. Those variables do
+        // not belong to this new session instance.
+        let key = format!("{}:{namespace}", journal.session);
+        let current = journal
+            .state
+            .protocol_filter_variables
+            .get(&key)
+            .cloned()
+            .unwrap_or_default();
+        if let FilterStateOperation::Save {
+            expected_revision,
+            writes,
+        } = operation
+        {
+            if expected_revision != current.revision {
+                let _ = reply.send(Err("protocol_filter state revision conflict"));
+                return Ok(());
+            }
+            let next = match current.proposed(&writes) {
+                Ok(next) => next,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return Ok(());
+                }
+            };
+            if next != current {
+                let session_id = journal.session;
+                if let Err(error) = journal.append(
+                    turn,
+                    None,
+                    None,
+                    EventKind::ProtocolFilterVariablesSaved {
+                        session_id,
+                        namespace: namespace.clone(),
+                        expected_revision,
+                        state: next,
+                    },
+                ) {
+                    let _ = reply.send(Err("protocol_filter session state persistence failed"));
+                    return Err(error);
+                }
+            }
+        }
+        let _ = reply.send(Ok(FilterStateSnapshot {
+            session_id: journal.session,
+            state: journal
+                .state
+                .protocol_filter_variables
+                .get(&key)
+                .cloned()
+                .unwrap_or_default(),
+        }));
+        Ok(())
+    }
+
+    /// Append through the existing journal sequence.
     pub fn append(
         &self,
         turn: TurnId,
@@ -677,6 +756,9 @@ impl<'a> Journal<'a> {
         self.state.apply(&event);
         if let Some(public) = project_public(&event) {
             self.sink.publish(&public, &self.state);
+        }
+        if let Some(child) = crate::public::project_child_lifecycle(&event) {
+            self.sink.publish(&child, &self.state);
         }
     }
 

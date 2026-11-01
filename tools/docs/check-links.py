@@ -2,10 +2,12 @@
 """Check repository-local Markdown paths and fragments in the public doc tree.
 
 No network requests. Markdown code fences and external links are excluded.
-Default scope includes README and docs, plus the top-level design authorities.
+Scope includes Git-tracked README and docs, plus the top-level design authorities.
+Ignored files and untracked drafts are not publication inputs.
 """
 from pathlib import Path
 import re
+import subprocess
 import sys
 from urllib.parse import unquote, urlsplit
 
@@ -29,8 +31,11 @@ def anchors(path):
     return result
 
 def main():
-    files = [ROOT / p for p in ("README.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "CLI.md")]
-    files += sorted((ROOT / "docs").rglob("*.md"))
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "-z", "--", "README.md", "CONTRIBUTING.md", "ARCHITECTURE.md", "CLI.md", "docs"],
+        cwd=ROOT,
+    )
+    files = sorted({ROOT / p.decode("utf-8", errors="surrogateescape") for p in tracked.split(b"\0") if p.endswith(b".md")})
     errors = []
     checked = 0
     for path in files:

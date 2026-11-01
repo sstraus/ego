@@ -9,6 +9,9 @@ use crate::store::evidence::EvidenceRef;
 /// Consecutive distinct-turn observations needed to block an active goal.
 pub const BLOCKER_OBSERVATION_LIMIT: u64 = 5;
 
+/// Default number of automatic work turns for a goal identity.
+pub const DEFAULT_CONTINUATION_BUDGET: u32 = 20;
+
 /// Authority responsible for a goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +35,10 @@ pub enum GoalState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum GoalTransition {
+    /// Operator grants more automatic work without replacing the goal.
+    AllowanceExtended {
+        turns: u32,
+    },
     /// A checked condition requires operator action, not another work turn.
     Blocked {
         reason: String,
@@ -49,6 +56,7 @@ pub enum GoalTransition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GoalRefusal {
     NoActiveGoal,
+    InvalidExtension,
     AlreadyTerminal(GoalState),
     ActiveGoalExists,
     EvidenceRequired,
@@ -58,6 +66,9 @@ pub enum GoalRefusal {
 impl std::fmt::Display for GoalRefusal {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InvalidExtension => formatter.write_str(
+                "goal extension requires a positive turn count and must not overflow the allowance",
+            ),
             Self::NoActiveGoal => formatter.write_str("session has no active goal"),
             Self::AlreadyTerminal(state) => write!(formatter, "goal is already {state:?}"),
             Self::ActiveGoalExists => formatter.write_str("session already has an active goal"),
@@ -102,6 +113,16 @@ impl GoalRecord {
     pub fn admits(&self, transition: &GoalTransition) -> Result<(), GoalRefusal> {
         if self.state != GoalState::Active {
             return Err(GoalRefusal::AlreadyTerminal(self.state));
+        }
+        if let GoalTransition::AllowanceExtended { turns } = transition
+            && (*turns == 0
+                || self
+                    .continuation_budget
+                    .unwrap_or(DEFAULT_CONTINUATION_BUDGET)
+                    .checked_add(*turns)
+                    .is_none())
+        {
+            return Err(GoalRefusal::InvalidExtension);
         }
         if let GoalTransition::Achieved {
             attested_by,

@@ -995,6 +995,12 @@ pub(crate) fn session_inventory<'a>(
     status: &McpRegistryStatus,
     servers: impl IntoIterator<Item = (&'a McpServerName, bool)>,
 ) -> String {
+    let servers = servers.into_iter().collect::<Vec<_>>();
+    let name_width = servers
+        .iter()
+        .map(|(name, _)| name.to_string().len())
+        .max()
+        .unwrap_or(0);
     let mut rows = vec!["mcp:".to_owned()];
     rows.extend(servers.into_iter().map(|(name, disabled)| {
         let state = if disabled {
@@ -1002,7 +1008,8 @@ pub(crate) fn session_inventory<'a>(
         } else {
             server_status_text(status, name)
         };
-        format!("{name}\t{state}")
+        let name = name.to_string();
+        format!("  {name:<name_width$}  {state}")
     }));
     if rows.len() == 1 {
         rows[0] = "mcp: no configured servers".to_owned();
@@ -1165,6 +1172,21 @@ mod session_presentation_tests {
         assert!(text.contains("mcp: no configured servers"));
         assert!(text.contains("/mcp toggle NAME"));
         assert!(text.contains("/mcp add NAME"));
+    }
+
+    // Catches: tab-separated names jump to different columns in the terminal inventory.
+    #[test]
+    fn inventory_aligns_server_states_without_tabs() {
+        let short: McpServerName = "a".parse().unwrap();
+        let long: McpServerName = "long-server".parse().unwrap();
+        let text = session_inventory(
+            &McpRegistryStatus::default(),
+            [(&short, true), (&long, true)],
+        );
+        let rows = text.lines().collect::<Vec<_>>();
+        assert!(!text.contains('\t'));
+        assert_eq!(rows[1].find("off (session)"), rows[2].find("off (session)"));
+        assert!(text.contains("/mcp toggle NAME"));
     }
 
     // Catches: malformed slash input returns the top-level CLI usage dump.

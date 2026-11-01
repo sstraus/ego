@@ -1,5 +1,7 @@
 # Interactive use
 
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/interactive.html).
+
 The terminal lets you keep a conversation running while inspecting state,
 changing selections, or giving the current work new direction. Local controls
 are handled by the harness; they are not sent as model prompts.
@@ -18,7 +20,7 @@ Reasoning selection refuses unsupported values rather than silently substituting
 | State and health | `/config`, `/config perimeter`, `/config set KEY TOML_VALUE`, `/doctor`, `/usage`, `/statusline` |
 | Conversation | `/sessions`, `/history`, `/new`, `/name`, `/goal`, `/fork [message-id]`, `/compact`, `/refresh` |
 | Tools and extensions | `/tools`, `/expand`, `/mcp`, `/skills`, `/hooks` |
-| Instructions and memory | `/init`, `/memory`; see [instructions and memory](memory.md) |
+| Project instructions | `/init`; see [project instructions](memory.md) |
 | Background execution and retry | `/tasks [ID \| cancel ID]`, `/retry` |
 | Local presentation/export | `/clear`, `/export [local\|sanitized] [md\|json\|jsonl]` |
 

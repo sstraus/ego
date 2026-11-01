@@ -1,0 +1,72 @@
+name: Deploy User Guide
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install verified mdBook 0.5.4
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz \
+            --output "$RUNNER_TEMP/mdbook.tar.gz"
+          # SHA-256 computed from the official release asset on 2026-10-31:
+          # https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz
+          printf '%s  %s\n' \
+            3f28de05dafca9d0f2eab99c662116b0e37b89b1d96a08f8f430b9eeae958cd7 \
+            "$RUNNER_TEMP/mdbook.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/mdbook-bin"
+          tar -xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP/mdbook-bin" mdbook
+          "$RUNNER_TEMP/mdbook-bin/mdbook" --version
+          echo "$RUNNER_TEMP/mdbook-bin" >> "$GITHUB_PATH"
+
+      - name: Check documentation sources
+        run: |
+          python3 tools/docs/check-links.py
+          PYTHONDONTWRITEBYTECODE=1 python3 tools/docs/test-book-source-paths.py
+
+      - name: Build and check the guide
+        run: |
+          mdbook build docs
+          python3 tools/docs/check-book.py docs/book
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -11,7 +11,7 @@
 - [Permissions and confinement](guides/permissions.md)
 - [Sessions and history](guides/sessions.md)
 - [Git worktrees](guides/worktrees.md)
-- [Instructions and memory](guides/memory.md)
+- [Project instructions](guides/memory.md)
 - [Tools](guides/tools.md)
 - [Automation and agent files](guides/automation.md)
 - [Troubleshooting](guides/troubleshooting.md)
@@ -41,6 +41,8 @@
 
 - [Architecture overview](architecture.md)
 - [Open-source licenses](THIRD_PARTY_LICENSES.md)
+- [Release notes: 0.4.3](release-notes/0.4.3.md)
+- [Release notes: 0.4.2](release-notes/0.4.2.md)
 - [Release notes: 0.4.1](release-notes/0.4.1.md)
 - [Release notes: 0.4.0](release-notes/0.4.0.md)
 - [Release notes: 0.3.0](release-notes/0.3.0.md)

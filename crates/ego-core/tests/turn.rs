@@ -2659,14 +2659,26 @@ mod turn {
         server: &'static str,
         fail: bool,
     ) -> (SessionState, Vec<DomainEvent>, Vec<GenRequest>) {
+        run_progress_prompts(scripts, goal, name, server, fail, &["work"])
+    }
+
+    fn run_progress_prompts(
+        scripts: Vec<Vec<AiEvent>>,
+        goal: bool,
+        name: &'static str,
+        server: &'static str,
+        fail: bool,
+        prompts: &[&str],
+    ) -> (SessionState, Vec<DomainEvent>, Vec<GenRequest>) {
         let mut fx = Fixture::new(scripts);
         fx.registry = vec![Arc::new(Typed(RecordedProgressTool { name, server, fail }))];
+        let evidence = SkillEvidence::new();
         let tools = Tools::new(
             &fx.registry,
             ToolEffectPorts::new(
                 &fx.fs,
                 fx.process.as_ref(),
-                &fx.evidence,
+                &evidence,
                 Arc::new(NoResolver),
                 Arc::new(NoHop),
                 Arc::new(NoDuplex),
@@ -2686,15 +2698,50 @@ mod turn {
             tools,
         )
         .with_goal(goal.then(|| "produce a verified artifact".into()), 20);
-        assert_eq!(
-            block_on(loop_.run("work")).unwrap().exit_reason,
-            ExitReason::Completed
-        );
+        for prompt in prompts {
+            assert_eq!(
+                block_on(loop_.run(prompt)).unwrap().exit_reason,
+                ExitReason::Completed
+            );
+        }
         (
             loop_.into_state().unwrap(),
             fx.store.events(),
             fx.generator.calls(),
         )
+    }
+
+    // Catches: a user-wait check_stop permanently disables the still-active goal.
+    #[test]
+    fn blocked_progress_goal_continues_after_user_reply() {
+        let (state, events, calls) = run_progress_prompts(
+            vec![
+                progress_round("blocked", 0),
+                vec![AiEvent::Stop(StopReason::Stop)],
+                goal_reply(false, "artifact still missing"),
+                vec![AiEvent::Stop(StopReason::Stop)],
+                goal_reply(true, "artifact verified"),
+            ],
+            true,
+            "progress",
+            "tuic",
+            false,
+            &["work", "Yes, proceed"],
+        );
+        assert_eq!(calls.len(), 5);
+        let wait = events.iter().position(|e| matches!(&e.kind,
+            EventKind::GoalCheckStopped { reason, .. } if reason == "waiting for user after blocked progress"
+        )).unwrap();
+        let continuation = events
+            .iter()
+            .position(|e| matches!(e.kind, EventKind::GoalContinuation { .. }))
+            .unwrap();
+        assert!(continuation > wait);
+        let goal = state.goal.as_ref().unwrap();
+        assert_eq!(goal.state, ego_core::goal::GoalState::Achieved);
+        assert_eq!(goal.continuation_turns, 1);
+        assert_eq!(goal.check_stop, None);
+        assert_eq!(SessionState::replay(events).goal, state.goal);
     }
 
     #[test]
@@ -13743,7 +13790,7 @@ mod turn {
     }
 
     #[test]
-    fn hook_context_reaches_model_input_without_leaking_to_the_next_turn() {
+    fn hook_context_expiry_is_appended_without_rewriting_prior_observations() {
         struct ContextHook;
         impl HookInvocationPort for ContextHook {
             fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
@@ -13835,7 +13882,219 @@ mod turn {
         let render = |request: &GenRequest| format!("{:?}", request.messages);
         assert!(render(&requests[0]).contains("context sentinel"));
         assert!(render(&requests[0]).contains("external context data"));
-        assert!(!render(&requests[1]).contains("context sentinel"));
+        // Historical evidence remains, but the latest observation expires the context.
+        assert_eq!(render(&requests[1]).matches("context sentinel").count(), 1);
+        assert!(
+            !format!("{:?}", requests[1].messages.messages().last()).contains("context sentinel")
+        );
+    }
+
+    #[test]
+    fn codex_hook_context_preserves_full_previous_request_prefix() {
+        // Catches: transient hook context moves behind history on every generation.
+        struct ContextHook;
+        impl HookInvocationPort for ContextHook {
+            fn invoke<'a>(&'a self, request: HookInvocationRequest) -> HookFuture<'a> {
+                let wire = serde_json::to_value(
+                    ego_core::hook::HookHandlerRequestV1::from_runtime(&request).unwrap(),
+                )
+                .unwrap();
+                let decoded: ego_core::hook::HookHandlerRequestV1 =
+                    serde_json::from_value(wire.clone()).unwrap();
+                assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+                assert_eq!(wire["hook_event_name"], "UserPromptSubmit");
+                assert!(wire["session_id"].is_string());
+                assert_eq!(wire["cwd"], "/ws");
+                let prompt = wire["prompt"].as_str().unwrap();
+                let outcome = if prompt == "recall first" {
+                    HookOutcome::new(HookDecision::Continue, None)
+                        .with_additional_context("context sentinel")
+                } else {
+                    HookOutcome::new(HookDecision::Continue, None)
+                };
+                Box::pin(futures::future::ready(Ok(outcome)))
+            }
+        }
+        let fx = Fixture::new(vec![
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "cache-read".into(),
+                    name: "read".into(),
+                    args: r#"{"path":"/ws/README.md"}"#.into(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "first answer".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "second answer".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+            vec![
+                AiEvent::TextDelta {
+                    text: "resumed answer".into(),
+                },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        ])
+        .with_read_tool();
+        let mut gate = fx.gate.borrow_mut();
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+        runtime.config.system = Some(SystemPrompt::verbatim("stable cache test instructions"));
+        let mut turn = TurnLoop::open(
+            session(
+                SessionState::default(),
+                &fx.store,
+                &fx.clock,
+                &fx.sink,
+                CancelToken::new(),
+            ),
+            runtime,
+            tools,
+        );
+        let catalogue = HookCatalogue::admit_typed(&[ConfigLayer::parse(Source::User, "[[hooks]]\nevent = \"UserPromptSubmit\"\n[hooks.handler]\ntype = \"prompt\"\nprompt = \"context\"\n").unwrap()], &[], Trust::Trusted).unwrap();
+        turn.journal()
+            .append(
+                TurnId::new(),
+                None,
+                None,
+                EventKind::HookCatalogueAdmitted {
+                    descriptors: catalogue.evidence(),
+                },
+            )
+            .unwrap();
+        let state = SessionHookState::new(
+            HookLifecycleDispatcher::new(HookRunner::new(), catalogue),
+            turn.journal(),
+            CancelToken::new(),
+            std::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .with_cwd("/ws".into());
+        struct ContextBinding;
+        impl HookInvocationBinding for ContextBinding {
+            fn bind<'a>(
+                &self,
+                _policy: Arc<PolicyEngine>,
+                _mcp: Option<&dyn McpRuntimeBinding>,
+            ) -> Result<Arc<dyn HookInvocationPort + 'a>, String>
+            where
+                Self: 'a,
+            {
+                Ok(Arc::new(ContextHook))
+            }
+        }
+        turn = turn
+            .with_hook_binding(state, Arc::new(ContextBinding), None)
+            .unwrap();
+        block_on(turn.run("recall first")).unwrap();
+        block_on(turn.run("unrelated second")).unwrap();
+        let id = turn.journal().session_id().unwrap();
+        let state = turn.state();
+        drop(turn);
+        let tools = Tools::new(
+            &fx.registry,
+            ToolEffectPorts::new(
+                &fx.fs,
+                fx.process.as_ref(),
+                &fx.evidence,
+                Arc::new(NoResolver),
+                Arc::new(NoHop),
+                Arc::new(NoDuplex),
+            ),
+            CanonPath::new("/ws"),
+        );
+        let mut runtime = model_for(&fx, &fx.generator, &mut gate);
+        runtime.config.system = Some(SystemPrompt::verbatim("stable cache test instructions"));
+        let mut resumed = TurnLoop::open(
+            Session {
+                id,
+                ..session(state, &fx.store, &fx.clock, &fx.sink, CancelToken::new())
+            },
+            runtime,
+            tools,
+        );
+        block_on(resumed.run("resumed third")).unwrap();
+        let requests = fx.generator.calls();
+        assert_eq!(requests.len(), 4);
+        let base = url::Url::parse("https://chatgpt.com/backend-api/").unwrap();
+        let target = ego_ai::wire::RequestTarget::new(&base, &[]);
+        let captured: Vec<_> = requests
+            .iter()
+            .map(|request| {
+                let wire =
+                    ego_ai::wire::openai_codex_responses::build_request(&target, request).unwrap();
+                let body = wire.body.unwrap();
+                let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                (body, json, wire.headers)
+            })
+            .collect();
+        assert_eq!(
+            captured[0].1["instructions"],
+            "stable cache test instructions"
+        );
+        assert!(!captured[0].1["tools"].as_array().unwrap().is_empty());
+        for (index, pair) in captured.windows(2).enumerate() {
+            let (a_bytes, a, a_headers) = &pair[0];
+            let (b_bytes, b, b_headers) = &pair[1];
+            if !b["input"]
+                .as_array()
+                .unwrap()
+                .starts_with(a["input"].as_array().unwrap())
+            {
+                let differing = a_bytes.iter().zip(b_bytes).position(|(a, b)| a != b);
+                eprintln!(
+                    "Codex capture pair {index}: first differing byte={differing:?}\nfirst={}\nsecond={}",
+                    String::from_utf8_lossy(a_bytes),
+                    String::from_utf8_lossy(b_bytes)
+                );
+            }
+            for field in ["instructions", "tools", "prompt_cache_key"] {
+                assert_eq!(a[field], b[field], "stable {field}");
+            }
+            for name in ["session-id", "x-client-request-id"] {
+                let value = |headers: &[ego_core::permit::HttpHeader]| {
+                    headers
+                        .iter()
+                        .find(|h| h.name() == name)
+                        .unwrap()
+                        .value()
+                        .to_vec()
+                };
+                assert_eq!(value(a_headers), value(b_headers), "stable {name}");
+            }
+            let previous = a["input"].as_array().unwrap();
+            let next = b["input"].as_array().unwrap();
+            // Compare the ordered input bytes, not just item counts or selected fields.
+            // A complete JSON document cannot itself be extended after its closing brace.
+            let input_bytes = |items: &[serde_json::Value]| {
+                items
+                    .iter()
+                    .flat_map(|item| serde_json::to_vec(item).unwrap())
+                    .collect::<Vec<_>>()
+            };
+            assert!(
+                input_bytes(next).starts_with(&input_bytes(previous)),
+                "pair {index}: complete prior input bytes must remain a prefix"
+            );
+        }
     }
 
     #[test]
@@ -14300,6 +14559,8 @@ mod turn {
     mod task_tool {
         use super::*;
 
+        include!("common/foreground_child_lifecycle.rs");
+
         const TASK_SECRET: &str = "task-secret-NKO-unique";
 
         fn call(id: &str, name: &str, args: serde_json::Value) -> AiEvent {
@@ -14511,6 +14772,113 @@ mod turn {
         }
 
         #[test]
+        fn recorded_empty_plan_step_does_not_block_background_research() {
+            // Catches: provider-emitted empty optional bindings reject a real background launch.
+            let recorded: serde_json::Value =
+                serde_json::from_str(include_str!("fixtures/task-plan-step-recorded.json"))
+                    .unwrap();
+            for binding in ["", " \t "] {
+                let fx = Fixture::new(vec![]);
+                let mut args = recorded["payloads"]["empty"]["args"].clone();
+                args["plan_step"] = json!(binding);
+                let generator = Arc::new(FakeGenerator::new([
+                    vec![
+                        call("recorded", "task", args),
+                        AiEvent::Stop(StopReason::ToolUse),
+                    ],
+                    vec![AiEvent::Stop(StopReason::Stop)],
+                ]));
+                let port = Arc::new(RecordingBackgroundPort::default());
+                let (exit, state) = run_task_host_case(
+                    &fx,
+                    &generator,
+                    CancelToken::new(),
+                    None,
+                    vec![],
+                    vec![],
+                    TaskHost {
+                        background: Some(port.clone()),
+                        ..TaskHost::default()
+                    },
+                );
+                assert_eq!(exit, ExitReason::Completed);
+                let task = state
+                    .items
+                    .values()
+                    .find(|item| item.tool_name.as_deref() == Some("task"))
+                    .unwrap();
+                assert_eq!(
+                    task.ok,
+                    Some(true),
+                    "{binding:?}: {}",
+                    tool_result_text(task)
+                );
+                let launches = port.0.lock().unwrap();
+                assert_eq!(launches.len(), 1, "{binding:?}");
+                assert!(tool_result_text(task).contains(&launches[0].invocation.to_string()));
+                assert_eq!(generator.calls().len(), 2, "no foreground child wait");
+                assert!(
+                    state.plan.steps.is_empty(),
+                    "unbound tasks do not invent a plan"
+                );
+                let calls = generator.calls();
+                let descriptor = calls[0]
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == "task")
+                    .unwrap();
+                assert!(
+                    descriptor.parameters["properties"]["plan_step"]["description"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Omit or leave empty when unbound")
+                );
+            }
+        }
+
+        #[test]
+        fn recorded_unknown_plan_step_without_a_plan_explains_how_to_retry() {
+            // Catches: a placeholder binding is rejected without telling the model to omit it.
+            let recorded: serde_json::Value =
+                serde_json::from_str(include_str!("fixtures/task-plan-step-recorded.json"))
+                    .unwrap();
+            let fx = Fixture::new(vec![]);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "recorded",
+                        "task",
+                        recorded["payloads"]["unknown"]["args"].clone(),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let port = Arc::new(RecordingBackgroundPort::default());
+            let (_, state) = run_task_host_case(
+                &fx,
+                &generator,
+                CancelToken::new(),
+                None,
+                vec![],
+                vec![],
+                TaskHost {
+                    background: Some(port.clone()),
+                    ..TaskHost::default()
+                },
+            );
+            let task = state
+                .items
+                .values()
+                .find(|item| item.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert_eq!(task.ok, Some(false));
+            assert!(tool_result_text(task).contains("no plan steps are defined; omit plan_step"));
+            assert!(port.0.lock().unwrap().is_empty());
+            assert!(state.plan.steps.is_empty());
+        }
+
+        #[test]
         fn background_task_without_owner_is_refused_instead_of_running_foreground() {
             // Catches: an unsupported host silently blocking on a background task.
             let fx = Fixture::new(vec![]);
@@ -14534,6 +14902,76 @@ mod turn {
                 .unwrap();
             assert_eq!(task.ok, Some(false));
             assert!(tool_result_text(task).contains("unavailable"));
+        }
+
+        #[test]
+        fn background_research_guidance_keeps_parent_validation_moving() {
+            // Catches: background research guidance omits independent work or mistakes launch for completion.
+            let mut fx = Fixture::new(vec![]).with_write_tool();
+            fx.set_mode(Mode::Yolo);
+            let generator = Arc::new(FakeGenerator::new([
+                vec![
+                    call(
+                        "research",
+                        "task",
+                        json!({"name":"research", "prompt":"Inspect unrelated layout", "background":true}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![
+                    call(
+                        "validation",
+                        "fake_write",
+                        json!({"path":"/ws/validation.txt", "contents":"validation completed"}),
+                    ),
+                    AiEvent::Stop(StopReason::ToolUse),
+                ],
+                vec![AiEvent::Stop(StopReason::Stop)],
+            ]));
+            let port = Arc::new(RecordingBackgroundPort::default());
+            let (exit, state) = run_task_host_case(
+                &fx,
+                &generator,
+                CancelToken::new(),
+                None,
+                vec![],
+                vec![],
+                TaskHost {
+                    background: Some(port.clone()),
+                    ..TaskHost::default()
+                },
+            );
+            assert_eq!(exit, ExitReason::Completed);
+            assert_eq!(port.0.lock().unwrap().len(), 1);
+            assert_eq!(
+                fx.fs.read(&CanonPath::new("/ws/validation.txt")).unwrap(),
+                b"validation completed"
+            );
+            let task_item = state
+                .items
+                .values()
+                .find(|item| item.tool_name.as_deref() == Some("task"))
+                .unwrap();
+            assert!(tool_result_text(task_item).starts_with("background agent "));
+            let calls = generator.calls();
+            for request in &calls {
+                let descriptor = request
+                    .tools
+                    .iter()
+                    .find(|tool| tool.name == "task")
+                    .unwrap();
+                for instruction in [
+                    "Continue ready, non-overlapping work while the child runs",
+                    "Wait only when the next action depends on the child's result or no independent work remains",
+                    "A launch receipt or running lifecycle status is not a completed result",
+                ] {
+                    assert!(
+                        descriptor.description.contains(instruction),
+                        "task descriptor missing: {instruction}"
+                    );
+                    assert!(request.messages.messages().iter().any(|message| message.role == Role::System && message.content.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains(instruction)))), "system guidance missing: {instruction}");
+                }
+            }
         }
 
         #[test]
@@ -14702,7 +15140,7 @@ mod turn {
                 .map(|item| item.tool_result.as_ref().unwrap().model_text())
                 .collect::<Vec<_>>()
                 .join("\n");
-            assert!(results.contains("unknown plan step: missing"));
+            assert!(results.contains("unknown plan step: missing; available plan steps: one"));
             assert!(results.contains("plan step already assigned in this batch: one"));
             assert_eq!(
                 state.plan.steps[0].status,

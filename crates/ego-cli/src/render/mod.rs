@@ -29,7 +29,6 @@ pub mod line;
 pub mod markdown;
 pub mod osc;
 pub mod permission_diff;
-pub(crate) mod prompt_echo;
 pub(crate) mod replay;
 mod shell;
 pub(crate) mod startup_logo;
@@ -59,12 +58,25 @@ pub(crate) fn duration(elapsed: std::time::Duration) -> String {
 /// Strip trailing padding for [`Depth::None`]. Diff padding carries a
 /// background in terminals but has no meaning in plain redirected text.
 pub fn block(lines: &[Line], depth: Depth) -> String {
+    block_with(
+        lines,
+        Capabilities {
+            depth,
+            ..Capabilities::plain()
+        },
+    )
+}
+
+/// Render an answer block with the negotiated hyperlink capability.
+pub fn block_with(lines: &[Line], capabilities: Capabilities) -> String {
+    let depth = capabilities.depth;
+    let osc = osc::Osc::new(capabilities);
     let mut out = String::new();
     for line in lines {
         if depth == Depth::None {
-            out.push_str(line.text().trim_end());
+            out.push_str(line.render_with(depth, &osc).trim_end());
         } else {
-            out.push_str(&line.render(depth));
+            out.push_str(&line.render_with(depth, &osc));
         }
         out.push('\n');
     }

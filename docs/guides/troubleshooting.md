@@ -1,5 +1,7 @@
 # Troubleshooting
 
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/troubleshooting.html).
+
 Start with the refusal and its owning boundary. A missing credential, unsupported
 model fact, denied effect, and unavailable confinement are different problems;
 changing one cannot safely be assumed to solve another.
@@ -22,7 +24,7 @@ refresh can remain `not_checked` with the command/reason that would establish th
 | Unknown provider/model or retired slug | Check the current catalogue/source; a provider mentioned in research may not be selectable |
 | Unknown/unsupported effort | Use a supported explicit `--thinking`; absence is not permission to invent `medium` |
 | Missing credential / 401 / 403 | Check the named profile's credential source and entitlement; do not copy tokens into diagnostics |
-| No pricing quote under a money ceiling | Supply verified per-token facts or choose a token-only bound; unknown is not free |
+| Unknown monetary cost | Inspect the cost-anomaly notice; money caps cover known recorded spend only, so use a token bound when prices are unknown |
 | Project settings ignored | Inspect trust/bare posture; headless is untrusted by default |
 | Denied tool despite an allow | Check every prepared operation, immutable denies, control-path rules, and origin of the allow |
 | `perimeter-probe-temp-overlap` | TMPDIR must be outside every granted root for the negative probe. Inspect roots; an explicit user `ego config set 'roots=[]'` selects workspace-only access when that is the intended authority |
@@ -68,8 +70,8 @@ rather than fixing the missing grant. System ceilings can prevent this recovery.
 
 ## `cargo: command not found`
 
-This was observed when macOS confinement hid the Cargo toolchain outside the
-workspace. It can also mean cargo is not installed or is absent from PATH. Check
+This can mean Cargo is not installed, is absent from PATH, or is outside
+the macOS confinement boundary. Check
 command resolution in the user's shell first. If it resolves there but not inside
 ego, inspect the perimeter. A read/read-write root does not grant exec.
 
@@ -98,9 +100,8 @@ This is a manual recovery; ego does not automatically add linked-worktree metada
 
 ## Git fails while selecting the macOS developer tools
 
-The live notes identify `/var/select/developer_dir` as a required git read but do
-not retain the full Xcode error text. Do not assume every Xcode error is a sandbox
-failure. In the user's shell, run `xcode-select -p` and verify git works there.
+Do not assume every Xcode error is a sandbox failure. In your shell, run
+`xcode-select -p` and verify that git works outside ego before changing grants.
 
 If it works outside ego but fails under the workspace sandbox, add a read root
 for the existing canonical `/var/select` path (macOS commonly resolves it under
@@ -109,16 +110,13 @@ exec: for example, an existing `/Library/Developer/CommandLineTools` directory
 belongs in `exec_paths` when git needs its executables. Use `ego config edit`,
 retain existing entries, and respect system ceilings. Exit and resume. A read root
 alone does not authorize a tool launched from the developer-tools directory.
-The exact Xcode diagnostic was not captured in the E2E; this entry does not invent it.
 
 ## `stopped: permission unresolved and nobody could be asked`
 
 `ego resume ID "follow-up"` is headless even on a terminal. A required human
 approval cannot be answered there. Run `ego resume ID` without a positional prompt,
 then enter the follow-up in the composer. Include explicit model/mode/sandbox
-flags if you need to override stored defaults. The E2E also observed staircase
-history rendering on interactive resume; that display defect is not an approval
-or perimeter change.
+flags if you need to override stored defaults.
 
 ## `is not a provider/model slug, e.g. ollama/qwen3`
 
@@ -139,8 +137,7 @@ An available key is not proof of sufficient credit or model entitlement.
 
 A `permissions.judge` slug can be accepted by `ego config set` but refused at
 launch when its capability facts are absent. Config mutation validates the typed
-value, not catalogue availability. The E2E hit this with
-`openai-codex/gpt-6-luna`; do not use that slug as a working sentinel example.
+value, not catalogue availability.
 Select a model with supplied facts and credentials (check `ego models`), or add
 verified facts through the documented [model configuration](../reference/configuration.md).
 Do not invent capability values. The judge receives bounded task context and action evidence; same-provider
@@ -149,13 +146,12 @@ It can still escalate. See [judge action evidence](permissions.md#judge-action-e
 
 ## `unable to access ~/.config/git/ignore: Operation not permitted`
 
-The historical E2E observed this git warning with an explicit shared-tree perimeter.
-The actual path can be expanded to the user's absolute home path. Git reads
+The actual path can be expanded to your absolute home path. Git reads
 configuration and ignore files outside the workspace. Grant the existing
 non-secret file with `ego roots add /absolute/path/to/.config/git/ignore --access read`,
 preserve required default roots, and exit/resume to apply it. Other configured git
-files can need their own read grants. Homebrew git ran where `/usr/bin/git` failed
-in this run, but changing executables is not a substitute for required grants.
+files can need their own read grants. Changing git executables is not a substitute
+for the required grants.
 
 ## `credit balance is too low`
 
@@ -169,30 +165,13 @@ publishing credentials; remove inappropriate identity overrides with
 error is a header error. The header schema still applies; forbidden wire headers
 are not valid overrides. See [authentication keys](../reference/configuration.md#authentication-keys).
 
-## Other live E2E limitations
+## Configured MCP server is unavailable
 
-The 2026-10-10 run observed root help without the run options. Root help now
-lists the shared run options. The trust offer names absolute file paths and
-explains both answers; trust admits project files and their configuration.
-`ego roots` uses plain receipts and access/path listings. Its edits remind the
-user to exit and resume because running sessions keep their captured perimeter.
-The `ego config set` receipt still describes the stored change, not a live
-session reload.
-
-The run also observed answered approval blocks remaining in scrollback, slow
-exec calls, and a configured MCP server unavailable without a visible warning.
-Startup now attaches every enabled configured server and reports each one that
-admission refuses or that fails to start, once, with its sanitized cause.
-Inspect configuration with `ego mcp ls`. Set `enabled = false` in the entry to
-detach a server; `--mcp NAME` still attaches it for one run.
-One auto-mode access check later took 4 minutes 29 seconds.
-Exec latency in that run was not isolated to a proven layer; do not treat sandbox
-startup cost as an established cause. Use the built-in read/grep tools for file
-inspection when available. They still enforce their own read authority.
-
-Do not implement the report's proposed full-disk read/exec perimeter, toolchain
-autodiscovery, inline root grants, or learned sentinel rules as troubleshooting
-steps: they were proposals, not evidence of shipped behavior.
+Startup attaches every enabled configured server and reports each refused or
+failed attachment once, with its sanitized cause. Inspect the declaration with
+`ego mcp ls`. Set `enabled = false` to keep a server configured but detached;
+`--mcp NAME` attaches it explicitly for one run. Check authority and authentication
+before retrying. A reconnect does not prove an earlier tool operation was unsent.
 
 ## Platforms
 

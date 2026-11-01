@@ -4,6 +4,9 @@ use std::io::IsTerminal;
 
 use super::*;
 
+#[path = "native_events.rs"]
+mod native_events;
+
 /// The currency a session settles in.
 ///
 /// Use a shared currency value rather than invent an unsupported `--currency` flag.
@@ -456,7 +459,12 @@ pub(super) async fn run_process(
         }),
         Output::Json | Output::Jsonl => Capabilities::plain(),
     };
-    let text_sink = TextSink::new(out, quiet, capabilities);
+    let text_sink = TextSink::new(
+        out,
+        quiet,
+        capabilities,
+        workspace(args.directory.as_ref()).ok().as_deref(),
+    );
     let jsonl_sink = JsonlSink::new(out);
     let sink: &dyn EventSink = match output {
         Output::Text => &text_sink,
@@ -568,9 +576,6 @@ pub(super) async fn interactive_process(
 
     if let Some(surface) = surface {
         let output = Arc::new(InteractiveOutput::new(surface));
-        let diagnostics: Arc<dyn crate::output::Diagnostics> = output.clone();
-        seat.install_diagnostics(Arc::downgrade(&diagnostics));
-        drop(diagnostics);
         let ended = interactive_through(
             args,
             cancel,
@@ -613,7 +618,12 @@ pub(super) async fn interactive_through(
     output: &dyn TextOutput,
     services: InteractiveServices,
 ) -> Ended {
-    let text_sink = TextSink::new(output, quiet, capabilities);
+    let text_sink = TextSink::new(
+        output,
+        quiet,
+        capabilities,
+        workspace(args.directory.as_ref()).ok().as_deref(),
+    );
     let announce = Announce::new(output, capabilities, quiet);
     let signalling = Signalling {
         inner: &text_sink,
@@ -657,6 +667,7 @@ pub(super) async fn interactive_through(
         }
     }
     let ended = loop {
+        text_sink.set_workspace(workspace(args.directory.as_ref()).ok().as_deref());
         let status = InteractiveStatus {
             seat: Arc::clone(&seat),
             width: capabilities.width,
@@ -756,6 +767,7 @@ pub(super) struct Announce<'a> {
     quiet: bool,
     started: std::time::Instant,
     recovering: std::sync::Mutex<bool>,
+    native_events: std::sync::Mutex<native_events::NativeEvents>,
     provider_notices: crate::output::ProviderTurnNotices,
 }
 
@@ -774,6 +786,7 @@ impl<'a> Announce<'a> {
             quiet,
             started: std::time::Instant::now(),
             recovering: std::sync::Mutex::new(false),
+            native_events: std::sync::Mutex::default(),
             provider_notices: crate::output::ProviderTurnNotices::default(),
         }
     }
@@ -824,7 +837,12 @@ impl<'a> Announce<'a> {
     pub(super) fn signal(&self, event: &PublicEvent, state: &SessionState) -> String {
         use ego_core::public::ItemKind as Kind;
         let provider_notice = self.provider_notices.observe(event);
-        match event {
+        let rich = self
+            .native_events
+            .lock()
+            .expect("native event lock")
+            .observe(self.osc, event);
+        let coarse = match event {
             PublicEvent::ProviderRetry {
                 attempt, delay_ms, ..
             } => {
@@ -867,7 +885,8 @@ impl<'a> Announce<'a> {
                 }
             }
             _ => String::new(),
-        }
+        };
+        [coarse, rich].concat()
     }
 
     fn clear_recovery(&self) -> String {
@@ -922,6 +941,19 @@ impl<'a> Announce<'a> {
             // Cleared on the way out on *every* path, including failure: an
             // indicator left set is a tab that stays orange until the terminal
             // is restarted, and the exit status is already carried by 133 D.
+            self.native_events
+                .lock()
+                .expect("native event lock")
+                .finish(
+                    self.osc,
+                    if code == 0 {
+                        "completed"
+                    } else if code == 130 {
+                        "interrupted"
+                    } else {
+                        "failed"
+                    },
+                ),
             self.osc.progress(if code == 0 {
                 Progress::Cleared
             } else {
@@ -993,6 +1025,9 @@ impl EventSink for Signalling<'_> {
     }
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
+        if let Some(seat) = self.seat {
+            seat.observe_native_turn(event);
+        }
         // Ingress acknowledgements cover acceptance/retraction. Consumption
         // and turn settlement happen here, before the next generation ends.
         if matches!(

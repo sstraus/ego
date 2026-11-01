@@ -36,7 +36,7 @@ never triggers a legacy GET or initialize handshake. The legacy profile pins
 2024-11-05, accepts only a same-origin POST endpoint, and keeps the configured
 frame bound, deadline, cancellation, and guarded egress. It does not reconnect
 or retry. Legacy complete results have no reusable cache grant. WebSocket is
-not supported; no official server fixture was found in the audited SDK tree.
+not supported.
 
 Project declarations load only after workspace trust. A stdio child has a
 session-owned lifetime and an admitted working-directory/environment identity.
@@ -147,8 +147,7 @@ For example, a client can pass `--max-concurrent-runs 1 --retained-requests 16
 Sources: [CLI MCP management](../../crates/ego-cli/src/mcp.rs),
 [inbound composition](../../crates/ego-cli/src/mcp_server.rs),
 [protocol crate](../../crates/ego-mcp/src/),
-[guarded registry](../../crates/ego-tools/src/mcp_registry.rs), and
-historical contract analysis.
+[guarded registry](../../crates/ego-tools/src/mcp_registry.rs).
 
 ## Turn time
 

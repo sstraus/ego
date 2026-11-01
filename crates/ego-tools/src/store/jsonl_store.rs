@@ -729,7 +729,10 @@ impl JsonlStore {
         self.session_dir(id).join("events.lock")
     }
 
-    fn open_events_lock(&self, id: &SessionId) -> Result<RwLock<std::fs::File>, StoreError> {
+    pub(super) fn open_events_lock(
+        &self,
+        id: &SessionId,
+    ) -> Result<RwLock<std::fs::File>, StoreError> {
         let lock_path = self.events_lock_path(id);
         let open = || {
             OpenOptions::new()
@@ -2118,22 +2121,46 @@ impl JsonlStore {
             }
             None => self.next_physical_position(&log_path, id)?,
         };
-        if cursor.log.is_none() {
-            cursor.log = self.io.open_session_log(&log_path)?;
-        }
-        let mut append_line = |line: &[u8]| -> Result<(), StoreError> {
-            match cursor.log.as_mut() {
-                Some(log) => log.append_line(line)?,
-                None => self.io.append_line(&log_path, line)?,
-            }
-            Ok(())
-        };
-        if is_new_session {
-            let header = Header::new(*id, ev.env.ts, self.workspace.clone());
-            append_line(&encode_header(&header))?;
-        }
         let record_line = encode_record(position, &SessionEntry::Event(ev.clone()))?;
-        append_line(&record_line)?;
+        let is_root_authority = matches!(
+            ev.kind,
+            EventKind::SessionRootGranted { .. }
+                | EventKind::PermanentRootGrantPending { .. }
+                | EventKind::PermanentRootGranted { .. }
+                | EventKind::RootRevoked { .. }
+        );
+        if is_root_authority {
+            // A crash must expose either the old complete receipt set or the new one.
+            // Close the retained descriptor so subsequent appends cannot target the old inode.
+            cursor.log = None;
+            let mut image = if is_new_session {
+                let mut image = encode_header(&Header::new(*id, ev.env.ts, self.workspace.clone()));
+                image.push(b'\n');
+                image
+            } else {
+                self.io.read(&log_path)?.ok_or(StoreError::NotFound)?
+            };
+            image.extend_from_slice(&record_line);
+            image.push(b'\n');
+            // StoreIo's atomic contract includes scratch fsync, rename and parent fsync.
+            self.io.replace_atomic(&log_path, &image)?;
+        } else {
+            if cursor.log.is_none() {
+                cursor.log = self.io.open_session_log(&log_path)?;
+            }
+            let mut append_line = |line: &[u8]| -> Result<(), StoreError> {
+                match cursor.log.as_mut() {
+                    Some(log) => log.append_line(line)?,
+                    None => self.io.append_line(&log_path, line)?,
+                }
+                Ok(())
+            };
+            if is_new_session {
+                let header = Header::new(*id, ev.env.ts, self.workspace.clone());
+                append_line(&encode_header(&header))?;
+            }
+            append_line(&record_line)?;
+        }
         if let Some(state) = cursor.state.as_mut() {
             state.apply(ev);
         }

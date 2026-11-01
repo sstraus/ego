@@ -224,7 +224,9 @@ mod generator {
                 | AiEvent::WebSearch { .. }
                 | AiEvent::Citation { .. }
                 | AiEvent::ReasoningState(_)
-                | AiEvent::ProviderFailure { .. } => Vec::new(),
+                | AiEvent::ProviderFailure { .. }
+                | AiEvent::FilterState(_)
+                | AiEvent::LocalFailure { .. } => Vec::new(),
                 AiEvent::TextDelta { text } => {
                     let item = *self.message_item.get_or_insert_with(ItemId::new);
                     let env = self.envelope(Some(item));

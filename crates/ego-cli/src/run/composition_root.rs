@@ -474,6 +474,7 @@ impl CliPrepared {
             fallbacks: self.fallbacks,
         };
         let turns = Turns {
+            parent_cancel: cancel.clone(),
             schema: self.compiled.as_ref(),
             retries: self.schema_retries,
             max_turns: self.max_turns,
@@ -614,6 +615,7 @@ pub(super) enum InteractiveTurnInput {
     },
     Skill(AdmittedSkillOperation),
     McpContext(repl::actions::McpContextCommand),
+    Shell(String),
 }
 
 pub(super) struct ExecutionPreflight {

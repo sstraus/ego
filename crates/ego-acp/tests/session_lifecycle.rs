@@ -2154,3 +2154,287 @@ async fn delete_refuses_a_prompt_preparing_its_first_run_even_with_force() {
     );
     connection.finish().await;
 }
+
+// Catches: child lifecycle is dropped, loses native identity/outcome, or leaks to another session.
+#[tokio::test]
+async fn acp_child_activity_is_scoped_to_its_parent_session() {
+    use ego_core::event::id::{ItemId, TurnId};
+    use ego_core::public::{ChildIdentity, ChildOutcome, ChildPhase, PublicEvent};
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router());
+    let (initialized, _) = connection
+        .request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": 1,
+                "clientCapabilities": {"_meta":{"ego":{"childActivity":{"version":1}}}}
+            }),
+        )
+        .await;
+    assert_eq!(initialized["result"]["protocolVersion"], 1);
+    let (first, _) = connection.new_session(ROOT).await;
+    let (second, _) = connection.new_session(OTHER_ROOT).await;
+    let turn = TurnId::new();
+    let item = ItemId::new();
+    let child_turn = TurnId::new();
+    let child = ChildIdentity::Foreground { turn: child_turn };
+    for outcome in [
+        ChildOutcome::Completed,
+        ChildOutcome::Failed,
+        ChildOutcome::Interrupted,
+        ChildOutcome::Cancelled,
+    ] {
+        *fixture.executor.child_events.lock().unwrap() = vec![
+            PublicEvent::ChildLifecycle {
+                turn,
+                item,
+                child,
+                phase: ChildPhase::Started,
+            },
+            PublicEvent::ChildLifecycle {
+                turn,
+                item,
+                child,
+                phase: ChildPhase::Settled { outcome },
+            },
+            PublicEvent::TurnCompleted {
+                turn,
+                ok: true,
+                exit_reason: ego_core::event::domain::ExitReason::Completed,
+            },
+        ];
+        let (response, messages) = connection
+            .request(
+                "session/prompt",
+                serde_json::json!({
+                    "sessionId":second,"prompt":[{"type":"text","text":"child work"}]
+                }),
+            )
+            .await;
+        assert!(response.get("result").is_some(), "{response}");
+        let updates: Vec<_> = messages
+            .iter()
+            .filter(|m| !m["params"]["update"]["_meta"]["ego"]["childActivity"].is_null())
+            .collect();
+        assert_eq!(
+            updates.len(),
+            3,
+            "native child start, settlement and turn clear must reach the host: {messages:?}"
+        );
+        for update in &updates {
+            assert_eq!(update["params"]["sessionId"], second);
+            assert_ne!(update["params"]["sessionId"], first);
+        }
+        let start = &updates[0]["params"]["update"]["_meta"]["ego"]["childActivity"];
+        assert_eq!(
+            start,
+            &serde_json::json!({"version":1,"kind":"lifecycle","turnId":turn,"itemId":item,"child":{"kind":"foreground","turn":child_turn},"phase":{"phase":"started"}})
+        );
+        assert_eq!(
+            updates[1]["params"]["update"]["_meta"]["ego"]["childActivity"]["phase"],
+            serde_json::json!({"phase":"settled","outcome":outcome})
+        );
+        assert_eq!(
+            updates[2]["params"]["update"]["_meta"]["ego"]["childActivity"],
+            serde_json::json!({"version":1,"kind":"clear","turnId":turn,"scope":"foreground"})
+        );
+    }
+    connection.finish().await;
+}
+
+// Catches: an ordinary v1 client receives unnegotiated child metadata.
+#[tokio::test]
+async fn acp_child_activity_is_absent_without_opt_in() {
+    use ego_core::event::id::{ItemId, TurnId};
+    use ego_core::public::{ChildIdentity, ChildPhase, PublicEvent};
+    let fixture = support::DurableAcpFixture::new();
+    *fixture.executor.child_events.lock().unwrap() = vec![PublicEvent::ChildLifecycle {
+        turn: TurnId::new(),
+        item: ItemId::new(),
+        child: ChildIdentity::Foreground {
+            turn: TurnId::new(),
+        },
+        phase: ChildPhase::Started,
+    }];
+    let mut connection = Connected::new(fixture.router());
+    connection.initialize().await;
+    let (session, _) = connection.new_session(ROOT).await;
+    let (_, messages) = connection
+        .request(
+            "session/prompt",
+            serde_json::json!({"sessionId":session,"prompt":[{"type":"text","text":"go"}]}),
+        )
+        .await;
+    assert!(
+        messages
+            .iter()
+            .all(|m| m["params"]["update"]["_meta"]["ego"]["childActivity"].is_null())
+    );
+    connection.finish().await;
+}
+
+// Catches: reattachment loses an active durable child or replays a start as new activity.
+#[tokio::test]
+async fn acp_child_activity_reattaches_as_snapshot_and_close_clears() {
+    let fixture = support::DurableAcpFixture::new();
+    let (session, _) = fixture.seed_settled_messages(ROOT);
+    let (turn, item, child) = fixture.append_child_start(&session);
+    let mut connection = Connected::new(fixture.router());
+    connection.request("initialize", serde_json::json!({"protocolVersion":1,"clientCapabilities":{"_meta":{"ego":{"childActivity":{"version":1}}}}})).await;
+    let (loaded, _) = connection
+        .request(
+            "session/load",
+            serde_json::json!({"sessionId":session,"cwd":ROOT,"mcpServers":[]}),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "{loaded}");
+    let messages = connection.announced().await;
+    let activities: Vec<_> = messages
+        .iter()
+        .map(|m| &m["params"]["update"]["_meta"]["ego"]["childActivity"])
+        .filter(|v| !v.is_null())
+        .collect();
+    assert_eq!(
+        activities,
+        vec![
+            &serde_json::json!({"version":1,"kind":"snapshot","children":[{"turnId":turn,"itemId":item,"child":child}]})
+        ]
+    );
+    let (closed, messages) = connection
+        .request("session/close", serde_json::json!({"sessionId":session}))
+        .await;
+    assert!(closed.get("result").is_some(), "{closed}");
+    assert!(
+        messages.iter().any(|m| m["params"]["sessionId"] == session
+            && m["params"]["update"]["_meta"]["ego"]["childActivity"]
+                == serde_json::json!({"version":1,"kind":"clear","turnId":null})),
+        "close must retract the session roster: {messages:?}"
+    );
+    connection.finish().await;
+}
+
+// Catches: a completed parent clears a still-running durable child from the host roster.
+#[tokio::test]
+async fn acp_durable_child_outlives_successful_parent_turn() {
+    use ego_core::event::id::{ItemId, SessionId, SubagentInvocationId, TurnId};
+    use ego_core::public::{ChildIdentity, ChildPhase, PublicEvent};
+    let fixture = support::DurableAcpFixture::new();
+    let mut connection = Connected::new(fixture.router());
+    connection.request("initialize", serde_json::json!({"protocolVersion":1,"clientCapabilities":{"_meta":{"ego":{"childActivity":{"version":1}}}}})).await;
+    let (session, _) = connection.new_session(ROOT).await;
+    let turn = TurnId::new();
+    let invocation = SubagentInvocationId::new();
+    *fixture.executor.child_events.lock().unwrap() = vec![
+        PublicEvent::ChildLifecycle {
+            turn,
+            item: ItemId::new(),
+            child: ChildIdentity::Durable {
+                invocation,
+                run: ego_core::run::RunId::new(SessionId::new(), invocation.uuid()),
+            },
+            phase: ChildPhase::Started,
+        },
+        PublicEvent::TurnCompleted {
+            turn,
+            ok: true,
+            exit_reason: ego_core::event::domain::ExitReason::Completed,
+        },
+    ];
+    let (_, messages) = connection.request("session/prompt", serde_json::json!({"sessionId":session,"prompt":[{"type":"text","text":"background work"}]})).await;
+    let clear = messages
+        .iter()
+        .find_map(|m| {
+            let activity = &m["params"]["update"]["_meta"]["ego"]["childActivity"];
+            (activity["kind"] == "clear").then_some(activity)
+        })
+        .expect("successful parent still retracts any omitted foreground stop");
+    assert_eq!(
+        clear["scope"], "foreground",
+        "a live durable child must not be cleared when its parent returns"
+    );
+    let (durable_turn, durable_item, durable_child) = fixture.append_child_start(&session);
+    fixture.append_parent_completion(&session, durable_turn);
+    let (loaded, _) = connection
+        .request(
+            "session/load",
+            serde_json::json!({"sessionId":session,"cwd":ROOT,"mcpServers":[]}),
+        )
+        .await;
+    assert!(loaded.get("result").is_some(), "{loaded}");
+    let replay = connection.announced().await;
+    let snapshot = replay
+        .iter()
+        .find_map(|m| {
+            let activity = &m["params"]["update"]["_meta"]["ego"]["childActivity"];
+            (activity["kind"] == "snapshot").then_some(activity)
+        })
+        .expect("load sends a current snapshot");
+    assert_eq!(
+        snapshot["children"],
+        serde_json::json!([{"turnId":durable_turn,"itemId":durable_item,"child":durable_child}]),
+        "completed parent must not remove its durable child on reattach"
+    );
+    connection.finish().await;
+}
+
+// Catches: history-free resume clears active children, replays history, or revives settled work.
+#[tokio::test]
+async fn acp_resume_preserves_current_durable_children_without_history() {
+    for phase in ["started", "parent completed", "settled"] {
+        let fixture = support::DurableAcpFixture::new();
+        let seeded = fixture.seed_replay_session(ROOT, "Resume child", 200_000);
+        let session = &seeded.session_id;
+        let (turn, item, child) = fixture.append_child_start(session);
+        if phase != "started" {
+            fixture.append_parent_completion(session, turn);
+        }
+        if phase == "settled" {
+            fixture.append_child_settlement(session, turn, item, child);
+        }
+        let mut connection = Connected::new(fixture.router());
+        connection.request("initialize", serde_json::json!({"protocolVersion":1,"clientCapabilities":{"_meta":{"ego":{"childActivity":{"version":1}}}}})).await;
+        let (resumed, before) = connection
+            .request(
+                "session/resume",
+                serde_json::json!({
+                    "sessionId":session,"cwd":ROOT,"mcpServers":[]
+                }),
+            )
+            .await;
+        assert!(resumed.get("result").is_some(), "{phase}: {resumed}");
+        assert!(
+            before.is_empty(),
+            "resume announced before its response: {before:?}"
+        );
+        let messages = connection.announced().await;
+        let activities: Vec<_> = messages
+            .iter()
+            .map(|m| &m["params"]["update"]["_meta"]["ego"]["childActivity"])
+            .filter(|v| !v.is_null())
+            .collect();
+        let expected = if phase == "settled" {
+            serde_json::json!([])
+        } else {
+            serde_json::json!([{"turnId":turn,"itemId":item,"child":child}])
+        };
+        assert_eq!(
+            activities,
+            vec![&serde_json::json!({"version":1,"kind":"snapshot","children":expected})],
+            "{phase}: resume must retain precisely the current roster"
+        );
+        assert_eq!(
+            messages.len(),
+            3,
+            "resume sends only snapshot, current info and plan: {messages:?}"
+        );
+        assert!(
+            messages.iter().all(|m| m["params"]["sessionId"] == *session
+                && matches!(
+                    m["params"]["update"]["sessionUpdate"].as_str(),
+                    Some("session_info_update" | "plan")
+                )),
+            "resume must not replay messages, tools or usage: {messages:?}"
+        );
+        connection.finish().await;
+    }
+}

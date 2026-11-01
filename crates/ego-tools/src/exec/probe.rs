@@ -4,6 +4,8 @@
 
 use std::ffi::OsString;
 use std::fs;
+use std::io::{Read as _, Write as _};
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -15,6 +17,7 @@ use ego_core::permit::{
     CanonPath, Classification, Confinement, ExecCaps, ProcessError, RunConfinement, Tool, Typed,
 };
 use ego_core::turn::{CancelToken, ToolEffectPorts, Tools};
+use nix::fcntl::{Flock, FlockArg, OFlag};
 use sha2::{Digest as _, Sha256};
 
 use crate::store::SessionEvidenceStore;
@@ -152,6 +155,11 @@ async fn measure_cached(
     cancel: CancelToken,
     limits: ExecLimits,
 ) -> Result<Measurement, ProcessError> {
+    // Sweep even on cache hits: another process may have died since the last
+    // measurement. Only a code-marked fixture with no active owner is eligible.
+    sweep_stale_fixtures(policy.workspace()).map_err(|error| {
+        ProcessError::Backend(format!("cannot remove stale workspace probe: {error}"))
+    })?;
     let cache_key =
         cache_key_async(policy.clone(), backend.clone(), runtime_roots.to_vec()).await?;
     let cached = cached_capabilities(cache_key);
@@ -911,8 +919,78 @@ async fn measure(
     measured
 }
 
+const FIXTURE_OWNER: &str = ".ego-probe-owner";
+fn fixture_marker(path: &Path) -> Option<String> {
+    Some(format!(
+        "ego-exec-probe-owner-v1\n{}\n",
+        path.file_name()?.to_str()?
+    ))
+}
+
+/// A released kernel lock proves the fixture has no active owner, without
+/// guessing from a PID that may have been reused. Unmarked legacy directories
+/// remain untouched: their prefix alone does not establish ownership.
+fn sweep_stale_fixtures(workspace: &CanonPath) -> std::io::Result<()> {
+    let entries = match fs::read_dir(workspace.as_path()) {
+        Ok(entries) => entries,
+        // A workspace can disappear after policy resolution. No fixture can
+        // remain there; keep the existing empty-capability fallback contract.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    for entry in entries.flatten() {
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".ego-exec-probe-")
+            || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Some(expected_marker) = fixture_marker(&path) else {
+            continue;
+        };
+        let owner_path = path.join(FIXTURE_OWNER);
+        // Do not follow marker symlinks or block opening an unrelated FIFO.
+        let Ok(file) = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags((OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK).bits())
+            .open(&owner_path)
+        else {
+            continue;
+        };
+        let Ok(mut owner) = Flock::lock(file, FlockArg::LockExclusiveNonblock) else {
+            continue;
+        };
+        let Ok(metadata) = owner.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let mut marker = Vec::new();
+        if (&mut *owner)
+            .take((expected_marker.len() + 1) as u64)
+            .read_to_end(&mut marker)
+            .is_err()
+            || marker != expected_marker.as_bytes()
+        {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 struct ProbeFixture {
+    // Fields drop in order: remove the directory before releasing its lock.
     _inside: tempfile::TempDir,
+    _inside_owner: Flock<fs::File>,
     _outside: tempfile::TempDir,
     cwd: CanonPath,
     inside: std::path::PathBuf,
@@ -926,11 +1004,24 @@ impl ProbeFixture {
             .prefix(".ego-exec-probe-")
             .tempdir_in(workspace.as_path())
             .ok()?;
+        let owner_file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(inside.path().join(FIXTURE_OWNER))
+            .ok()?;
+        let mut owner = Flock::lock(owner_file, FlockArg::LockExclusiveNonblock).ok()?;
+        // Publish the complete marker only while the lock is held. A sweeper
+        // ignores an incomplete marker if creation is interrupted here.
+        owner
+            .write_all(fixture_marker(inside.path())?.as_bytes())
+            .ok()?;
         let outside = tempfile::tempdir().ok()?;
         let inside_path = fs::canonicalize(inside.path()).ok()?;
         let outside_path = fs::canonicalize(outside.path()).ok()?;
         Some(Self {
             _inside: inside,
+            _inside_owner: owner,
             _outside: outside,
             cwd: workspace.clone(),
             inside: inside_path,
@@ -1412,6 +1503,18 @@ fn validate_probe_scope(policy: &RunConfinement) -> Result<(), ProcessError> {
     if policy.level() == ego_core::permit::Confinement::Off {
         return Ok(());
     }
+    if policy.level() == Confinement::Workspace
+        && let Some(root) = policy.roots().iter().find(|root| {
+            root.restricts_writes(policy.workspace(), policy.roots())
+                && policy.workspace().is_or_under(root.path())
+        })
+    {
+        return Err(ProcessError::Backend(format!(
+            "workspace {} is covered by read-only root {}; workspace confinement cannot prove scoped writes. Inspect `ego roots ls` and the effective perimeter configuration; remove the conflicting read root or change its access to read-write with `ego roots add --access read-write <path>` if writes are intended, then start a new session. Use --sandbox ro if the workspace must stay read-only",
+            policy.workspace(),
+            root.path()
+        )));
+    }
     let tmp = fs::canonicalize(std::env::temp_dir())
         .map_err(|error| ProcessError::Backend(format!("cannot resolve probe TMPDIR: {error}")))?;
     for root in policy.roots() {
@@ -1440,6 +1543,61 @@ mod tests {
         CachedCapabilities, CapabilityCacheKey, Measurement, cache_key, cache_key_for_binary,
         cached_capabilities,
     };
+
+    // Catches: a read-only workspace reaches a write probe and reports an internal touch failure.
+    #[test]
+    fn workspace_read_root_reports_actionable_conflict() {
+        use ego_core::permit::{ProfileRoot, RootAccess};
+
+        let workspace = CanonPath::new("/parent/workspace");
+        for frozen in ["/parent/workspace", "/parent"] {
+            let policy = RunConfinement::new(Confinement::Workspace, false, workspace.clone())
+                .unwrap()
+                .with_roots(vec![
+                    ProfileRoot::new(CanonPath::new(frozen), RootAccess::Read),
+                    ProfileRoot::new(CanonPath::new("/parent"), RootAccess::ReadWrite),
+                ]);
+            let error = super::validate_probe_scope(&policy).expect_err("read-only workspace");
+            let message = error.to_string();
+            for required in [
+                "read-only root",
+                frozen,
+                "/workspace",
+                "ego roots",
+                "read-write",
+                "--sandbox ro",
+            ] {
+                assert!(
+                    message.contains(required),
+                    "missing {required:?}: {message}"
+                );
+            }
+            assert!(
+                !message.contains("positive filesystem capability"),
+                "{message}"
+            );
+        }
+    }
+
+    // Catches: the conflict check rejects a broad read grant, nested restriction or Ro run.
+    #[test]
+    fn workspace_read_root_conflict_preserves_nonconflicting_policies() {
+        use ego_core::permit::{ProfileRoot, RootAccess};
+
+        for (level, frozen) in [
+            (Confinement::Workspace, "/parent/workspace/frozen"),
+            (Confinement::Workspace, "/parent"),
+            (Confinement::Ro, "/parent/workspace"),
+        ] {
+            let policy = RunConfinement::new(level, false, CanonPath::new("/parent/workspace"))
+                .unwrap()
+                .with_roots(vec![ProfileRoot::new(
+                    CanonPath::new(frozen),
+                    RootAccess::Read,
+                )]);
+            super::validate_probe_scope(&policy).expect("compatible read root");
+        }
+    }
 
     /// The envelope the probe emits is the envelope the dispatcher accepts, and
     /// it is spelled so libtest runs the `#[ignore]`d fixture named for the

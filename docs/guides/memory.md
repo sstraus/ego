@@ -1,8 +1,9 @@
-# Instructions and memory
+# Project instructions
 
-Project instructions and persistent memory serve different purposes. Instructions
-enter model context through workspace trust and prompt admission. Memory is a
-reviewable store; a stored entry does not automatically become a system instruction.
+Read this page in the [hosted user guide](https://sstraus.github.io/ego/guides/memory.html).
+
+Project instructions enter model context through workspace trust and prompt
+admission.
 
 ## Initialize project instructions
 

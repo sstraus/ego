@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_ego_global_optspecs
-    string join \n worktree= f/file= var= attach= m/model= offline proxy= proxy-ca= sandbox= thinking= read-only-dir= system= bare append-system= output-style= instructions= tools= no-tools allow= deny= profile= trust-workspace session= session-id= ephemeral session-dir= C= output= artifact-dir= schema= schema-retries= retry= fallback= budget= max-output-tokens= goal= no-context-tool context-clear context-interval= goal-turns= goal-check-command= max-turns= timeout= mcp= mode= plan yolo c/set= q/quiet no-color plain vim h/help V/version
+    string join \n continua worktree= f/file= var= attach= m/model= offline proxy= proxy-ca= sandbox= thinking= read-only-dir= system= bare append-system= output-style= instructions= tools= no-tools allow= deny= profile= trust-workspace session= session-id= ephemeral session-dir= C= output= artifact-dir= schema= schema-retries= retry= fallback= budget= max-output-tokens= goal= no-context-tool context-clear context-interval= goal-turns= goal-check-command= max-turns= timeout= mcp= mode= plan yolo c/set= q/quiet no-color plain vim h/help V/version
 end
 
 function __fish_ego_needs_command
@@ -65,6 +65,7 @@ complete -c ego -n "__fish_ego_needs_command" -l timeout -d 'Wall clock, e.g. \'
 complete -c ego -n "__fish_ego_needs_command" -l mcp -d 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server' -r
 complete -c ego -n "__fish_ego_needs_command" -l mode -d 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)' -r
 complete -c ego -n "__fish_ego_needs_command" -s c -l set -d 'Dotted-path config override, value parsed as TOML' -r
+complete -c ego -n "__fish_ego_needs_command" -l continua -d 'Resume the latest saved session in this workspace without the terminal picker'
 complete -c ego -n "__fish_ego_needs_command" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_needs_command" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_needs_command" -l no-tools -d 'Offer no tools at all'
@@ -93,7 +94,7 @@ complete -c ego -n "__fish_ego_needs_command" -a "models" -d 'List the shared mo
 complete -c ego -n "__fish_ego_needs_command" -a "hooks" -d 'Inspect the admitted system and user hook catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -a "doctor" -d 'Report a read-only redacted health snapshot of this installation.'
 complete -c ego -n "__fish_ego_needs_command" -a "checkpoint" -d 'Preview or selectively restore session-owned Git file checkpoints.'
-complete -c ego -n "__fish_ego_needs_command" -a "setup" -d 'Inspect expected work without running effects.'
+complete -c ego -n "__fish_ego_needs_command" -a "setup" -d 'Configure saved user settings in an interactive terminal.'
 complete -c ego -n "__fish_ego_needs_command" -a "acp" -d 'Serve the Agent Client Protocol on stdio or an endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -a "a2a" -d 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -a "auth" -d 'Manage subscription credentials.'
@@ -157,10 +158,11 @@ complete -c ego -n "__fish_ego_using_subcommand run" -s q -l quiet -d 'Suppress 
 complete -c ego -n "__fish_ego_using_subcommand run" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand run" -l plain -d 'Append plain output without terminal styling or live retry updates'
 complete -c ego -n "__fish_ego_using_subcommand run" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
+complete -c ego -n "__fish_ego_using_subcommand run" -l continua -d 'Resume the latest saved session in this workspace without the terminal picker'
 complete -c ego -n "__fish_ego_using_subcommand run" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l name -d 'Read or change the session title without starting a turn: show, set=TEXT, clear' -r
-complete -c ego -n "__fish_ego_using_subcommand resume" -l goal-operation -d 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l goal-operation -d 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
 complete -c ego -n "__fish_ego_using_subcommand resume" -l var -d 'Supply one declared agent-file template variable. Requires --file' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
@@ -218,7 +220,7 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -l vim -d 'Use Vim norma
 complete -c ego -n "__fish_ego_using_subcommand resume" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l name -d 'Read or change the session title without starting a turn: show, set=TEXT, clear' -r
-complete -c ego -n "__fish_ego_using_subcommand continue" -l goal-operation -d 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l goal-operation -d 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
 complete -c ego -n "__fish_ego_using_subcommand continue" -l var -d 'Supply one declared agent-file template variable. Requires --file' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l attach -d 'Add exact image bytes as ordered context before the prompt text' -r
@@ -337,10 +339,8 @@ complete -c ego -n "__fish_ego_using_subcommand checkpoint; and not __fish_seen_
 complete -c ego -n "__fish_ego_using_subcommand checkpoint; and __fish_seen_subcommand_from preview" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand checkpoint; and __fish_seen_subcommand_from restore" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand checkpoint; and __fish_seen_subcommand_from close" -s h -l help -d 'Print help'
-complete -c ego -n "__fish_ego_using_subcommand setup" -l items -d 'Select proposal item IDs as one comma-separated list; repeat to add IDs' -r
-complete -c ego -n "__fish_ego_using_subcommand setup" -l judge -d 'Offer a validated judge for unresolved policy; never authorizes an action' -r
-complete -c ego -n "__fish_ego_using_subcommand setup" -l profile -r
-complete -c ego -n "__fish_ego_using_subcommand setup" -l directory -r -F
+complete -c ego -n "__fish_ego_using_subcommand setup" -l profile -d 'Edit one user profile rather than the base user settings' -r
+complete -c ego -n "__fish_ego_using_subcommand setup" -s C -l directory -d 'Resolve effective settings for this workspace' -r -F
 complete -c ego -n "__fish_ego_using_subcommand setup" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand acp" -s C -d 'Run as if started in DIR' -r -F

@@ -11,7 +11,7 @@ use agent_client_protocol_schema::v1;
 use ego_acp::auth::Credential;
 use ego_acp::serve::{
     AcpRunBindingsBuilder, McpAdmissionContext, McpSessionAdmissionError,
-    McpSessionAdmissionFuture, McpSessionAdmitter, SessionConfinementAdmission,
+    McpSessionAdmissionFuture, McpSessionAdmitter, RunBindingsBuilder, SessionConfinementAdmission,
     SessionMcpAdmission, SessionTrustAdmission,
 };
 use ego_core::config::{
@@ -999,6 +999,45 @@ fn permission_rule_target(
     }
 }
 
+/// Retain only this process's live turn cancellation capabilities. A durable
+/// catalogue can include sessions owned by other processes and is not a shutdown list.
+struct ShutdownBindings {
+    inner: AcpRunBindingsBuilder,
+    turns: Arc<Mutex<HashMap<v1::SessionId, CancelToken>>>,
+}
+
+impl RunBindingsBuilder for ShutdownBindings {
+    fn build(
+        &self,
+        connection: ConnectionTo<Client>,
+        session: v1::SessionId,
+        capabilities: ego_acp::question::CapabilityCapture,
+        root: &RunRoot,
+        session_approval: Arc<std::sync::atomic::AtomicBool>,
+    ) -> ego_core::run::RunExecutionBindings {
+        let bindings = self.inner.build(
+            connection,
+            session.clone(),
+            capabilities,
+            root,
+            session_approval,
+        );
+        self.turns
+            .lock()
+            .expect("ACP shutdown bindings")
+            .insert(session, bindings.cancel());
+        bindings
+    }
+
+    fn end_session(&self, session: &v1::SessionId) {
+        self.inner.end_session(session);
+        self.turns
+            .lock()
+            .expect("ACP shutdown bindings")
+            .remove(session);
+    }
+}
+
 /// Serve the protocol on stdio or an explicitly selected endpoint.
 pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> RunTermination {
     let listener = match prepare_listener(args).await {
@@ -1200,6 +1239,9 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     }));
     let roots = Arc::new(CanonicalRoots { base: root });
     let spawner = Arc::new(TokioExecutionSpawner);
+    let turns = Arc::new(Mutex::new(HashMap::<v1::SessionId, CancelToken>::new()));
+    let shutdown_turns = Arc::clone(&turns);
+    let shutdown_lifecycle = Arc::clone(&lifecycle);
     let factory = move || {
         ego_acp::serve::durable_agent_with_compaction(
             Arc::clone(&controller),
@@ -1207,11 +1249,12 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             roots.clone(),
             spawner.clone(),
             ids.clone(),
-            Arc::new(
-                AcpRunBindingsBuilder::with_controls(Some(Arc::clone(&control_port)))
+            Arc::new(ShutdownBindings {
+                inner: AcpRunBindingsBuilder::with_controls(Some(Arc::clone(&control_port)))
                     .with_permission_rules(permission_rules.clone())
                     .with_sandbox_store(sandbox_grants.clone()),
-            ),
+                turns: Arc::clone(&turns),
+            }),
             Arc::clone(&mcp_admitter),
             Arc::clone(&compaction),
             Some(Arc::clone(&control_port)),
@@ -1220,37 +1263,77 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             notices.clone(),
         )
     };
-    let outcome = match listener {
-        Some(listener) => ego_acp::serve::serve_on(
-            listener.bound,
-            &listener.admitted,
-            listener.credential,
-            listener.gate,
-            factory,
-            std::future::pending(),
-        )
-        .await
-        .map_err(|error| format!("the ACP listener ended badly: {error}")),
-        None => {
-            let mut input = tokio::io::BufReader::new(tokio::io::stdin());
-            // No initialization is possible after empty stdin EOF. The SDK's
-            // negotiation router otherwise waits for a first frame indefinitely.
-            // Keep any buffered bytes for the ordinary SDK framing path.
-            match input.fill_buf().await {
-                Ok([]) => Ok(()),
-                Ok(_) => factory()
-                    .connect_to(ByteStreams::new(
-                        tokio::io::stdout().compat_write(),
-                        input.compat(),
-                    ))
-                    .await
-                    .map_err(|error| format!("the ACP connection ended badly: {error}")),
-                Err(error) => Err(format!("the ACP input could not be read: {error}")),
+    let serving = async {
+        match listener {
+            Some(listener) => ego_acp::serve::serve_on(
+                listener.bound,
+                &listener.admitted,
+                listener.credential,
+                listener.gate,
+                factory,
+                std::future::pending(),
+            )
+            .await
+            .map_err(|error| format!("the ACP listener ended badly: {error}")),
+            None => {
+                let mut input = tokio::io::BufReader::new(tokio::io::stdin());
+                // No initialization is possible after empty stdin EOF. The SDK's
+                // negotiation router otherwise waits for a first frame indefinitely.
+                // Keep any buffered bytes for the ordinary SDK framing path.
+                match input.fill_buf().await {
+                    Ok([]) => Ok(()),
+                    Ok(_) => factory()
+                        .connect_to(ByteStreams::new(
+                            tokio::io::stdout().compat_write(),
+                            input.compat(),
+                        ))
+                        .await
+                        .map_err(|error| format!("the ACP connection ended badly: {error}")),
+                    Err(error) => Err(format!("the ACP input could not be read: {error}")),
+                }
             }
         }
     };
+    let mut stopped = None;
+    let outcome = {
+        tokio::pin!(serving);
+        tokio::select! {
+            biased;
+            cause = run::stop_signal(None) => {
+                stopped = Some(cause);
+                Ok(())
+            }
+            outcome = &mut serving => outcome,
+        }
+    }; // Stop accepting frames before cancelling and settling owned turns.
+    if let Some(cause) = stopped {
+        let turns = std::mem::take(&mut *shutdown_turns.lock().expect("ACP shutdown bindings"));
+        for cancel in turns.values() {
+            cancel.cancel(cause);
+        }
+        // Close waits for durable settlement, then releases the writer attachment.
+        // Different sessions can settle concurrently; one slow cleanup must not
+        // postpone delivery of shutdown to the remaining sessions.
+        let closes = turns.keys().map(|id| {
+            let lifecycle = &shutdown_lifecycle;
+            async move {
+                let id = id.to_string().parse().expect("validated ACP session id");
+                lifecycle.close(id).await
+            }
+        });
+        for result in futures::future::join_all(closes).await {
+            if let Err(error) = result {
+                tracing::warn!(%error, "ACP shutdown could not close a session");
+            }
+        }
+    }
     mcp_cancel.cancel(CancelCause::Host);
     drop(mcp_effects);
+    if let Some(cause) = stopped {
+        let cancel = CancelToken::new();
+        cancel.cancel(cause);
+        return run::cancelled_termination(&cancel);
+    }
     match outcome {
         Ok(()) => RunTermination::Done,
         Err(message) => RunTermination::Failed { message },

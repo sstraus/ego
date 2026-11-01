@@ -471,6 +471,7 @@ struct SurfaceStatus {
     queue: QueueStatus,
     drafts: usize,
     activity: bool,
+    native_turn: Option<ego_core::event::id::TurnId>,
     activity_since: Option<Instant>,
     activity_output_chars: usize,
     children: std::collections::BTreeMap<ItemId, ChildActivity>,
@@ -520,10 +521,21 @@ struct SurfaceStatus {
     cursor_selectors: bool,
     mcp_actions: Option<McpSurfaceActions>,
     surface_effect: Arc<Mutex<Option<SurfaceActionEffect>>>,
-    diagnostics: Option<std::sync::Weak<dyn crate::output::Diagnostics>>,
 }
 
 impl SurfaceStatus {
+    fn observe_native_turn(&mut self, event: &ego_core::public::PublicEvent) {
+        use ego_core::public::PublicEvent;
+        match event {
+            PublicEvent::SessionStarted { .. } => self.native_turn = None,
+            PublicEvent::TurnStarted { turn } => self.native_turn = Some(*turn),
+            PublicEvent::TurnCompleted { turn, .. } if self.native_turn == Some(*turn) => {
+                self.native_turn = None;
+            }
+            _ => {}
+        }
+    }
+
     fn begin_activity(&mut self) {
         if !self.activity {
             self.activity_since = Some(Instant::now());
@@ -623,6 +635,7 @@ impl Default for SurfaceStatus {
             queue: QueueStatus::default(),
             drafts: 0,
             activity: false,
+            native_turn: None,
             activity_since: None,
             activity_output_chars: 0,
             children: Default::default(),
@@ -663,7 +676,6 @@ impl Default for SurfaceStatus {
             cursor_selectors: false,
             mcp_actions: None,
             surface_effect: Arc::new(Mutex::new(None)),
-            diagnostics: None,
         }
     }
 }
@@ -1335,6 +1347,13 @@ fn composer_editor(vim: bool) -> Box<dyn EditMode> {
 }
 
 impl Seat {
+    pub(crate) fn observe_native_turn(&self, event: &ego_core::public::PublicEvent) {
+        if let SeatKind::Live(live) = &self.kind {
+            let mut status = live.status.lock().expect("surface status lock");
+            status.observe_native_turn(event);
+        }
+    }
+
     pub(crate) fn observe_generation_progress(&self, event: &ego_core::public::PublicEvent) {
         if let SeatKind::Live(live) = &self.kind {
             live.status
@@ -1405,9 +1424,15 @@ impl Seat {
             // once the completer has no choice left (for example after the / is erased).
             .with_persistent_menus(true)
             .with_menu(ReedlineMenu::EngineCompleter(Box::new(ActionMenu::new(
-                ColumnarMenu::default().with_name(ACTION_MENU),
+                ColumnarMenu::default()
+                    .with_name(ACTION_MENU)
+                    .with_text_style(reedline::Color::Default.normal())
+                    .with_description_text_style(reedline::Color::Default.normal())
+                    .with_selected_text_style(reedline::Color::Default.reverse())
+                    .with_selected_match_text_style(reedline::Color::Default.reverse().underline()),
             ))))
-            .use_bracketed_paste(true);
+            .use_bracketed_paste(true)
+            .use_kitty_keyboard_enhancement(true);
 
         // Keep startup type-ahead as Enter bytes, without cooked tty echo.
         // Reedline restores the terminal on drop, including startup refusal.
@@ -1692,17 +1717,6 @@ impl Seat {
         ExitCounts {
             drafts: status.drafts,
             accepted: status.queue.pending_steers + status.queue.queued,
-        }
-    }
-
-    /// Let local output actions run without waiting for the turn coordinator.
-    /// A weak reference avoids a cycle through the output's shared surface status.
-    pub(crate) fn install_diagnostics(
-        &self,
-        diagnostics: std::sync::Weak<dyn crate::output::Diagnostics>,
-    ) {
-        if let SeatKind::Live(live) = &self.kind {
-            live.status.lock().expect("surface status lock").diagnostics = Some(diagnostics);
         }
     }
 
@@ -2648,6 +2662,14 @@ fn own_terminal(
                 repaint_status(&status);
                 continue;
             };
+            let bang = images
+                .is_empty()
+                .then(|| Line::bang_from_editor(&text))
+                .flatten();
+            if phase.get() == EditPhase::Busy && action_execution::refuse_busy_shell(&status, &text)
+            {
+                continue;
+            }
             let accepted = if phase.get() == EditPhase::Busy {
                 match futures::executor::block_on(ingress.submit(text.clone(), images.clone())) {
                     Ok(queue) => {
@@ -2690,7 +2712,10 @@ fn own_terminal(
                 repaint_status(&status);
                 continue;
             }
-            Line::HostCommand(HostCommand::SubmittedDraft { text, images })
+            bang.unwrap_or(Line::HostCommand(HostCommand::SubmittedDraft {
+                text,
+                images,
+            }))
         } else if matches!(line, Line::HostCommand(HostCommand::RemovePasteImage)) {
             let mut current = status.lock().expect("surface status lock");
             current.images.pop();
@@ -2703,7 +2728,7 @@ fn own_terminal(
         };
         if phase.get() == EditPhase::Busy
             && let Line::HostCommand(command) = &line
-            && command.is_read_only_inspection()
+            && (command.is_read_only_inspection() || command.is_root_revocation())
         {
             if inspections.send(command.clone()).is_err() {
                 break;
@@ -2897,8 +2922,8 @@ use permission::{
 use picker_surface::run_model_picker;
 use question::{
     PermissionEditOutcome, Question, Waiting, answer_control, commit_to_transcript,
-    edit_permission_parameters, enter_modal, leave_modal, next_selector_key, parse_trust,
-    question_selector_prompt, queued_selector_line,
+    commit_transcript_block, edit_permission_parameters, enter_modal, leave_modal,
+    next_selector_key, parse_trust, question_selector_prompt, queued_selector_line,
 };
 #[cfg(test)]
 use question::{PermissionWord, parse_permission};

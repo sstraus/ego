@@ -812,6 +812,7 @@ pub(super) struct CliSkillInvocationOwner<'a> {
     token_family: Option<(Arc<JsonlStore>, SessionId)>,
     task_refresh: futures::lock::Mutex<()>,
     task_surface: Option<repl::BackgroundTaskSurface>,
+    task_waker: Option<Arc<dyn Fn() + Send + Sync>>,
     pub(super) tasks: Mutex<BTreeMap<SubagentInvocationId, BackgroundTask>>,
 }
 
@@ -834,6 +835,7 @@ impl<'a> CliSkillInvocationOwner<'a> {
             token_family: None,
             task_refresh: futures::lock::Mutex::new(()),
             task_surface: None,
+            task_waker: None,
         }
     }
 
@@ -843,6 +845,27 @@ impl<'a> CliSkillInvocationOwner<'a> {
     ) -> Self {
         self.task_surface = surface;
         self
+    }
+
+    pub(super) fn with_task_waker(mut self, wake: Arc<dyn Fn() + Send + Sync>) -> Self {
+        self.task_waker = Some(wake);
+        self
+    }
+
+    pub(super) fn has_ready_tasks(&self) -> Result<bool, String> {
+        let state = self.hooks.hook_state().state();
+        let tasks = self.tasks.lock().expect("background tasks");
+        for (id, task) in tasks.iter() {
+            if !state.delivered_subagents.contains_key(id)
+                && task
+                    .service
+                    .is_settled(*id)
+                    .map_err(|error| error.to_string())?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn register_task_activity(
@@ -933,6 +956,7 @@ impl<'a> CliSkillInvocationOwner<'a> {
         service: &ChildRunService,
         invocation: SubagentInvocationId,
         activity: Option<repl::BackgroundActivity>,
+        wake: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Result<Option<ChildExecutionTask>, SkillError> {
         let Some(execution) = service
             .take_execution(invocation)
@@ -943,10 +967,16 @@ impl<'a> CliSkillInvocationOwner<'a> {
         let service = service.clone();
         Ok(Some(tokio::spawn(async move {
             let result = service.execute(execution).await;
-            if let Some(activity) = activity
+            if (activity.is_some() || wake.is_some())
                 && service.is_settled(invocation).unwrap_or(false)
             {
-                activity.settled();
+                if let Some(activity) = activity {
+                    activity.settled();
+                }
+                // Settlement is durable before notifying the existing seat inbox.
+                if let Some(wake) = wake {
+                    wake();
+                }
             }
             result
         })))
@@ -956,7 +986,7 @@ impl<'a> CliSkillInvocationOwner<'a> {
         &self,
         invocation: SubagentInvocationId,
     ) -> Result<Option<ChildExecutionTask>, SkillError> {
-        Self::launch_on(&self.service, invocation, None)
+        Self::launch_on(&self.service, invocation, None, None)
     }
 
     pub(super) async fn await_execution(
@@ -1318,12 +1348,22 @@ impl ego_core::turn::BackgroundTaskPort for CliSkillInvocationOwner<'_> {
                     }
                 }
             }
-            let execution = Self::launch_on(&service, task.invocation, activity)
-                .map_err(|error| error.to_string())?;
+            let execution =
+                Self::launch_on(&service, task.invocation, activity, self.task_waker.clone())
+                    .map_err(|error| error.to_string())?;
+            // A recovered task can already be settled and have no execution to launch.
+            let already_settled = self.task_waker.is_some()
+                && execution.is_none()
+                && service
+                    .is_settled(task.invocation)
+                    .map_err(|error| error.to_string())?;
             self.tasks
                 .lock()
                 .expect("background tasks")
                 .insert(task.invocation, BackgroundTask { service, execution });
+            if already_settled && let Some(wake) = &self.task_waker {
+                wake();
+            }
             Ok(())
         })
     }

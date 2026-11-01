@@ -26,7 +26,7 @@ Run an agent, from one command line.
 - `ego hooks` — Inspect the admitted system and user hook catalogue.
 - `ego doctor` — Report a read-only redacted health snapshot of this installation.
 - `ego checkpoint` — Preview or selectively restore session-owned Git file checkpoints.
-- `ego setup` — Inspect expected work without running effects.
+- `ego setup` — Configure saved user settings in an interactive terminal.
 - `ego acp` — Serve the Agent Client Protocol on stdio or an endpoint.
 - `ego a2a` — Serve the Agent2Agent protocol on a local or loopback endpoint.
 - `ego auth` — Manage subscription credentials.
@@ -45,6 +45,7 @@ Run an agent, from one command line.
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
+- `--continua` — Resume the latest saved session in this workspace without the terminal picker Default: `false`. Conflicts: `<PROMPT>`, `--file`, `--session`, `--session-id`, `--worktree`.
 - `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
 - `-C <DIR>` — Run as if started in DIR
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
@@ -176,7 +177,7 @@ Continue a stored session.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
-- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
@@ -269,7 +270,7 @@ Continue a stored session.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
-- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
@@ -530,17 +531,14 @@ Close checkpoint ownership and delete the session's private Git ref
 ## `ego setup`
 
 ```text
-Usage: ego setup [OPTIONS] [PROMPT]
+Usage: ego setup [OPTIONS]
 ```
 
-Inspect expected work without running effects.
+Configure saved user settings in an interactive terminal.
 
-- `--directory <DIRECTORY>` — (undocumented)
+- `-C, --directory <DIRECTORY>` — Resolve effective settings for this workspace
 - `-h, --help` — Print help
-- `--items <ID[,ID...]>` — Select proposal item IDs as one comma-separated list; repeat to add IDs Repeatable.
-- `--judge <JUDGE>` — Offer a validated judge for unresolved policy; never authorizes an action
-- `--profile <PROFILE>` — (undocumented)
-- `<PROMPT>` — (undocumented)
+- `--profile <PROFILE>` — Edit one user profile rather than the base user settings
 
 ## `ego acp`
 

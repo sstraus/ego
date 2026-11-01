@@ -14,6 +14,7 @@ pub mod oauth;
 pub mod ollama;
 mod openrouter;
 pub mod pricing;
+pub mod protocol_filter;
 pub mod provider;
 pub mod resolver;
 pub mod service_tier;

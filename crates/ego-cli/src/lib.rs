@@ -49,6 +49,7 @@ pub mod output;
 pub(crate) mod output_style;
 pub mod perimeter;
 pub mod prompt;
+mod protocol_filter;
 pub mod provider_http;
 pub mod reference;
 pub mod render;
@@ -58,7 +59,7 @@ pub mod run;
 pub mod schema;
 pub mod session;
 pub mod setup;
-mod setup_proposals;
+pub(crate) mod setup_config;
 #[allow(dead_code)] // Connected to generation through the admitted turn service.
 pub(crate) mod skill;
 pub mod status_provider;

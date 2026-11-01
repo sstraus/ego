@@ -150,19 +150,10 @@ impl EditMode for SurfaceEditMode {
         if let Event::Key(key) = &raw
             && suspend::is_suspend_key(key)
         {
-            // A suspend leaves whatever is on screen unanswered: the modals
-            // re-render from their own state when the repaint arrives.
-            return match suspend::suspend_job() {
-                Ok((width, height)) => {
-                    self.status.lock().expect("surface status lock").width = usize::from(width);
-                    ReedlineEvent::Resize(width, height)
-                }
-                Err(reason) => {
-                    self.status.lock().expect("surface status lock").notice =
-                        Some(reason.to_owned());
-                    ReedlineEvent::Repaint
-                }
-            };
+            // Return through read_line so its terminal guards pop before the
+            // shell takes over. The shared read boundary resumes this same
+            // composer or modal without treating suspension as an answer.
+            return ReedlineEvent::ExecuteHostCommand(suspend::COMMAND.to_owned());
         }
 
         // Key-only selectors still offer the same slash-command composer.

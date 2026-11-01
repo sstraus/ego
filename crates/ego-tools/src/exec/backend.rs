@@ -249,3 +249,102 @@ impl Backend for super::seatbelt::SeatbeltBackend {
         true
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    // Catches: re-resolving a mutable alias runs a different file after validation;
+    // hard-link dispatch names and exact arguments must survive canonical launch.
+    #[tokio::test]
+    async fn canonical_target_survives_symlink_swap_and_hard_link_keeps_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(directory.path()).unwrap();
+        let shim = root.join("tuic-agent-shim");
+        std::fs::write(&shim, b"#!/bin/sh\nprintf '%s\\n' \"${0##*/}\" \"$@\"\n").unwrap();
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let alias = root.join("ego");
+        symlink(&shim, &alias).unwrap();
+        let hard_link = root.join("ego-hard-link");
+        std::fs::hard_link(&shim, &hard_link).unwrap();
+        let replacement = root.join("replacement");
+        std::fs::write(&replacement, b"#!/bin/sh\nprintf 'replacement\\n'\n").unwrap();
+        std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let environment = EnvPolicy::exact(vec![
+            ego_core::permit::ExplicitEnvBinding::from_native(
+                EnvName::new("PATH").unwrap(),
+                root.as_os_str().to_owned(),
+            )
+            .unwrap(),
+        ])
+        .unwrap();
+        let mut failures = Vec::new();
+        for (invoked, expected_name, is_symlink) in [
+            (alias.clone().into_os_string(), "tuic-agent-shim", true),
+            (OsString::from("./ego"), "tuic-agent-shim", true),
+            (OsString::from("ego"), "tuic-agent-shim", true),
+            (hard_link.into_os_string(), "ego-hard-link", false),
+            (shim.clone().into_os_string(), "tuic-agent-shim", false),
+        ] {
+            for (wrapped, swap) in [(false, false), (true, false), (false, true), (true, true)] {
+                if swap && !is_symlink {
+                    continue;
+                }
+                std::fs::remove_file(&alias).unwrap();
+                symlink(&shim, &alias).unwrap();
+                let spec = SpawnSpec::new(
+                    vec![
+                        invoked.clone(),
+                        "models".into(),
+                        "space argument".into(),
+                        "".into(),
+                    ],
+                    Some(CanonPath::new(&root)),
+                    None,
+                    environment.clone(),
+                )
+                .unwrap();
+                let captured = super::super::identity::capture(&spec).unwrap();
+                super::super::identity::revalidate(&captured).unwrap();
+                if swap {
+                    std::fs::remove_file(&alias).unwrap();
+                    symlink(&replacement, &alias).unwrap();
+                }
+                let prefix = if wrapped {
+                    LaunchPrefix {
+                        program: Some("/bin/sh".into()),
+                        args_before_target: vec![
+                            "-c".into(),
+                            "exec \"$@\"".into(),
+                            "wrapper".into(),
+                        ],
+                    }
+                } else {
+                    LaunchPrefix {
+                        program: None,
+                        args_before_target: vec![],
+                    }
+                };
+                let output = prefixed_command(prefix, &captured)
+                    .unwrap()
+                    .output()
+                    .await
+                    .unwrap();
+                let expected = format!("{expected_name}\nmodels\nspace argument\n\n");
+                if !output.status.success()
+                    || output.stdout != expected.as_bytes()
+                    || !output.stderr.is_empty()
+                {
+                    failures.push(format!(
+                        "{invoked:?}, wrapped={wrapped}, swap={swap}: status={}, stdout={:?}, stderr={:?}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    ));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+}

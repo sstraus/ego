@@ -34,8 +34,12 @@ fn busy_mcp_inventory_is_user_facing_and_bounded() {
     let start = output.len();
     input.write_all(b"/mcp\r").expect("inventory");
     input.flush().expect("flush");
-    until_normalized(&reader, &mut output, start, "mcp:");
-    drain_until_quiet(&reader, &mut output);
+    until_notice_prose(
+        &reader,
+        &mut output,
+        start,
+        "/mcp add NAME --http URL | /mcp add NAME --stdio -- COMMAND ...",
+    );
     record_slash_capture(&output, 24, 80);
     let listing = normalized(&output[start..]);
     gate.release();

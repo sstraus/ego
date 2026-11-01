@@ -112,6 +112,14 @@ fn broad_modes_refuse_credential_paths_even_with_user_allow() {
         let sibling = tempfile::tempdir().unwrap();
         let file = sibling.path().join(".env.synthetic");
         std::fs::write(&file, "SYNTHETIC_SECRET=DO-NOT-EXPOSE").unwrap();
+        // This fixture must exercise the credential floor, not an enclosing
+        // checkout's ignore rules (public checkouts can ignore `.env*`).
+        // Explicitly include the synthetic file so grep/glob really visit it.
+        std::fs::write(
+            sibling.path().join(".gitignore"),
+            ".env*\n!.env.synthetic\n",
+        )
+        .unwrap();
         let places = Places::new();
         configure(&places, sandbox);
         let mut config = std::fs::read_to_string(places.home_path().join("config.toml")).unwrap();

@@ -34,6 +34,11 @@
     "auth": {},
     "_meta": {
       "ego": {
+        "childActivity": {
+          "version": 1,
+          "update": "session_info_update",
+          "field": "_meta.ego.childActivity"
+        },
         "steer": {
           "version": 1,
           "method": "_ego/steer",

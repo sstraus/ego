@@ -135,6 +135,8 @@ fail closed (read refuses, grep skips). Exec refuses protected paths declared
 in argv, including resolved symlink targets, for foreground and background
 calls. This check does not analyze dynamic program code or sanitize arbitrary
 process output.
+Terminal permanent approvals carry a unique revision linked to their session receipt. Publication records pending intent, atomically saves the root, then commits the receipt. Startup admits the root only while that matching committed receipt exists; an interrupted publication grants no access. Removing or changing that configured root invalidates the saved answer; a later addition of the same path requires fresh execution-policy approval when resuming the old session.
+
 The first `ego roots add` writes an explicit list of additional roots. Removing all stored roots leaves an explicit empty list. Use
 `ego config unset roots` to restore absence. Extra execution grants require
 `exec_paths` in the user/system file or invocation flags; `ego roots` cannot
@@ -157,8 +159,8 @@ The default status template is `{{ compact }}\n{{ prompt }}`. The prompt must
 render once on its own line. MiniJinja `{% filter priority(integer) %}` blocks drop as
 whole units in ascending priority order when a row is too wide. Text before the
 prompt goes above the buffer, and text after it goes below. Critical operational
-state remains visible even if omitted. See [CLI section 6.5](../guides/interactive.md)
-for the variables, filters, limits and fallback diagnostics. The unreleased
+state remains visible even if omitted. See [interactive use](../guides/interactive.md)
+for terminal controls. The unreleased
 `segments` key is no longer accepted.
 
 Status provider commands run once per trusted native interactive prompt epoch,
@@ -279,6 +281,7 @@ Source: [facts.rs](../../crates/ego-cli/src/facts.rs),
 | `...cancel` | `unsupported`, `cooperative`, `immediate` |
 | `...cache` | `none`, `short`, `long` |
 | `...transport` | `sse` or `web_socket`; Codex uses WebSocket, with guarded SSE fallback. `auto`, `web_transport`, and `websocket` are not accepted spellings |
+| `...audio_input` | `unknown` (default), `unsupported`, or `supported_wav`; exact provider/model support is still required |
 | `...image_input` | `"unknown"` default, `"unsupported"`, or supported table below |
 | `model."PROVIDER/MODEL".pricing` | Optional quote table; absence is unpriced, not free |
 | `retired."PROVIDER/MODEL".replacement` | Required replacement slug |
@@ -298,7 +301,10 @@ unknown; product ceilings still bind. Do not invent limits to make a request fit
 A pricing table requires `revision` and `currency`, with optional decimal-string
 per-token rates `uncached_input`, `cache_read`, `cache_write`,
 `cache_write_extended`, `output`. Missing categories remain unpriced. No built-in
-prices are shipped. Monetary limits require enough known rates for admission.
+prices are shipped. Monetary limits use recorded known response spend;
+unknown prices or actual costs do not become zero or block generation. Unpriced
+work has no finite monetary bound, and admitted responses can cross a cap. See
+[cost and capability facts](../guides/providers.md#capability-and-cost-facts).
 `ego models --json` exposes the resolved capabilities and provenance.
 
 ## Environment and private state
@@ -315,8 +321,9 @@ prices are shipped. Monetary limits require enough known rates for admission.
 | `$EGO_HOME/sessions` | Default durable session store; invocation `--session-dir` can override |
 | `$EGO_HOME/auth.json` | Private provider credentials; never publish or inspect it for troubleshooting output |
 
-No implicit `.claude/settings.json` or `.claude/skills` alias exists. See
-[integrations](../integrations/README.md) for the corresponding εgo sources.
+Ego does not import `.claude/settings.json` or its permission policy. Trusted
+`.claude/skills` directories are recognized as skill sources, alongside the
+other roots listed in [skills](../integrations/skills.md).
 
 ### Atomic managed batches
 
@@ -375,4 +382,90 @@ Exclusions follow canonical paths, including symlinks. A missing shared root or
 invalid link refuses instruction discovery; a missing exclusion is inert.
 Project configuration cannot widen this user-owned discovery boundary. Use
 `ego config edit` to edit these keys; the typed `config set` vocabulary does not
-include instruction paths. No coordinator file bridge or landing command is offered.
+include instruction paths.
+
+### Revoke a terminal root grant
+
+Use `/config roots revoke EXACT_PATH` in the human terminal that owns the session. Use the canonical path shown in the grant receipt. Revocation cancels the active turn and stops its child processes, records the revoked path, and rebuilds the same session through normal admission. The terminal stays open. Subsequent turns and child spawns use the narrower authority; a fresh resume does not restore the revoked session grant. A permanent grant also removes the matching root from the selected user-profile configuration.
+
+A revoked path can still be named when its filesystem object has disappeared. Revoking an unknown grant reports a local error and does not alter authority. Rebuilding uses a new effect owner; it does not modify an existing OS guard.
+
+## Provider protocol filter
+
+For a one-file installation and a generic offline example, see the
+[protocol-filter guide](../integrations/protocol-filter.md).
+
+A user can install one reviewed executable that transforms final HTTP generation
+bytes for one provider. This is opt-in user configuration in
+`$EGO_HOME/config.toml`; other layers cannot declare a filter:
+
+```toml
+[auth.example.protocol_filter]
+command = "/absolute/path/to/my-filter"
+identity_headers = ["x-request-identity"]
+timeout_ms = 1000
+enabled = true
+```
+
+Install the one executable at that absolute path and make it executable. A script
+must name its interpreter with a valid shebang. Python is optional; Ego requires
+no addon runtime. Remove this table or set `enabled = false` to disable the filter.
+Restart a session to load changed configuration. Ego ships no provider identity
+algorithm and makes no subscription compatibility claim.
+
+Version 1 includes journal-backed, write-once session variables. Stdin carries
+`state: {revision, values}` and stdout requires `expected_revision` and
+`state_writes`. New values are persisted before HTTP dispatch; a failed write,
+stale revision or attempted replacement fails closed. The same session retains
+values on resume or continue; new sessions and executable paths have separate
+state. See [session variable examples and limits](../integrations/protocol-filter.md#capture-a-session-variable-once).
+
+For each actual generation attempt Ego starts the executable without a shell or
+arguments for a bounded request exchange, then starts a persistent response
+process. It transforms incoming bytes before provider decoding, including tool
+arguments. The response process uses sequenced JSON lines and a final EOF
+exchange; the timeout applies to each exchange, excluding provider idle time.
+See the [response contract](../integrations/protocol-filter.md#response-stream-exchange). CLI and ACP use the
+same generation path. Preflight, login, refresh, discovery and MCP do not invoke
+it. Version 1 rejects WebSocket mappings that rewrite their outbound body.
+
+Stdin contains one JSON object:
+
+```json
+{"version":1,"direction":"request","provider":"example","model":"model","session_id":"uuid","generation_id":"uuid","attempt_id":"uuid","body_base64":"e30=","state":{"revision":0,"values":{}}}
+```
+
+`body_base64` is the exact normally encoded request body. `session_id` is the
+active session UUID supplied by the journal owner. Attempt
+and generation UUIDs come from the admitted attempt. There is no inferred first
+prompt or previous-response field. An addon that requires these fields must
+refuse unsupported requests. The filter returns exactly one JSON object:
+
+```json
+{"version":1,"body_base64":"eyJleGFtcGxlIjp0cnVlfQ==","identity_headers":[{"name":"x-request-identity","value":"example"}],"expected_revision":0,"state_writes":{}}
+```
+
+Unknown fields, duplicate fields, trailing output, missing fields and other
+versions fail. Ego sends returned bytes unchanged and applies only declared
+identity headers, replacing existing public values by name. Ego retains its
+credential headers. Authentication, cookies, routing, framing, content negotiation,
+protocol-version and beta headers are forbidden even if allowlisted. Header names
+are case insensitive; duplicate output names fail. Values must be ASCII HTTP
+field values, at most 4096 bytes. Names are limited to 128 bytes, with at most
+16 headers. The HTTP transport derives framing and request admission digests from
+the final body. Cache-prefix observations use the transformed bytes.
+
+Input/output bodies are limited to 16 MiB. Each JSON envelope is limited to
+22,435,160 bytes including base64 expansion. The command timeout is 1..1000 ms
+(default 1000), further constrained by the run deadline. Process-tree cleanup
+adds a bounded grace. Child stdout is bounded; stderr is discarded. Cancellation,
+timeout, command failure and invalid output stop generation before HTTP dispatch;
+Ego never silently falls back to the unfiltered request.
+
+This executable is trusted user code with ordinary OS access. Ego clears the
+inherited environment and sends no credentials, request headers or URL through
+the child contract. The body contains conversation content and may itself be
+sensitive. Unix children receive only a fixed `/usr/bin:/bin` PATH;
+Windows children receive OS bootstrap paths. Do not put credentials in the
+executable path or in addon diagnostics. Environment isolation does not prevent
+trusted code from reading files or making its own network requests.

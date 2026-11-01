@@ -63,6 +63,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--mode', '--mode', [CompletionResultType]::ParameterName, 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)')
             [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
+            [CompletionResult]::new('--continua', '--continua', [CompletionResultType]::ParameterName, 'Resume the latest saved session in this workspace without the terminal picker')
             [CompletionResult]::new('--offline', '--offline', [CompletionResultType]::ParameterName, 'No non-loopback egress from ego''s own HTTP transport')
             [CompletionResult]::new('--bare', '--bare', [CompletionResultType]::ParameterName, 'No ambient discovery, even in a trusted workspace')
             [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no tools at all')
@@ -94,7 +95,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('hooks', 'hooks', [CompletionResultType]::ParameterValue, 'Inspect the admitted system and user hook catalogue.')
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Report a read-only redacted health snapshot of this installation.')
             [CompletionResult]::new('checkpoint', 'checkpoint', [CompletionResultType]::ParameterValue, 'Preview or selectively restore session-owned Git file checkpoints.')
-            [CompletionResult]::new('setup', 'setup', [CompletionResultType]::ParameterValue, 'Inspect expected work without running effects.')
+            [CompletionResult]::new('setup', 'setup', [CompletionResultType]::ParameterValue, 'Configure saved user settings in an interactive terminal.')
             [CompletionResult]::new('acp', 'acp', [CompletionResultType]::ParameterValue, 'Serve the Agent Client Protocol on stdio or an endpoint.')
             [CompletionResult]::new('a2a', 'a2a', [CompletionResultType]::ParameterValue, 'Serve the Agent2Agent protocol on a local or loopback endpoint.')
             [CompletionResult]::new('auth', 'auth', [CompletionResultType]::ParameterValue, 'Manage subscription credentials.')
@@ -163,6 +164,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
             [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
             [CompletionResult]::new('--vim', '--vim', [CompletionResultType]::ParameterName, 'Use Vim normal/insert editing in the interactive composer')
+            [CompletionResult]::new('--continua', '--continua', [CompletionResultType]::ParameterName, 'Resume the latest saved session in this workspace without the terminal picker')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -170,7 +172,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;resume' {
             [CompletionResult]::new('--answer', '--answer', [CompletionResultType]::ParameterName, 'Settle a pending question. Repeat for multiple sibling questions')
             [CompletionResult]::new('--name', '--name', [CompletionResultType]::ParameterName, 'Read or change the session title without starting a turn: show, set=TEXT, clear')
-            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON')
+            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable. Requires --file')
@@ -234,7 +236,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;continue' {
             [CompletionResult]::new('--answer', '--answer', [CompletionResultType]::ParameterName, 'Settle a pending question. Repeat for multiple sibling questions')
             [CompletionResult]::new('--name', '--name', [CompletionResultType]::ParameterName, 'Read or change the session title without starting a turn: show, set=TEXT, clear')
-            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, set=TEXT, achieve, block=REASON')
+            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable. Requires --file')
@@ -407,10 +409,9 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;setup' {
-            [CompletionResult]::new('--items', '--items', [CompletionResultType]::ParameterName, 'Select proposal item IDs as one comma-separated list; repeat to add IDs')
-            [CompletionResult]::new('--judge', '--judge', [CompletionResultType]::ParameterName, 'Offer a validated judge for unresolved policy; never authorizes an action')
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'directory')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Edit one user profile rather than the base user settings')
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Resolve effective settings for this workspace')
+            [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'Resolve effective settings for this workspace')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

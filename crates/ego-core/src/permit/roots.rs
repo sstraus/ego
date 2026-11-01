@@ -34,6 +34,25 @@ impl RootAccess {
 pub struct RootCfg {
     pub path: PathBuf,
     pub access: RootAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent: Option<RootConsent>,
+}
+
+/// Identifies one terminal approval and its authoritative session journal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RootConsent {
+    pub revision: crate::event::id::SessionId,
+    pub session: crate::event::id::SessionId,
+    pub store: PathBuf,
+}
+
+/// A permanent receipt is useful only while the exact configured revision exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PermanentRootConsent {
+    pub root: ProfileRoot,
+    pub receipt: RootConsent,
 }
 
 /// One admitted root: canonical, and checked against the ceilings.

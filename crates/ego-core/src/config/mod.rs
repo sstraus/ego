@@ -26,8 +26,9 @@ pub use layer::{
     AuthProviderLayer, ConfigLayer, ExecEnvironment, ExecLayer, FORBIDDEN_AUTH_HEADER_NAMES,
     InstructionConfig, McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpProfile, McpHttpUrl,
     McpLayer, McpLayerEntry, McpServerConfig, McpServerName, McpStdioConfig, McpValueError, Mode,
-    ModelRef, Network, PermCfg, ProfileLayer, StatusProvider, StatusSegmentName, StatuslineLayer,
-    UiLayer, is_forbidden_auth_header,
+    ModelRef, Network, PermCfg, ProfileLayer, ProtocolFilterConfig, StatusProvider,
+    StatusSegmentName, StatuslineLayer, UiLayer, is_forbidden_auth_header,
+    is_protocol_filter_identity_header,
 };
 pub use mutation::{
     ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigBatch,

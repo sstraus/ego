@@ -118,37 +118,56 @@ pub(crate) fn deferred_wrap_row<'a>(
     pieces: impl IntoIterator<Item = &'a str>,
     terminal_columns: u16,
 ) -> Option<u16> {
+    let (row, col) = printed_cursor(pieces, terminal_columns);
+    (terminal_columns > 0 && col >= usize::from(terminal_columns)).then(|| row.saturating_add(1))
+}
+
+/// Cursor offset after printing from column zero, retaining pending wrap.
+/// The row counts line feeds and wide-grapheme wraps before screen scrolling.
+pub(crate) fn printed_cursor<'a>(
+    pieces: impl IntoIterator<Item = &'a str>,
+    terminal_columns: u16,
+) -> (u16, usize) {
     let columns: usize = terminal_columns.into();
     if columns == 0 {
-        return None;
+        return (0, 0);
     }
 
     // `col == columns` *is* the deferred wrap: the run has filled the row but
     // nothing has arrived to push it over yet.
     let (mut row, mut col) = (0u16, 0usize);
     for piece in pieces {
-        for grapheme in strip_ansi(piece).graphemes(true) {
-            match grapheme {
-                "\n" => (row, col) = (row.saturating_add(1), 0),
-                "\r" => col = 0,
-                _ => {
-                    let width = grapheme.width();
-                    // The wrap this grapheme's arrival was deferred until.
-                    if col >= columns {
-                        (row, col) = (row.saturating_add(1), 0);
+        // The ANSI stripper discards HT as a control byte. Retain those
+        // boundaries while stripping styling from the printable spans.
+        for (index, span) in piece.split('\t').enumerate() {
+            if index > 0 {
+                // Default eight-column stops, clamped at the final cell.
+                // HT clears pending wrap without advancing the row.
+                col = ((col / 8 + 1) * 8).min(columns - 1);
+            }
+            for grapheme in strip_ansi(span).graphemes(true) {
+                match grapheme {
+                    "\n" | "\r\n" => (row, col) = (row.saturating_add(1), 0),
+                    "\r" => col = 0,
+                    _ => {
+                        let width = grapheme.width();
+                        // The wrap this grapheme's arrival was deferred until.
+                        if col >= columns {
+                            (row, col) = (row.saturating_add(1), 0);
+                        }
+                        // No room for the whole grapheme: the trailing column stays
+                        // blank and the terminal wraps before drawing it.
+                        if col + width > columns {
+                            (row, col) = (row.saturating_add(1), 0);
+                        }
+                        col += width;
                     }
-                    // No room for the whole grapheme: the trailing column stays
-                    // blank and the terminal wraps before drawing it.
-                    if col + width > columns {
-                        (row, col) = (row.saturating_add(1), 0);
-                    }
-                    col += width;
                 }
             }
         }
     }
 
-    (col >= columns).then(|| row.saturating_add(1))
+    (row, col)
 }
 
 #[cfg(test)]
@@ -189,6 +208,13 @@ mod test {
     // A hard break resets the column, so the rows before it still count.
     #[case("ab\naaaaaaaaaaaaaaaaaaaa", 20, Some(2))]
     #[case("ab\n", 20, None)]
+    // Catches: HT counted as zero width, wrapping past the final column,
+    // or consuming pending wrap instead of clearing it at the final cell.
+    #[case("\tX", 8, Some(1))]
+    #[case("\t\tX", 20, None)]
+    #[case("\t\t\tX", 20, Some(1))]
+    #[case("12345678\tX", 8, Some(1))]
+    #[case("\x1b[31m12345678\tX\x1b[0m", 8, Some(1))]
     // Zero columns is reported by terminals mid-resize; nothing to divide by.
     #[case(&"a".repeat(20), 0, None)]
     fn deferred_wrap_row_on_narrow_graphemes(

@@ -372,6 +372,8 @@ impl JudgeDecoder {
             | AiEvent::ProviderCost { .. }
             | AiEvent::ProviderLimits { .. }
             | AiEvent::ProviderFailure { .. }
+            | AiEvent::LocalFailure { .. }
+            | AiEvent::FilterState(_)
             | AiEvent::DeliveryObserved(_) => {}
         }
     }

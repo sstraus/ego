@@ -440,7 +440,7 @@ pub struct CachePrefix {
 pub struct AttemptStream {
     attempt: GenerationAttempt,
     inner: BoxStream<'static, AiEvent>,
-    cache_prefix: Option<CachePrefix>,
+    cache_prefix: std::sync::Arc<std::sync::OnceLock<CachePrefix>>,
     delivery: DeliveryCertainty,
     usage: UsageReport,
     /// What the provider said this request will cost, when it says so at all.
@@ -466,7 +466,7 @@ impl AttemptStream {
         Self {
             attempt,
             inner,
-            cache_prefix: None,
+            cache_prefix: std::sync::Arc::default(),
             delivery: DeliveryCertainty::default(),
             usage: UsageReport::Missing,
             provider_cost: None,
@@ -475,12 +475,21 @@ impl AttemptStream {
     }
 
     pub fn with_cache_prefix(mut self, prefix: CachePrefix) -> Self {
-        self.cache_prefix = Some(prefix);
+        self.cache_prefix = std::sync::Arc::new(std::sync::OnceLock::from(prefix));
+        self
+    }
+
+    /// Async request preparation publishes its final-byte cache identity before dispatch.
+    pub fn with_prepared_cache_prefix(
+        mut self,
+        prefix: std::sync::Arc<std::sync::OnceLock<CachePrefix>>,
+    ) -> Self {
+        self.cache_prefix = prefix;
         self
     }
 
     pub fn cache_prefix(&self) -> Option<&CachePrefix> {
-        self.cache_prefix.as_ref()
+        self.cache_prefix.get()
     }
 
     /// Which generation is streaming, and which attempt at it.
@@ -530,7 +539,7 @@ impl AttemptStream {
             // be the provider answering *or* the transport failing locally,
             // and the two are opposite readings of retry safety. The
             // transport says which, with `DeliveryObserved`.
-            AiEvent::Error { .. } => {}
+            AiEvent::Error { .. } | AiEvent::LocalFailure { .. } | AiEvent::FilterState(_) => {}
             // Only a provider that answered emits one, so it is content below.
             AiEvent::ProviderFailure { .. } => {}
         }

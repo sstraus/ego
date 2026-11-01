@@ -442,6 +442,7 @@ pub struct HttpResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpFailure {
+    ProtocolFilter(&'static str),
     Profile(HttpProfileError),
     Authority,
     Offline,
@@ -464,6 +465,21 @@ pub struct HttpError {
 }
 
 impl HttpError {
+    pub(crate) fn protocol_filter(message: &'static str) -> Self {
+        Self {
+            failure: HttpFailure::ProtocolFilter(message),
+            delivery: DeliveryCertainty::PossiblySent,
+            host: None,
+            connect_source: None,
+        }
+    }
+
+    pub(crate) fn protocol_filter_message(&self) -> Option<&'static str> {
+        match self.failure {
+            HttpFailure::ProtocolFilter(message) => Some(message),
+            _ => None,
+        }
+    }
     fn profile(failure: HttpProfileError, delivery: DeliveryCertainty) -> Self {
         Self {
             failure: HttpFailure::Profile(failure),
@@ -516,6 +532,7 @@ impl HttpError {
 
     pub fn kind(&self) -> ErrorKind {
         match self.failure {
+            HttpFailure::ProtocolFilter(_) => ErrorKind::Invalid,
             HttpFailure::Profile(_)
             | HttpFailure::Authority
             | HttpFailure::Offline
@@ -538,6 +555,7 @@ pub(crate) fn test_http_error(error: TransportError) -> HttpError {
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self.failure {
+            HttpFailure::ProtocolFilter(message) => message,
             HttpFailure::Profile(failure) => return write!(f, "{failure}"),
             HttpFailure::Authority => "HTTP authority was invalid",
             HttpFailure::Offline => "HTTP is unavailable under offline confinement",
