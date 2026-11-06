@@ -93,6 +93,93 @@ max_bytes_per_image = 10485760
 max_width = 8000
 max_height = 8000
 
+# models.dev 0598d41d read 2026-10-11: anthropic/claude-fable-5-1
+[model."bedrock/anthropic.claude-fable-5-1".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "bedrock-messages"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "high"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."bedrock/anthropic.claude-fable-5-1".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# models.dev 0598d41d read 2026-10-11: anthropic/claude-haiku-5-5
+[model."bedrock/anthropic.claude-haiku-5-5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "bedrock-messages"
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."bedrock/anthropic.claude-haiku-5-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# models.dev 0598d41d read 2026-10-11: anthropic/claude-opus-5-5
+[model."bedrock/anthropic.claude-opus-5-5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "bedrock-messages"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "medium"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."bedrock/anthropic.claude-opus-5-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# models.dev 0598d41d read 2026-10-11: anthropic/claude-sonnet-5-5
+[model."bedrock/anthropic.claude-sonnet-5-5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "bedrock-messages"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "high"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."bedrock/anthropic.claude-sonnet-5-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
 # models.dev 0598d41d read 2026-10-11: google/gemini-3.1-pro-preview
 [model."gemini/gemini-3.1-pro-preview".capabilities]
 schema_version = 6
@@ -433,6 +520,93 @@ transport = "web_socket"
 kind = "supported"
 accepted_media_types = ["png", "jpeg", "webp", "gif"]
 max_images = 100
+
+# models.dev 0598d41d read 2026-10-11: anthropic/claude-fable-5-1
+[model."vertex/claude-fable-5-1".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "vertex-messages"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "high"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."vertex/claude-fable-5-1".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# models.dev 0598d41d read 2026-10-11: anthropic/claude-haiku-5-5
+[model."vertex/claude-haiku-5-5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "vertex-messages"
+reasoning_efforts = { only = ["off", "low", "medium", "high", "xhigh", "max"] }
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."vertex/claude-haiku-5-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# models.dev 0598d41d read 2026-10-11: anthropic/claude-opus-5-5
+[model."vertex/claude-opus-5-5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "vertex-messages"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "medium"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."vertex/claude-opus-5-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# models.dev 0598d41d read 2026-10-11: anthropic/claude-sonnet-5-5
+[model."vertex/claude-sonnet-5-5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "vertex-messages"
+reasoning_efforts = { only = ["low", "medium", "high", "xhigh", "max"] }
+default_reasoning_effort = "high"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[model."vertex/claude-sonnet-5-5".capabilities.image_input]
+kind = "supported"
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
 
 # models.dev 0598d41d read 2026-10-11: xai/grok-4.7
 [model."xai-oauth/grok-4.7".capabilities]

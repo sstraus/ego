@@ -43,6 +43,12 @@ impl GenerationModelRequest {
         self
     }
 
+    /// Select one explicit reasoning effort for this resolution without changing its role.
+    pub fn with_thinking(mut self, thinking: ThinkingLevel) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
+
     /// Select one explicit model for this resolution without changing its role.
     pub fn with_model(mut self, model: ModelRef) -> Self {
         self.model = Some(model);
@@ -75,13 +81,35 @@ pub struct GenerationProfile {
     pub pricing_unavailable: Option<crate::cost::PricingUnavailable>,
 }
 
+const DEFAULT_OUTPUT_TOKENS: u64 = 32_768;
+
 impl GenerationProfile {
+    pub fn prompt_cache_request(
+        &self,
+        request: &crate::generator::types::GenRequest,
+    ) -> crate::usage::PromptCacheRequest {
+        crate::usage::PromptCacheRequest {
+            model: self.identity.0.clone(),
+            policy: self.generator.prompt_cache_policy(request),
+        }
+    }
+
     /// The response bound used by both ordinary and judge requests.
+    ///
+    /// Without a declared model maximum, the default also leaves half of a
+    /// known context window for input: a model whose window equals the default
+    /// would otherwise reserve its whole window for output.
     pub fn output_ceiling(&self) -> Option<u64> {
         match (self.output_limit, self.capabilities.max_output_tokens) {
             (Some(limit), Some(max)) => Some(limit.get().min(max)),
             (Some(limit), None) => Some(limit.get()),
-            (None, maximum) => maximum,
+            (None, Some(max)) => Some(max.min(DEFAULT_OUTPUT_TOKENS)),
+            (None, None) => Some(
+                self.capabilities
+                    .max_context_tokens
+                    .map_or(DEFAULT_OUTPUT_TOKENS, |window| window / 2)
+                    .min(DEFAULT_OUTPUT_TOKENS),
+            ),
         }
     }
 }

@@ -45,7 +45,7 @@ const HELPER_ENVELOPE: [&str; 5] = ["--ignored", "--exact", HELPER_TOKEN, "--noc
 
 const HELPER_FAILURE: u8 = 125;
 const MAX_RUNTIME_ROOTS: usize = 128;
-const BACKEND_REVISION: &str = "landlock-safe-reexec-v4-nested-read-warning";
+const BACKEND_REVISION: &str = "landlock-safe-reexec-v5-config-enumeration";
 
 /// One immutable Linux confinement mechanism prepared for an effective run.
 /// Its capability value is only an upper bound; common production probes must
@@ -57,6 +57,9 @@ pub(crate) struct LandlockBackend {
     private_scratch: PathBuf,
     runtime_roots: Vec<PathBuf>,
     roots: Vec<ego_core::permit::ProfileRoot>,
+    /// Operator configuration paths. Landlock grants are additive, so a writable
+    /// root that contains one is granted entry by entry around it.
+    protected: Vec<PathBuf>,
     maximum_caps: ExecCaps,
 }
 
@@ -77,8 +80,10 @@ impl LandlockBackend {
             }
         };
         validate_private_directory(private_scratch.as_path())?;
-        super::user_config::capture()?;
-        super::user_config::reject_overlap(policy, private_scratch.as_path())?;
+        let protected = super::user_config::capture_for(&super::user_config::writable_roots(
+            policy,
+            private_scratch.as_path(),
+        ))?;
         let runtime_roots = derived_runtime_roots
             .iter()
             .map(CanonPath::as_path)
@@ -144,6 +149,7 @@ impl LandlockBackend {
             private_scratch: private_scratch.as_path().to_path_buf(),
             runtime_roots,
             roots: policy.roots().to_vec(),
+            protected,
             maximum_caps,
         })
     }
@@ -184,6 +190,12 @@ impl LandlockBackend {
             ));
             arguments.push(root.path().as_path().as_os_str().to_owned());
         }
+        arguments.push(OsString::from(self.protected.len().to_string()));
+        arguments.extend(
+            self.protected
+                .iter()
+                .map(|path| path.as_os_str().to_owned()),
+        );
         super::backend::LaunchPrefix {
             program: Some(self.helper.as_os_str().to_owned()),
             args_before_target: arguments,
@@ -340,6 +352,13 @@ fn run_helper(mut arguments: impl Iterator<Item = OsString>) -> Result<ExitCode,
         validate_absolute_existing("perimeter root", &path)?;
         roots.push((path, writable));
     }
+    let protected_count = required_argument(&mut arguments, "protected path count")?
+        .to_str()
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(|| HelperError::Protocol("invalid protected path count".into()))?;
+    let protected = (0..protected_count)
+        .map(|_| required_argument(&mut arguments, "protected path").map(PathBuf::from))
+        .collect::<Result<Vec<_>, _>>()?;
     let target_argv = arguments.collect::<Vec<_>>();
 
     validate_absolute_directory("workspace", &workspace)?;
@@ -353,7 +372,14 @@ fn run_helper(mut arguments: impl Iterator<Item = OsString>) -> Result<ExitCode,
         ));
     }
 
-    install_ruleset(level, &workspace, &private_scratch, &runtime_roots, &roots)?;
+    install_ruleset(
+        level,
+        &workspace,
+        &private_scratch,
+        &runtime_roots,
+        &roots,
+        &protected,
+    )?;
 
     let mut target = Command::new(&target_argv[0]);
     target.args(&target_argv[1..]);
@@ -390,7 +416,7 @@ fn ensure_no_ambient_descriptors() -> Result<(), HelperError> {
         match fs::symlink_metadata(path) {
             Ok(_) => {
                 return Err(HelperError::Descriptors(format!(
-                    "unexpected inherited file descriptor {descriptor}"
+                    "unexpected inherited file descriptor {descriptor}; the launcher must close nonstandard descriptors or set FD_CLOEXEC before starting ego"
                 )));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -406,6 +432,7 @@ fn install_ruleset(
     private_scratch: &Path,
     runtime_roots: &[PathBuf],
     roots: &[(PathBuf, bool)],
+    protected: &[PathBuf],
 ) -> Result<(), HelperError> {
     let required = required_v3_access();
     let optional = optional_known_access();
@@ -435,7 +462,7 @@ fn install_ruleset(
                 .filter(|(_, writable)| *writable)
                 .map(|(path, _)| path.as_path()),
         ) {
-            ruleset = add_write_rules(ruleset, root)?;
+            ruleset = add_write_rules_around(ruleset, root, protected)?;
         }
     }
 
@@ -462,6 +489,54 @@ fn add_read_rule(
     let rule = PathBeneath::new(PathFd::new(root)?, access)
         .set_compatibility(CompatLevel::HardRequirement);
     Ok(ruleset.add_rule(rule)?)
+}
+
+/// Grant write authority under `root` except for the protected paths. Landlock
+/// rights are hierarchical and additive, so the root is granted entry by entry
+/// along the way to each protected path. A protected path is never granted, and
+/// neither is a symlink. Entries created later in a directory that holds a
+/// protected path stay unwritable, and so does a root inside a protected path.
+fn add_write_rules_around(
+    ruleset: RulesetCreated,
+    root: &Path,
+    protected: &[PathBuf],
+) -> Result<RulesetCreated, HelperError> {
+    if protected.iter().any(|path| root.starts_with(path)) {
+        return Ok(ruleset);
+    }
+    let inside = protected
+        .iter()
+        .filter(|path| path.starts_with(root))
+        .collect::<Vec<_>>();
+    if inside.is_empty() {
+        return add_write_rules(ruleset, root);
+    }
+    let entries = fs::read_dir(root).map_err(|error| HelperError::Root {
+        path: root.to_path_buf(),
+        reason: error.to_string(),
+    })?;
+    let mut ruleset = ruleset;
+    for entry in entries {
+        let path = entry
+            .map_err(|error| HelperError::Root {
+                path: root.to_path_buf(),
+                reason: error.to_string(),
+            })?
+            .path();
+        let metadata = fs::symlink_metadata(&path).map_err(|error| HelperError::Root {
+            path: path.clone(),
+            reason: error.to_string(),
+        })?;
+        if metadata.file_type().is_symlink() || inside.iter().any(|p| **p == path) {
+            continue;
+        }
+        ruleset = if metadata.is_dir() && inside.iter().any(|p| p.starts_with(&path)) {
+            add_write_rules_around(ruleset, &path, protected)?
+        } else {
+            add_write_rules(ruleset, &path)?
+        };
+    }
+    Ok(ruleset)
 }
 
 fn add_write_rules(ruleset: RulesetCreated, root: &Path) -> Result<RulesetCreated, HelperError> {
@@ -622,11 +697,12 @@ mod tests {
 
     use super::{LandlockBackend, Level, dispatch_helper};
 
-    // Catches: a writable workspace containing EGO_HOME admits a config-changing child.
+    // Catches: a root that contains or sits inside the ego config refuses the
+    // whole session, or is granted whole and so lets a child rewrite the config.
     #[test]
-    fn linux_user_config_overlap_refuses_admission() {
+    fn linux_user_config_overlap_is_admitted_around_the_protected_paths() {
         use ego_core::permit::{CanonPath, Confinement, RunConfinement};
-        let name = "exec::landlock::tests::linux_user_config_overlap_refuses_admission";
+        let name = "exec::landlock::tests::linux_user_config_overlap_is_admitted_around_the_protected_paths";
         if std::env::var_os("EGO_CONFIG_FLOOR_CHILD").is_none() {
             let root = tempfile::tempdir().unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -646,53 +722,39 @@ mod tests {
         let scratch = tempfile::tempdir().unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(scratch.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let prepare = |policy: &RunConfinement| {
+            LandlockBackend::prepare(policy, &CanonPath::new(scratch.path()), &[])
+        };
         let policy =
             RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
-        let result = LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]);
-        let Err(error) = result else {
-            panic!("user-config overlap admitted")
-        };
-        let message = error.to_string();
+        let backend = prepare(&policy).expect("workspace containing the config is admitted");
         assert!(
-            message.contains("user config") && message.contains(workspace.to_str().unwrap()),
-            "{message}"
+            backend.protected.contains(&config),
+            "{:?}",
+            backend.protected
         );
-        assert_eq!(std::fs::read(&config).unwrap(), b"mode = 'default'\n");
-        use ego_core::permit::{ProfileRoot, RootAccess};
-        let outside = tempfile::tempdir().unwrap();
-        let outside = std::fs::canonicalize(outside.path()).unwrap();
-        let policy = RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&outside))
-            .unwrap()
-            .with_roots(vec![ProfileRoot::new(
-                CanonPath::new(&config_dir),
-                RootAccess::ReadWrite,
-            )]);
-        let error = match LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]) {
-            Err(error) => error,
-            Ok(_) => panic!("explicit user-config write root admitted"),
-        };
-        assert!(error.to_string().contains(config_dir.to_str().unwrap()));
-        // A file alias can place the selected authority inside another workspace.
-        std::fs::remove_file(&config).unwrap();
-        let alias_target = outside.join("policy.toml");
-        std::fs::write(&alias_target, "mode = 'default'\n").unwrap();
-        std::os::unix::fs::symlink(&alias_target, &config).unwrap();
-        let alias_policy =
-            RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&outside)).unwrap();
-        let error =
-            match LandlockBackend::prepare(&alias_policy, &CanonPath::new(scratch.path()), &[]) {
-                Err(error) => error,
-                Ok(_) => panic!("config-file alias workspace admitted"),
-            };
-        assert!(error.to_string().contains(alias_target.to_str().unwrap()));
-        assert_eq!(std::fs::read(&config).unwrap(), b"mode = 'default'\n");
-        // An absent config directory remains protected through its existing ancestor.
+        // A hardlink alias inside the workspace is protected as well.
+        let alias = workspace.join("alias");
+        std::fs::hard_link(&config, &alias).unwrap();
+        let backend = prepare(&policy).expect("hardlinked config is admitted");
+        assert!(
+            backend.protected.contains(&alias),
+            "{:?}",
+            backend.protected
+        );
+        std::fs::remove_file(&alias).unwrap();
+        // A workspace inside the config directory is admitted without write authority there.
+        let nested = config_dir.join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let inside =
+            RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&nested)).unwrap();
+        assert!(prepare(&inside).is_ok());
+        // An absent config directory stays protected through its existing ancestor.
+        std::fs::remove_dir(&nested).unwrap();
         std::fs::remove_file(&config).unwrap();
         std::fs::remove_dir(&config_dir).unwrap();
-        assert!(LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]).is_err());
-        let policy =
-            RunConfinement::new(Confinement::Ro, false, CanonPath::new(&workspace)).unwrap();
-        assert!(LandlockBackend::prepare(&policy, &CanonPath::new(scratch.path()), &[]).is_ok());
+        assert!(prepare(&policy).unwrap().protected.contains(&config_dir));
+        assert_eq!(std::fs::read_dir(&workspace).unwrap().count(), 0);
     }
 
     /// The prefix the backend emits is the envelope the dispatcher accepts, and
@@ -707,6 +769,7 @@ mod tests {
             private_scratch: PathBuf::from("/scratch"),
             runtime_roots: vec![PathBuf::from("/usr")],
             roots: Vec::new(),
+            protected: Vec::new(),
             maximum_caps: ExecCaps::empty(),
         };
         let prefix = backend.launch_prefix();
@@ -721,6 +784,7 @@ mod tests {
             "/scratch",
             "1",
             "/usr",
+            "0",
             "0",
         ]
         .map(OsString::from);

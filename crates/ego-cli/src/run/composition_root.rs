@@ -1,5 +1,6 @@
 //! Wire prepared CLI authority into executable run inputs.
 
+use super::driver_runtime::{activate_headless_successor, compaction_activation_note};
 use super::*;
 
 pub(super) fn run_budget_spec(budget: &Budget) -> Result<String, RunTermination> {
@@ -44,6 +45,8 @@ pub struct CliPrepared {
     /// `trusted` for admit its hooks under `Untrusted` anyway.
     pub(super) trust: Trust,
     pub(super) profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
+    /// `--no-hooks`: no hook is admitted, whatever the layers hold.
+    pub(super) no_hooks: bool,
     /// The exact ACP session fact to compare during effect construction.
     pub(super) admitted_sandbox_observation: Option<ExecObservation>,
     pub(super) effective: Effective,
@@ -307,6 +310,7 @@ impl CliPrepared {
                 confinement,
                 trust,
                 profile_layers,
+                no_hooks: args.no_hooks,
                 admitted_sandbox_observation: request.selections.sandbox_observation().cloned(),
                 effective,
                 system,
@@ -345,27 +349,22 @@ impl CliPrepared {
         let opening = opened.state();
         let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
             .map_err(|error| RunExecutorError::new(error.to_string()))?;
-        let (ports, observation, probe_evidence) = match run_effect_ports(
-            self.confinement.clone(),
-            active.evidence().clone(),
-            cancel.clone(),
-            self.run_deadline,
-            self.admitted_sandbox_observation.as_ref(),
-            bindings.sandbox_grants(),
-            bindings.residual_desk(),
-        )
-        .await
-        {
-            Ok(effects) => effects,
-            Err(error @ ProcessError::ConfinementChanged { .. }) => {
-                return Ok(RunSettlement::Interrupted {
-                    diagnostic: Some(error.to_string()),
-                });
-            }
-            Err(error) => {
-                return settlement(process_error_termination(error, &self.confinement, cancel));
-            }
-        };
+        if let Some(desk) = bindings.residual_desk() {
+            desk.configure_limits(self.effective.residual_limits);
+        }
+        let mut effects = Some(
+            match segment_effects(
+                &self.confinement,
+                self.run_deadline,
+                self.admitted_sandbox_observation.as_ref(),
+                (&active, &bindings, cancel),
+            )
+            .await
+            {
+                Ok(effects) => effects,
+                Err(settled) => return settled,
+            },
+        );
         if let Some(note_text) = repair_note {
             Stderr.note(&note_text);
         }
@@ -420,25 +419,27 @@ impl CliPrepared {
                 .retain(|tool| !matches!(tool, RegisteredTool::Task | RegisteredTool::Skill(_)));
         }
         let sink = bindings.sink_factory.create(&model_capabilities);
-        sink.publish(
-            &PublicEvent::SessionStarted {
-                v: PUBLIC_EVENT_VERSION,
-                session: active.id(),
-                capabilities: capabilities(
-                    &self.registry,
-                    self.system.is_some(),
-                    self.compiled.is_some(),
-                ),
-                mcp_errors,
-                hook_errors: Vec::new(),
-                instructions: self
-                    .system
-                    .as_ref()
-                    .map(|system| system.sources.clone())
-                    .unwrap_or_default(),
-            },
-            &opening,
+        let started_capabilities = capabilities(
+            &self.registry,
+            self.system.is_some(),
+            self.compiled.is_some(),
+            self.no_hooks,
         );
+        let instructions = self
+            .system
+            .as_ref()
+            .map(|system| system.sources.clone())
+            .unwrap_or_default();
+        // The source and every compaction successor open with the same header.
+        let session_started = |session| PublicEvent::SessionStarted {
+            v: PUBLIC_EVENT_VERSION,
+            session,
+            capabilities: started_capabilities.clone(),
+            mcp_errors: mcp_errors.clone(),
+            hook_errors: Vec::new(),
+            instructions: instructions.clone(),
+        };
+        sink.publish(&session_started(active.id()), &opening);
 
         let mode = self.effective.mode.unwrap_or(Mode::Default);
         let policy_selection =
@@ -490,65 +491,176 @@ impl CliPrepared {
                 currency,
             ))
         });
-        let (termination, state, result) = match drive_headless_turn(
-            HeadlessSession {
-                active: &mut active,
-                opening,
-                clock: &clock,
-                sink: sink.as_ref(),
-                cancel,
-                pause,
-                control: bindings.take_interactive_control(),
-            },
-            HeadlessGeneration {
-                source,
-                admission,
-                invocation,
-                config,
-                provider_recovery: self.provider_recovery,
-                goal: self.goal,
-                goal_turns: self.goal_turns,
-                goal_check_command: self.goal_check_command,
-                goal_ceilings: self.effective.ceilings.clone(),
-                gate,
-                hook_layers: self.profile_layers.as_deref(),
-                hook_trust: self.trust,
-                policy_source,
-                judge_available,
-            },
-            HeadlessChild {
-                parent_run: run_id,
-                root: child_root,
-                store: Arc::clone(&self.store),
-                executor: child_executor,
-                inherited_effect_tools,
-            },
-            HeadlessEffects {
-                mcp_runtime,
-                registry: &self.registry,
-                admitted_tools,
-                cwd: &self.cwd,
-                confinement: &self.confinement,
-                run_deadline: self.run_deadline,
-                ports,
-                observation,
-                probe_evidence,
-                elicitor: bindings.elicitor,
-            },
-            HeadlessTurn {
-                turns: &turns,
-                attachment_specs: &[],
-                input: HeadlessInput::Prompt(prompt),
-                diagnostics: &Stderr,
-            },
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(termination) => return run_settlement(termination, self.child),
+        // A host that follows the transition gets the in-process compaction of
+        // `ego run`; any other host keeps explicit recovery with `_ego/compact`.
+        let compaction_host = !self.child && bindings.sink_factory.follows_session_transitions();
+        // DEFERRED (2026-11-04) — only the first segment takes the host's
+        // steering control: a `_ego/steer` accepted while the summary is
+        // written is not delivered to the successor (review F2).
+        let mut control = bindings.take_interactive_control();
+        let mut opening = opening;
+        let mut input = HeadlessInput::Prompt(prompt);
+        let mut turns_taken: u32 = 0;
+        let (termination, state, result) = loop {
+            let (ports, observation, probe_evidence) = match effects.take() {
+                Some(effects) => effects,
+                None => match segment_effects(
+                    &self.confinement,
+                    self.run_deadline,
+                    self.admitted_sandbox_observation.as_ref(),
+                    (&active, &bindings, cancel),
+                )
+                .await
+                {
+                    Ok(effects) => effects,
+                    Err(settled) => return settled,
+                },
+            };
+            // Session roots cannot cross an in-process session transition.
+            let automatic_compaction = (compaction_host && opening.session_roots.is_empty())
+                .then_some(self.effective.compaction.threshold);
+            let segment_turns = Turns {
+                parent_cancel: turns.parent_cancel.clone(),
+                schema: turns.schema,
+                retries: turns.retries,
+                max_turns: turns.max_turns.map(|max| max.saturating_sub(turns_taken)),
+                deadline: turns.deadline,
+            };
+            let driven = drive_headless_turn(
+                HeadlessSession {
+                    active: &mut active,
+                    opening,
+                    clock: &clock,
+                    sink: sink.as_ref(),
+                    cancel,
+                    pause,
+                    control: control.take(),
+                },
+                HeadlessGeneration {
+                    source: Arc::clone(&source),
+                    admission: Arc::clone(&admission),
+                    invocation,
+                    config: config.clone(),
+                    provider_recovery: self.provider_recovery,
+                    goal: self.goal.clone(),
+                    goal_turns: self.goal_turns,
+                    goal_check_command: self.goal_check_command.clone(),
+                    goal_ceilings: self.effective.ceilings.clone(),
+                    child_defaults: self.effective.task.clone(),
+                    gate: gate.clone(),
+                    hook_layers: self.profile_layers.as_deref(),
+                    hooks_off: self.no_hooks,
+                    hook_trust: self.trust,
+                    policy_source: Arc::clone(&policy_source),
+                    judge_available,
+                },
+                HeadlessChild {
+                    parent_run: run_id,
+                    root: child_root.clone(),
+                    store: Arc::clone(&self.store),
+                    executor: Arc::clone(&child_executor),
+                    inherited_effect_tools: inherited_effect_tools.clone(),
+                },
+                HeadlessEffects {
+                    mcp_runtime: mcp_runtime.clone(),
+                    registry: &self.registry,
+                    admitted_tools: admitted_tools.clone(),
+                    cwd: &self.cwd,
+                    confinement: &self.confinement,
+                    run_deadline: self.run_deadline,
+                    ports,
+                    observation,
+                    probe_evidence,
+                    elicitor: bindings.elicitor.clone(),
+                },
+                HeadlessTurn {
+                    turns: &segment_turns,
+                    attachment_specs: &[],
+                    input,
+                    diagnostics: &Stderr,
+                    automatic_compaction,
+                },
+            )
+            .await;
+            let (termination, state, result, compaction) = match driven {
+                Ok(outcome) => outcome,
+                Err(termination) => return run_settlement(termination, self.child),
+            };
+            let Some(compaction) = compaction else {
+                break (termination, state, result);
+            };
+            let source_context = state.context;
+            active.replace_state(state);
+            if let Err(termination) = activate_headless_successor(
+                &mut active,
+                &compaction.receipt,
+                self.store.as_ref(),
+                &clock,
+                (self.admission.as_ref(), &Some(self.run_context.clone())),
+            ) {
+                return run_settlement(termination, self.child);
+            }
+            Stderr.note(&compaction_activation_note(
+                compaction.receipt.source,
+                active.id(),
+                source_context,
+            ));
+            opening = active.state().clone();
+            sink.publish(
+                &PublicEvent::SessionCompacted {
+                    source: compaction.receipt.source,
+                    source_seq: compaction.receipt.source_seq,
+                    target: active.id(),
+                },
+                &opening,
+            );
+            sink.publish(&session_started(active.id()), &opening);
+            turns_taken = turns_taken.saturating_add(compaction.turns_taken);
+            input = HeadlessInput::Checkpoint {
+                request: compaction.request,
+            };
         };
         active.replace_state(state);
         settle_run_artifact(termination, artifacts, run_id, result, self.child)
+    }
+}
+
+/// Effect ports, exec observation and probe evidence of one session segment.
+type SegmentEffects = (
+    Arc<RunEffectPorts>,
+    ExecObservation,
+    Option<ego_core::store::evidence::EvidenceRef>,
+);
+
+/// The effect ports of the active session; an error is already the run's settlement.
+async fn segment_effects(
+    confinement: &RunConfinement,
+    run_deadline: Option<std::time::Instant>,
+    admitted_observation: Option<&ExecObservation>,
+    (active, bindings, cancel): (&ActiveSession<'_>, &RunExecutionBindings, &CancelToken),
+) -> Result<SegmentEffects, Result<RunSettlement, RunExecutorError>> {
+    match run_effect_ports(
+        confinement.clone(),
+        active.evidence().clone(),
+        cancel.clone(),
+        run_deadline,
+        admitted_observation,
+        bindings.sandbox_grants(),
+        bindings.residual_desk(),
+    )
+    .await
+    {
+        Ok(effects) => Ok(effects),
+        Err(error @ ProcessError::ConfinementChanged { .. }) => {
+            Err(Ok(RunSettlement::Interrupted {
+                diagnostic: Some(error.to_string()),
+            }))
+        }
+        Err(error) => Err(settlement(process_error_termination(
+            error,
+            confinement,
+            cancel,
+        ))),
     }
 }
 
@@ -708,6 +820,14 @@ pub(super) async fn select_startup_model(
                 message: error.to_string(),
             });
         }
+        crate::onboarding::StartupDecision::UseForRun(model) => {
+            diagnostics.note(&format!(
+                "using {}, the default model of the only usable provider, for this run; it is not saved; pass --model to pin a model",
+                model.0
+            ));
+            settings.effective.model = Some(model);
+            return Ok(());
+        }
         crate::onboarding::StartupDecision::AutoSelect(model) => (Some(model), None),
         crate::onboarding::StartupDecision::Pick(snapshot, notice) => {
             let picker = Arc::new(Mutex::new(ModelPicker::for_startup(snapshot)));
@@ -809,6 +929,15 @@ pub(super) async fn execution_preflight(
         ci.as_ref().map(|ci| ci.session_root.as_path()),
     )
     .map_err(usage)?;
+    if ci.is_none() {
+        crate::session::start_cold_storage(
+            Arc::clone(&chosen.store),
+            &crate::session::cold_storage_config(
+                &settings.effective.sessions,
+                args.no_session_compression,
+            ),
+        );
+    }
     if args.answers.is_empty() {
         select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;
     }
@@ -820,7 +949,7 @@ pub(super) async fn execution_preflight(
     )
     .map_err(usage)?;
     if !args.quiet {
-        note_refused_mcp(diagnostics, &attachment.refused);
+        note_mcp_attachment(diagnostics, &attachment);
     }
     let selected_mcp = ego_tools::mcp::materialize_admissions(attachment.attached);
     let refresh = ego_mcp::McpRegistryRefresh::new(
@@ -907,17 +1036,12 @@ pub(super) fn admit_mcp_transports(
 ) -> Result<(), UsageError> {
     for (name, config, _) in selected {
         match config {
-            McpServerConfig::Http(_) if !confinement.admits_mcp_http() && confinement.offline() => {
+            McpServerConfig::Http(_) if !confinement.admits_mcp() => {
                 return Err(UsageError(format!(
                     "MCP HTTP server `{name}` is unavailable under --offline"
                 )));
             }
-            McpServerConfig::Http(_) if !confinement.admits_mcp_http() => {
-                return Err(UsageError(format!(
-                    "MCP HTTP server `{name}` requires --sandbox off"
-                )));
-            }
-            McpServerConfig::Stdio(_) if !confinement.admits_mcp_stdio() => {
+            McpServerConfig::Stdio(_) if !confinement.admits_mcp() => {
                 return Err(UsageError(format!(
                     "MCP stdio server `{name}` is unavailable under --offline"
                 )));
@@ -961,12 +1085,17 @@ pub(super) fn attach_mcp(
     Ok(McpAttachment { attached, refused })
 }
 
-/// Tell the user once why a configured server did not start.
-pub(super) fn note_refused_mcp(
-    diagnostics: &dyn Diagnostics,
-    refused: &[(McpServerName, UsageError)],
-) {
-    for (name, error) in refused {
+/// Tell the user once why a configured server did not start, and which
+/// attached server sends its OAuth credential unencrypted.
+pub(super) fn note_mcp_attachment(diagnostics: &dyn Diagnostics, attachment: &McpAttachment) {
+    for (name, error) in &attachment.refused {
         diagnostics.note(&format!("MCP server '{name}' was not connected: {error}"));
+    }
+    for (name, config, _) in &attachment.attached {
+        if let McpServerConfig::Http(http) = config
+            && let Some(warning) = crate::mcp::plaintext_credential_warning(name, http)
+        {
+            diagnostics.note(&warning);
+        }
     }
 }

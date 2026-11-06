@@ -8,7 +8,7 @@ fn typed_goal_starts_work_with_or_without_set_keyword() {
         "/goal set build the fixture artifact",
     ] {
         let stub = Stub::start(Plan {
-            completions: vec![Reply::Sse(text("GOAL-WORK-749-DONE"))],
+            completions: vec![Reply::Sse(text("GOAL-WORK-DONE"))],
             ..Plan::default()
         });
         let checker = serde_json::json!([
@@ -41,7 +41,7 @@ fn typed_goal_starts_work_with_or_without_set_keyword() {
         let start = output.len();
         input.write_all(format!("{command}\r").as_bytes()).unwrap();
         input.flush().unwrap();
-        until_normalized(&reader, &mut output, start, "GOAL-WORK-749-DONE");
+        until_normalized(&reader, &mut output, start, "GOAL-WORK-DONE");
         until_prompt_from(&reader, &mut output, start);
         input.write_all(b"/quit\r").unwrap();
         input.flush().unwrap();

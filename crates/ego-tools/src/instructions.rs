@@ -20,20 +20,36 @@ pub struct OsInstructionIo;
 
 impl InstructionIo for OsInstructionIo {
     fn load(&self, path: &Path, max_bytes: u64) -> Found {
-        read_instruction(open_in_tree(path), max_bytes)
+        read_instruction(path, open_in_tree(path), max_bytes)
     }
 
     fn load_external(&self, path: &Path, max_bytes: u64) -> Found {
-        read_instruction(open_no_links(path), max_bytes)
+        read_instruction(path, open_no_links(path), max_bytes)
     }
 }
 
-fn read_instruction(opened: std::io::Result<fs::File>, max_bytes: u64) -> Found {
+/// The canonical target of a leaf symlink under a link-free parent chain.
+/// A parent link, a dangling link and a link cycle have none.
+fn leaf_link_target(path: &Path) -> Option<std::path::PathBuf> {
+    let parent = path.parent()?;
+    if fs::canonicalize(parent).ok()? != parent {
+        return None;
+    }
+    if !fs::symlink_metadata(path).ok()?.file_type().is_symlink() {
+        return None;
+    }
+    fs::canonicalize(path).ok()
+}
+
+fn read_instruction(path: &Path, opened: std::io::Result<fs::File>, max_bytes: u64) -> Found {
     let file = match opened {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Found::Absent,
         Err(error) if error.raw_os_error() == Some(nix_symlink_error()) => {
-            return Found::Refused(Refusal::Symlink);
+            return match leaf_link_target(path) {
+                Some(target) => Found::Link { target },
+                None => Found::Refused(Refusal::Symlink),
+            };
         }
         Err(error) => {
             return Found::Refused(Refusal::Unreadable {
@@ -179,9 +195,9 @@ mod tests {
                     }
                 }
             }
-            fn load_external(&self, _: &Path, _: u64) -> Found {
+            fn load_external(&self, _path: &Path, _: u64) -> Found {
                 self.reads.borrow_mut().push(true);
-                read_instruction(unsupported_external(), 100)
+                read_instruction(_path, unsupported_external(), 100)
             }
         }
         let tree = tempfile::tempdir().unwrap();
@@ -245,7 +261,7 @@ mod tests {
     /// Catches static leaf or parent links bypassing the portable policy.
     #[cfg(unix)]
     #[test]
-    fn portable_in_tree_reads_refuse_leaf_and_parent_links() {
+    fn in_tree_reads_report_leaf_links_and_refuse_parent_links() {
         use std::os::unix::fs::symlink;
         let tree = tempfile::tempdir().unwrap();
         let root = tree.path().canonicalize().unwrap();
@@ -253,12 +269,16 @@ mod tests {
         fs::write(root.join("real/AGENTS.md"), "secret").unwrap();
         symlink(root.join("real/AGENTS.md"), root.join("AGENTS.md")).unwrap();
         symlink(root.join("real"), root.join("linked")).unwrap();
-        for path in [root.join("AGENTS.md"), root.join("linked/AGENTS.md")] {
-            assert_eq!(
-                OsInstructionIo.load(&path, 100),
-                Found::Refused(Refusal::Symlink)
-            );
-        }
+        assert_eq!(
+            OsInstructionIo.load(&root.join("AGENTS.md"), 100),
+            Found::Link {
+                target: root.join("real/AGENTS.md")
+            }
+        );
+        assert_eq!(
+            OsInstructionIo.load(&root.join("linked/AGENTS.md"), 100),
+            Found::Refused(Refusal::Symlink)
+        );
     }
 
     /// Catches refusing ordinary in-tree instructions on non-Unix platforms.

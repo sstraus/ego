@@ -16,7 +16,7 @@ use ego_core::hook::{
 };
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::{
-    Classification, HttpRoute, HttpScheme, NetworkTarget, PolicyEngine, PreparedCall,
+    Classification, HttpRoute, HttpScheme, NetworkTarget, PolicyEngine, PreparedCall, Resolution,
 };
 use ego_core::store::evidence::EvidenceRef;
 use ego_core::turn::{ToolEffectPorts, ToollessGenerationOwner};
@@ -333,7 +333,7 @@ impl<'a> HookPortAdapter<'a> {
     ) -> Result<HookOutcome, Box<HookFailure>> {
         let prepared = CommandHookAdapter::prepare(request.clone())
             .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
-        let (prepared, effects) = self.authorize(prepared)?;
+        let (prepared, effects) = self.authorize(prepared).await?;
         let result = CommandHookAdapter::new(effects, prepared)
             .invoke(request.clone())
             .await
@@ -348,7 +348,7 @@ impl<'a> HookPortAdapter<'a> {
         let http = HttpHookAdapter::prepare(request.clone())
             .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
         let prepared = self.prepare_http_authority(&request, &http)?;
-        let (prepared, effects) = self.authorize(prepared)?;
+        let (prepared, effects) = self.authorize(prepared).await?;
         let result = HttpHookAdapter::new(effects, prepared, http)
             .invoke(request.clone())
             .await
@@ -397,18 +397,26 @@ impl<'a> HookPortAdapter<'a> {
         )
     }
 
-    fn authorize(
+    async fn authorize(
         &self,
         prepared: PreparedCall,
     ) -> Result<(PreparedCall, ego_core::permit::GuardedEffects<'a>), Box<HookFailure>> {
-        match self.policy.classify(prepared) {
-            Classification::Settled(Ok(authorized)) => Ok(self.effects.clone().bind(authorized)),
-            Classification::Settled(Err(denial)) => {
+        let resolution = match self.policy.classify(prepared) {
+            Classification::Settled(result) => Resolution::Settled(result),
+            Classification::Ask(pending) => self.policy.settle(pending).await,
+        };
+        match resolution {
+            Resolution::Settled(Ok(authorized)) => Ok(self.effects.clone().bind(authorized)),
+            Resolution::Settled(Err(denial)) => {
                 Err(self.failure(HookFailureKind::EffectDenied, denial.to_string()))
             }
-            Classification::Ask(pending) => {
+            Resolution::Ask(pending) => {
                 Err(self.failure(HookFailureKind::EffectDenied, pending.request().to_string()))
             }
+            Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => Err(self.failure(
+                HookFailureKind::EffectDenied,
+                "unexpected human permission resolution for hook".to_owned(),
+            )),
         }
     }
 
@@ -671,6 +679,120 @@ mod tests {
         assert_eq!(
             serde_json::to_value(failure).unwrap(),
             serde_json::json!({"kind": "backend_unavailable", "feedback": null}),
+        );
+    }
+    #[cfg(unix)]
+    async fn command_admission(
+        mode: Mode,
+        rules: Ruleset,
+        script: &str,
+    ) -> (Result<HookOutcome, HookFailure>, bool) {
+        let owner = tempfile::tempdir().unwrap();
+        let marker = owner.path().join("executed");
+        let scope = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let ports = scope.ports();
+        let evidence = SessionEvidenceStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = ToolEffectPorts::new(
+            &OsFs,
+            ports.process(),
+            &evidence,
+            ports.resolver_handle(),
+            ports.one_hop_handle(),
+            ports.duplex_handle(),
+        );
+        let adapter = HookPortAdapter::new(
+            Arc::new(PolicyEngine::new(CanonPath::new(owner.path()), mode, rules)),
+            effects,
+            None,
+            Arc::new(NoGeneration),
+        );
+        let hook = HookId::derive(
+            HookSourceAuthority::User,
+            &HookSourceLocation::parse("config.toml").unwrap(),
+            &HookContentDigest::parse(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
+            0,
+        );
+        let request = HookInvocationRequest::new(
+            HookStartedEvidence::new(
+                EventId::new(),
+                EventId::new(),
+                hook,
+                HookInvocationId::new(),
+                HookActivation::Persistent,
+            ),
+            HookCausality::session(SessionId::new(), TurnId::new()),
+            HookHandlerConfig::Command {
+                command: format!("touch '{}'; {}", marker.display(), script),
+                args: None,
+                shell: Some("bash".into()),
+                timeout_seconds: Some(3),
+            },
+            HookEvent::session(HookLifecycle::Stop),
+            EffectScope::new(Duration::from_secs(3)),
+        );
+        let result = adapter.invoke(request).await;
+        (result, marker.exists())
+    }
+
+    // Catches: yolo rejects an uncovered command before the configured hook runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_admission_yolo_runs_uncovered_command() {
+        let (result, ran) = command_admission(Mode::Yolo, Ruleset::default(), "exit 0").await;
+        assert!(ran, "the hook command must execute");
+        assert_eq!(result.unwrap().decision(), HookDecision::Continue);
+    }
+
+    // Catches: mode settlement bypasses explicit deny or the plan floor.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_admission_enforces_denies_and_plan() {
+        use ego_core::config::{PermCfg, Source};
+        use ego_core::permit::rule::Rule;
+        let denied = Ruleset::from_layer(
+            PermCfg {
+                judge: None,
+                allow: vec![],
+                deny: vec![Rule::load("exec(**)").unwrap()],
+            },
+            Source::User,
+        );
+        let allowed = Ruleset::from_layer(
+            PermCfg {
+                judge: None,
+                allow: vec![Rule::load("exec(**)").unwrap()],
+                deny: vec![],
+            },
+            Source::User,
+        );
+        for (mode, rules) in [
+            (Mode::Yolo, denied),
+            (Mode::Plan, allowed),
+            (Mode::Default, Ruleset::default()),
+        ] {
+            let (result, ran) = command_admission(mode, rules, "exit 0").await;
+            assert!(!ran);
+            assert_eq!(result.unwrap_err().kind(), HookFailureKind::EffectDenied);
+        }
+    }
+
+    // Catches: executing through mode admission conflates a veto with a command failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_admission_preserves_veto_and_failure() {
+        let (veto, ran) = command_admission(Mode::Yolo, Ruleset::default(), "exit 2").await;
+        assert!(ran);
+        assert_eq!(veto.unwrap().decision(), HookDecision::Block);
+        let (failure, ran) = command_admission(Mode::Yolo, Ruleset::default(), "exit 1").await;
+        assert!(ran);
+        assert_eq!(
+            failure.unwrap_err().kind(),
+            HookFailureKind::DeliveryUncertain
         );
     }
 }

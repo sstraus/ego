@@ -1,64 +1,46 @@
 use super::*;
 
-// Catches: a Linux bwrap measurement is silently reused after a read-only root
-// changes the next process's required backend to Landlock.
-#[cfg(target_os = "linux")]
-fn approve_linux_read_root_backend_change(places: &support::Places) {
-    let denied = Stub::start(Plan::default());
-    let result = places
-        .ego(&denied)
-        .subcommand("resume")
-        .args([
-            support::FIXTURE_SESSION_ID,
-            "--model",
-            "ollama/qwen3",
-            "--sandbox",
-            "workspace",
-            "--mode",
-            "yolo",
-        ])
-        .arg("check the resumed root")
-        .run();
-    assert_eq!(result.code, Some(3), "{}", result.stderr);
-    assert!(
-        result
-            .stderr
-            .contains("backend measurement bwrap -> landlock"),
-        "{}",
-        result.stderr
-    );
-    assert!(
-        denied.generations().is_empty(),
-        "no effects before approval"
-    );
-
-    let approved = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("ROOT-READMISSION-RECORDED"))],
-        ..Plan::default()
-    });
-    let ego = places.ego(&approved).subcommand("resume").args([
-        support::FIXTURE_SESSION_ID,
-        "--model",
-        "ollama/qwen3",
-        "--sandbox",
-        "workspace",
-        "--mode",
-        "yolo",
-    ]);
-    let (session, mut input, reader) = PtySession::start(&ego, 40, 160, None);
-    let mut output = Vec::new();
-    until_normalized(&reader, &mut output, 0, "Allow Re-admit execution policy");
-    input.write_all(b"y\r").unwrap();
-    input.flush().unwrap();
-    until_prompt_from(&reader, &mut output, 0);
-    let start = output.len();
-    input.write_all(b"record the backend approval\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "ROOT-READMISSION-RECORDED");
-    until_prompt_from(&reader, &mut output, start);
-    input.write_all(b"/quit\r").unwrap();
-    input.flush().unwrap();
-    assert!(session.quit(input).success());
+/// Wait until a granted root rebuilds the same session in this process. A
+/// change of Linux backend (bwrap to Landlock for a first read root) asks the
+/// owner once; any other wider root re-admits with a note.
+pub(super) fn readmit_after_root_grant(
+    reader: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    input: &mut PtyWriter,
+    start: usize,
+) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let words = normalized(&output[start..])
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if words.contains("Allow Re-admit execution policy") {
+            input.write_all(b"y\r").unwrap();
+            input.flush().unwrap();
+            let approved = output.len();
+            until_prompt_from(reader, output, approved);
+            return;
+        }
+        if words.contains("Re-admitting under equal or narrower authority.") {
+            // The prompt can share a read with the note; start after the note.
+            let note_end = output
+                .windows(b"authority.".len())
+                .rposition(|window| window == b"authority.")
+                .expect("re-admission note")
+                + b"authority.".len();
+            until_prompt_from(reader, output, note_end);
+            return;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match reader.recv_timeout(remaining) {
+            Ok(chunk) => output.extend(chunk),
+            Err(error) => panic!(
+                "no re-admission after the root grant: {error}; output: {:?}",
+                normalized(&output[start..])
+            ),
+        }
+    }
 }
 
 /// Catches: recording a root choice only in profile config, widening the live
@@ -66,14 +48,14 @@ fn approve_linux_read_root_backend_change(places: &support::Places) {
 #[test]
 fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("policy-758.txt");
-    std::fs::write(&target, "POLICY-758-SECRET").unwrap();
+    let target = outside.path().join("policy-mark.txt");
+    std::fs::write(&target, "POLICY-MARK-SECRET").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let read = |id: &str| {
         Reply::Sse(tool_call(
             id,
             "read",
-            &serde_json::json!({"path": target.to_str().unwrap()}).to_string(),
+            &serde_json::json!({"files":[{"path": target.to_str().unwrap()}]}).to_string(),
         ))
     };
     let places = support::Places::new();
@@ -81,9 +63,8 @@ fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
     let first = Stub::start(Plan {
         completions: vec![
             read("denied-before"),
-            Reply::Sse(text("LIVE-DENIED-758")),
-            read("denied-after"),
-            Reply::Sse(text("STILL-DENIED-758")),
+            Reply::Sse(text("LIVE-DENIED-MARK")),
+            Reply::Sse(text("RECORDED-MARK")),
         ],
         ..Plan::default()
     });
@@ -115,50 +96,37 @@ fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
     }
     input.write_all(b"2\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "LIVE-DENIED-758");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "LIVE-DENIED-MARK");
+    readmit_after_root_grant(&reader, &mut output, &mut input, start);
+    // A turn after re-admission records the re-admitted execution
+    // observation, so the next resume compares against it.
+    let recorded = output.len();
+    input.write_all(b"record the readmission\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, recorded, "RECORDED-MARK");
+    until_prompt_from(&reader, &mut output, recorded);
     let saved_receipt = first.generations()[1].to_string();
     assert!(saved_receipt.contains("Session root"), "{saved_receipt}");
-    assert!(saved_receipt.contains("ego resume"), "{saved_receipt}");
-    let next = output.len();
-    input
-        .write_all(b"try the same read before resume\r")
-        .unwrap();
-    input.flush().unwrap();
-    until_normalized(
-        &reader,
-        &mut output,
-        next,
-        "Choose Deny, Session, or Permanent",
+    assert!(
+        saved_receipt.contains("re-admits session"),
+        "{saved_receipt}"
     );
-    input.write_all(b"1\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, next, "STILL-DENIED-758");
-    until_prompt_from(&reader, &mut output, next);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
-    for generation in [1, 3] {
-        assert!(
-            !first.generations()[generation]
-                .to_string()
-                .contains("POLICY-758-SECRET"),
-            "generation {generation} saw the external bytes before process restart"
-        );
-    }
+    assert!(
+        !first.generations()[1]
+            .to_string()
+            .contains("POLICY-MARK-SECRET"),
+        "the granting turn saw the external bytes"
+    );
     assert!(
         !places.home_path().join("config.toml").exists(),
         "session grant leaked into the profile"
     );
 
-    #[cfg(target_os = "linux")]
-    approve_linux_read_root_backend_change(&places);
-
     let resumed = Stub::start(Plan {
-        completions: vec![
-            read("admitted-on-resume"),
-            Reply::Sse(text("REGRESSION-MARKER")),
-        ],
+        completions: vec![read("admitted-on-resume"), Reply::Sse(text("RESUMED-MARK"))],
         ..Plan::default()
     });
     let result = places
@@ -179,7 +147,7 @@ fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
     assert!(
         resumed.generations()[1]
             .to_string()
-            .contains("POLICY-758-SECRET"),
+            .contains("POLICY-MARK-SECRET"),
         "same-id resume did not admit the external read"
     );
     let writes = Stub::start(Plan {
@@ -187,12 +155,12 @@ fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
             Reply::Sse(tool_call(
                 "read-only-grant",
                 "write",
-                &serde_json::json!({
-                    "path": target.to_str().unwrap(), "contents": "WRONG-758"
-                })
+                &serde_json::json!({"files": [{
+                    "path": target.to_str().unwrap(), "contents": "WRONG-MARK"
+                }]})
                 .to_string(),
             )),
-            Reply::Sse(text("WRITE-REFUSED-758")),
+            Reply::Sse(text("WRITE-REFUSED-MARK")),
         ],
         ..Plan::default()
     });
@@ -213,12 +181,12 @@ fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
     assert_eq!(denied_write.code, Some(0), "{}", denied_write.stderr);
     assert_eq!(
         std::fs::read_to_string(&target).unwrap(),
-        "POLICY-758-SECRET"
+        "POLICY-MARK-SECRET"
     );
     let other = Stub::start(Plan {
         completions: vec![
             read("different-session"),
-            Reply::Sse(text("OTHER-DENIED-758")),
+            Reply::Sse(text("OTHER-DENIED-MARK")),
         ],
         ..Plan::default()
     });
@@ -238,7 +206,7 @@ fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
     assert!(
         !other.generations()[1]
             .to_string()
-            .contains("POLICY-758-SECRET"),
+            .contains("POLICY-MARK-SECRET"),
         "a different session inherited the grant"
     );
 }
@@ -248,8 +216,8 @@ fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
 #[test]
 fn resumed_session_root_refuses_in_process_session_switches() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("switch-758.txt");
-    std::fs::write(&target, "SWITCH-758-SECRET").unwrap();
+    let target = outside.path().join("switch-mark.txt");
+    std::fs::write(&target, "SWITCH-MARK-SECRET").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let places = support::Places::new();
     places.file("AGENTS.md", "# Session switch fixture\n");
@@ -258,9 +226,10 @@ fn resumed_session_root_refuses_in_process_session_switches() {
             Reply::Sse(tool_call(
                 "ask-root",
                 "read",
-                &serde_json::json!({"path": target}).to_string(),
+                &serde_json::json!({"files":[{"path": target}]}).to_string(),
             )),
-            Reply::Sse(text("SWITCH-758-PENDING")),
+            Reply::Sse(text("SWITCH-MARK-PENDING")),
+            Reply::Sse(text("RECORDED-MARK")),
         ],
         ..Plan::default()
     });
@@ -287,8 +256,15 @@ fn resumed_session_root_refuses_in_process_session_switches() {
     until_normalized(&reader, &mut output, start, "Permanent");
     input.write_all(b"2\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "SWITCH-758-PENDING");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "SWITCH-MARK-PENDING");
+    readmit_after_root_grant(&reader, &mut output, &mut input, start);
+    // A turn after re-admission records the re-admitted execution
+    // observation, so the next resume compares against it.
+    let recorded = output.len();
+    input.write_all(b"record the readmission\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, recorded, "RECORDED-MARK");
+    until_prompt_from(&reader, &mut output, recorded);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
@@ -305,12 +281,6 @@ fn resumed_session_root_refuses_in_process_session_switches() {
     ]);
     let (session, mut input, reader) = PtySession::start(&ego, 40, 160, None);
     let mut output = Vec::new();
-    #[cfg(target_os = "linux")]
-    {
-        until_normalized(&reader, &mut output, 0, "Allow Re-admit execution policy");
-        input.write_all(b"y\r").unwrap();
-        input.flush().unwrap();
-    }
     until_prompt_from(&reader, &mut output, 0);
     let start = output.len();
     input.write_all(b"/new\r").unwrap();
@@ -350,8 +320,8 @@ fn resumed_session_root_refuses_in_process_session_switches() {
 #[test]
 fn background_task_cannot_read_the_parent_session_root() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("fork-child-758.txt");
-    std::fs::write(&target, "FORK-REGRESSION-MARKER-SECRET").unwrap();
+    let target = outside.path().join("fork-child-mark.txt");
+    std::fs::write(&target, "FORK-CHILD-MARK-SECRET").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let places = support::Places::new();
     places.file("AGENTS.md", "# Child root fixture\n");
@@ -360,9 +330,9 @@ fn background_task_cannot_read_the_parent_session_root() {
             Reply::Sse(tool_call(
                 "ask-root",
                 "read",
-                &serde_json::json!({"path": target}).to_string(),
+                &serde_json::json!({"files":[{"path": target}]}).to_string(),
             )),
-            Reply::Sse(text("CHILD-ROOT-PENDING-model")),
+            Reply::Sse(text("CHILD-ROOT-PENDING-MARK")),
         ],
         ..Plan::default()
     });
@@ -389,8 +359,8 @@ fn background_task_cannot_read_the_parent_session_root() {
     until_normalized(&reader, &mut output, start, "Permanent");
     input.write_all(b"2\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "CHILD-ROOT-PENDING-model");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "CHILD-ROOT-PENDING-MARK");
+    readmit_after_root_grant(&reader, &mut output, &mut input, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
@@ -406,7 +376,7 @@ fn background_task_cannot_read_the_parent_session_root() {
                 })
                 .to_string(),
             )),
-            Reply::Sse(text("PARENT-TASK-DONE-758")),
+            Reply::Sse(text("PARENT-TASK-DONE-MARK")),
         ],
         prompt_completions: vec![(
             child_prompt.into(),
@@ -414,7 +384,7 @@ fn background_task_cannot_read_the_parent_session_root() {
                 Reply::Sse(tool_call(
                     "child-read",
                     "read",
-                    &serde_json::json!({"path": target}).to_string(),
+                    &serde_json::json!({"files":[{"path": target}]}).to_string(),
                 )),
                 Reply::Sse(tool_call(
                     "child-cat",
@@ -422,7 +392,7 @@ fn background_task_cannot_read_the_parent_session_root() {
                     &serde_json::json!({"argv": ["/bin/cat", target], "timeout_ms": 5000})
                         .to_string(),
                 )),
-                Reply::Sse(text("CHILD-ROOT-REFUSED-758")),
+                Reply::Sse(text("CHILD-ROOT-REFUSED-MARK")),
             ],
         )],
         ..Plan::default()
@@ -464,7 +434,7 @@ fn background_task_cannot_read_the_parent_session_root() {
             .expect("durable child tool result");
         assert!(!result.is_empty(), "empty {call_id} result");
         assert!(
-            !result.contains("FORK-REGRESSION-MARKER-SECRET"),
+            !result.contains("FORK-CHILD-MARK-SECRET"),
             "durable child {call_id} read its parent's root: {result}; stderr: {}",
             resumed.stderr
         );
@@ -476,14 +446,14 @@ fn background_task_cannot_read_the_parent_session_root() {
 #[test]
 fn cancelled_root_question_and_model_text_cannot_grant_authority() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("cancelled-758.txt");
-    std::fs::write(&target, "REGRESSION-MARKER-SECRET").unwrap();
+    let target = outside.path().join("cancelled-mark.txt");
+    std::fs::write(&target, "CANCELLED-MARK-SECRET").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let read = |id: &str| {
         Reply::Sse(tool_call(
             id,
             "read",
-            &serde_json::json!({"path": target}).to_string(),
+            &serde_json::json!({"files":[{"path": target}]}).to_string(),
         ))
     };
     let places = support::Places::new();
@@ -491,7 +461,7 @@ fn cancelled_root_question_and_model_text_cannot_grant_authority() {
     let stub = Stub::start(Plan {
         completions: vec![
             read("cancelled-root"),
-            Reply::Sse(text("session permanent approve CANCEL-758")),
+            Reply::Sse(text("session permanent approve CANCEL-MARK")),
         ],
         ..Plan::default()
     });
@@ -518,14 +488,14 @@ fn cancelled_root_question_and_model_text_cannot_grant_authority() {
     until_normalized(&reader, &mut output, start, "Permanent");
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "CANCEL-758");
+    until_normalized(&reader, &mut output, start, "CANCEL-MARK");
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
     assert!(!places.home_path().join("config.toml").exists());
     let resumed = Stub::start(Plan {
-        completions: vec![read("still-denied"), Reply::Sse(text("DENIED-758"))],
+        completions: vec![read("still-denied"), Reply::Sse(text("DENIED-MARK"))],
         ..Plan::default()
     });
     let result = places
@@ -546,26 +516,26 @@ fn cancelled_root_question_and_model_text_cannot_grant_authority() {
     assert!(
         !resumed.generations()[1]
             .to_string()
-            .contains("REGRESSION-MARKER-SECRET")
+            .contains("CANCELLED-MARK-SECRET")
     );
 }
 
 /// Catches: a permanent answer changes the live run, is not saved by the
 /// atomic user-config transaction, or admits an unselected sibling path.
 #[test]
-fn permanent_root_needs_a_new_process_and_binds_the_exact_path() {
+fn permanent_root_is_readmitted_in_process_and_binds_the_exact_path() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("chosen-758.txt");
-    let sibling = outside.path().join("other-758.txt");
-    std::fs::write(&target, "CHOSEN-758-SECRET").unwrap();
-    std::fs::write(&sibling, "OTHER-758-SECRET").unwrap();
+    let target = outside.path().join("chosen-mark.txt");
+    let sibling = outside.path().join("other-mark.txt");
+    std::fs::write(&target, "CHOSEN-MARK-SECRET").unwrap();
+    std::fs::write(&sibling, "OTHER-MARK-SECRET").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let sibling = std::fs::canonicalize(sibling).unwrap();
     let read = |id: &str, path: &std::path::Path| {
         Reply::Sse(tool_call(
             id,
             "read",
-            &serde_json::json!({"path": path}).to_string(),
+            &serde_json::json!({"files":[{"path": path}]}).to_string(),
         ))
     };
     let places = support::Places::new();
@@ -573,9 +543,9 @@ fn permanent_root_needs_a_new_process_and_binds_the_exact_path() {
     let first = Stub::start(Plan {
         completions: vec![
             read("before", &target),
-            Reply::Sse(text("PERMANENT-PENDING-model")),
-            read("still-denied", &target),
-            Reply::Sse(text("PERMANENT-STILL-DENIED-758")),
+            Reply::Sse(text("PERMANENT-PENDING-MARK")),
+            read("readmitted", &target),
+            Reply::Sse(text("PERMANENT-READMITTED-MARK")),
         ],
         ..Plan::default()
     });
@@ -602,45 +572,42 @@ fn permanent_root_needs_a_new_process_and_binds_the_exact_path() {
     until_normalized(&reader, &mut output, start, "Permanent");
     input.write_all(b"3\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "PERMANENT-PENDING-model");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "PERMANENT-PENDING-MARK");
+    readmit_after_root_grant(&reader, &mut output, &mut input, start);
     let saved_receipt = first.generations()[1].to_string();
     assert!(saved_receipt.contains("Permanent root"), "{saved_receipt}");
-    assert!(saved_receipt.contains("ego resume"), "{saved_receipt}");
+    assert!(
+        saved_receipt.contains("re-admits session"),
+        "{saved_receipt}"
+    );
+    assert!(
+        !saved_receipt.contains("CHOSEN-MARK-SECRET"),
+        "{saved_receipt}"
+    );
     let again = output.len();
     input
-        .write_all(b"try chosen file before restart\r")
+        .write_all(b"read chosen file after readmission\r")
         .unwrap();
     input.flush().unwrap();
-    until_normalized(
-        &reader,
-        &mut output,
-        again,
-        "Choose Deny, Session, or Permanent",
-    );
-    input.write_all(b"1\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, again, "PERMANENT-STILL-DENIED-758");
+    until_normalized(&reader, &mut output, again, "PERMANENT-READMITTED-MARK");
     until_prompt_from(&reader, &mut output, again);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
     assert!(places.home_path().join("config.toml").exists());
     assert!(
-        !first.generations()[3]
+        first.generations()[3]
             .to_string()
-            .contains("CHOSEN-758-SECRET")
+            .contains("CHOSEN-MARK-SECRET"),
+        "the same process did not re-admit the permanent root"
     );
-
-    #[cfg(target_os = "linux")]
-    approve_linux_read_root_backend_change(&places);
 
     let resumed = Stub::start(Plan {
         completions: vec![
             read("admitted", &target),
-            Reply::Sse(text("CHOSEN-REGRESSION-MARKER")),
+            Reply::Sse(text("CHOSEN-READ-MARK")),
             read("sibling-denied", &sibling),
-            Reply::Sse(text("SIBLING-REFUSED-758")),
+            Reply::Sse(text("SIBLING-REFUSED-MARK")),
         ],
         ..Plan::default()
     });
@@ -662,7 +629,7 @@ fn permanent_root_needs_a_new_process_and_binds_the_exact_path() {
     assert!(
         resumed.generations()[1]
             .to_string()
-            .contains("CHOSEN-758-SECRET")
+            .contains("CHOSEN-MARK-SECRET")
     );
     let sibling_run = places
         .ego(&resumed)
@@ -683,7 +650,7 @@ fn permanent_root_needs_a_new_process_and_binds_the_exact_path() {
             .last()
             .unwrap()
             .to_string()
-            .contains("OTHER-758-SECRET")
+            .contains("OTHER-MARK-SECRET")
     );
 }
 
@@ -693,24 +660,28 @@ fn permanent_root_needs_a_new_process_and_binds_the_exact_path() {
 #[test]
 fn session_root_is_bound_to_the_canonical_target_not_a_symlink() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("approved-758.txt");
-    let other = outside.path().join("unapproved-758.txt");
-    let alias = outside.path().join("alias-758.txt");
-    std::fs::write(&target, "APPROVED-758-SECRET").unwrap();
-    std::fs::write(&other, "UNAPPROVED-758-SECRET").unwrap();
+    let target = outside.path().join("approved-mark.txt");
+    let other = outside.path().join("unapproved-mark.txt");
+    let alias = outside.path().join("alias-mark.txt");
+    std::fs::write(&target, "APPROVED-MARK-SECRET").unwrap();
+    std::fs::write(&other, "UNAPPROVED-MARK-SECRET").unwrap();
     std::os::unix::fs::symlink(&target, &alias).unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let read = |id: &str, path: &std::path::Path| {
         Reply::Sse(tool_call(
             id,
             "read",
-            &serde_json::json!({"path": path}).to_string(),
+            &serde_json::json!({"files":[{"path": path}]}).to_string(),
         ))
     };
     let places = support::Places::new();
     places.file("AGENTS.md", "# Canonical root fixture\n");
     let first = Stub::start(Plan {
-        completions: vec![read("alias", &alias), Reply::Sse(text("ALIAS-758-PENDING"))],
+        completions: vec![
+            read("alias", &alias),
+            Reply::Sse(text("ALIAS-MARK-PENDING")),
+            Reply::Sse(text("RECORDED-MARK")),
+        ],
         ..Plan::default()
     });
     let ego = places.ego(&first).conversing().args([
@@ -738,23 +709,27 @@ fn session_root_is_bound_to_the_canonical_target_not_a_symlink() {
     assert!(shown.contains(target.to_str().unwrap()), "{shown}");
     input.write_all(b"2\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "ALIAS-758-PENDING");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "ALIAS-MARK-PENDING");
+    readmit_after_root_grant(&reader, &mut output, &mut input, start);
+    // A turn after re-admission records the re-admitted execution
+    // observation, so the next resume compares against it.
+    let recorded = output.len();
+    input.write_all(b"record the readmission\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, recorded, "RECORDED-MARK");
+    until_prompt_from(&reader, &mut output, recorded);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
     std::fs::remove_file(&alias).unwrap();
     std::os::unix::fs::symlink(&other, &alias).unwrap();
 
-    #[cfg(target_os = "linux")]
-    approve_linux_read_root_backend_change(&places);
-
     let after = Stub::start(Plan {
         completions: vec![
             read("original-target", &target),
-            Reply::Sse(text("REGRESSION-MARKER-DONE")),
+            Reply::Sse(text("TARGET-MARK-DONE")),
             read("changed-alias", &alias),
-            Reply::Sse(text("ALIAS-758-DENIED")),
+            Reply::Sse(text("ALIAS-MARK-DENIED")),
         ],
         ..Plan::default()
     });
@@ -776,7 +751,7 @@ fn session_root_is_bound_to_the_canonical_target_not_a_symlink() {
     assert!(
         after.generations()[1]
             .to_string()
-            .contains("APPROVED-758-SECRET"),
+            .contains("APPROVED-MARK-SECRET"),
         "resumed stdout: {}; stderr: {}; generation: {}",
         resumed.stdout,
         resumed.stderr,
@@ -803,7 +778,7 @@ fn session_root_is_bound_to_the_canonical_target_not_a_symlink() {
             .last()
             .unwrap()
             .to_string()
-            .contains("UNAPPROVED-758-SECRET")
+            .contains("UNAPPROVED-MARK-SECRET")
     );
 }
 
@@ -813,8 +788,8 @@ fn session_root_is_bound_to_the_canonical_target_not_a_symlink() {
 #[test]
 fn resumed_session_root_reaches_a_real_sandboxed_child() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("os-758.txt");
-    std::fs::write(&target, "OS-GUARD-758-SECRET").unwrap();
+    let target = outside.path().join("os-mark.txt");
+    std::fs::write(&target, "OS-GUARD-MARK-SECRET").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let places = support::Places::new();
     places.file("AGENTS.md", "# OS root fixture\n");
@@ -823,9 +798,9 @@ fn resumed_session_root_reaches_a_real_sandboxed_child() {
             Reply::Sse(tool_call(
                 "ask-root",
                 "read",
-                &serde_json::json!({"path": target}).to_string(),
+                &serde_json::json!({"files":[{"path": target}]}).to_string(),
             )),
-            Reply::Sse(text("BEFORE-RESUME-758")),
+            Reply::Sse(text("BEFORE-RESUME-MARK")),
         ],
         ..Plan::default()
     });
@@ -852,8 +827,8 @@ fn resumed_session_root_reaches_a_real_sandboxed_child() {
     until_normalized(&reader, &mut output, start, "Permanent");
     input.write_all(b"2\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "BEFORE-RESUME-758");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "BEFORE-RESUME-MARK");
+    readmit_after_root_grant(&reader, &mut output, &mut input, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
@@ -865,7 +840,7 @@ fn resumed_session_root_reaches_a_real_sandboxed_child() {
                 "exec",
                 &serde_json::json!({"argv": ["/bin/cat", target], "timeout_ms": 5000}).to_string(),
             )),
-            Reply::Sse(text("CHILD-REGRESSION-MARKER-DONE")),
+            Reply::Sse(text("CHILD-READ-MARK-DONE")),
         ],
         ..Plan::default()
     });
@@ -887,7 +862,7 @@ fn resumed_session_root_reaches_a_real_sandboxed_child() {
     assert!(
         after.generations()[1]
             .to_string()
-            .contains("OS-GUARD-758-SECRET"),
+            .contains("OS-GUARD-MARK-SECRET"),
         "child did not read: stdout: {}; stderr: {}; generation: {}",
         resumed.stdout,
         resumed.stderr,

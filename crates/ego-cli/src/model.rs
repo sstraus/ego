@@ -118,6 +118,7 @@ pub(crate) fn rows(
         ProviderRow::ollama(base(OLLAMA_HOST, OLLAMA_BASE)?),
         ProviderRow::openai_at(base(OPENAI_BASE_URL, OPENAI_BASE)?),
         ProviderRow::anthropic(base(ANTHROPIC_BASE_URL, ANTHROPIC_BASE)?),
+        ProviderRow::bedrock(bedrock_base()?),
     );
     for row in &mut rows {
         if row.id() == "openrouter" {
@@ -150,8 +151,32 @@ fn mapped_rows(
     ollama: ProviderRow,
     openai: ProviderRow,
     anthropic: ProviderRow,
+    bedrock: ProviderRow,
 ) -> Vec<ProviderRow> {
-    ego_ai::conformance::final_provider_rows(ollama, openai, anthropic).into()
+    ego_ai::conformance::final_provider_rows(ollama, openai, anthropic, bedrock).into()
+}
+
+/// The Bedrock base for the region the AWS SDKs would use.
+///
+/// `AWS_REGION`, then `AWS_DEFAULT_REGION`, then the documented default: the
+/// order the AWS CLI and SDKs read them. A blank variable is no region.
+fn bedrock_base() -> Result<Url, ResolveError> {
+    let region = ["AWS_REGION", "AWS_DEFAULT_REGION"]
+        .into_iter()
+        .find_map(|var| {
+            std::env::var(var)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (var, value))
+        });
+    let (var, region) = region.unwrap_or((
+        "the default region",
+        ego_ai::provider::BEDROCK_DEFAULT_REGION.to_owned(),
+    ));
+    ego_ai::provider::bedrock_base(&region).ok_or_else(|| ResolveError::EndpointUnreachable {
+        endpoint: region.trim().to_owned(),
+        message: format!("{var} is not an AWS region"),
+    })
 }
 
 /// Assemble the one resolver-selected catalogue from current rows and facts.
@@ -190,6 +215,7 @@ pub(crate) fn supplied_request_profile(
                 Url::parse(OPENAI_BASE).expect("the built-in OpenAI base is a URL"),
             ),
             ProviderRow::anthropic_default(),
+            ProviderRow::bedrock_default(),
         ),
     );
     catalogue
@@ -485,6 +511,7 @@ fn unresolved_selection_error() -> GenerationModelError {
 
 /// CLI adapter for the core-owned fresh generation-model port.
 pub struct CliGenerationModelSource {
+    cache_ttl_seconds: Option<std::num::NonZeroU64>,
     selection: Arc<GenerationSelection>,
     initial_identity: ModelRef,
     initial_thinking: Option<ThinkingLevel>,
@@ -510,6 +537,7 @@ impl CliGenerationModelSource {
             initial_identity: identity,
             initial_thinking: thinking,
             output_limit: None,
+            cache_ttl_seconds: None,
             offline: false,
             proxy: None,
             judge,
@@ -517,6 +545,11 @@ impl CliGenerationModelSource {
             auth,
             credential_commands: Arc::new(crate::auth::OsCredentialCommand),
         }
+    }
+
+    pub fn with_cache_ttl_seconds(mut self, ttl: Option<std::num::NonZeroU64>) -> Self {
+        self.cache_ttl_seconds = ttl;
+        self
     }
 
     pub fn with_output_limit(mut self, limit: Option<std::num::NonZeroU64>) -> Self {
@@ -797,7 +830,8 @@ impl CliGenerationModelSource {
                 Arc::clone(http),
                 credential,
             )
-            .with_service_tier(service_tier);
+            .with_service_tier(service_tier)
+            .with_cache_ttl_seconds(self.cache_ttl_seconds);
             let generator = match filter {
                 Some(config) if config.enabled => generator.with_protocol_filter(
                     config.clone(),
@@ -1512,6 +1546,7 @@ mod tests {
                 ProviderRow::ollama_default(),
                 ProviderRow::openai(),
                 ProviderRow::anthropic_default(),
+                ProviderRow::bedrock_default(),
             ),
         );
         let row = catalogue
@@ -1642,6 +1677,7 @@ mod tests {
                 ProviderRow::ollama_default(),
                 ProviderRow::openai(),
                 ProviderRow::anthropic_default(),
+                ProviderRow::bedrock_default(),
             ),
         );
         let row = catalogue.row("anthropic").expect("anthropic is selectable");
@@ -1701,6 +1737,8 @@ mod tests {
                 "nous",
                 "openrouter",
                 "gemini",
+                "bedrock",
+                "vertex",
             ],
             "the selectable provider table changed"
         );

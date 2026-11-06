@@ -319,24 +319,31 @@ pub struct McpProcessScope {
     runtime: Arc<McpRegistryRuntime>,
     /// Present for a run: its stdio servers keep one child across tool calls.
     stdio: Option<Arc<McpStdioSession>>,
+    /// Present when the user opted in to MCP Tasks: the run's live tasks.
+    tasks: Option<Arc<ego_core::mcp::McpTaskLedger>>,
 }
 
 impl McpProcessScope {
     pub async fn online(cancel: CancelToken) -> Result<Self, String> {
         let effects = CommandHttpScope::online(cancel).await?;
-        Self::from_effects(effects, false)
+        Self::from_effects(effects, false, false)
     }
 
     pub(crate) async fn for_run(
         confinement: RunConfinement,
         cancel: CancelToken,
         run_deadline: Option<Instant>,
+        tasks: bool,
     ) -> Result<Self, McpProcessScopeError> {
         let effects = CommandHttpScope::confined(confinement, cancel, run_deadline, None).await?;
-        Self::from_effects(effects, true).map_err(McpProcessScopeError::Setup)
+        Self::from_effects(effects, true, tasks).map_err(McpProcessScopeError::Setup)
     }
 
-    fn from_effects(effects: CommandHttpScope, retain_stdio: bool) -> Result<Self, String> {
+    fn from_effects(
+        effects: CommandHttpScope,
+        retain_stdio: bool,
+        tasks: bool,
+    ) -> Result<Self, String> {
         let root = crate::config::ego_home()
             .ok_or_else(|| "MCP needs EGO_HOME or HOME for its machine journals".to_owned())?
             .join("mcp");
@@ -380,6 +387,7 @@ impl McpProcessScope {
                 Arc::new(SystemClock),
                 MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
                 MCP_DEFAULT_OPERATION_TIMEOUT,
+                tasks,
             )
             .map_err(|error| format!("the MCP server registry could not be opened: {error}"))?,
         );
@@ -387,7 +395,15 @@ impl McpProcessScope {
             _effects: effects,
             runtime,
             stdio: session,
+            tasks: tasks.then(|| Arc::new(ego_core::mcp::McpTaskLedger::new())),
         })
+    }
+
+    /// The delivery port for this run's MCP tasks, when the user opted in.
+    pub(crate) fn task_port(&self) -> Option<Arc<dyn ego_core::mcp::McpTaskPort>> {
+        self.tasks
+            .as_ref()
+            .map(|ledger| Arc::clone(ledger) as Arc<dyn ego_core::mcp::McpTaskPort>)
     }
 
     /// Reap every retained stdio child before the run's effect scope goes away.

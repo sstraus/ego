@@ -144,9 +144,10 @@ impl TypedTool for NotebookEditTool {
                 ));
             }
             io.write(&path, &after)?;
-            Ok(ToolResult::builtin(format!(
-                "edited cell {id} in {path}; code was not executed"
-            )))
+            Ok(
+                ToolResult::builtin(format!("edited cell {id} in {path}; code was not executed"))
+                    .with_checkpoint(io.last_checkpoint(&path)),
+            )
         })
     }
 }

@@ -122,7 +122,8 @@ def toml_list(values):
 
 
 def row(name, provider, wire, model_id, model, snapshot, provenance=None):
-    slug = f"{name}/{model_id}"
+    # A cloud platform serves the snapshot's model under its own id spelling.
+    slug = f"{name}/{provider.get('id_prefix', '')}{model_id}"
     limit = model["limit"]
     context = provider.get("context_override", limit.get("context"))
     output = limit.get("output")

@@ -123,6 +123,8 @@ fn queued_prompt_during_provider_retry_survives_missing_cursor_replies() {
     replies.store(false, Ordering::SeqCst);
     let queued = output.len();
     input.write_all(b"queued during retry\r").unwrap();
+    // A capacity refusal waits a minute; Meta-r ends the wait.
+    input.write_all(b"\x1br").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, queued, "QUEUED-ANSWER");
     let later = output.len();

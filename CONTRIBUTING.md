@@ -55,10 +55,11 @@ prices and capabilities must not be invented.
 
 ## Releases
 
-Release notes live in `docs/release-notes/VERSION.md`. The release workflow checks
-that a `vVERSION` tag matches the workspace version and that its notes exist.
-Tagging can publish assets and update the Homebrew tap. Do not use a publication
-workflow as a local validation command.
+Release changes are recorded in `CHANGELOG.md`. Follow the "Prepare a release"
+procedure in [documentation maintenance](docs/maintaining.md), including
+`just changelog-check`, before tagging. A `vVERSION` tag must match the workspace
+version. Tagging can publish assets and update the Homebrew tap; do not use a
+publication workflow as a local validation command.
 
 ## License and private information
 

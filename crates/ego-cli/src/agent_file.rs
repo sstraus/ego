@@ -57,6 +57,7 @@ impl AgentFile {
 #[derive(Default)]
 struct Fields {
     model: Option<String>,
+    effort: Option<String>,
     mode: Option<String>,
     sandbox: Option<String>,
     allow: Vec<String>,
@@ -130,6 +131,7 @@ pub(crate) fn load_definition(
     let mut toml = String::new();
     for (key, value) in [
         ("model", fields.model.as_deref()),
+        ("thinking", fields.effort.as_deref()),
         ("mode", fields.mode.as_deref()),
         ("sandbox", fields.sandbox.as_deref()),
     ] {
@@ -181,7 +183,16 @@ fn fields(path: &Path, header: &str) -> Result<Fields, UsageError> {
     for key in entries.keys() {
         if !matches!(
             key.as_str(),
-            "model" | "mode" | "sandbox" | "allow" | "deny" | "tools" | "roots" | "schema" | "vars"
+            "model"
+                | "effort"
+                | "mode"
+                | "sandbox"
+                | "allow"
+                | "deny"
+                | "tools"
+                | "roots"
+                | "schema"
+                | "vars"
         ) {
             return Err(file_error(path, format!("contains unknown field `{key}`")));
         }
@@ -199,6 +210,7 @@ fn fields(path: &Path, header: &str) -> Result<Fields, UsageError> {
         roots,
         deny: take_strings(path, &mut entries, "deny")?,
         model: take_string(path, &mut entries, "model")?,
+        effort: take_string(path, &mut entries, "effort")?,
         mode: take_string(path, &mut entries, "mode")?,
         sandbox: take_string(path, &mut entries, "sandbox")?,
         allow: take_strings(path, &mut entries, "allow")?,

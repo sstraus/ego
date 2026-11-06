@@ -10,6 +10,7 @@
 
 pub mod budget;
 pub mod ceiling;
+pub mod code_intel;
 pub mod command;
 pub mod compact;
 pub mod config;
@@ -29,10 +30,13 @@ pub mod health;
 pub mod history;
 pub mod hook;
 pub mod mcp;
+mod mcp_task;
+pub mod memory;
 pub mod permit;
 pub mod plan;
 pub mod public;
 pub mod question;
+pub mod recap;
 pub mod run;
 pub mod session;
 pub mod session_lifecycle;

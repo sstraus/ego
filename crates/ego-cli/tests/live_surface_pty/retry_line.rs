@@ -53,6 +53,10 @@ fn retry_contract(term: &str, plain: bool, live: bool) {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"retry line\r").unwrap();
     input.flush().unwrap();
+    for attempt in 1..3 {
+        until_normalized(&reader, &mut output, 0, &format!("attempt {attempt}/3"));
+        force_retry(&mut input);
+    }
     until_normalized(&reader, &mut output, 0, "attempt 3/3");
     drain_until_quiet(&reader, &mut output);
     let before = screen_rows(&output, 40, 180).join("\n");
@@ -65,6 +69,7 @@ fn retry_contract(term: &str, plain: bool, live: bool) {
     }
     let live_count = before.matches("503").count();
     let start = output.len();
+    force_retry(&mut input);
     until_normalized(&reader, &mut output, start, "RETRY-RECOVERED");
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
@@ -146,13 +151,25 @@ fn retry_colour_contract(recovers: bool, no_color: bool) {
     until_post_trust_prompt(&reader, &mut output, 0);
     input.write_all(b"retry colours\r").unwrap();
     input.flush().unwrap();
+    until_normalized(&reader, &mut output, 0, "attempt 1/2");
+    force_retry(&mut input);
     until_normalized(&reader, &mut output, 0, "attempt 2/2");
     drain_until_quiet(&reader, &mut output);
     let before = output.clone();
     let start = output.len();
-    if recovers {
-        until_normalized(&reader, &mut output, start, "RETRY-RECOVERED");
-    }
+    force_retry(&mut input);
+    // The force notice repaints the prompt at once, so wait for the outcome
+    // itself before the prompt that follows it.
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        if recovers {
+            "RETRY-RECOVERED"
+        } else {
+            "stopped"
+        },
+    );
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
     let after = output.clone();
@@ -190,6 +207,13 @@ fn retry_colour_contract(recovers: bool, no_color: bool) {
             "failed turn emitted success colour"
         );
     }
+}
+
+/// A 503 is a capacity refusal that waits minutes; Meta-r ends
+/// the wait through the same control a person uses.
+fn force_retry(input: &mut impl std::io::Write) {
+    input.write_all(b"\x1br").expect("Meta-r");
+    input.flush().unwrap();
 }
 
 fn cause_colours(output: &[u8]) -> Vec<vt100::Color> {

@@ -668,7 +668,7 @@ impl BuiltInFlow {
     }
 }
 
-fn oauth_profile(id: &str, routes: &[&str]) -> AdmittedHttpProfile {
+pub(crate) fn oauth_profile(id: &str, routes: &[&str]) -> AdmittedHttpProfile {
     let routes = routes
         .iter()
         .map(|route| Url::parse(route).expect("a built-in OAuth route is a URL"))
@@ -1164,7 +1164,7 @@ fn parse(raw: &str) -> Result<Url, FlowError> {
     })
 }
 
-fn form_request(url: &str, fields: &[(&str, &str)]) -> Result<HttpRequest, FlowError> {
+pub(crate) fn form_request(url: &str, fields: &[(&str, &str)]) -> Result<HttpRequest, FlowError> {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer.extend_pairs(fields.iter().copied());
     Ok(HttpRequest {

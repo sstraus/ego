@@ -12,6 +12,7 @@ use ego_tools::config::OsUserConfigStore;
 use ego_tools::store::OsIo;
 
 use crate::config;
+use crate::onboarding::ProviderReadiness;
 
 /// Terminal and interactive-session seats share the same configuration flow.
 /// Only the human seat supplies answers; model output never reaches this port.
@@ -34,12 +35,46 @@ fn describe(key: &ManagedConfigKey) -> &'static str {
         Key::ExecEnv => "Choose which environment variables child processes receive.",
         Key::ExecEnvAllowlist => "Name variables that children may receive in allowlist mode.",
         Key::Network => "Allow or block network access during a run.",
+        Key::WebPrivateNetwork => {
+            "Let web_fetch reach every local and LAN address (true turns the block off)."
+        }
         Key::Budget => "Limit the tokens or money a run can spend.",
         Key::Bare => "Ignore ambient project instructions and configuration.",
         Key::PermissionsJudge => "Choose a model to review uncertain tool requests.",
         Key::StatuslineTemplate => "Control the text shown above the prompt.",
         Key::Keybindings => "Change the keys used by the interactive editor.",
         Key::Vim => "Use Vim keys to edit the interactive prompt.",
+        Key::CompactionIdle => "Compact an idle session shortly before its prompt cache expires.",
+        Key::CompactionIdleMarginSeconds => {
+            "Start idle compaction this many seconds before the cache expires."
+        }
+        Key::CompactionIdleThreshold => {
+            "Skip idle compaction below this percent of the context window."
+        }
+        Key::Checkpoints => {
+            "Save a private Git checkpoint before every file write so it can be restored."
+        }
+        Key::SessionsCompress => "Compress old sessions in the background (true is the default).",
+        Key::Tools => {
+            "Limit which built-in tools every session offers (an empty list offers none)."
+        }
+        Key::Cache => "Choose how long a provider may retain prompt cache entries.",
+        Key::InstructionsMaxFiles => "Limit how many instruction files one run may load.",
+        Key::CompactionHeadless => {
+            "Compact a headless run that fills its context window and continue in the successor."
+        }
+        Key::DoctorNetwork => "Let ego doctor probe the network reachability of each provider.",
+        Key::RecapEnabled => "Show a short recap at the first prompt after an absence.",
+        Key::RecapAfterMinutes => {
+            "Show the recap after this many minutes without a completed turn."
+        }
+        Key::McpTasks => {
+            "Let HTTP MCP servers run long tools as tasks, and report each result when it ends."
+        }
+        Key::Memory => "Keep a memory file for this workspace that the model can add to.",
+        Key::Lsp => {
+            "Let the model ask language servers for definitions, references and diagnostics."
+        }
         Key::SessionDir => "Choose where CI sessions are saved.",
         Key::ArtifactDir => "Choose where CI artifacts are saved.",
         Key::AuthHeaders(_) => "Set identity headers for this provider.",
@@ -51,8 +86,13 @@ fn describe(key: &ManagedConfigKey) -> &'static str {
 const ADVANCED: &[(&str, &str)] = &[
     ("max_output_tokens", "Limit the length of each model reply."),
     (
-        "cache",
-        "Choose how long a provider may retain prompt cache entries.",
+        "compaction.threshold",
+        "Compact when the context reaches this percent of the window.",
+    ),
+    ("task.model", "Choose the default model for task children."),
+    (
+        "task.effort",
+        "Choose the default reasoning effort for task children.",
     ),
     (
         "permissions.allow",
@@ -69,6 +109,10 @@ const ADVANCED: &[(&str, &str)] = &[
     (
         "instructions.exclude_roots",
         "Exclude subtrees from shared instructions.",
+    ),
+    (
+        "auth.PROVIDER.protocol_filter",
+        "Route provider requests through a local protocol filter.",
     ),
     (
         "hooks",
@@ -123,6 +167,7 @@ fn effective_value(
             Some(ManagedConfigValue::ExecPaths(effective.exec_paths.clone()).to_toml())
         }
         Key::Network => Some(ManagedConfigValue::Network(effective.network).to_toml()),
+        Key::WebPrivateNetwork => Some(effective.permissions.web_private_network.to_string()),
         Key::Budget => Some(format!(
             "money: {}; tokens: {}",
             effective.ceilings.money.map_or_else(
@@ -157,6 +202,26 @@ fn effective_value(
             .as_ref()
             .map(|value| ManagedConfigValue::Keybindings(value.clone()).to_toml()),
         Key::Vim => Some(effective.ui.vim.unwrap_or(false).to_string()),
+        Key::CompactionIdle => Some(effective.compaction.idle.to_string()),
+        Key::CompactionHeadless => Some(effective.compaction.headless.to_string()),
+        Key::DoctorNetwork => Some(effective.doctor_network.to_string()),
+        Key::RecapEnabled => Some(effective.recap.enabled.to_string()),
+        Key::RecapAfterMinutes => Some(effective.recap.after_minutes.to_string()),
+        Key::McpTasks => Some(effective.mcp_tasks.to_string()),
+        Key::Memory => Some(effective.memory.to_string()),
+        Key::CompactionIdleMarginSeconds => {
+            Some(effective.compaction.idle_margin_seconds.to_string())
+        }
+        Key::CompactionIdleThreshold => Some(effective.compaction.idle_threshold.get().to_string()),
+        Key::Cache => Some(ManagedConfigValue::Cache(effective.cache).to_toml()),
+        Key::Checkpoints => Some(effective.checkpoints.to_string()),
+        Key::SessionsCompress => Some((effective.sessions.compress != Some(false)).to_string()),
+        Key::Tools => effective
+            .tools
+            .as_ref()
+            .map(|names| ManagedConfigValue::Tools(names.clone()).to_toml()),
+        Key::InstructionsMaxFiles => Some(effective.instructions.limits().max_files.to_string()),
+        Key::Lsp => Some(effective.lsp.to_string()),
         Key::SessionDir => effective
             .session_dir
             .as_ref()
@@ -311,6 +376,31 @@ fn source_for(
                 .or(base.budget.as_ref())
                 .is_some(),
             Key::Bare => base.bare.is_some(),
+            Key::WebPrivateNetwork => base.web_private_network.is_some(),
+            Key::Memory => base.memory.is_some(),
+            Key::Cache => base.cache.is_some(),
+            Key::Tools => base.tools.is_some(),
+            Key::Checkpoints => base.checkpoints.is_some(),
+            Key::SessionsCompress => base
+                .sessions
+                .as_ref()
+                .and_then(|sessions| sessions.compress)
+                .is_some(),
+            Key::CompactionIdleMarginSeconds => base
+                .compaction
+                .and_then(|compaction| compaction.idle_margin_seconds)
+                .is_some(),
+            Key::CompactionIdleThreshold => base
+                .compaction
+                .and_then(|compaction| compaction.idle_threshold)
+                .is_some(),
+            Key::InstructionsMaxFiles => base
+                .instructions
+                .as_ref()
+                .and_then(|instructions| instructions.max_files)
+                .is_some(),
+            Key::Lsp => base.lsp.is_some(),
+            Key::McpTasks => base.mcp_tasks.is_some(),
             Key::PermissionsJudge => profile
                 .and_then(|p| p.permissions.as_ref())
                 .or(base.permissions.as_ref())
@@ -327,6 +417,17 @@ fn source_for(
                 .and_then(|ui| ui.keybindings.as_ref())
                 .is_some(),
             Key::Vim => base.ui.as_ref().and_then(|ui| ui.vim).is_some(),
+            Key::CompactionIdle => base
+                .compaction
+                .and_then(|compaction| compaction.idle)
+                .is_some(),
+            Key::CompactionHeadless => base
+                .compaction
+                .and_then(|compaction| compaction.headless)
+                .is_some(),
+            Key::DoctorNetwork => base.doctor_network.is_some(),
+            Key::RecapEnabled => base.recap.and_then(|recap| recap.enabled).is_some(),
+            Key::RecapAfterMinutes => base.recap.and_then(|recap| recap.after_minutes).is_some(),
             Key::AuthHeaders(provider) => base
                 .auth
                 .get(provider)
@@ -386,6 +487,16 @@ fn advanced_stored(key: &str, layer: &ConfigLayer, target: &UserConfigTarget) ->
             .as_ref()
             .map(|instructions| format!("{:?}", instructions.exclude_roots)),
         "hooks" => (!layer.hooks.is_empty()).then(|| format!("{:?}", layer.hooks)),
+        "task.model" => layer
+            .task
+            .as_ref()
+            .and_then(|task| task.model.as_ref())
+            .map(|model| model.0.clone()),
+        "task.effort" => layer
+            .task
+            .as_ref()
+            .and_then(|task| task.effort)
+            .map(|effort| effort.as_str().to_owned()),
         "ui.statusline.providers" => layer
             .ui
             .as_ref()
@@ -488,6 +599,21 @@ fn advanced_details(
                 .join("; ");
             (format!("[{values}]"), "per-rule sources above".into())
         }
+        "task.model" => (
+            effective
+                .task
+                .model
+                .as_ref()
+                .map_or_else(|| "unset".into(), |model| model.0.clone()),
+            source,
+        ),
+        "task.effort" => (
+            effective
+                .task
+                .effort
+                .map_or_else(|| "unset".into(), |effort| effort.as_str().to_owned()),
+            source,
+        ),
         "mcp.servers" => (
             format!("{:?}", effective.mcp.entries()),
             "per-entry provenance above".into(),
@@ -638,7 +764,19 @@ fn edit_value(screen: &mut impl Screen, key: &ManagedConfigKey) -> Option<Manage
         Key::Thinking => Some(&["off", "minimal", "low", "medium", "high", "xhigh", "max"]),
         Key::Network => Some(&["on", "off"]),
         Key::ExecEnv => Some(&["inherit", "core", "allowlist"]),
-        Key::Bare | Key::Vim => Some(&["true", "false"]),
+        Key::Cache => Some(&["none", "short", "long"]),
+        Key::Bare
+        | Key::Vim
+        | Key::CompactionIdle
+        | Key::CompactionHeadless
+        | Key::DoctorNetwork
+        | Key::RecapEnabled
+        | Key::Memory
+        | Key::Checkpoints
+        | Key::SessionsCompress
+        | Key::Lsp
+        | Key::McpTasks
+        | Key::WebPrivateNetwork => Some(&["true", "false"]),
         _ => None,
     };
     let raw = if let Some(choices) = choices {
@@ -651,7 +789,21 @@ fn edit_value(screen: &mut impl Screen, key: &ManagedConfigKey) -> Option<Manage
     } else {
         screen.input(&format!("{key}: enter one TOML value"))?
     };
-    let raw = if matches!(key, Key::Bare | Key::Vim) {
+    let raw = if matches!(
+        key,
+        Key::Bare
+            | Key::Vim
+            | Key::CompactionIdle
+            | Key::CompactionHeadless
+            | Key::DoctorNetwork
+            | Key::RecapEnabled
+            | Key::Memory
+            | Key::Checkpoints
+            | Key::SessionsCompress
+            | Key::Lsp
+            | Key::McpTasks
+            | Key::WebPrivateNetwork
+    ) {
         raw.trim_matches('"').to_owned()
     } else {
         raw
@@ -673,6 +825,7 @@ pub(crate) fn run(
     home: &Path,
     preset: Option<&str>,
     current_session: Option<&ego_core::config::Effective>,
+    providers: &[ProviderReadiness],
 ) -> Result<(), String> {
     let Some(target) = target(screen, workspace, home, preset)? else {
         return Ok(());
@@ -710,6 +863,11 @@ pub(crate) fn run(
         for (key, description) in ADVANCED {
             choices.push(format!("{key} — {description} [advanced: config edit]"));
         }
+        choices.push(format!(
+            "providers — {} of {} ready [view credential setup]",
+            providers.iter().filter(|provider| provider.ready).count(),
+            providers.len()
+        ));
         choices.push(format!("Review and save ({} pending)", staged.len()));
         choices.push("Discard and exit".into());
         let Some(index) = screen.choose(
@@ -823,6 +981,18 @@ pub(crate) fn run(
                     return Ok(());
                 }
             }
+        }
+        if index == keys.len() + ADVANCED.len() {
+            let lines = providers
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            screen.choose(
+                &format!("Providers — credential readiness\n{lines}\nCredentials come from environment variables or 'ego auth login'. Setup does not store them."),
+                &["Back".into()],
+            );
+            continue;
         }
         if index >= keys.len() {
             let (key, description) = ADVANCED[index - keys.len()];
@@ -1083,7 +1253,7 @@ mod tests {
         std::fs::create_dir_all(&home).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         let config = home.join("config.toml");
-        let original = "exec_paths=['/bin']\n[ui]\nvim=true\n[ui.statusline]\ntemplate='short'\n[profile.ci]\nsession_dir='/tmp/ego-ci'\n[auth.demo]\ncredential_command='echo private'\n";
+        let original = "exec_paths=['/bin']\n[ui]\nvim=true\n[ui.statusline]\ntemplate='short'\n[profile.ci]\nsession_dir='/tmp/ego-ci'\n[auth.demo]\ncredential_command='echo sentinel-credential'\n";
         std::fs::write(&config, original).unwrap();
         let mut base = InspectScreen {
             selections: [
@@ -1102,7 +1272,7 @@ mod tests {
             details: Vec::new(),
             catalogue: Vec::new(),
         };
-        run(&mut base, &workspace, &home, None, None).unwrap();
+        run(&mut base, &workspace, &home, None, None, &[]).unwrap();
         assert!(
             base.details[0].contains("/bin") && base.details[0].contains("user"),
             "{}",
@@ -1124,9 +1294,10 @@ mod tests {
             base.details[3]
         );
         assert!(
-            base.details.iter().all(
-                |text| !text.contains("private") && !text.contains("see config ls --effective")
-            )
+            base.details
+                .iter()
+                .all(|text| !text.contains("sentinel-credential")
+                    && !text.contains("see config ls --effective"))
         );
         assert!(
             base.catalogue
@@ -1138,13 +1309,17 @@ mod tests {
                 .iter()
                 .any(|row| row.starts_with("auth.demo.credential_command"))
         );
-        assert!(base.catalogue.iter().all(|row| !row.contains("private")));
+        assert!(
+            base.catalogue
+                .iter()
+                .all(|row| !row.contains("sentinel-credential"))
+        );
         let mut ci = InspectScreen {
             selections: ["session_dir =", "Back", "Discard and exit"].into(),
             details: Vec::new(),
             catalogue: Vec::new(),
         };
-        run(&mut ci, &workspace, &home, Some("ci"), None).unwrap();
+        run(&mut ci, &workspace, &home, Some("ci"), None, &[]).unwrap();
         assert!(
             ci.details[0].contains("/tmp/ego-ci") && ci.details[0].contains("user"),
             "{}",
@@ -1199,6 +1374,166 @@ mod tests {
         );
     }
 
+    // Catches: the owner cannot turn the web private-address block off from
+    // setup, or setup stores a value the resolver does not hand to the policy.
+    #[test]
+    fn setup_turns_the_web_private_address_block_off_in_user_config() {
+        struct Choices(VecDeque<&'static str>);
+        impl Screen for Choices {
+            fn choose(&mut self, _title: &str, options: &[String]) -> Option<usize> {
+                let label = self.0.pop_front()?;
+                Some(
+                    options
+                        .iter()
+                        .position(|option| option.starts_with(label))
+                        .expect(label),
+                )
+            }
+            fn input(&mut self, _prompt: &str) -> Option<String> {
+                None
+            }
+            fn confirm(&mut self, preview: &str) -> bool {
+                assert!(preview.contains("web_private_network"), "{preview}");
+                true
+            }
+            fn notice(&mut self, _text: &str) {}
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut screen = Choices(
+            [
+                "User defaults",
+                "web_private_network =",
+                "Change value",
+                "true",
+                "Review and save",
+            ]
+            .into(),
+        );
+        run(&mut screen, &workspace, &home, None, None, &[]).unwrap();
+        assert!(screen.0.is_empty());
+        let text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let layers = [ConfigLayer::parse(Source::User, &text).unwrap()];
+        let resolved = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
+        assert!(resolved.permissions.web_private_network, "{text}");
+    }
+
+    // Catches: a scalar key that `ego setup` only names is shown but not written, so the
+    // row exists while the owner still has to edit the file.
+    #[test]
+    fn setup_writes_the_typed_scalar_rows_that_were_advanced() {
+        struct Script {
+            choices: VecDeque<&'static str>,
+            inputs: VecDeque<&'static str>,
+        }
+        impl Screen for Script {
+            fn choose(&mut self, _title: &str, options: &[String]) -> Option<usize> {
+                let label = self.choices.pop_front()?;
+                Some(
+                    options
+                        .iter()
+                        .position(|option| option.starts_with(label))
+                        .expect(label),
+                )
+            }
+            fn input(&mut self, _prompt: &str) -> Option<String> {
+                self.inputs.pop_front().map(str::to_owned)
+            }
+            fn confirm(&mut self, _preview: &str) -> bool {
+                true
+            }
+            fn notice(&mut self, text: &str) {
+                assert!(text.starts_with("Saved:"), "unexpected notice: {text}");
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut screen = Script {
+            choices: [
+                "User defaults",
+                "cache =",
+                "Change value",
+                "long",
+                "compaction.idle_margin_seconds =",
+                "Change value",
+                "compaction.idle_threshold =",
+                "Change value",
+                "instructions.max_files =",
+                "Change value",
+                "Review and save",
+            ]
+            .into(),
+            inputs: ["45", "40", "7"].into(),
+        };
+        run(&mut screen, &workspace, &home, None, None, &[]).unwrap();
+        assert!(screen.choices.is_empty() && screen.inputs.is_empty());
+        let text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let layers = [ConfigLayer::parse(Source::User, &text).unwrap()];
+        let resolved = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
+        assert_eq!(
+            resolved.cache,
+            ego_core::generator::capabilities::CacheRetention::Long,
+            "{text}"
+        );
+        assert_eq!(resolved.compaction.idle_margin_seconds.get(), 45, "{text}");
+        assert_eq!(resolved.compaction.idle_threshold.get(), 40, "{text}");
+        assert_eq!(resolved.instructions.limits().max_files, 7, "{text}");
+    }
+
+    // Catches: the compression row is shown but `ego setup` writes nothing the job reads, so
+    // old sessions are still compressed after the owner turned it off.
+    #[test]
+    fn setup_turns_cold_session_compression_off_in_user_config() {
+        struct Choices(VecDeque<&'static str>);
+        impl Screen for Choices {
+            fn choose(&mut self, _title: &str, options: &[String]) -> Option<usize> {
+                let label = self.0.pop_front()?;
+                Some(
+                    options
+                        .iter()
+                        .position(|option| option.starts_with(label))
+                        .expect(label),
+                )
+            }
+            fn input(&mut self, _prompt: &str) -> Option<String> {
+                None
+            }
+            fn confirm(&mut self, _preview: &str) -> bool {
+                true
+            }
+            fn notice(&mut self, text: &str) {
+                assert!(text.starts_with("Saved:"), "unexpected notice: {text}");
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut screen = Choices(
+            [
+                "User defaults",
+                "sessions.compress =",
+                "Change value",
+                "false",
+                "Review and save",
+            ]
+            .into(),
+        );
+        run(&mut screen, &workspace, &home, None, None, &[]).unwrap();
+        assert!(screen.0.is_empty());
+        let text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+        let layers = [ConfigLayer::parse(Source::User, &text).unwrap()];
+        let resolved = resolve_selected(&layers, Trust::Untrusted, None).unwrap();
+        assert_eq!(resolved.sessions.compress_after(), None, "{text}");
+    }
+
     // Catches: setup overwrites another writer's bytes after showing a stale preview.
     #[test]
     fn setup_refuses_a_candidate_when_config_changes_during_confirmation() {
@@ -1222,7 +1557,7 @@ mod tests {
             concurrent_edit: true,
             notices: Vec::new(),
         };
-        run(&mut screen, &workspace, &home, None, None).unwrap();
+        run(&mut screen, &workspace, &home, None, None, &[]).unwrap();
         assert_eq!(
             std::fs::read_to_string(config).unwrap(),
             "# concurrent edit\nmode='auto'\n"
@@ -1275,7 +1610,7 @@ mod tests {
             .into(),
             details: Vec::new(),
         };
-        run(&mut screen, &workspace, &home, None, None).unwrap();
+        run(&mut screen, &workspace, &home, None, None, &[]).unwrap();
         assert!(
             screen.details.iter().any(|detail| detail.contains("123")
                 && detail.contains("effective:")
@@ -1348,6 +1683,7 @@ mod tests {
                 &home,
                 profile,
                 live.then_some(&session),
+                &[],
             )
             .unwrap();
             assert!(
@@ -1405,7 +1741,7 @@ mod tests {
             .into(),
             config,
         };
-        run(&mut screen, &workspace, &home, None, None).unwrap();
+        run(&mut screen, &workspace, &home, None, None, &[]).unwrap();
     }
 
     // Catches: editing a named profile accidentally changes the user base setting.
@@ -1424,7 +1760,7 @@ mod tests {
             concurrent_edit: false,
             notices: Vec::new(),
         };
-        run(&mut screen, &workspace, &home, Some("docs"), None).unwrap();
+        run(&mut screen, &workspace, &home, Some("docs"), None, &[]).unwrap();
         let parsed = ego_core::config::ConfigLayer::parse(
             Source::User,
             &std::fs::read_to_string(config).unwrap(),
@@ -1436,5 +1772,38 @@ mod tests {
             Some("default")
         );
         assert!(screen.choices.is_empty());
+    }
+
+    #[test]
+    fn task_default_rows_show_the_stored_and_effective_values() {
+        // Catches: a `task.*` advanced row without a detail arm, which panics
+        // `ego setup` when the owner selects it, or shows a stored key as unset.
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[task]\nmodel='anthropic/claude-opus-5-5'\neffort='xhigh'\n",
+        )
+        .unwrap();
+        let (current, layers) = effective(&workspace, &home, &UserConfigTarget::Base).unwrap();
+        for (key, expected) in [
+            ("task.model", "anthropic/claude-opus-5-5"),
+            ("task.effort", "xhigh"),
+        ] {
+            let (stored, value, source) =
+                advanced_details(key, &UserConfigTarget::Base, &current, &layers);
+            assert!(
+                stored.to_lowercase().contains(expected),
+                "{key} stored: {stored}"
+            );
+            assert!(
+                value.to_lowercase().contains(expected),
+                "{key} value: {value}"
+            );
+            assert_eq!(source, "user", "{key}");
+        }
     }
 }

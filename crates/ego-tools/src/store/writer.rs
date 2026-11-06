@@ -8,7 +8,7 @@
 //!
 //! Whether a crash happened is not observable from outside the store, so
 //! "recover if damaged" is not a decision a caller can make; it can only
-//! guess, and the common guess is to forget. `crates/ego-tools/tests/resume.rs`
+//! guess, and the common guess is to forget. `crates/ego-tools/tests/it/resume.rs`
 //! measures what forgetting costs: appending to a torn log splices a complete
 //! record onto a partial one, `valid_prefix` rejects that line and everything
 //! behind it, and the next recovery discards every append made since the
@@ -320,6 +320,33 @@ impl JsonlStore {
         self.session_dir(id).join("lease")
     }
 
+    /// Take the queued-turn lease of `id` (`CLI.md` §2, `resume --queue`).
+    ///
+    /// A second lock file beside the writer lease, and not the writer lease
+    /// itself: a queued invocation must hold its place while the turn's own
+    /// open takes the writer lease in the same process. Contention is
+    /// [`LeaseError::LeaseHeld`]; a crashed holder's lock is released by the
+    /// kernel, so `lease.is_alive` only governs the stale-but-locked case.
+    pub fn acquire_queue_lease(
+        &self,
+        id: &SessionId,
+        lease: LeaseInputs<'_>,
+    ) -> Result<Lease, LeaseError> {
+        Lease::acquire(
+            &self.session_dir(id).join("queue"),
+            lease.pid,
+            lease.now,
+            lease.stale_after,
+            lease.is_alive,
+        )
+    }
+
+    /// Whether some process holds `id`'s writer lease right now. Never takes
+    /// or creates the lease.
+    pub fn writer_lease_held(&self, id: &SessionId) -> std::io::Result<bool> {
+        super::lease::is_held(&self.lease_path(id))
+    }
+
     /// Take the writer lease on `id`, repair whatever a crash left behind,
     /// and rebuild the session's state.
     ///
@@ -370,6 +397,8 @@ impl JsonlStore {
             lease.is_alive,
         )
         .map_err(OpenError::Lease)?;
+        // A cold session goes back to plain files before any replay or append.
+        self.restore_plain_session(id).map_err(OpenError::Recover)?;
 
         let snapshot_revision = self
             .io

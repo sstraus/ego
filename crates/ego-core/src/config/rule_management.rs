@@ -68,9 +68,23 @@ pub struct RememberPlan {
     pub omitted: Vec<OmittedDimension>,
     candidate_operations: Vec<usize>,
     omitted_operations: Vec<usize>,
+    disclosing_operations: Vec<usize>,
 }
 
 impl RememberPlan {
+    /// What every remember surface states when [`discloses_values`](Self::discloses_values).
+    pub const DISCLOSURE_NOTICE: &'static str = "Remembering shows the values of the named credential file: an exact user rule discloses them.";
+
+    /// Operations whose exact `read`/`search` rule would disclose credential
+    /// values (an exact user rule is the owner's disclosure approval).
+    pub fn disclosure_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.disclosing_operations.iter().copied()
+    }
+
+    pub fn discloses_values(&self) -> bool {
+        !self.disclosing_operations.is_empty()
+    }
+
     /// Explicit alternative to the tool-specific plan, never the default.
     /// Transport/process candidates stay exact; only tools of the named server widen.
     pub fn server_scope(&self) -> Option<Self> {
@@ -355,7 +369,13 @@ impl RuleManagement {
         let mut candidate_operations = Vec::new();
         let mut omitted = Vec::new();
         let mut omitted_operations = Vec::new();
+        let mut disclosing_operations = Vec::new();
         for (operation, op) in call.ops().iter().enumerate() {
+            if let Op::Read { path } | Op::Search { root: path, .. } = op
+                && Ruleset::is_credential_path(path)
+            {
+                disclosing_operations.push(operation);
+            }
             for (candidate, dimensions) in derive(op)? {
                 if !candidates.contains(&candidate) {
                     candidates.push(candidate);
@@ -378,6 +398,7 @@ impl RuleManagement {
             omitted,
             candidate_operations,
             omitted_operations,
+            disclosing_operations,
         })
     }
 

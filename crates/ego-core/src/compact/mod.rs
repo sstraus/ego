@@ -21,6 +21,8 @@ use crate::store::session_store::StoreError;
 
 mod constraints;
 pub use constraints::{ConstraintLedger, PinCommand, PinError};
+mod idle;
+pub use idle::{CompactionConfig, CompactionLayer, ContextPercent, IdleCompaction};
 
 pub const COMPACTION_PROMPT_REVISION: u32 = 4;
 
@@ -184,6 +186,7 @@ pub struct PreparedCompaction {
     pub(crate) checkpoint: Checkpoint,
     pub(crate) latest_user_request: Option<String>,
     pub(crate) constraints: ConstraintLedger,
+    pub(crate) owner_sandbox_grants: Vec<crate::permit::SandboxGrant>,
     pub(crate) baseline: GenRequest,
     pub(crate) title: Option<String>,
     pub(crate) goal: Option<GoalRecord>,
@@ -223,6 +226,7 @@ impl PreparedCompaction {
         )
         .with_latest_user_request(self.latest_user_request.clone())
         .with_constraints(self.constraints.clone())
+        .with_owner_sandbox_grants(&self.owner_sandbox_grants)
         .with_title(self.title.clone())
         .with_goal(self.goal.as_ref())
         .with_plan(&self.plan)
@@ -707,6 +711,7 @@ mod transition_contract_tests {
             checkpoint: checkpoint(),
             latest_user_request: None,
             constraints: ConstraintLedger::default(),
+            owner_sandbox_grants: Vec::new(),
             baseline: GenRequest {
                 web_search: None,
                 cache: None,

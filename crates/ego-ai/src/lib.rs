@@ -8,6 +8,7 @@ pub mod catalogue;
 mod codex_session;
 pub mod conformance;
 pub mod generator;
+pub mod google_adc;
 pub mod http;
 pub mod kimi;
 pub mod oauth;

@@ -60,6 +60,8 @@ pub enum Invocation {
     Usage(Box<UsageArgs>),
     /// `ego fork ID [--at ITEM_ID]` — branch at the tip or after a completed turn.
     Fork(Box<ForkArgs>),
+    /// `ego rewind ID --at ITEM_ID` — restore files, then fork after that turn.
+    Rewind(Box<RewindArgs>),
     Rm(Box<RmArgs>),
     /// `ego compact ID [--request-id UUID]` — publish one deterministic successor.
     Compact(Box<CompactArgs>),
@@ -136,6 +138,7 @@ pub const BUILT: &[&str] = &[
     "resume",
     "continue",
     "fork",
+    "rewind",
     "rm",
     "compact",
     "export",
@@ -210,6 +213,7 @@ pub fn root_command() -> clap::Command {
         .subcommand(named("resume", resume_command()))
         .subcommand(named("continue", resume_command()))
         .subcommand(named("fork", ForkCommand::command()))
+        .subcommand(named("rewind", RewindCommand::command()))
         .subcommand(named("rm", RmCommand::command()))
         .subcommand(named("compact", CompactCommand::command()))
         .subcommand(named("export", ExportCommand::command()))
@@ -341,6 +345,7 @@ fn resume_command() -> clap::Command {
                 "id",
                 "prompt",
                 "answers",
+                "accept_authority_delta",
                 "name",
                 "goal_operation",
                 "session_dir",
@@ -407,9 +412,18 @@ pub enum SessionChoice {
     /// Unlike [`Id`](SessionChoice::Id), resume must refuse a missing session.
     /// Routing it through create-if-absent selection would silently replace a
     /// mistyped session id with an empty session.
-    Resume(Option<String>),
+    Resume(Option<ResumeTarget>),
     /// Direct latest-session resume, with no human terminal picker.
     ResumeLatest,
+}
+
+/// The session `ego resume` names: its id, or its exact title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResumeTarget {
+    /// The text of an id, already checked to parse.
+    Id(String),
+    /// `--title TITLE`: the one session of this workspace with that title.
+    Title(String),
 }
 
 /// The parsed command line of `ego ls`.
@@ -491,6 +505,16 @@ pub struct ForkArgs {
     pub output: Output,
 }
 
+/// `ego rewind`: the source session and a message of the turn to return to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RewindArgs {
+    pub source: SessionId,
+    pub at: ItemId,
+    pub session_dir: Option<PathBuf>,
+    pub directory: Option<PathBuf>,
+    pub output: Output,
+}
+
 /// The exact deterministic headless compaction request. The parser mints the
 /// request identity when an ordinary caller does not supply an advanced retry
 /// override, so downstream compaction stays deterministic without exposing a
@@ -566,6 +590,8 @@ pub struct SetupArgs {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DoctorArgs {
     pub json: bool,
+    pub offline: bool,
+    pub probe_network: bool,
 }
 
 /// The parsed command line of `ego acp`.
@@ -608,6 +634,8 @@ pub struct SessionShape {
     pub deny: Vec<String>,
     /// `None` is every builtin; `Some(vec![])` is the tool-less session.
     pub tools: Option<Vec<String>>,
+    /// Every hook is off for this session; the configuration is not changed.
+    pub no_hooks: bool,
     pub profile: Option<String>,
     pub profile_source: Option<ego_core::config::Source>,
 }
@@ -631,6 +659,7 @@ impl From<Shape> for SessionShape {
             } else {
                 shape.tools
             },
+            no_hooks: shape.no_hooks,
             profile_source: shape
                 .profile
                 .as_ref()
@@ -664,6 +693,11 @@ pub struct McpServerArgs {
     pub max_concurrent_runs: NonZeroUsize,
     pub retained_requests: NonZeroUsize,
     pub max_resource_bytes: NonZeroUsize,
+    /// Owner-declared additions to the selection policy; the deployment root,
+    /// configured model and mode are always allowed.
+    pub allow_roots: Vec<PathBuf>,
+    pub allow_models: Vec<ModelRef>,
+    pub allow_modes: Vec<Mode>,
 }
 
 /// One explicitly selected MCP server for a run.
@@ -822,7 +856,9 @@ pub struct Args {
     pub output_style: Option<String>,
     pub instructions: Option<PathBuf>,
     pub bare: bool,
+    pub no_hooks: bool,
     pub trust_workspace: bool,
+    pub trust_development_programs: bool,
     /// Permission mode, independent of operating-system confinement.
     ///
     /// One field, not three, for the same reason [`SessionChoice`] is one
@@ -837,6 +873,12 @@ pub struct Args {
     /// Answers that settle pending questions while resuming this session.
     /// Empty for every command except `resume --answer`.
     pub answers: Vec<ResumeAnswer>,
+    /// `resume --accept-authority-delta`: allow the execution-authority change
+    /// shown for this resume. False for every other command.
+    pub accept_authority_delta: bool,
+    /// `resume --queue`: wait while another process owns the session, then
+    /// run headless. False for every other command.
+    pub queue: bool,
     pub session: SessionChoice,
     pub session_dir: Option<PathBuf>,
     pub artifact_dir: Option<PathBuf>,
@@ -875,6 +917,12 @@ pub struct Args {
     pub plain: bool,
     /// Select Vim composer editing for this interactive process.
     pub vim: bool,
+    /// Turn the workspace memory on for this run, like `memory = true`.
+    pub memory: bool,
+    /// Skip the background compression of old sessions for this run.
+    pub no_session_compression: bool,
+    /// Turn file checkpoints off for this run, like `checkpoints = false`.
+    pub no_checkpoints: bool,
 }
 
 /// One validated `resume --answer QUESTION_ID=JSON` value.
@@ -1001,7 +1049,14 @@ fn into_mcp_args(
                     Some("oauth") => McpHttpAuth::Oauth,
                     Some(_) => unreachable!("clap restricts MCP HTTP auth values"),
                 };
+                let oauth_hosts = add
+                    .oauth_host
+                    .iter()
+                    .map(|host| host.parse::<McpHttpUrl>())
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|error| UsageError(error.to_string()))?;
                 McpHttpConfig::new(url, auth, add.allow_insecure_loopback)
+                    .and_then(|config| config.with_oauth_hosts(oauth_hosts))
                     .map(|mut config| {
                         if add.profile.as_deref() == Some("legacy-sse") {
                             config.profile = ego_core::config::McpHttpProfile::LegacySse;
@@ -1232,6 +1287,7 @@ fn overview(program: &str) -> String {
             }
             "rm" => "Delete a stored session",
             "fork" => "Fork a session at its tip or after a completed turn",
+            "rewind" => "Restore a session's files and fork it after a completed turn",
             "ls" => "List sessions (this workspace; --all for every one)",
             "usage" => "Report usage, context and cost for this workspace",
             "compact" => "Compact a session into its deterministic successor",
@@ -1356,6 +1412,20 @@ fn parse_subcommand(
         None => match clap_or_answer::<RunCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
             Parsed::Command(parsed) => {
+                // Clap owns option values; only the parsed root positional can
+                // be a misplaced command. A nonempty separator tail is the
+                // explicit prompt escape (the grammar admits one positional).
+                if tail.as_ref().is_none_or(Vec::is_empty)
+                    && let Some(name) = parsed.prompt.as_deref()
+                    && BUILT.contains(&name)
+                {
+                    return Err(UsageError(format!(
+                        "`{name}` is a subcommand and must come before flags; \
+                         use `{} {name} --help` for its options, or `{} -- {name}` \
+                         to use it as a prompt",
+                        tokens[0], tokens[0]
+                    )));
+                }
                 let direct_resume = parsed.continua;
                 let mut args = into_args(parsed, INTERACTIVE_PROVIDER_RETRIES)?;
                 if direct_resume {
@@ -1407,9 +1477,12 @@ fn parse_subcommand(
                 max_concurrent_runs: parsed.max_concurrent_runs,
                 retained_requests: parsed.retained_requests,
                 max_resource_bytes: parsed.max_resource_bytes,
+                allow_roots: parsed.allow_root,
+                allow_models: parsed.allow_model,
+                allow_modes: parsed.allow_mode,
             }))),
         },
-        Some(command @ ("ls" | "usage" | "rm" | "fork" | "compact" | "export")) => {
+        Some(command @ ("ls" | "usage" | "rm" | "fork" | "rewind" | "compact" | "export")) => {
             parse_session_command(command, &tokens)
         }
         Some("models") => match clap_or_answer::<ModelsCommand>(&tokens)? {
@@ -1439,7 +1512,11 @@ fn parse_subcommand(
         },
         Some("doctor") => match clap_or_answer::<DoctorCommand>(&tokens)? {
             Parsed::Answered(text) => Ok(Invocation::Answered(text)),
-            Parsed::Command(parsed) => Ok(Invocation::Doctor(DoctorArgs { json: parsed.json })),
+            Parsed::Command(parsed) => Ok(Invocation::Doctor(DoctorArgs {
+                json: parsed.json,
+                offline: parsed.offline,
+                probe_network: parsed.probe_network,
+            })),
         },
         Some(command @ ("auth" | "roots" | "config" | "rules" | "mcp")) => {
             parse_management_command(command, &tokens, tail)
@@ -1496,6 +1573,24 @@ fn parse_session_command(command: &str, tokens: &[String]) -> Result<Invocation,
                     })
                     .transpose()?;
                 Ok(Invocation::Fork(Box::new(ForkArgs {
+                    source,
+                    at,
+                    session_dir: parsed.common.places.session_dir,
+                    directory: parsed.common.places.directory,
+                    output: parsed.common.output.unwrap_or(Output::Text),
+                })))
+            }
+        },
+        "rewind" => match clap_or_answer::<RewindCommand>(tokens)? {
+            Parsed::Answered(text) => Ok(Invocation::Answered(text)),
+            Parsed::Command(parsed) => {
+                let source = SessionId::from_str(&parsed.source).map_err(|error| {
+                    UsageError(format!("`{}` is not a session id: {error}", parsed.source))
+                })?;
+                let at = ItemId::from_str(&parsed.at).map_err(|error| {
+                    UsageError(format!("`{}` is not a message id: {error}", parsed.at))
+                })?;
+                Ok(Invocation::Rewind(Box::new(RewindArgs {
                     source,
                     at,
                     session_dir: parsed.common.places.session_dir,
@@ -1925,7 +2020,10 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
         id,
         prompt,
         answers,
+        accept_authority_delta,
+        queue,
         flags,
+        title,
         name: _,
         goal_operation: _,
     } = command;
@@ -1948,10 +2046,25 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
         }
     }
 
-    let (id, prompt) = match (id, prompt) {
-        (Some(first), None) if SessionId::from_str(&first).is_err() => (None, Some(first)),
-        (Some(first), None) => (Some(first), None),
-        (first, second) => (first, second),
+    // With `--title` every positional is the prompt: the title names the session.
+    let (id, prompt) = match (id, prompt, &title) {
+        (Some(first), None, Some(_)) if SessionId::from_str(&first).is_err() => (None, Some(first)),
+        (Some(_), _, Some(_)) => {
+            return Err(UsageError(
+                "--title names the session to resume; pass either a session id or --title, not both"
+                    .into(),
+            ));
+        }
+        (id, prompt, Some(_)) => (id, prompt),
+        (Some(first), None, None) if SessionId::from_str(&first).is_err() => (None, Some(first)),
+        (Some(first), None, None) => (Some(first), None),
+        (first, second, None) => (first, second),
+    };
+    let title = match title.map(|title| title.trim().to_owned()) {
+        Some(title) if title.is_empty() => {
+            return Err(UsageError("--title needs the title of a session".into()));
+        }
+        title => title,
     };
     if let Some(text) = &id
         && let Err(err) = SessionId::from_str(text)
@@ -1960,6 +2073,12 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
             "`{text}` is not a session id: {err}. Pass the id of a session, or \
              omit it for the latest in this workspace"
         )));
+    }
+
+    if queue && prompt.is_none() && flags.file.is_none() {
+        return Err(UsageError(
+            "--queue needs a prompt: pass PROMPT, -f FILE, or - to read it from stdin".into(),
+        ));
     }
 
     let retry_default = if prompt.is_none() && flags.file.is_none() && answers.is_empty() {
@@ -1979,8 +2098,11 @@ fn into_resume_args(command: ResumeCommand) -> Result<Args, UsageError> {
         retry_default,
     )?;
     args.provider_recovery = implicit_retry;
-    args.session = SessionChoice::Resume(id);
+    args.session =
+        SessionChoice::Resume(title.map(ResumeTarget::Title).or(id.map(ResumeTarget::Id)));
     args.answers = answers;
+    args.accept_authority_delta = accept_authority_delta;
+    args.queue = queue;
     Ok(args)
 }
 
@@ -2012,6 +2134,11 @@ fn into_session_metadata_args(command: ResumeCommand) -> Result<SessionMetadataA
 
 /// Interactive and ACP seats recover from transient failures that showed nothing.
 pub const INTERACTIVE_PROVIDER_RETRIES: u32 = 6;
+
+/// Three additional transient attempts let unattended runs wait out a capacity
+/// refusal (after 1, 2 and 5 minutes) without inheriting the interactive
+/// recovery horizon.
+pub const HEADLESS_PROVIDER_RETRIES: u32 = 3;
 
 fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError> {
     let RunCommand {
@@ -2104,11 +2231,15 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         output_style: shape.output_style,
         instructions: shape.instructions,
         bare: shape.bare,
+        no_hooks: shape.no_hooks,
         trust_workspace: flags.trust_workspace,
+        trust_development_programs: flags.trust_development_programs,
         mode,
         allow: shape.allow,
         deny: shape.deny,
         answers: Vec::new(),
+        accept_authority_delta: false,
+        queue: false,
         session,
         session_dir: flags.common.places.session_dir,
         artifact_dir: flags.artifact_dir,
@@ -2116,7 +2247,11 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         output_explicit: flags.common.output.is_some(),
         schema: flags.schema,
         schema_retries: flags.schema_retries,
-        retry: flags.retry.unwrap_or(retry_default),
+        retry: flags.retry.unwrap_or(if retry_default == 0 {
+            HEADLESS_PROVIDER_RETRIES
+        } else {
+            retry_default
+        }),
         provider_recovery: retry_default != 0 && flags.retry.is_none(),
         fallbacks: flags.fallbacks,
         budget: flags.budget,
@@ -2140,6 +2275,9 @@ fn into_args(command: RunCommand, retry_default: u32) -> Result<Args, UsageError
         no_color: flags.no_color,
         plain: flags.plain,
         vim: flags.vim,
+        memory: flags.memory,
+        no_session_compression: flags.no_session_compression,
+        no_checkpoints: flags.no_checkpoints,
     })
 }
 

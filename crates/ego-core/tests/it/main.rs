@@ -1,0 +1,120 @@
+//! The one integration-test binary of `ego-core`.
+//!
+//! Every file in `tests/` used to be its own binary, and each one linked the
+//! whole dependency graph. One binary links it once. Each former binary is a
+//! module here, so `cargo nextest run -p ego-core --test it -E 'test(/^<file>::/)'`
+//! selects what `--test <file>` selected before.
+
+#[path = "../common/mod.rs"]
+mod common;
+
+#[path = "../support/mod.rs"]
+mod support;
+
+mod architecture_docs;
+mod attempt;
+mod audio;
+mod budget;
+mod ceiling;
+mod child_public;
+mod codec;
+mod compaction;
+mod compaction_transition;
+mod config;
+mod config_mutation;
+mod config_projection;
+mod config_rules;
+mod config_vocabulary;
+mod context_overflow;
+mod conversation;
+mod cost;
+mod credential_defaults;
+mod credential_read_grants;
+mod credential_security;
+mod destination_policy;
+mod discarded_config;
+mod elicitation_round;
+mod endpoint_policy;
+mod export;
+mod foreign_permission;
+mod generation_policy_capture;
+mod generator;
+mod goal_lifecycle;
+mod health;
+mod hook_causality;
+mod hook_context;
+mod hook_lifecycle;
+mod hook_runtime;
+mod hooks_contract;
+mod hooks_projection_contract;
+mod hooks_reducer_contract;
+mod images;
+mod journaled_lifecycle;
+mod judge_authority;
+mod judge_cache_terminator;
+mod judge_clusters;
+mod judge_credentials;
+mod judge_critic;
+mod judge_critic_round2;
+mod judge_eval_set;
+mod judge_mcp_evidence;
+mod judge_sed;
+mod judge_task_evidence;
+mod judge_urls;
+mod lineage;
+mod mcp_config;
+mod mcp_execution_authority;
+mod mcp_protocol_envelopes;
+mod mcp_surfaces;
+mod mcp_task_ledger;
+mod mcp_task_ticket;
+mod model_default_reasoning;
+mod near_side;
+mod permission_analysis;
+mod permission_modes;
+mod permit;
+mod permit_privacy;
+mod plan;
+mod policy_control_path_aliases;
+mod policy_control_paths;
+mod policy_remembered_git_creation;
+mod policy_remembered_prefix_routes;
+mod profile_ceiling;
+mod profile_roots;
+mod project_grants;
+mod public_golden;
+mod question;
+mod question_runtime;
+mod queue;
+mod recap;
+mod reducer;
+mod remembered_compound_exec;
+mod rule;
+mod rule_management;
+mod run;
+mod run_controller;
+mod run_evidence;
+mod selection_controls;
+mod session_composition;
+mod session_hook_runtime;
+mod session_lifecycle;
+mod shared_budget_gate;
+mod shell_disclosure_paths;
+mod skill_hooks_surfaces;
+mod skill_service;
+mod step14_evidence_contract;
+mod step14_judge_contract;
+mod step14_runtime_contract;
+mod subagent_service;
+mod subagent_skill_schema;
+mod suggest_remember_authority;
+mod symlinked_workspace_rules;
+mod system_perimeter;
+mod tool_catalogue;
+mod tool_rule_server_identity;
+mod tool_wildcard_critic;
+mod tool_wildcard_trust_critic;
+mod turn;
+mod unconfined_admission;
+mod usage;
+mod workspace_trust;

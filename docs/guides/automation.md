@@ -69,4 +69,4 @@ Full keys and invariants are in [configuration](../reference/configuration.md).
 Sources: [agent-file parser](../../crates/ego-cli/src/agent_file.rs),
 [schema validator](../../crates/ego-cli/src/schema.rs),
 [prompt ownership](../../crates/ego-cli/src/prompt.rs), and
-[agent-file tests](../../crates/ego-cli/tests/agent_file.rs).
+[agent-file tests](../../crates/ego-cli/tests/it/agent_file.rs).

@@ -92,11 +92,36 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
     {
         invocation = Err(cli::UsageError(message));
     }
+    // Before preflight and every session read: a queued turn is admitted
+    // against the session as the previous writer left it. The place in the
+    // queue is held until the process exits. It waits before the checkout
+    // lease below: the owner of a --worktree session holds that lease for its
+    // whole life, so taking it first would refuse instead of waiting.
+    let mut _queued_turn = None;
+    let mut queue_refusal = None;
+    if let Ok(Invocation::Resume(args)) = &mut invocation
+        && args.queue
+    {
+        let mut waiting = Box::pin(ego_cli::queue::wait_for_turn(args));
+        let waited = tokio::select! {
+            biased;
+            cause = run::stop_signal(None) => {
+                cancel.cancel(cause);
+                Err(run::cancelled_termination(&cancel))
+            }
+            waited = &mut waiting => waited,
+        };
+        match waited {
+            Ok(turn) => _queued_turn = Some(turn),
+            Err(termination) => queue_refusal = Some(termination),
+        }
+    }
     // Keep the checkout lease through session shutdown. A resumed standalone
     // checkout acquires the same lease; cleanup cannot race an owned process.
     let mut _worktree_lease = None;
-    if let Ok(Invocation::Run(args) | Invocation::Resume(args) | Invocation::Interactive(args)) =
-        &mut invocation
+    if queue_refusal.is_none()
+        && let Ok(Invocation::Run(args) | Invocation::Resume(args) | Invocation::Interactive(args)) =
+            &mut invocation
     {
         match ego_cli::worktree::launch(args) {
             Ok(lease) => _worktree_lease = lease,
@@ -105,7 +130,7 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
     }
     let mut ci_preflight = match &invocation {
         Ok(Invocation::Run(args) | Invocation::Resume(args))
-            if args.profile.as_deref() == Some("ci") =>
+            if args.profile.as_deref() == Some("ci") && queue_refusal.is_none() =>
         {
             Some(run::preflight_ci(args, &cancel).await)
         }
@@ -269,6 +294,7 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
             },
             Ok(Invocation::Rm(args)) => run::rm(&args, &out).await,
             Ok(Invocation::Fork(args)) => run::fork(&args, &out).await,
+            Ok(Invocation::Rewind(args)) => run::rewind(&args, &out).await,
             Ok(Invocation::Compact(args)) => {
                 run::compact(&args, &out, std::sync::Arc::clone(&evidence)).await
             }
@@ -396,7 +422,11 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
             }
             Ok(Invocation::Run(args) | Invocation::Resume(args)) => {
                 let json = args.output == cli::Output::Json;
-                let ended = match ci_preflight.take() {
+                let refused = queue_refusal
+                    .take()
+                    .map(Err)
+                    .or_else(|| ci_preflight.take());
+                let ended = match refused {
                     Some(Err(termination)) => Ended {
                         termination,
                         session: ego_core::event::id::SessionId::new(),
@@ -449,7 +479,7 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
         }
     };
 
-    run::diagnose(&ended.termination, out.broken());
+    run::diagnose(&ended.termination, &out);
     let acp_stopped = is_acp && matches!(ended.termination, RunTermination::Signalled(_));
     (
         std::process::ExitCode::from(ended.termination.exit_code()),

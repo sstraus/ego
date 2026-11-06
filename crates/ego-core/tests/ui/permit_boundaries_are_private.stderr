@@ -41,8 +41,8 @@ error[E0624]: method `mint` is private
    |
   ::: src/permit/grant.rs
    |
-   |     fn mint(&self, scope: Scope) -> Permit {
-   |     -------------------------------------- private method defined here
+   |     fn mint(&self, mut scope: Scope) -> Permit {
+   |     ------------------------------------------ private method defined here
 
 error[E0599]: no method named `with_approver` found for reference `&PolicyEngine` in the current scope
   --> tests/ui/permit_boundaries_are_private.rs:27:20

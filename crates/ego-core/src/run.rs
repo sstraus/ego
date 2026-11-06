@@ -136,6 +136,8 @@ pub enum RunTermination {
     /// failure. The run is settled and the session takes the next prompt.
     /// `message` names the cause once, in words a host may show.
     Provider { message: String },
+    /// A local generation guard stopped the run; no automatic retry is safe.
+    Guard { message: String },
     /// The exchange was lost after the turn had already shown output, so
     /// nobody can say what the provider did with the rest. The only provider
     /// failure that leaves the run uncertain.
@@ -192,6 +194,7 @@ impl RunTermination {
             // Pause has no human-input payload and uses exit 6, not exit 3. Scripts receiving
             // exit 3 must find a denied action or question; a host-held pause asks neither.
             RunTermination::Paused => 6,
+            RunTermination::Guard { .. } => 7,
             RunTermination::TimedOut => 124,
             RunTermination::Signalled(Signal::Int) => 130,
             RunTermination::Signalled(Signal::Term) => 143,
@@ -210,6 +213,7 @@ impl RunTermination {
             RunTermination::PermissionRequired { .. } => "permission",
             RunTermination::QuestionRequired { .. } => "question",
             RunTermination::Paused => "paused",
+            RunTermination::Guard { .. } => "guard",
             RunTermination::TaskFailed
             | RunTermination::UsageError { .. }
             | RunTermination::Provider { .. }
@@ -260,6 +264,14 @@ impl RunTermination {
     /// Usage failures carry the current turn's journal diagnostic. Other
     /// outcomes are decided by the exit reason alone.
     pub fn after_outcome(outcome: &crate::turn::TurnOutcome) -> Option<Self> {
+        if outcome.exit_reason == ExitReason::Guard {
+            return Some(Self::Guard {
+                message: outcome
+                    .guard_failure
+                    .clone()
+                    .unwrap_or_else(|| "a local generation guard stopped the turn".into()),
+            });
+        }
         if outcome.exit_reason == ExitReason::Usage
             && let Some(message) = &outcome.usage_error
         {
@@ -286,6 +298,9 @@ impl RunTermination {
     pub fn after_turn(reason: ExitReason, denied: Option<Denial>) -> Option<Self> {
         match reason {
             ExitReason::Completed => None,
+            ExitReason::Guard => Some(RunTermination::Guard {
+                message: "a local generation guard stopped the turn".into(),
+            }),
             ExitReason::Budget => Some(RunTermination::BudgetExceeded),
             ExitReason::Paused => Some(RunTermination::Paused),
             ExitReason::PermissionRequired => Some(match denied {
@@ -1281,6 +1296,12 @@ pub trait EventSinkFactory: Send + Sync {
     /// Visible pre-effect policy change, independent of model capabilities.
     fn execution_policy_notice(&self, _message: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Whether the host follows a `session_compacted` transition to the
+    /// successor, so the run may compact and continue in it.
+    fn follows_session_transitions(&self) -> bool {
+        false
     }
 }
 

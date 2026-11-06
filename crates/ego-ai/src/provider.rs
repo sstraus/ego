@@ -32,12 +32,21 @@ use crate::wire::openai_codex_responses::OpenAiCodexResponses;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 use crate::wire::xai_responses::XaiResponses;
 
+mod cloud;
+pub use cloud::{
+    BEDROCK, BEDROCK_DEFAULT_REGION, BEDROCK_KEY_VAR, VERTEX, VERTEX_BASE, VERTEX_DEFAULT_LOCATION,
+    VERTEX_LOCATION_VAR, VERTEX_PROJECT_VAR, VertexAddressPart, bedrock_base, vertex_base,
+};
+
 /// The single core-owned provider secret type.
 ///
 /// Kept under the established public name so credential sources do not need a
 /// second wrapper. The aliased owner is non-`Clone`, zeroizes on drop, and
 /// redacts its formatter.
 pub type Secret = ProviderSecret;
+
+/// A host-supplied Codex access token. Its owner, not ego, controls renewal.
+pub const OPENAI_CODEX_ACCESS_TOKEN_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN";
 
 /// How a provider presents a credential, and where the credential is read
 /// from — the *strategy*, never the value.
@@ -67,6 +76,18 @@ pub enum CredentialStrategy {
     OAuth { provider: String },
     /// A permanent key minted through OAuth, with an environment fallback.
     OAuthOrEnv { provider: String, var: String },
+    /// A Google Cloud OAuth access token that `ego auth login PROVIDER` mints
+    /// from Application Default Credentials, sent as a bearer token to the
+    /// project and location the two variables name.
+    ///
+    /// The address is part of the credential's resolution and not of the row:
+    /// a Vertex AI endpoint names the caller's project in its path, so a
+    /// missing project is refused here, where the variable can be named.
+    GoogleCloud {
+        provider: String,
+        project_var: String,
+        location_var: String,
+    },
     /// Anthropic's API key and Claude subscription token are two wire
     /// presentations selected by the credential prefix.
     Anthropic {
@@ -105,12 +126,21 @@ impl CredentialStrategy {
                 (vec![header], None)
             }
             CredentialStrategy::OAuth { provider } => {
-                let secret =
-                    creds
-                        .secret(&format!("oauth:{provider}"))
-                        .map_err(|_| MissingCredential {
+                // Select the external credential before consulting the store. An
+                // invalid supplied token must fail, never fall back to a login.
+                let external = if provider == "openai-codex" {
+                    creds.secret(OPENAI_CODEX_ACCESS_TOKEN_ENV).ok()
+                } else {
+                    None
+                };
+                let secret = match external {
+                    Some(secret) => secret,
+                    None => creds.secret(&format!("oauth:{provider}")).map_err(|_| {
+                        MissingCredential {
                             var: format!("ego auth login {provider}"),
-                        })?;
+                        }
+                    })?,
+                };
                 let base_override = crate::oauth::provider_base(provider, secret_text(&secret)?)
                     .map_err(|_| MissingCredential {
                         var: format!("ego auth login {provider}"),
@@ -126,6 +156,11 @@ impl CredentialStrategy {
                     })?;
                 (oauth_headers(provider, &secret)?, None)
             }
+            CredentialStrategy::GoogleCloud {
+                provider,
+                project_var,
+                location_var,
+            } => cloud::google_cloud_credential(creds, provider, project_var, location_var)?,
             CredentialStrategy::Anthropic {
                 provider,
                 api_key_var,
@@ -164,7 +199,9 @@ impl CredentialStrategy {
     /// somewhere to put it.
     pub fn environment_var(&self) -> Option<&str> {
         match self {
-            CredentialStrategy::None | CredentialStrategy::OAuth { .. } => None,
+            CredentialStrategy::None
+            | CredentialStrategy::OAuth { .. }
+            | CredentialStrategy::GoogleCloud { .. } => None,
             CredentialStrategy::BearerFromEnv { var }
             | CredentialStrategy::HeaderFromEnv { var, .. }
             | CredentialStrategy::OAuthOrEnv { var, .. } => Some(var),
@@ -289,6 +326,13 @@ impl fmt::Display for MissingCredential {
                 self.var
             );
         }
+        if self.var == VERTEX_PROJECT_VAR || self.var == VERTEX_LOCATION_VAR {
+            return write!(
+                f,
+                "no valid Google Cloud value in {}; set this environment variable",
+                self.var
+            );
+        }
         write!(
             f,
             "no API key in {}; set this environment variable to the provider's API key",
@@ -365,11 +409,21 @@ pub struct ProviderRow {
     /// Behind an `Arc` because a row is `Clone` and a decoder is immutable
     /// configuration shared by every generation against that row.
     pub cost: Option<Arc<dyn ProviderCost>>,
+    /// Where the third-party price table files this row's models, when it
+    /// does not file them under the row's own id (`cloud.rs`).
+    price_table: Option<PriceTableName>,
     /// Whether this row's wire mapping has cleared the live-promotion gate.
     ///
     /// Each constructor states promotion explicitly so a new row cannot
     /// silently inherit selectability.
     pub promotion: Promotion,
+}
+
+/// A row's namespace and key prefix in the third-party price table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceTableName {
+    pub provider: &'static str,
+    pub key_prefix: &'static str,
 }
 
 /// Whether a row may be offered, or is waiting on evidence only an operator
@@ -507,6 +561,14 @@ impl ProviderRow {
         self.cost_expectation
     }
 
+    /// This row's namespace and key prefix in the third-party price table.
+    pub fn price_table_name(&self) -> (&str, &str) {
+        match self.price_table {
+            Some(name) => (name.provider, name.key_prefix),
+            None => (&self.id, &self.id),
+        }
+    }
+
     /// The hosted row.
     /// Construction is infallible because rows name credential variables without
     /// reading them. Missing keys must not make providers disappear.
@@ -528,6 +590,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::Positive,
             resolver: &OPENAI_SUPPLIED,
             credential: CredentialStrategy::BearerFromEnv {
@@ -576,6 +639,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &OllamaDaemon,
             credential: CredentialStrategy::None,
@@ -610,6 +674,7 @@ impl ProviderRow {
                     crate::oauth::EGO_USER_AGENT.to_string(),
                 ),
             ],
+            price_table: None,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &OPENAI_CODEX_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -636,6 +701,7 @@ impl ProviderRow {
                 "user-agent".to_string(),
                 crate::oauth::EGO_USER_AGENT.to_string(),
             )],
+            price_table: None,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &GITHUB_COPILOT_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -656,6 +722,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &XAI_OAUTH_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -679,6 +746,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &KimiManaged,
             credential: CredentialStrategy::OAuth {
@@ -699,6 +767,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &MINIMAX_OAUTH_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -719,6 +788,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &NOUS_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -744,6 +814,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::Positive,
             resolver: &OPENROUTER_MODELS,
             credential: CredentialStrategy::OAuthOrEnv {
@@ -781,6 +852,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::Positive,
             resolver: &ANTHROPIC_SUPPLIED,
             credential: CredentialStrategy::Anthropic {
@@ -813,6 +885,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: None,
             cost_expectation: CostExpectation::Positive,
             resolver: &GEMINI_SUPPLIED,
             credential: CredentialStrategy::HeaderFromEnv {

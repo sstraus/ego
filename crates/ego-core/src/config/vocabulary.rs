@@ -127,18 +127,34 @@ pub enum ManagedConfigKey {
     ExecEnv,
     ExecEnvAllowlist,
     Network,
+    WebPrivateNetwork,
     Budget,
     Bare,
     PermissionsJudge,
     StatuslineTemplate,
     Keybindings,
     Vim,
+    CompactionIdle,
+    CompactionIdleMarginSeconds,
+    CompactionIdleThreshold,
+    CompactionHeadless,
+    DoctorNetwork,
+    RecapEnabled,
+    RecapAfterMinutes,
+    McpTasks,
+    Memory,
+    Checkpoints,
+    Tools,
+    SessionsCompress,
+    Cache,
+    InstructionsMaxFiles,
+    Lsp,
     SessionDir,
     ArtifactDir,
 }
 
 impl ManagedConfigKey {
-    const BASE: [Self; 15] = [
+    const BASE: [Self; 31] = [
         Self::Model,
         Self::Thinking,
         Self::Mode,
@@ -150,10 +166,26 @@ impl ManagedConfigKey {
         Self::ExecEnv,
         Self::ExecEnvAllowlist,
         Self::Network,
+        Self::WebPrivateNetwork,
         Self::Roots,
         Self::ExecPaths,
         Self::Keybindings,
         Self::Vim,
+        Self::CompactionIdle,
+        Self::CompactionIdleMarginSeconds,
+        Self::CompactionIdleThreshold,
+        Self::CompactionHeadless,
+        Self::DoctorNetwork,
+        Self::RecapEnabled,
+        Self::RecapAfterMinutes,
+        Self::McpTasks,
+        Self::Memory,
+        Self::Checkpoints,
+        Self::Tools,
+        Self::SessionsCompress,
+        Self::Cache,
+        Self::InstructionsMaxFiles,
+        Self::Lsp,
     ];
     const PROFILE: [Self; 11] = [
         Self::Model,
@@ -199,12 +231,28 @@ impl ManagedConfigKey {
                 return Cow::Owned(format!("auth.{provider}.credential_command"));
             }
             Self::Network => "network",
+            Self::WebPrivateNetwork => "web_private_network",
             Self::Budget => "budget",
             Self::Bare => "bare",
             Self::PermissionsJudge => "permissions.judge",
             Self::StatuslineTemplate => "ui.statusline.template",
             Self::Keybindings => "ui.keybindings",
             Self::Vim => "ui.vim",
+            Self::CompactionIdle => "compaction.idle",
+            Self::CompactionIdleMarginSeconds => "compaction.idle_margin_seconds",
+            Self::CompactionIdleThreshold => "compaction.idle_threshold",
+            Self::CompactionHeadless => "compaction.headless",
+            Self::DoctorNetwork => "doctor_network",
+            Self::RecapEnabled => "recap.enabled",
+            Self::RecapAfterMinutes => "recap.after_minutes",
+            Self::McpTasks => "mcp_tasks",
+            Self::Memory => "memory",
+            Self::Checkpoints => "checkpoints",
+            Self::Tools => "tools",
+            Self::SessionsCompress => "sessions.compress",
+            Self::Cache => "cache",
+            Self::InstructionsMaxFiles => "instructions.max_files",
+            Self::Lsp => "lsp",
             Self::SessionDir => "session_dir",
             Self::ArtifactDir => "artifact_dir",
         })
@@ -257,12 +305,28 @@ impl ManagedConfigKey {
             "exec.env_allowlist" => Ok(Self::ExecEnvAllowlist),
             "roots" => Ok(Self::Roots),
             "network" => Ok(Self::Network),
+            "web_private_network" => Ok(Self::WebPrivateNetwork),
             "budget" => Ok(Self::Budget),
             "bare" => Ok(Self::Bare),
             "permissions.judge" => Ok(Self::PermissionsJudge),
             "ui.statusline.template" => Ok(Self::StatuslineTemplate),
             "ui.keybindings" => Ok(Self::Keybindings),
             "ui.vim" => Ok(Self::Vim),
+            "compaction.idle" => Ok(Self::CompactionIdle),
+            "compaction.idle_margin_seconds" => Ok(Self::CompactionIdleMarginSeconds),
+            "compaction.idle_threshold" => Ok(Self::CompactionIdleThreshold),
+            "compaction.headless" => Ok(Self::CompactionHeadless),
+            "doctor_network" => Ok(Self::DoctorNetwork),
+            "recap.enabled" => Ok(Self::RecapEnabled),
+            "recap.after_minutes" => Ok(Self::RecapAfterMinutes),
+            "mcp_tasks" => Ok(Self::McpTasks),
+            "memory" => Ok(Self::Memory),
+            "checkpoints" => Ok(Self::Checkpoints),
+            "tools" => Ok(Self::Tools),
+            "sessions.compress" => Ok(Self::SessionsCompress),
+            "cache" => Ok(Self::Cache),
+            "instructions.max_files" => Ok(Self::InstructionsMaxFiles),
+            "lsp" => Ok(Self::Lsp),
             "session_dir" => Ok(Self::SessionDir),
             "artifact_dir" => Ok(Self::ArtifactDir),
             _ => Err(UserConfigError::new(format!(
@@ -300,12 +364,28 @@ pub enum ManagedConfigValue {
     ExecEnv(super::ExecEnvironment),
     ExecEnvAllowlist(Vec<String>),
     Network(super::Network),
+    WebPrivateNetwork(bool),
     Budget(Budget),
     Bare(bool),
     PermissionsJudge(ModelRef),
     StatuslineTemplate(String),
     Keybindings(std::collections::BTreeMap<String, Vec<String>>),
     Vim(bool),
+    CompactionIdle(bool),
+    CompactionIdleMarginSeconds(std::num::NonZeroU64),
+    CompactionIdleThreshold(crate::compact::ContextPercent),
+    CompactionHeadless(bool),
+    DoctorNetwork(bool),
+    RecapEnabled(bool),
+    RecapAfterMinutes(std::num::NonZeroU64),
+    McpTasks(bool),
+    Memory(bool),
+    Checkpoints(bool),
+    Tools(Vec<String>),
+    SessionsCompress(bool),
+    Cache(crate::generator::capabilities::CacheRetention),
+    InstructionsMaxFiles(std::num::NonZeroUsize),
+    Lsp(bool),
     Path(PathBuf),
 }
 
@@ -335,6 +415,7 @@ impl ManagedConfigValue {
             ManagedConfigKey::ExecEnv => decode(&key, value).map(Self::ExecEnv),
             ManagedConfigKey::Roots => decode(&key, value).map(Self::Roots),
             ManagedConfigKey::Network => decode(&key, value).map(Self::Network),
+            ManagedConfigKey::WebPrivateNetwork => decode(&key, value).map(Self::WebPrivateNetwork),
             ManagedConfigKey::ExecEnvAllowlist => {
                 let names: Vec<String> = decode(&key, value)?;
                 crate::permit::EnvPolicy::allow_only(names.iter().map(String::as_str))
@@ -345,6 +426,29 @@ impl ManagedConfigValue {
             ManagedConfigKey::Bare => decode(&key, value).map(Self::Bare),
             ManagedConfigKey::Keybindings => decode(&key, value).map(Self::Keybindings),
             ManagedConfigKey::Vim => decode(&key, value).map(Self::Vim),
+            ManagedConfigKey::CompactionIdle => decode(&key, value).map(Self::CompactionIdle),
+            ManagedConfigKey::CompactionIdleMarginSeconds => {
+                decode(&key, value).map(Self::CompactionIdleMarginSeconds)
+            }
+            ManagedConfigKey::CompactionIdleThreshold => {
+                decode(&key, value).map(Self::CompactionIdleThreshold)
+            }
+            ManagedConfigKey::CompactionHeadless => {
+                decode(&key, value).map(Self::CompactionHeadless)
+            }
+            ManagedConfigKey::DoctorNetwork => decode(&key, value).map(Self::DoctorNetwork),
+            ManagedConfigKey::RecapEnabled => decode(&key, value).map(Self::RecapEnabled),
+            ManagedConfigKey::RecapAfterMinutes => decode(&key, value).map(Self::RecapAfterMinutes),
+            ManagedConfigKey::McpTasks => decode(&key, value).map(Self::McpTasks),
+            ManagedConfigKey::Memory => decode(&key, value).map(Self::Memory),
+            ManagedConfigKey::Checkpoints => decode(&key, value).map(Self::Checkpoints),
+            ManagedConfigKey::Tools => decode(&key, value).map(Self::Tools),
+            ManagedConfigKey::SessionsCompress => decode(&key, value).map(Self::SessionsCompress),
+            ManagedConfigKey::Cache => decode(&key, value).map(Self::Cache),
+            ManagedConfigKey::InstructionsMaxFiles => {
+                decode(&key, value).map(Self::InstructionsMaxFiles)
+            }
+            ManagedConfigKey::Lsp => decode(&key, value).map(Self::Lsp),
             ManagedConfigKey::PermissionsJudge => decode(&key, value).map(Self::PermissionsJudge),
             ManagedConfigKey::StatuslineTemplate => {
                 decode(&key, value).map(Self::StatuslineTemplate)
@@ -383,7 +487,36 @@ impl ManagedConfigValue {
             ),
             Self::Sandbox(sandbox) => toml::Value::String(sandbox.to_string()),
             Self::Budget(budget) => toml::Value::String(canonical_budget(budget)),
-            Self::Bare(bare) | Self::Vim(bare) => toml::Value::Boolean(*bare),
+            Self::Bare(flag)
+            | Self::Vim(flag)
+            | Self::CompactionIdle(flag)
+            | Self::CompactionHeadless(flag)
+            | Self::DoctorNetwork(flag)
+            | Self::RecapEnabled(flag)
+            | Self::McpTasks(flag)
+            | Self::Memory(flag)
+            | Self::Checkpoints(flag)
+            | Self::SessionsCompress(flag)
+            | Self::Lsp(flag)
+            | Self::WebPrivateNetwork(flag) => toml::Value::Boolean(*flag),
+            Self::Tools(names) => {
+                toml::Value::Array(names.iter().cloned().map(toml::Value::String).collect())
+            }
+            Self::RecapAfterMinutes(minutes) => {
+                toml::Value::Integer(i64::try_from(minutes.get()).unwrap_or(i64::MAX))
+            }
+            Self::CompactionIdleMarginSeconds(seconds) => {
+                toml::Value::Integer(i64::try_from(seconds.get()).unwrap_or(i64::MAX))
+            }
+            Self::CompactionIdleThreshold(percent) => {
+                toml::Value::Integer(i64::from(percent.get()))
+            }
+            Self::InstructionsMaxFiles(files) => {
+                toml::Value::Integer(i64::try_from(files.get()).unwrap_or(i64::MAX))
+            }
+            Self::Cache(retention) => {
+                toml::Value::try_from(retention).expect("cache retention is TOML data")
+            }
             Self::Keybindings(bindings) => {
                 toml::Value::try_from(bindings).expect("keybindings are TOML data")
             }

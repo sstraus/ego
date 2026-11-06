@@ -112,4 +112,4 @@ Sources: [catalogue](../../crates/ego-cli/src/catalogue.rs),
 [session identity](../../crates/ego-cli/src/session.rs),
 [durable run controller](../../crates/ego-core/src/run.rs),
 [usage](../../crates/ego-cli/src/usage.rs), and
-[resume tests](../../crates/ego-cli/tests/resume_runtime.rs).
+[resume tests](../../crates/ego-cli/tests/it/resume_runtime.rs).

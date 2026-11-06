@@ -55,5 +55,41 @@
     "output_cost_per_token": 2.5e-06,
     "litellm_provider": "gemini",
     "mode": "chat"
+  },
+  "bedrock_mantle/anthropic.claude-opus-5-5": {
+    "input_cost_per_token": 4.4e-06,
+    "cache_read_input_token_cost": 2.2e-07,
+    "cache_creation_input_token_cost": 5.5e-06,
+    "cache_creation_input_token_cost_above_1hr": 8.8e-06,
+    "output_cost_per_token": 2.2e-05,
+    "litellm_provider": "bedrock_mantle",
+    "mode": "chat"
+  },
+  "anthropic.claude-opus-5-5": {
+    "input_cost_per_token": 4e-06,
+    "cache_read_input_token_cost": 2e-07,
+    "cache_creation_input_token_cost": 5e-06,
+    "cache_creation_input_token_cost_above_1hr": 8e-06,
+    "output_cost_per_token": 2e-05,
+    "litellm_provider": "bedrock_converse",
+    "mode": "chat"
+  },
+  "vertex_ai/claude-opus-5-5": {
+    "input_cost_per_token": 4e-06,
+    "cache_read_input_token_cost": 2e-07,
+    "cache_creation_input_token_cost": 5e-06,
+    "cache_creation_input_token_cost_above_1hr": 8e-06,
+    "output_cost_per_token": 2e-05,
+    "litellm_provider": "vertex_ai-anthropic_models",
+    "mode": "chat"
+  },
+  "claude-opus-5-5": {
+    "input_cost_per_token": 4e-06,
+    "cache_read_input_token_cost": 2e-07,
+    "cache_creation_input_token_cost": 5e-06,
+    "cache_creation_input_token_cost_above_1hr": 8e-06,
+    "output_cost_per_token": 2e-05,
+    "litellm_provider": "anthropic",
+    "mode": "chat"
   }
 }

@@ -1,0 +1,13 @@
+{
+  "captured_at": "2026-11-02T14:48:21.197436+00:00",
+  "method": "POST",
+  "url": "https://chatgpt.com/backend-api/codex/responses",
+  "request_body": "{}",
+  "request_authentication": "none",
+  "status": 401,
+  "content_type": "application/json",
+  "response_body_sha256": "8f399debe52f271e56918a3ef03cd90d60776f7c972e6807b1ef2a7437c1040c",
+  "response_body_redaction": "none: exact allowlisted Unauthorized body; no credentials or account identity sent",
+  "client": "Python urllib.request",
+  "python_version": "3.15.2"
+}

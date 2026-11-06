@@ -401,6 +401,10 @@ impl super::StreamSink for StreamDecoder {
     fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent> {
         StreamDecoder::finish(*self, transport)
     }
+
+    fn usage_incoherent(&self) -> bool {
+        self.usage_incoherent
+    }
 }
 
 impl StreamDecoder {
@@ -416,15 +420,6 @@ impl StreamDecoder {
         let mut out = Vec::new();
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
-        }
-        if self.usage_incoherent {
-            out.push(AiEvent::Error {
-                message: "the provider's prompt cache breakdown was larger than \
-                          the prompt it broke down, so no usage figure could be \
-                          trusted; this generation settles at its bound"
-                    .to_string(),
-                kind: ErrorKind::Unclassified,
-            });
         }
         self.flush_calls(&mut out);
         if let Some(usage) = self.usage.take() {
@@ -537,13 +532,13 @@ impl StreamDecoder {
                     "incomplete" => self.finish_reason = Some(StopReason::Length),
                     "failed" | "cancelled" => {
                         let error = event.response.and_then(|done| done.error);
-                        let kind = super::classify_stream_code(
+                        let class = super::classify_stream_code(
                             error.as_ref().and_then(|error| error.code.as_deref()),
                         );
                         let message = error.and_then(|error| error.message).unwrap_or_else(|| {
                             format!("the Codex backend reported response status {status}")
                         });
-                        out.extend(super::streamed_failure(message, kind));
+                        out.extend(super::streamed_failure(message, class));
                         self.finish_reason = Some(StopReason::Error);
                     }
                     _ if !self.calls.is_empty() => self.finish_reason = Some(StopReason::ToolUse),
@@ -559,7 +554,7 @@ impl StreamDecoder {
                     .as_ref()
                     .and_then(|error| error.code.clone())
                     .or(event.code);
-                let kind = super::classify_stream_code(code.as_deref());
+                let class = super::classify_stream_code(code.as_deref());
                 let message = error
                     .and_then(|error| error.message)
                     .or(event.message)
@@ -567,7 +562,7 @@ impl StreamDecoder {
                         Some(code) => format!("the Codex backend reported streamed error {code}"),
                         None => "the Codex backend reported response.failed".to_string(),
                     });
-                out.extend(super::streamed_failure(message, kind));
+                out.extend(super::streamed_failure(message, class));
                 self.finish_reason = Some(StopReason::Error);
             }
             _ => {}
@@ -575,23 +570,10 @@ impl StreamDecoder {
     }
 
     fn flush_calls(&mut self, out: &mut Vec<AiEvent>) {
-        for (index, call) in std::mem::take(&mut self.calls).into_iter().enumerate() {
-            let Some(id) = call.1.id.filter(|id| !id.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!(
-                        "Codex streamed a function_call at slot {index} with no call_id"
-                    ),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
-            let Some(name) = call.1.name.filter(|name| !name.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!("Codex streamed a function_call {id} with no name"),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
+        // Absent identities pass on empty; the shared stage decides.
+        for call in std::mem::take(&mut self.calls) {
+            let id = call.1.id.unwrap_or_default();
+            let name = call.1.name.unwrap_or_default();
             out.push(AiEvent::ToolCall {
                 call_id: id,
                 name,

@@ -2,9 +2,9 @@
 
 use crate::provider::{CostExpectation, ProviderRow};
 
-pub const FINAL_PROFILE_COUNT: usize = 11;
+pub const FINAL_PROFILE_COUNT: usize = 13;
 
-/// The final inventory, with the three rows whose base an operator may move.
+/// The final inventory, with the four rows whose base an operator may move.
 ///
 /// `ollama`, `openai` and `anthropic` are parameters and the rest are not,
 /// because those three are the API-key rows a machine can legitimately serve
@@ -17,10 +17,15 @@ pub const FINAL_PROFILE_COUNT: usize = 11;
 /// `gemini` has an implemented mapping and appears in this inventory.
 /// Leaving an implemented row out would report an incorrect unknown-provider
 /// error rather than its actual availability.
+///
+/// `bedrock` is the fourth parameter because its base names the AWS region,
+/// which the environment states (`AWS_REGION`). `vertex` is not: its project
+/// and location are resolved with its credential.
 pub fn final_provider_rows(
     ollama: ProviderRow,
     openai: ProviderRow,
     anthropic: ProviderRow,
+    bedrock: ProviderRow,
 ) -> [ProviderRow; FINAL_PROFILE_COUNT] {
     [
         ollama,
@@ -34,6 +39,8 @@ pub fn final_provider_rows(
         ProviderRow::nous_default(),
         ProviderRow::openrouter_default(),
         ProviderRow::gemini_default(),
+        bedrock,
+        ProviderRow::vertex(),
     ]
 }
 
@@ -62,6 +69,7 @@ pub fn final_cost_expectations() -> [FinalCostExpectation; FINAL_PROFILE_COUNT] 
         ProviderRow::ollama_default(),
         ProviderRow::openai(),
         ProviderRow::anthropic_default(),
+        ProviderRow::bedrock_default(),
     )
     .map(|row| FinalCostExpectation {
         profile_id: row.id().to_string(),

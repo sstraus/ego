@@ -24,8 +24,8 @@ use ego_core::compact::{
 };
 use ego_core::config::rule_management::RuleManagement;
 use ego_core::config::{
-    ConfigLayer, Effective, Limits, McpConfigProvenance, McpServerConfig, McpServerName, Mode,
-    ModelRef, PermCfg, Posture, RuleMutation, RuleSnapshot, Ruleset, Selection, Source, Sourced,
+    ConfigLayer, Effective, McpConfigProvenance, McpServerConfig, McpServerName, Mode, ModelRef,
+    PermCfg, Posture, RuleMutation, RuleSnapshot, Ruleset, Selection, Source, Sourced,
     SystemPrompt, Trust, UserConfigError, UserConfigMutation, UserConfigPublication,
     UserConfigStore, UserConfigTarget, resolve_selected, system_prompt,
 };
@@ -106,6 +106,8 @@ use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 mod executor;
+mod mcp_task_wake;
+mod rewind_command;
 mod root_revocation;
 mod session_commands;
 mod turns;
@@ -117,6 +119,7 @@ use executor::{
 };
 pub use executor::{CliCompactionCommand, CliRunExecutor};
 pub(crate) use executor::{protocol_args, protocol_effective};
+pub use rewind_command::rewind;
 pub use session_commands::{compact, export, fork, ls, rm};
 use session_commands::{exported, finalize_ci_bundle, finalize_ci_error};
 use turns::{
@@ -131,7 +134,7 @@ use crate::hook::{CliHookInvocationBinding, RunToollessGenerationService};
 use crate::model_picker::{ModelPicker, ModelSwitchRequest};
 use crate::models;
 use crate::output::{
-    Diagnostics, InteractiveOutput, JsonlSink, Report, Stderr, Stdout, TextOutput, TextSink, note,
+    Diagnostics, InteractiveOutput, JsonlSink, Report, Stderr, Stdout, TextOutput, TextSink,
 };
 use crate::provider_http::{ProviderHttpAdapter, run_effect_ports};
 use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
@@ -191,11 +194,12 @@ pub fn report(ended: &Ended) -> Report {
 /// closed pipe ends as `Signalled(Term)`, which on its own reads as "somebody
 /// sent SIGTERM"; naming the real cause is the difference between a report and
 /// a guess.
-pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
+pub fn diagnose(termination: &RunTermination, out: &Stdout) {
     let message = match termination {
         RunTermination::Done => return,
         RunTermination::TaskFailed => "the task did not complete successfully".to_string(),
         RunTermination::UsageError { message }
+        | RunTermination::Guard { message }
         | RunTermination::Provider { message }
         | RunTermination::ProviderUncertain { message }
         | RunTermination::ContextOverflow { message } => message.clone(),
@@ -230,12 +234,12 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
         RunTermination::MaxTurns => "stopped: --max-turns was reached".to_string(),
         RunTermination::TimedOut => "stopped: --timeout expired".to_string(),
         RunTermination::Signalled(Signal::Int) => "interrupted".to_string(),
-        RunTermination::Signalled(Signal::Term) => match broken {
+        RunTermination::Signalled(Signal::Term) => match out.broken() {
             Some(why) => format!("stopped: {why}"),
             None => "terminated".to_string(),
         },
     };
-    note(&message);
+    out.final_note(&message);
 }
 
 #[cfg(test)]

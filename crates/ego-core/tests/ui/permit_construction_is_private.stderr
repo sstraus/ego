@@ -10,4 +10,4 @@ error: cannot construct `ego_core::permit::Permit` with struct literal syntax du
 13 |         _sealed: impossible(),
    |         --------------------- private field
    |
-   = note: ...and other private field `read_perimeter` that was not provided
+   = note: ...and other private fields `read_perimeter` and `disclosed` that were not provided

@@ -4,7 +4,9 @@
 //! the bytes back into [`AiEvent`](ego_core::generator::port::AiEvent)s. It
 //! owns no socket, no credential and no policy — those belong to
 //! [`crate::http`] and to the provider table — so a wire format is testable
-//! against a transcript, which is what the goldens here do.
+//! against a transcript, which is what the goldens here do. A wire format also
+//! decides nothing about a malformed answer: the shared rules in [`policy`]
+//! and the generator's tool-name stage do, once, for every adapter.
 //!
 //! [`WireFormat`] separates provider-neutral generation types from wire
 //! encoding and decoding. Implementations share the core request and event
@@ -12,6 +14,7 @@
 
 pub mod anthropic_messages;
 mod cache;
+mod failure_capture;
 pub mod gemini_interactions;
 pub mod github_copilot_completions;
 pub mod kimi_anthropic;
@@ -22,6 +25,10 @@ pub mod ollama;
 pub mod openai_codex_responses;
 pub mod openai_completions;
 pub mod openai_responses;
+pub mod partner_messages;
+mod policy;
+#[cfg(test)]
+mod policy_contract;
 pub mod provider_cost;
 pub mod sse;
 pub mod xai_responses;
@@ -62,6 +69,11 @@ pub(crate) fn request_has_audio(req: &GenRequest) -> bool {
 /// semantics share a stateless value; real shape differences use distinct
 /// values. `Debug`, `Send` and `Sync` support shared provider rows.
 pub trait WireFormat: fmt::Debug + Send + Sync {
+    /// Lifetime selected by this mapping, not an invented response field.
+    fn prompt_cache_policy(&self, _req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        ego_core::usage::PromptCachePolicy::default()
+    }
+
     /// Only mappings with a proven bidirectional contract opt in.
     fn websocket(&self) -> bool {
         false
@@ -244,6 +256,21 @@ pub fn failed(message: String, delivery: DeliveryCertainty, kind: ErrorKind) -> 
 pub(crate) trait StreamSink: Send + 'static {
     fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent>;
     fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent>;
+    /// Whether the wire's usage report did not partition its own input total.
+    /// The adapter states the fact; [`policy`] decides what it means.
+    fn usage_incoherent(&self) -> bool {
+        false
+    }
+}
+
+/// End the decoder, with the shared notice when its usage was incoherent.
+fn finish(decoder: Box<dyn StreamSink>, transport: Option<HttpError>) -> Vec<AiEvent> {
+    let incoherent = decoder.usage_incoherent();
+    let mut events = decoder.finish(transport);
+    if incoherent {
+        events.insert(0, policy::incoherent_usage());
+    }
+    events
 }
 
 enum State {
@@ -254,6 +281,7 @@ enum State {
     Body {
         body: crate::http::ByteStream,
         decoder: Box<dyn StreamSink>,
+        capture: Option<failure_capture::FailureCapture>,
     },
     Done,
 }
@@ -273,6 +301,11 @@ pub(crate) fn decode_response(
     response: Result<HttpResponse, HttpError>,
     decoder: Box<dyn StreamSink>,
 ) -> BoxStream<'static, AiEvent> {
+    let stream_retry_after = response
+        .as_ref()
+        .ok()
+        .filter(|response| response.status == 200)
+        .and_then(|response| retry_after(&response.headers));
     stream::unfold(State::Head { response, decoder }, |state| async move {
         match state {
             State::Head {
@@ -300,15 +333,19 @@ pub(crate) fn decode_response(
                 // the body and leave nobody to report it.
                 let arrived = AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent);
                 if response.status == 200 {
+                    let capture =
+                        failure_capture::FailureCapture::start(response.status, &response.headers);
                     return Some((
                         vec![arrived],
                         State::Body {
                             body: response.body,
                             decoder,
+                            capture,
                         },
                     ));
                 }
                 let kind = classify_status(response.status);
+                let capacity = matches!(response.status, 429 | 503 | 529);
                 let retry_after = retry_after(&response.headers);
                 let (message, cause) = match read_error_body(response.status, response.body).await {
                     Ok(diagnostic) => diagnostic,
@@ -319,30 +356,67 @@ pub(crate) fn decode_response(
                 // all proves the request arrived. The provider answered, so
                 // its host-safe cause goes before the terminal `Stop`.
                 let mut events = failed(message, DeliveryCertainty::PossiblySent, kind).to_vec();
-                events.insert(2, AiEvent::ProviderFailure { cause, retry_after });
+                events.insert(2, AiEvent::ProviderFailure {
+                        cause,
+                        retry_after,
+                        capacity,
+                    },
+                );
                 Some((events, State::Done))
             }
             State::Body {
                 mut body,
                 mut decoder,
+                mut capture,
             } => match body.next().await {
                 Some(Ok(bytes)) => {
                     let events = decoder.push(&bytes);
-                    Some((events, State::Body { body, decoder }))
+                    if let Some(capture) = capture.as_mut() {
+                        capture.observe(&bytes);
+                    }
+                    let capture = capture.and_then(|capture| capture.settle(&events));
+                    Some((
+                        events,
+                        State::Body {
+                            body,
+                            decoder,
+                            capture,
+                        },
+                    ))
                 }
                 Some(Err(error)) if error.protocol_filter_message().is_some() => {
-                    let mut events = decoder.finish(None);
+                    let mut events = finish(decoder, None);
                     events.retain(|event| !matches!(event, AiEvent::Stop(_)));
                     events.extend(local_filter_failure(&error));
                     Some((events, State::Done))
                 }
-                Some(Err(error)) => Some((decoder.finish(Some(error)), State::Done)),
-                None => Some((decoder.finish(None), State::Done)),
+                Some(Err(error)) => {
+                    let events = finish(decoder, Some(error));
+                    if let Some(capture) = capture {
+                        capture.settle(&events);
+                    }
+                    Some((events, State::Done))
+                }
+                None => {
+                    let events = finish(decoder, None);
+                    if let Some(capture) = capture {
+                        capture.settle(&events);
+                    }
+                    Some((events, State::Done))
+                }
             },
             State::Done => None,
         }
     })
     .flat_map(stream::iter)
+    .map(move |mut event| {
+        if let AiEvent::ProviderFailure { retry_after, .. } = &mut event
+            && retry_after.is_none()
+        {
+            *retry_after = stream_retry_after;
+        }
+        event
+    })
     .boxed()
 }
 
@@ -456,28 +530,48 @@ fn retry_after_at(
 /// fail-closed rule as [`classify_status`]. `insufficient_quota` is not here
 /// on purpose: it shares a status with a rate limit and never clears by
 /// waiting.
-pub(crate) fn classify_stream_code(code: Option<&str>) -> ErrorKind {
+///
+/// Only an overload and a rate limit are a capacity refusal; a generic
+/// `server_error` retries on the seconds-long backoff.
+pub(crate) fn classify_stream_code(code: Option<&str>) -> FailureClass {
     match code {
-        Some("server_is_overloaded" | "rate_limit_exceeded" | "server_error") => {
-            ErrorKind::Transient
-        }
-        _ => ErrorKind::Unclassified,
+        Some("server_is_overloaded" | "rate_limit_exceeded") => FailureClass {
+            kind: ErrorKind::Transient,
+            capacity: true,
+        },
+        Some("server_error") => FailureClass {
+            kind: ErrorKind::Transient,
+            capacity: false,
+        },
+        _ => FailureClass {
+            kind: ErrorKind::Unclassified,
+            capacity: false,
+        },
     }
+}
+
+/// What a streamed provider error says about retrying: its class, and whether
+/// it is a capacity refusal ([`AiEvent::ProviderFailure`]'s `capacity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FailureClass {
+    pub(crate) kind: ErrorKind,
+    pub(crate) capacity: bool,
 }
 
 /// The two events a streamed provider error emits: the log's `Error`, and the
 /// host-safe [`AiEvent::ProviderFailure`]. `message` is the provider's typed
 /// `message` field (or a sentence naming its code), never a raw body, so it
 /// serves as both.
-pub(crate) fn streamed_failure(message: String, kind: ErrorKind) -> [AiEvent; 2] {
+pub(crate) fn streamed_failure(message: String, class: FailureClass) -> [AiEvent; 2] {
     [
         AiEvent::Error {
             message: message.clone(),
-            kind,
+            kind: class.kind,
         },
         AiEvent::ProviderFailure {
             cause: message,
             retry_after: None,
+            capacity: class.capacity,
         },
     ]
 }

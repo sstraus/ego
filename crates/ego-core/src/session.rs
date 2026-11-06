@@ -543,6 +543,18 @@ impl TargetSeed {
         }
     }
 
+    pub(crate) fn with_owner_sandbox_grants(
+        mut self,
+        grants: &[crate::permit::SandboxGrant],
+    ) -> Self {
+        for grant in grants {
+            self.push_trailing(EventKind::SandboxOwnerGranted {
+                grant: grant.clone(),
+            });
+        }
+        self
+    }
+
     pub(crate) fn with_latest_user_request(mut self, text: Option<String>) -> Self {
         if let EventKind::CompactionSeeded {
             latest_user_request,

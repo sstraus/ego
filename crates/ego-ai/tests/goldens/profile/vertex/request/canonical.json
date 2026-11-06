@@ -1,0 +1,28 @@
+{
+  "body": {
+    "anthropic_version": "vertex-2023-10-16",
+    "max_tokens": 16,
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "Reply with the single word: ok",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "stream": true,
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "authorization"
+  ],
+  "method": "Post",
+  "url": "https://aiplatform.googleapis.com/v1/projects/ego-conformance/locations/global/publishers/anthropic/models/claude-opus-5-5:streamRawPredict"
+}

@@ -26,6 +26,8 @@ use crate::cli::DoctorArgs;
 use crate::config;
 use crate::output::Stdout;
 
+mod network;
+
 /// The text rendering, for the surface that has nowhere to put a `--json`.
 ///
 /// `/doctor` calls this and `ego doctor` calls [`execute`]; both go through
@@ -53,7 +55,16 @@ pub fn observed_with_width(workspace: PathBuf, width: usize) -> String {
 /// the process working directory to reach this would be a test that cannot run
 /// beside another one.
 pub fn snapshot(workspace: PathBuf, home: Option<PathBuf>, roots: &VisibleRoots) -> HealthSnapshot {
-    snapshot_with_perimeter(workspace, home, roots, None)
+    snapshot_with_perimeter(workspace, home, roots, None, network::Probe::Configured)
+}
+
+/// [`snapshot`] with the offline posture forced on, as `ego doctor --offline` does.
+pub fn snapshot_offline(
+    workspace: PathBuf,
+    home: Option<PathBuf>,
+    roots: &VisibleRoots,
+) -> HealthSnapshot {
+    snapshot_with_perimeter(workspace, home, roots, None, network::Probe::Offline)
 }
 
 /// Inspect an existing session without re-resolving its admitted perimeter.
@@ -73,7 +84,13 @@ pub(crate) fn observed_session_view(
 ) -> String {
     let home = config::ego_home();
     let roots = visible_roots(&workspace, home.as_ref());
-    let snapshot = snapshot_with_perimeter(workspace, home, &roots, Some(perimeter));
+    let snapshot = snapshot_with_perimeter(
+        workspace,
+        home,
+        &roots,
+        Some(perimeter),
+        network::Probe::Configured,
+    );
     if details {
         text_with_width(&snapshot, width)
     } else {
@@ -108,7 +125,25 @@ fn snapshot_with_perimeter(
     home: Option<PathBuf>,
     roots: &VisibleRoots,
     perimeter: Option<&crate::perimeter::Perimeter>,
+    probe: network::Probe,
 ) -> HealthSnapshot {
+    // Network probes run beside the local ones on their own bounded budget, so
+    // a slow provider cannot spend the two seconds the local reads share.
+    let (network_send, network_receive) = mpsc::sync_channel(1);
+    {
+        let network = network::Network {
+            workspace: workspace.clone(),
+            home: home.clone(),
+            perimeter: perimeter.cloned(),
+            probe,
+        };
+        let roots = roots.clone();
+        let _ = std::thread::Builder::new()
+            .name("ego-doctor-network".into())
+            .spawn(move || {
+                let _ = network_send.send(network.observe(&roots));
+            });
+    }
     let probes: Vec<Box<dyn HealthProbe + Send>> = vec![
         Box::new(Configuration),
         Box::new(Credentials { home: home.clone() }),
@@ -127,7 +162,20 @@ fn snapshot_with_perimeter(
         Box::new(Hooks),
         Box::new(Acp),
     ];
-    observe_bounded(probes, roots, Duration::from_secs(2))
+    let local = observe_bounded(probes, roots, Duration::from_secs(2));
+    let network = match network_receive.recv_timeout(network::PROBE_BUDGET + Duration::from_secs(2))
+    {
+        Ok(Ok(items)) => HealthSectionReport::new(HealthSection::Catalogue, items),
+        Ok(Err(refusal)) => HealthSectionReport::new(
+            HealthSection::Catalogue,
+            vec![HealthItem::refused(HealthSection::Catalogue, &refusal)],
+        ),
+        Err(_) => probe_error(
+            HealthSection::Catalogue,
+            "network probe failed: it timed out or stopped without a result",
+        ),
+    };
+    HealthSnapshot::new(local.sections.into_iter().chain([network]))
 }
 
 // A blocked filesystem read cannot safely be killed in-process. Partition the
@@ -227,7 +275,15 @@ pub fn execute(args: &DoctorArgs, out: &Stdout) -> RunTermination {
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = config::ego_home();
     let roots = visible_roots(&workspace, home.as_ref());
-    let snapshot = snapshot(workspace, home, &roots);
+    // `--offline` wins over `--probe-network`: the offline posture skips every probe.
+    let probe = if args.offline {
+        network::Probe::Offline
+    } else if args.probe_network {
+        network::Probe::Requested
+    } else {
+        network::Probe::Configured
+    };
+    let snapshot = snapshot_with_perimeter(workspace, home, &roots, None, probe);
     let rendered = match render(&snapshot, args.json) {
         Ok(rendered) => rendered,
         Err(error) => {

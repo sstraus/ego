@@ -152,7 +152,7 @@ pub(super) fn instructions(
             &discovery_root,
             cwd,
             &selection,
-            Limits::default(),
+            effective.instructions.limits(),
             home.as_deref(),
         )
         .map_err(|err| UsageError(err.to_string()))?;
@@ -201,6 +201,25 @@ pub(super) fn instructions(
 
         system_prompt(&set, root, &selection)
     };
+    if replacement.is_none()
+        && let Some(store) = memory_store(effective, args, root)
+    {
+        use ego_core::memory::Loaded;
+        let location = store.location();
+        match ego_core::memory::load(store.as_ref()) {
+            Loaded::Text(text) => {
+                assembled = ego_core::memory::frame(assembled, &location, &text);
+            }
+            Loaded::Absent => {}
+            Loaded::TooLarge { bytes } => diagnostics.note(&format!(
+                "{location} was not used: {bytes} bytes is over the {} byte memory limit",
+                ego_core::memory::MAX_BYTES
+            )),
+            Loaded::Unreadable(error) => {
+                diagnostics.note(&format!("{location} was not used: {error}"));
+            }
+        }
+    }
     if replacing.is_none()
         && let Some(name) = args.output_style.as_deref()
     {
@@ -240,7 +259,67 @@ pub(super) fn tools(
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
-    tools_with_mode(selected, skills, profile, history, environment, None)
+    tools_with_mode(
+        selected,
+        skills,
+        profile,
+        history,
+        environment,
+        None,
+        OptInTools::default(),
+    )
+}
+
+/// The tools a run has only when the owner turned them on.
+#[derive(Default)]
+pub(super) struct OptInTools {
+    pub(super) memory: Option<Arc<dyn ego_core::memory::MemoryStore>>,
+    /// The workspace whose language servers the `lsp` tool asks.
+    pub(super) lsp: Option<std::path::PathBuf>,
+}
+
+pub(super) fn opt_in_tools(effective: &Effective, args: &Args, root: &Path) -> OptInTools {
+    OptInTools {
+        memory: memory_store(effective, args, root),
+        lsp: effective.lsp.then(|| root.to_path_buf()),
+    }
+}
+
+/// The language servers of `root`, shared by every registry this process
+/// builds for it, so a skill rescan or a compaction does not restart them.
+fn lsp_pool(root: &Path, environment: ego_core::permit::EnvPolicy) -> ego_tools::lsp::LspPool {
+    static POOLS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, ego_tools::lsp::LspPool>>,
+    > = std::sync::OnceLock::new();
+    POOLS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(root.to_path_buf())
+        .or_insert_with(|| ego_tools::lsp::LspPool::new(root, environment))
+        .clone()
+}
+
+/// The workspace memory of this run, when the owner turned it on.
+pub(super) fn memory_store(
+    effective: &Effective,
+    args: &Args,
+    root: &Path,
+) -> Option<Arc<dyn ego_core::memory::MemoryStore>> {
+    crate::memory::store(
+        effective.memory,
+        args.bare,
+        crate::config::ego_home().as_deref(),
+        root,
+    )
+}
+
+/// The tool selection of this run: `--tools` or `--no-tools`, else the owner's `tools` key.
+pub(super) fn selected_tools<'a>(
+    args: &'a Args,
+    effective: &'a Effective,
+) -> Option<&'a Vec<String>> {
+    args.tools.as_ref().or(effective.tools.as_ref())
 }
 
 pub(super) fn tools_with_mode(
@@ -250,7 +329,9 @@ pub(super) fn tools_with_mode(
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
     _model: Option<&str>,
+    opt_in: OptInTools,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
+    let lsp = opt_in.lsp.map(|root| lsp_pool(&root, environment.clone()));
     let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
         .into_iter()
         .map(RegisteredTool::Effect)
@@ -270,6 +351,12 @@ pub(super) fn tools_with_mode(
     all.push(RegisteredTool::Task);
     all.push(RegisteredTool::Goal);
     all.push(RegisteredTool::Plan);
+    if let Some(store) = opt_in.memory {
+        all.push(RegisteredTool::Memory(store));
+    }
+    if let Some(pool) = lsp {
+        all.push(RegisteredTool::CodeIntel(Arc::new(pool)));
+    }
     if let Some(source) = history {
         for tool in [
             ego_core::history::HistoryTool::Search,
@@ -317,6 +404,7 @@ pub(super) fn capabilities(
     tools: &[RegisteredTool],
     instructions: bool,
     schema: bool,
+    hooks_off: bool,
 ) -> Vec<String> {
     let mut names = Vec::new();
     if !tools.is_empty() {
@@ -327,6 +415,9 @@ pub(super) fn capabilities(
     }
     if schema {
         names.push("schema".to_string());
+    }
+    if hooks_off {
+        names.push("hooks_off".to_string());
     }
     names.push("jsonl".to_string());
     names
@@ -585,7 +676,7 @@ pub(super) fn handle_policy_request(
                     ));
                     Ok(None)
                 }
-                repl::Confirmation::Propagate(line) => Ok(Some(line)),
+                repl::Confirmation::Propagate(line) => Ok(Some(*line)),
             }
         }
         PolicyControlRequest::Permission(PermissionInput::ConfirmRemember(_)) => Err(mismatch()),
@@ -926,6 +1017,7 @@ pub(super) fn finish_rooted_settings(
     .with_exec_paths(exec_paths)
     .with_roots(roots);
 
+    crate::session::set_checkpoints(effective.checkpoints);
     Ok(Settings {
         run_deadline,
         root,
@@ -1014,7 +1106,7 @@ pub(super) fn prepared_materials(
         .transpose()
         .map_err(|error| UsageError(error.to_string()))?;
     let registry = tools_with_mode(
-        args.tools.as_ref(),
+        selected_tools(args, &settings.effective),
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
@@ -1036,6 +1128,7 @@ pub(super) fn prepared_materials(
                 .as_ref()
                 .map(|model| model.0.as_str())
         }),
+        opt_in_tools(&settings.effective, args, &settings.root),
     )?;
     let slug = args
         .model
@@ -1481,6 +1574,7 @@ pub(super) async fn generation_preflight_inner(
             effective.auth.clone(),
         )
         .with_output_limit(effective.max_output_tokens)
+        .with_cache_ttl_seconds(effective.cache_ttl_seconds)
         .with_offline(confinement.offline())
         .with_proxy(proxy),
     );

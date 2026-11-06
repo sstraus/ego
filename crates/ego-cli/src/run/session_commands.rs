@@ -574,7 +574,7 @@ async fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> 
     ))
 }
 
-fn render_fork_result(
+pub(super) fn render_fork_result(
     target: SessionId,
     publication: &LifecyclePublication,
     output: Output,
@@ -682,7 +682,11 @@ fn tabulate(out: &Stdout, metas: &[SessionMeta], root: &Path, all: bool) {
 /// `what` names the thing rather than the error: a `Listing` and a `Row` fail
 /// for the same reason and the operator needs to know which of the two the
 /// command was in the middle of.
-fn render<T: serde::Serialize>(out: &Stdout, value: &T, what: &str) -> Result<(), RunTermination> {
+pub(super) fn render<T: serde::Serialize>(
+    out: &Stdout,
+    value: &T,
+    what: &str,
+) -> Result<(), RunTermination> {
     match serde_json::to_string(value) {
         Ok(line) => {
             out.line(&line);

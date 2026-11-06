@@ -24,8 +24,8 @@ use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
 use crate::goal::{GoalOwner, GoalTransition};
 use crate::permit::residual::{ResidualOutcome, ResidualScope};
 use crate::permit::{
-    Authority, CanonPath, DetachedExecSnapshot, Escalation, ExecObservation, ToolResult,
-    ToolResultProvenance,
+    Authority, CanonPath, DetachedExecLines, DetachedExecSnapshot, Escalation, ExecObservation,
+    ToolResult, ToolResultProvenance,
 };
 use crate::question::{QuestionOutcome, QuestionRequest, QuestionTarget};
 use crate::run::{CancelReason, DeniedBy, RequestId, RunId, RunSelections, RunSettlement};
@@ -162,6 +162,8 @@ pub enum ExitReason {
     ///
     /// [`Internal`]: ExitReason::Internal
     Provider,
+    /// A local generation guard stopped unsafe or degenerate tool output.
+    Guard,
     /// **We** failed. Never reported as a provider error: telling a script to
     /// retry our own defect is worse than telling it nothing.
     Internal,
@@ -210,13 +212,13 @@ pub struct ToolTiming {
 /// SessionPaused | SessionPauseObserved | SessionResumed | SessionSelectionsSelected | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
 /// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | PromptQueued | PromptDeliveryExpedited |
-/// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
+/// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessageStarted | AssistantMessage |
 /// ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted | ToolCallStarted | ToolCallDelta |
-/// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
+/// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted | DetachedExecOutput |
 /// DetachedExecSettled | QuestionRequested | QuestionSettled | QuestionMemberSettled |
 /// PermissionRequested | PermissionAmended | PermissionDecided |
 /// SessionRootGranted | PermanentRootGrantPending | PermanentRootGranted | RootRevoked | GenerationStarted | FallbackDecision | ExecutionObserved |
-/// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
+/// ExecutionMeasured | JudgeResponse | SandboxResidualDecided | SandboxOwnerGranted |
 /// AttemptSettled | CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved |
 /// TurnCompleted | PinsChanged | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
@@ -351,8 +353,16 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queued_prompt: Option<QueuedPromptId>,
     },
-    /// A streamed increment of the assistant's message.
+    /// A streamed increment of the assistant's message, in logs written
+    /// by earlier versions. New turns publish chunks live only and persist the
+    /// assembled [`EventKind::AssistantMessage`].
+    // TODO(2027-03-01): remove legacy AssistantDelta replay support.
     AssistantDelta { text: String },
+    /// The assistant's message item began before the generation opened
+    /// another item. It carries no text: it only gives the item its place in
+    /// the log, so the one [`EventKind::AssistantMessage`] written at the
+    /// close is the item's only completion.
+    AssistantMessageStarted,
     /// The assistant's final, assembled message.
     AssistantMessage { text: String },
     /// A streamed increment of the model's reasoning/thinking.
@@ -409,6 +419,9 @@ pub enum EventKind {
     DetachedExecStarted { id: DetachedExecId },
     /// Ego-owned append-only provider context; never an operator prompt.
     HostContextAppended { text: String },
+    /// Monitored lines of a running process, delivered to the model at a
+    /// generation boundary before the settlement of the same process.
+    DetachedExecOutput { output: DetachedExecLines },
     /// One terminal observation, delivered to the model at a generation boundary.
     DetachedExecSettled { snapshot: DetachedExecSnapshot },
     /// A typed human-input request became durable before any host was asked.
@@ -469,6 +482,9 @@ pub enum EventKind {
     /// resumed session able to say that a request was in flight — and, once
     /// `AttemptSettled` arrives, whether it may safely be sent again.
     GenerationStarted {
+        /// Request policy, not a provider-reported cache expiry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache: Option<crate::usage::PromptCacheRequest>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         snapshot: Option<crate::session::PromptSnapshot>,
         attempt: AttemptRef,
@@ -484,6 +500,8 @@ pub enum EventKind {
     SessionSelectionsSelected { selections: RunSelections },
     /// A terminal-approved root bound to this session's durable log.
     SessionRootGranted { root: crate::permit::ProfileRoot },
+    /// An explicit owner path/access approval, never a judge verdict.
+    SandboxOwnerGranted { grant: crate::permit::SandboxGrant },
     /// Durable intent before publishing the configured root; never grants authority.
     PermanentRootGrantPending {
         consent: crate::permit::PermanentRootConsent,
@@ -852,6 +870,7 @@ impl EventKind {
             EventKind::ProtocolFilterVariablesSaved { .. } => "protocol_filter_variables_saved",
             EventKind::UserPrompt { .. } => "user_prompt",
             EventKind::AssistantDelta { .. } => "assistant_delta",
+            EventKind::AssistantMessageStarted => "assistant_message_started",
             EventKind::AssistantMessage { .. } => "assistant_message",
             EventKind::ReasoningDelta { .. } => "reasoning_delta",
             EventKind::ReasoningState { .. } => "reasoning_state",
@@ -863,6 +882,7 @@ impl EventKind {
             EventKind::ToolCallMeasured { .. } => "tool_call_measured",
             EventKind::DetachedExecStarted { .. } => "detached_exec_started",
             EventKind::HostContextAppended { .. } => "host_context_appended",
+            EventKind::DetachedExecOutput { .. } => "detached_exec_output",
             EventKind::DetachedExecSettled { .. } => "detached_exec_settled",
             EventKind::QuestionRequested { .. } => "question_requested",
             EventKind::QuestionSettled { .. } => "question_settled",
@@ -874,6 +894,7 @@ impl EventKind {
             EventKind::FallbackDecision { .. } => "fallback_decision",
             EventKind::SessionSelectionsSelected { .. } => "session_selections_selected",
             EventKind::SessionRootGranted { .. } => "session_root_granted",
+            EventKind::SandboxOwnerGranted { .. } => "sandbox_owner_granted",
             EventKind::PermanentRootGrantPending { .. } => "permanent_root_grant_pending",
             EventKind::PermanentRootGranted { .. } => "permanent_root_granted",
             EventKind::RootRevoked { .. } => "root_revoked",

@@ -12,7 +12,7 @@ use super::foreign::{
     InvocationDigest, NetworkTarget, PreparedConnect, Subject,
 };
 use super::path::CanonPath;
-use super::spawn::SpawnSpec;
+use super::spawn::{DetachedExecMonitor, SpawnSpec};
 use crate::event::hook::HookId;
 use crate::event::id::DetachedExecId;
 use crate::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
@@ -105,9 +105,15 @@ pub enum Change {
     /// occurrence must exist. Bulk mode replaces original non-overlapping matches.
     Replace {
         replace_all: bool,
-        old_string: String,
-        new_string: String,
+        chunks: Vec<ReplaceChunk>,
     },
+}
+
+/// One exact replacement, in execution order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceChunk {
+    pub old_string: String,
+    pub new_string: String,
 }
 
 /// A cell mutation, bound into the same permission identity as other writes.
@@ -351,6 +357,10 @@ pub struct PreparedCall {
     ops: Vec<Op>,
     background: Option<DetachedExecId>,
     read_offset: u64,
+    read_items: Vec<(String, u64)>,
+    write_items: Vec<String>,
+    web_output_limit: Option<usize>,
+    monitor: Option<Box<DetachedExecMonitor>>,
     mcp: Option<Box<McpPreparedEnvelope>>,
     hook_http: Option<Box<HookHttpPreparedEnvelope>>,
     web_http: Option<Box<(HttpRoute, HttpRequest)>>,
@@ -441,6 +451,10 @@ impl PreparedCall {
             ops: vec![first],
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             hook_http: None,
             web_http: None,
@@ -489,6 +503,48 @@ impl PreparedCall {
 
     pub fn read_offset(&self) -> u64 {
         self.read_offset
+    }
+
+    /// Presentation names and offsets for ordered native read operations.
+    pub fn with_read_items(mut self, items: Vec<(String, u64)>) -> Self {
+        self.read_items = items;
+        self
+    }
+
+    pub fn read_items(&self) -> &[(String, u64)] {
+        &self.read_items
+    }
+
+    /// Original names for the ordered native whole-file write operations.
+    pub fn with_write_items(mut self, items: Vec<String>) -> Self {
+        self.write_items = items;
+        self
+    }
+
+    pub fn write_items(&self) -> &[String] {
+        &self.write_items
+    }
+
+    /// Requested rendered-output bound for a web fetch; this grants no extra
+    /// authority and is outside the authority fingerprint.
+    pub fn with_web_output_limit(mut self, bytes: usize) -> Self {
+        self.web_output_limit = Some(bytes);
+        self
+    }
+
+    pub fn web_output_limit(&self) -> Option<usize> {
+        self.web_output_limit
+    }
+
+    /// Requested output subscription for an inspected session process; this
+    /// grants no extra authority and is outside the authority fingerprint.
+    pub fn with_monitor(mut self, monitor: DetachedExecMonitor) -> Self {
+        self.monitor = Some(Box::new(monitor));
+        self
+    }
+
+    pub fn monitor(&self) -> Option<&DetachedExecMonitor> {
+        self.monitor.as_deref()
     }
 
     pub fn tool(&self) -> &str {
@@ -559,6 +615,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -613,6 +673,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -664,6 +728,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -689,6 +757,50 @@ impl PreparedCall {
 
     pub fn mcp_envelope(&self) -> Option<&McpPreparedEnvelope> {
         self.mcp.as_deref()
+    }
+
+    /// The same prepared call, re-aimed at `tasks/get` or `tasks/cancel` for
+    /// `task_id`. Invocations, transport, admission and operations are the
+    /// original's, so classification and the egress claim are the original's.
+    /// Only [`crate::mcp::McpTaskTicket`] calls this.
+    pub(crate) fn mcp_task_call(
+        &self,
+        operation: McpOperationKind,
+        task_id: &str,
+    ) -> Result<Self, crate::mcp::McpProjectionError> {
+        let envelope = self
+            .mcp
+            .as_deref()
+            .ok_or(crate::mcp::McpProjectionError::InvalidIdentity)?;
+        let McpSubject::Tool { server, name } = envelope.subject() else {
+            return Err(crate::mcp::McpProjectionError::InvalidIdentity);
+        };
+        let subject = McpSubject::Task {
+            server: server.clone(),
+            tool: name.clone(),
+            task_id: task_id.to_owned(),
+        };
+        subject.validate()?;
+        if !matches!(
+            operation,
+            McpOperationKind::GetTask | McpOperationKind::CancelTask
+        ) || !operation.matches(&subject)
+        {
+            return Err(crate::mcp::McpProjectionError::InvalidIdentity);
+        }
+        let parameters = serde_json::to_vec(&serde_json::json!({ "taskId": task_id }))
+            .map_err(|_| crate::mcp::McpProjectionError::InvalidContent)?;
+        let mut call = self.clone();
+        call.mcp = Some(Box::new(McpPreparedEnvelope {
+            subject,
+            operation,
+            admission: envelope.admission.clone(),
+            transport_fingerprint: envelope.transport_fingerprint.clone(),
+            transport: envelope.transport.clone(),
+            parameters,
+            annotations: Value::Null,
+        }));
+        Ok(call)
     }
 
     pub fn hook_http(
@@ -731,6 +843,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             web_http: None,
             hook_http: Some(Box::new(HookHttpPreparedEnvelope {
@@ -804,13 +920,15 @@ impl PreparedCall {
                     }
                     Change::Replace {
                         replace_all,
-                        old_string,
-                        new_string,
+                        chunks,
                     } => {
                         frame(&mut digest, b"replace");
                         frame(&mut digest, &[u8::from(*replace_all)]);
-                        frame(&mut digest, old_string.as_bytes());
-                        frame(&mut digest, new_string.as_bytes());
+                        frame(&mut digest, &(chunks.len() as u64).to_be_bytes());
+                        for chunk in chunks {
+                            frame(&mut digest, chunk.old_string.as_bytes());
+                            frame(&mut digest, chunk.new_string.as_bytes());
+                        }
                     }
                 },
                 Op::Spawn { spec } => {
@@ -941,6 +1059,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             hook_http: None,
             web_http: None,
@@ -969,6 +1091,10 @@ impl PreparedCall {
             ],
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             hook_http: None,
             web_http: None,
@@ -1011,6 +1137,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             hook_http: None,
             web_http: None,

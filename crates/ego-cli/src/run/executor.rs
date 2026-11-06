@@ -24,8 +24,8 @@ use super::*;
 ///
 /// operator decision 2026-10-05 (regression): a human watching an AI chat is
 /// served better by six visible retries with backoff than by a turn that dies
-/// on the first overload. A headless `ego run` keeps `--retry 0` by default,
-/// because a script owns its own retry policy and reads exit 4 for it.
+/// on the first overload. A headless `ego run` uses two finite retries by
+/// default; a script can select `--retry 0` and own recovery after exit 4.
 pub(super) const ACP_PROVIDER_RETRIES: u32 = crate::cli::INTERACTIVE_PROVIDER_RETRIES;
 
 pub(super) fn public_result_artifact(
@@ -322,11 +322,15 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         output_style: shape.output_style,
         instructions: shape.instructions,
         bare: shape.bare,
+        no_hooks: shape.no_hooks,
         trust_workspace: false,
+        trust_development_programs: false,
         mode: None,
         allow: shape.allow,
         deny: shape.deny,
         answers: Vec::new(),
+        accept_authority_delta: false,
+        queue: false,
         session: SessionChoice::New,
         session_dir,
         artifact_dir: None,
@@ -358,6 +362,9 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         no_color: false,
         plain: false,
         vim: false,
+        memory: false,
+        no_session_compression: false,
+        no_checkpoints: false,
     }
 }
 
@@ -784,6 +791,8 @@ impl CliRunExecutor {
         let artifacts: Arc<dyn RunArtifactStore> = self.store.clone();
         executor.artifacts = Some(artifacts);
         executor.child = true;
+        // The top-level ceiling counts client runs; a child runs inside its parent's permit.
+        executor.concurrency = None;
         executor
     }
 

@@ -10,6 +10,9 @@ mod bottom_row;
 mod bottom_row_capture;
 #[path = "live_surface_pty/busy_commands.rs"]
 mod busy_commands;
+#[cfg(unix)]
+#[path = "live_surface_pty/busy_interrupt_raw.rs"]
+mod busy_interrupt_raw;
 #[path = "live_surface_pty/busy_notice.rs"]
 mod busy_notice;
 #[path = "live_surface_pty/exec_risk_reason.rs"]
@@ -20,6 +23,7 @@ mod expand_finish;
 mod finish_queue;
 #[path = "live_surface_pty/foreign_judge_reason.rs"]
 mod foreign_judge_reason;
+#[cfg(unix)]
 #[path = "live_surface_pty/goal_ancestry.rs"]
 mod goal_ancestry;
 #[path = "live_surface_pty/goal_launch.rs"]
@@ -28,6 +32,8 @@ mod goal_launch;
 mod goal_visibility;
 #[path = "live_surface_pty/help_latency.rs"]
 mod help_latency;
+#[path = "live_surface_pty/image_receipt.rs"]
+mod image_receipt;
 #[path = "live_surface_pty/image_refusal.rs"]
 mod image_refusal;
 #[path = "live_surface_pty/kitty_keyboard.rs"]
@@ -51,6 +57,9 @@ mod mode_picker;
 mod notice_wrap;
 #[path = "live_surface_pty/owned_footprint.rs"]
 mod owned_footprint;
+#[cfg(unix)]
+#[path = "live_surface_pty/permanent_cursor.rs"]
+mod permanent_cursor;
 #[path = "live_surface_pty/permission_receipts.rs"]
 mod permission_receipts;
 #[path = "live_surface_pty/picker_roles.rs"]
@@ -71,16 +80,23 @@ mod raw_columns;
 mod remembered_exec;
 #[path = "live_surface_pty/render_efficiency.rs"]
 mod render_efficiency;
+#[path = "live_surface_pty/resize_after_accept.rs"]
+mod resize_after_accept;
 #[path = "live_surface_pty/retry_line.rs"]
 mod retry_line;
 #[path = "live_surface_pty/root_grants.rs"]
 mod root_grants;
 #[path = "live_surface_pty/root_prompt_evidence.rs"]
 mod root_prompt_evidence;
+#[path = "live_surface_pty/root_readmission.rs"]
+mod root_readmission;
 #[path = "live_surface_pty/root_revoke.rs"]
 mod root_revoke;
 #[path = "live_surface_pty/sandbox_grants.rs"]
 mod sandbox_grants;
+#[cfg(target_os = "macos")]
+#[path = "live_surface_pty/session_exec_grants.rs"]
+mod session_exec_grants;
 #[path = "live_surface_pty/setup.rs"]
 mod setup;
 #[path = "live_surface_pty/shell_escape.rs"]
@@ -91,6 +107,9 @@ mod shell_rows;
 mod slash_completion;
 #[path = "live_surface_pty/slash_inspections.rs"]
 mod slash_inspections;
+#[cfg(unix)]
+#[path = "live_surface_pty/startup_cursor.rs"]
+mod startup_cursor;
 #[path = "live_surface_pty/startup_order.rs"]
 mod startup_order;
 #[path = "live_surface_pty/startup_provenance.rs"]
@@ -108,6 +127,13 @@ mod stuck_turn;
 mod support;
 #[path = "live_surface_pty/task_rows.rs"]
 mod task_rows;
+#[path = "live_surface_pty/tool_running.rs"]
+mod tool_running;
+#[cfg(unix)]
+#[path = "live_surface_pty/wake_question.rs"]
+mod wake_question;
+#[path = "live_surface_pty/window_recovery.rs"]
+mod window_recovery;
 #[path = "live_surface_pty/working_line.rs"]
 mod working_line;
 #[path = "live_surface_pty/working_repaint.rs"]
@@ -642,7 +668,11 @@ fn across_root_picker_contract(case: &str) {
     use ego_tools::store::{JsonlStore, OsIo};
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(tool_call("target-read", "read", r#"{"path":"notes.md"}"#)),
+            Reply::Sse(tool_call(
+                "target-read",
+                "read",
+                r#"{"files":[{"path":"notes.md"}]}"#,
+            )),
             Reply::Sse(text("ROOT-SWITCH-ANSWER-OKQ")),
         ],
         ..Plan::default()
@@ -904,7 +934,7 @@ fn resume_replay_contract(turns: usize, unrenderable: bool) {
             Some(call),
             EventKind::ToolCallStarted {
                 name: "read".to_owned(),
-                args: format!("{{\"path\":\"replay-{n:02}.txt\"}}"),
+                args: format!("{{\"files\":[{{\"path\":\"replay-{n:02}.txt\"}}]}}"),
                 call_id: Some(format!("read-{n}")),
             },
         );
@@ -3167,9 +3197,11 @@ fn until_screen_prose(
             receiver
                 .recv_timeout(deadline.saturating_duration_since(Instant::now()))
                 .unwrap_or_else(|error| {
+                    let tail = &output[output.len().saturating_sub(32 * 1024)..];
                     panic!(
-                        "screen wait failed for {needle:?}: {error}; {:?}",
-                        screen_rows(output, rows, cols)
+                        "screen wait failed for {needle:?}: {error}; {:?}; raw PTY byte tail: {tail:?}; normalized tail: {:?}",
+                        screen_rows(output, rows, cols),
+                        normalized(tail)
                     )
                 }),
         );
@@ -3433,20 +3465,34 @@ fn count_exact_strings(value: &serde_json::Value, target: &str) -> usize {
 
 fn count_notes_write_results(value: &serde_json::Value) -> usize {
     match value {
-        serde_json::Value::String(value) => usize::from(
-            value
-                .lines()
-                .next()
-                .and_then(|line| line.strip_prefix("wrote 10 bytes to "))
-                .is_some_and(|path| {
-                    Path::new(path)
-                        .file_name()
-                        .is_some_and(|name| name == "notes.md")
-                }),
-        ),
         serde_json::Value::Array(values) => values.iter().map(count_notes_write_results).sum(),
+        serde_json::Value::Object(values)
+            if values.get("role").and_then(|v| v.as_str()) == Some("tool") =>
+        {
+            usize::from(
+                values
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+                    .and_then(|result| result.get("files").and_then(|v| v.as_array()).cloned())
+                    .is_some_and(|files| {
+                        files.len() == 1
+                            && files[0].get("index").and_then(|v| v.as_u64()) == Some(0)
+                            && files[0].get("status").and_then(|v| v.as_str()) == Some("completed")
+                            && files[0].get("bytes").and_then(|v| v.as_u64()) == Some(10)
+                            && files[0]
+                                .get("path")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|path| {
+                                    Path::new(path)
+                                        .file_name()
+                                        .is_some_and(|name| name == "notes.md")
+                                })
+                    }),
+            )
+        }
         serde_json::Value::Object(values) => values.values().map(count_notes_write_results).sum(),
-        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
+        _ => 0,
     }
 }
 
@@ -3498,8 +3544,9 @@ fn find(output: &[u8], needle: &[u8]) -> usize {
 // Cancellation receipts precede the driver's idle transition. Require the
 // completed status frame before follow-up input can enter a cursor query.
 fn until_idle_status_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
-    until_normalized(receiver, output, start, "qwen3 · ");
-    let idle_row = start + find(&output[start..], "qwen3 · ".as_bytes());
+    // Narrow status layouts can drop the separator with an omitted segment.
+    until_normalized(receiver, output, start, "qwen3 ");
+    let idle_row = start + find(&output[start..], "qwen3 ".as_bytes());
     let idle_frame = output[..idle_row]
         .windows(b"\x1b[?25l".len())
         .rposition(|bytes| bytes == b"\x1b[?25l")
@@ -3550,10 +3597,10 @@ fn live_surface_preserves_draft_through_busy_permission_and_resize() {
     let draft = "fn newest_draft() {\n    println!(\"newest e\\u{301} 👩‍💻\");\n}\n";
     #[cfg(windows)]
     let draft = "fn newest_draft() { println!(\"newest e\\u{301} 👩💻\"); }";
-    let write_arguments = serde_json::json!({
+    let write_arguments = serde_json::json!({"files": [{
         "path": "notes.md",
         "contents": "permission",
-    })
+    }]})
     .to_string();
     let (paced_tool_call, provider_gate) =
         gated_paced_tool_call_line("write-1", "write", &write_arguments);
@@ -3821,7 +3868,7 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
                 "exec",
                 // The first exec of a freshly written script can exceed 1s under suite
                 // load; this test asserts PATH resolution, not exec latency.
-                r#"{"argv":["wiz-run","stories-cli.js","list"],"cwd":null,"timeout_ms":30000}"#,
+                r#"{"argv":["local-tool","tasks.js","list"],"cwd":null,"timeout_ms":30000}"#,
             )),
             Reply::Sse(text("LOCAL-PATH-EXEC-DONE")),
         ],
@@ -3838,8 +3885,8 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
         "off",
     ]);
     let executable = ego.home_file(
-        ".local/bin/wiz-run",
-        "#!/bin/sh\nprintf '%s\\n' WIZ-RUN-FROM-LOCAL-PATH\n",
+        ".local/bin/local-tool",
+        "#!/bin/sh\nprintf '%s\\n' LOCAL-TOOL-FROM-LOCAL-PATH\n",
     );
     let mut permissions = std::fs::metadata(&executable)
         .expect("local executable metadata")
@@ -3864,7 +3911,7 @@ fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
     assert!(
         generations[1]
             .to_string()
-            .contains("WIZ-RUN-FROM-LOCAL-PATH"),
+            .contains("LOCAL-TOOL-FROM-LOCAL-PATH"),
         "the executable found on effective PATH did not run: {}",
         generations[1]
     );
@@ -5305,7 +5352,10 @@ fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
         "policy zero is not monetary spend: {usage:?}"
     );
     assert!(
-        !usage.contains("unknown"),
+        usage
+            .lines()
+            .filter(|line| line.contains("unpriced nonmonetary usage (no API equivalent)"))
+            .all(|line| !line.contains("unknown")),
         "cancelled local turn keeps its nonmonetary cost status: {usage:?}"
     );
     assert!(
@@ -5508,7 +5558,7 @@ fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
     // display's whole-second boundary rather than assuming a fast launch.
     let active_seconds = turn_started.elapsed().saturating_sub(held).as_secs() + 1;
     std::fs::write(&release, b"go").expect("release tool");
-    until(&reader, &mut output, b"SLOW-TOOL-DONE");
+    until_prompt_after_reply(&reader, &mut output, b"SLOW-TOOL-DONE");
     input.write_all(b"/quit\r").expect("quit");
     input.flush().expect("quit flush");
     session.quit(input);
@@ -6362,7 +6412,7 @@ fn silent_slash_action_waits_for_a_driver_reply() {
 // Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
 #[test]
 fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
-    const COMMANDS: [&str; 34] = [
+    const COMMANDS: [&str; 36] = [
         "help",
         "model",
         "thinking",
@@ -6379,6 +6429,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "unpin",
         "clear",
         "usage",
+        "context",
         "statusline",
         "export",
         "config",
@@ -6390,6 +6441,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         "name",
         "goal",
         "tasks",
+        "side",
         "tools",
         "expand",
         "skills",
@@ -6400,7 +6452,13 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
     ];
     assert_eq!(ActionRegistry::final_surface().names(), COMMANDS);
 
-    let stub = Stub::start(Plan::default());
+    // A window large enough for the in-window /compact path: with the recorded
+    // 32,768-token Ollama window, the output reserve sends this request through
+    // the conservative transcript path (covered by compaction_skill.rs).
+    let stub = Stub::start(Plan {
+        context_length: Some(131_072),
+        ..Plan::default()
+    });
     let ego = Ego::against(&stub).conversing().args([
         "--model",
         "ollama/qwen3",
@@ -6480,6 +6538,7 @@ fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior(
         ("name", None),
         ("goal", None),
         ("tasks", Some("background tasks: none")),
+        ("side", Some("usage: /side QUESTION")),
         ("tools", Some("tools:")),
         ("expand", Some("no tool call to expand yet")),
         ("hooks", Some("no hooks are configured and enabled")),
@@ -7719,10 +7778,10 @@ fn ends_with_duration(row: &str) -> bool {
             .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'm' | 's'))
 }
 
-const READ_CALL: (&str, &str) = ("read", r#"{"path":"calc.py"}"#);
+const READ_CALL: (&str, &str) = ("read", r#"{"files":[{"path":"calc.py"}]}"#);
 const EDIT_CALL: (&str, &str) = (
     "edit",
-    r#"{"path":"calc.py","old_string":"a = 1","new_string":"a = 1\nc = 3\nd = 4"}"#,
+    r#"{"files":[{"path":"calc.py","chunks":[{"old_string":"a = 1","new_string":"a = 1\nc = 3\nd = 4"}]}]}"#,
 );
 const SEQ_CALL: (&str, &str) = ("exec", r#"{"argv":["seq","1","20"]}"#);
 
@@ -7807,7 +7866,7 @@ fn a_failing_call_shows_the_failure_and_never_a_success_mark() {
         &[],
         &[
             ("exec", r#"{"argv":["sh","-c","echo boom >&2; exit 3"]}"#),
-            ("read", r#"{"path":"missing.py"}"#),
+            ("read", r#"{"files":[{"path":"missing.py"}]}"#),
         ],
         false,
     );
@@ -7835,7 +7894,10 @@ fn a_failing_call_shows_the_failure_and_never_a_success_mark() {
 fn rows_fit_the_terminal_at_120_80_60_and_40_columns() {
     let long_arg = "a".repeat(130);
     let exec = format!(r#"{{"argv":["echo","{long_arg}"]}}"#);
-    let long_missing = format!(r#"{{"path":"no-such-directory/{}.txt"}}"#, "b".repeat(90));
+    let long_missing = format!(
+        r#"{{"files":[{{"path":"no-such-directory/{}.txt"}}]}}"#,
+        "b".repeat(90)
+    );
     for cols in [120u16, 80, 60, 40] {
         let screens = tool_turn(
             cols,
@@ -8180,10 +8242,10 @@ fn the_banner_lists_the_keys_at_120_80_60_and_40_columns() {
 /// `Interrupted by user` receipt the plain modal leaves.
 #[test]
 fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
-    let write_arguments = serde_json::json!({
+    let write_arguments = serde_json::json!({"files": [{
         "path": "notes.md",
         "contents": "permission",
-    })
+    }]})
     .to_string();
     let stub = Stub::start(Plan {
         completions: vec![
@@ -8203,6 +8265,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
         "off",
     ]);
     ego.file("AGENTS.md", "# live surface fixture\n");
+    let notes = ego.file("notes.md", "original");
     let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
     let mut output = Vec::new();
 
@@ -8218,7 +8281,12 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
     let edit_start = output.len();
     input.write_all(b"e").expect("open the edit form");
     input.flush().expect("edit flush");
-    until_normalized(&reader, &mut output, edit_start, "path: ");
+    until_normalized(
+        &reader,
+        &mut output,
+        edit_start,
+        "Nested or additional parameters (JSON): ",
+    );
     drain_until_quiet(&reader, &mut output);
     let esc_start = output.len();
     input.write_all(b"\x1b").expect("Esc in the form");
@@ -8236,6 +8304,7 @@ fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
         1,
         "Esc in the edit form must leave exactly one receipt: {visible:?}"
     );
+    assert_eq!(std::fs::read_to_string(notes).unwrap(), "original");
     input.write_all(b"/quit\r").expect("quit command");
     input.flush().expect("quit flush");
     let status = session.quit(input);
@@ -8358,6 +8427,13 @@ impl ModalSession {
     fn resize(&mut self, rows: u16, cols: u16) {
         drain_until_quiet(&self.reader, &mut self.output);
         self.mark = self.output.len();
+        self.resize_now(rows, cols);
+    }
+
+    /// [`ModalSession::resize`] without settling first, so it can race a
+    /// key press written just before it.
+    fn resize_now(&mut self, rows: u16, cols: u16) {
+        let _ = self.mark;
         self.resizes.push((self.mark, (rows, cols)));
         *self.size.lock().expect("screen size lock") = (rows, cols);
         self.pair
@@ -8785,7 +8861,6 @@ impl Job {
     }
 }
 
-#[cfg(unix)]
 fn job_ego(stub: &Stub, mode: &str) -> Ego {
     let ego = Ego::against(stub)
         .conversing()
@@ -8958,7 +9033,7 @@ fn a_running_exec_is_not_charged_the_time_ego_spent_suspended() {
 fn ctrl_z_at_a_permission_modal_leaves_it_unresolved_after_resume() {
     // Catches a suspend that answers the prompt: the key falling through to
     // the modal's decision handling, or the repaint dismissing the modal.
-    let write_arguments = r#"{"path":"notes.md","contents":"permission"}"#;
+    let write_arguments = r#"{"files":[{"path":"notes.md","contents":"permission"}]}"#;
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call("suspended-write", "write", write_arguments)),
@@ -9343,7 +9418,7 @@ fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
     let gate = ReleaseGate::new();
     let child = || Reply::GatedPaced {
         head: String::new(),
-        tail: tool_call("read1", "read", r#"{"path":"calc.py"}"#),
+        tail: tool_call("read1", "read", r#"{"files":[{"path":"calc.py"}]}"#),
         gate: gate.clone(),
     };
     let screens = tool_turn_with_completions(
@@ -10064,8 +10139,7 @@ fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
     );
 }
 
-// Catches: a non-transient checkpoint failure leaves required compaction latched
-// off while every subsequent managed prompt is refused at context pressure.
+// Catches: a permanent checkpoint failure retries without input or kills the session.
 #[test]
 fn failed_compaction_preparation_does_not_loop_refusals() {
     let stub = Stub::start(Plan {
@@ -10096,42 +10170,23 @@ fn failed_compaction_preparation_does_not_loop_refusals() {
     input.write_all(b"finish this task\r").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "compaction preparation failed");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let exited = loop {
-        if session.child.try_wait().expect("child status").is_some() {
-            break true;
-        }
-        if Instant::now() >= deadline {
-            break false;
-        }
-        if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(20)) {
-            output.extend(bytes);
-        }
-    };
-    // Reap the pre-fix refusal loop too, without leaving a fixture process.
-    if !exited {
-        input.write_all(b"/quit\r").unwrap();
-        input.flush().unwrap();
-    }
-    let status = session.quit(input);
+    until_notice_prose(&reader, &mut output, start, "Retry with '/compact'");
+    until_prompt_from(&reader, &mut output, start);
+    assert!(session.child.try_wait().unwrap().is_none());
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "failed recovery must wait for input"
+    );
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
     let shown = normalized(&output);
     assert!(
-        exited,
-        "failed required compaction must terminate, not await another doomed prompt: {shown}"
-    );
-    assert!(
-        !status.success(),
-        "the parent must observe a failed process"
-    );
-    assert!(
-        shown.contains("automatic compaction failed; session stopped"),
-        "{shown}"
-    );
-    assert!(
         support::notice_prose(&shown).contains(
-            "automatic compaction failed; session stopped: compaction failed: compaction preparation failed: compaction generation failed: the provider returned HTTP 400"
+            "Compaction paused; the session is still open: compaction failed: compaction preparation failed: compaction generation failed: the provider returned HTTP 400"
         ),
-        "the final failure must name the permanent provider cause: {shown}"
+        "the recovery notice must name the permanent provider cause: {shown}"
     );
     assert!(shown.contains("Compacting the session now"), "{shown}");
     assert!(

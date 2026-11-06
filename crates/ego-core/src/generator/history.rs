@@ -309,8 +309,12 @@ fn conversation_from_inner(
             ItemKind::DetachedExecNotification => {
                 push(&mut messages, Role::User, text_block(&item.text));
             }
+            // A message killed between its `AssistantMessageStarted` and its
+            // close has no text, and providers refuse an empty text block.
             ItemKind::Assistant => {
-                push(&mut messages, Role::Assistant, text_block(&item.text));
+                if !item.text.is_empty() {
+                    push(&mut messages, Role::Assistant, text_block(&item.text));
+                }
             }
             // Questions are control state for one pure tool call. Their
             // request and settlement are not conversation messages; the

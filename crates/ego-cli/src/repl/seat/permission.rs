@@ -472,7 +472,7 @@ pub(super) fn choose_policy_mode(
 pub(crate) enum Confirmation {
     Confirmed,
     Declined,
-    Propagate(Line),
+    Propagate(Box<Line>),
 }
 
 pub(super) fn confirm_surface_action(
@@ -496,7 +496,7 @@ pub(super) fn confirm_surface_action(
             }
             Line::Interrupted | Line::Blank => break Confirmation::Declined,
             line @ (Line::Ended | Line::ExternalBreak(_)) => {
-                break Confirmation::Propagate(line);
+                break Confirmation::Propagate(Box::new(line));
             }
             Line::Refused(_) | Line::HostCommand(_) => {}
         }

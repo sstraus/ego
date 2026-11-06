@@ -29,13 +29,29 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
         subpath(&mut out, path)?;
     }
     out.push_str(")\n");
-    // Denies take precedence over broad read/write rules, including human grants.
+    let maintenance = input
+        .maintenance
+        .iter()
+        .filter(|grant| {
+            grant.access == SandboxAccess::Write
+                && super::super::maintenance::target(
+                    grant.path.as_path(),
+                    input.workspace,
+                    perimeter,
+                )
+        })
+        .collect::<Vec<_>>();
+    // Credentials always take precedence over grants. Only exact owner files
+    // can be subtracted from the separate instruction/Git control write floor.
     out.push_str("(deny file-read* file-write* process-exec*\n");
     for path in &perimeter.credentials {
         subpath(&mut out, path.as_path())?;
     }
     subpath(&mut out, &input.private_scratch.join("credential-probe"))?;
     out.push_str(")\n(deny file-write*\n");
+    if !maintenance.is_empty() {
+        out.push_str("  (require-all (require-any\n");
+    }
     for path in &perimeter.controls {
         subpath(&mut out, path.as_path())?;
     }
@@ -55,7 +71,18 @@ pub(super) fn render(input: &ProfileInput<'_>) -> Result<String, ProfileError> {
     for root in floor::metadata_roots(perimeter) {
         rooted_regex(&mut out, root, floor::metadata_control())?;
     }
-    out.push_str(")\n(deny file-write-unlink\n");
+    if maintenance.is_empty() {
+        out.push_str(")\n");
+    } else {
+        out.push_str("  ) (require-not (require-any\n");
+        for grant in maintenance {
+            out.push_str("    (literal ");
+            out.push_str(&path_literal(grant.path.as_path())?);
+            out.push_str(")\n");
+        }
+        out.push_str("  ))))\n");
+    }
+    out.push_str("(deny file-write-unlink\n");
     // Keep operator instruction directories at their protected names.
     out.push_str("  (require-all\n");
     rooted_regex(&mut out, perimeter.home.as_path(), floor::OPERATOR_BOUNDARY)?;

@@ -56,26 +56,26 @@ Dir.mktmpdir('ego-release-check-', scratch) do |dir|
     end
     puts "PASS: #{asset}, archive and relative SHA256 checksums"
   end
-  # Catches the tag workflow reading an absent CHANGELOG instead of versioned notes.
+  # Catches: the tag workflow publishing without a complete CHANGELOG section.
   notes_step = workflow.fetch('jobs').fetch('release').fetch('steps').find do |step|
     step['name'] == 'Build checksum file and release notes'
   end.fetch('run')
-  notes_directory = File.join(dir, 'docs', 'release-notes')
-  FileUtils.mkdir_p(notes_directory)
-  notes_path = File.join(notes_directory, '0.4.1.md')
-  notes = File.read(File.join(root, 'docs', 'release-notes', '0.4.1.md'))
-  File.write(notes_path, notes)
-  run_notes = lambda do
+  FileUtils.mkdir_p(File.join(dir, 'scripts'))
+  FileUtils.cp(File.join(root, 'scripts', 'check-changelog.py'), File.join(dir, 'scripts'))
+  changelog = lambda do |release|
+    "# Changelog\n\n## [Unreleased]\n\n## [0.4.1] - 2026-10-30\n\n#{release}\n## [0.4.0] - 2026-10-30\n\n- Earlier.\n"
+  end
+  run_notes = lambda do |text|
+    File.write(File.join(dir, 'CHANGELOG.md'), text)
     system({'GITHUB_REF_NAME' => 'v0.4.1'}, 'bash', '-c', notes_step,
            chdir: dir, out: File::NULL, err: File::NULL)
   end
-  abort 'Workflow could not prepare versioned notes' unless run_notes.call
-  abort 'Workflow changed release notes' unless File.read(File.join(dir, 'notes.md')) == notes
-  FileUtils.rm(notes_path)
-  abort 'Workflow accepted missing release notes' if run_notes.call
-  File.write(notes_path, " \n")
-  abort 'Workflow accepted empty release notes' if run_notes.call
-  puts 'PASS: workflow copies versioned notes and refuses missing or empty notes'
+  abort 'Workflow could not prepare changelog notes' unless run_notes.call(changelog.call("- Fixed a thing.\n<!-- internal: regression case -->\n"))
+  abort 'Workflow changed release notes' unless File.read(File.join(dir, 'notes.md')) == "- Fixed a thing.\n"
+  abort 'Workflow accepted a missing version section' if run_notes.call(changelog.call('').sub('## [0.4.1] - 2026-10-30', '## [0.4.2] - 2026-10-30'))
+  abort 'Workflow accepted an empty version section' if run_notes.call(changelog.call("<!-- internal: regression case -->\n"))
+  abort 'Workflow accepted unreleased entries' if run_notes.call(changelog.call("- Fixed.\n").sub("## [Unreleased]\n", "## [Unreleased]\n\n- Pending.\n"))
+  puts 'PASS: workflow publishes the CHANGELOG section and refuses a missing, empty or unmoved one'
 
   formula = IO.popen(['bash', File.join(root, 'scripts/homebrew-formula.sh'), 'v0.4.1', 'sstraus/ego', File.join(dir, 'dist')], &:read)
   abort 'Formula generation failed' unless $?.success?
@@ -91,6 +91,10 @@ Dir.mktmpdir('ego-release-check-', scratch) do |dir|
    'zsh_completion.install "completions/_ego"', 'fish_completion.install "completions/ego.fish"',
    '(pkgshare/"completions").install "completions/_ego.ps1", "completions/ego.elv"'].each do |install|
     abort "Formula missing installation: #{install}" unless formula.include?(install)
+  end
+  # Catches: a Homebrew install ends without telling the user how to make a provider usable.
+  ['def caveats', 'ego auth login PROVIDER', 'ego setup'].each do |text|
+    abort "Formula caveats missing: #{text}" unless formula.include?(text)
   end
   formula_path = File.join(dir, 'ego.rb')
   File.write(formula_path, formula)

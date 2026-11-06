@@ -66,6 +66,15 @@ pub enum AiEvent {
         name: String,
         args: String,
     },
+    /// A model call rejected by the shared post-adapter trust boundary.
+    /// It retains its exact provider identity for a failed tool result, but
+    /// must never be looked up in the executable tool catalogue.
+    ToolCallRejected {
+        call_id: String,
+        name: String,
+        args: String,
+        message: String,
+    },
     /// Incremental usage for this generation.
     ///
     /// An **increment**, never a running total. `AttemptStream::observe` adds
@@ -144,6 +153,10 @@ pub enum AiEvent {
         cause: String,
         /// The provider's `Retry-After`, when it stated one in seconds.
         retry_after: Option<std::time::Duration>,
+        /// The provider said it is out of capacity or limiting the rate: HTTP
+        /// 429, 503 or 529, or a typed overload or rate-limit code. Such a
+        /// refusal clears in minutes; any other failure retries in seconds.
+        capacity: bool,
     },
 }
 
@@ -172,6 +185,11 @@ impl std::error::Error for RequestExpressibilityError {}
 /// `Http`, credentials and the provider table. The dependency arrow is
 /// `ego-ai -> ego-core`, never the reverse.
 pub trait Generator: Send + Sync {
+    /// Lifetime actually selected by this request mapping; unknown is the default.
+    fn prompt_cache_policy(&self, _req: &GenRequest) -> crate::usage::PromptCachePolicy {
+        crate::usage::PromptCachePolicy::default()
+    }
+
     /// Whether this resolved provider owns a native hosted search contract.
     fn supports_web_search(&self) -> bool {
         false

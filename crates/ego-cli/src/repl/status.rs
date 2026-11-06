@@ -151,6 +151,7 @@ impl From<ego_core::config::StatusSegmentName> for StatusSegmentName {
             ego_core::config::StatusSegmentName::Fast => Self::Fast,
             ego_core::config::StatusSegmentName::Mode => Self::Mode,
             ego_core::config::StatusSegmentName::Context => Self::Context,
+            ego_core::config::StatusSegmentName::Cache => Self::Cache,
             ego_core::config::StatusSegmentName::Cost => Self::Cost,
             ego_core::config::StatusSegmentName::Queue => Self::Queue,
             ego_core::config::StatusSegmentName::Drafts => Self::Drafts,
@@ -271,6 +272,9 @@ impl GitFactsSource for GitCommand {
 /// One immutable set of facts shared by status and action availability.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SurfaceSnapshot {
+    prompt_cache: Option<ego_core::usage::PromptCacheDeadline>,
+    cache_hit: Option<String>,
+    as_of: Option<ego_core::event::time::Timestamp>,
     fast: bool,
     revision: String,
     model: String,
@@ -332,6 +336,22 @@ impl SurfaceSnapshot {
         };
         let (cost_display, cost_amount, cost_equivalent) = visible_cost(state);
         Self {
+            cache_hit: ego_core::usage::UsageLine {
+                usage: state.usage,
+                cost: ego_core::usage::CostBreakdown {
+                    known: vec![],
+                    unknown: vec![],
+                    subscription_equivalent: vec![],
+                    subscription_unknown: vec![],
+                },
+            }
+            .cache_hit()
+            .map(|hit| format!("{:.1}%", hit * 100.0)),
+            prompt_cache: state
+                .prompt_cache
+                .clone()
+                .filter(|cache| cache.model == selection.model.0),
+            as_of: None,
             fast: selection.fast,
             revision: session.to_string(),
             model: selection.model.0,
@@ -365,6 +385,56 @@ impl SurfaceSnapshot {
         }
     }
 
+    /// Freeze the observation time without creating another cache deadline.
+    pub fn with_clock(mut self, clock: &dyn ego_core::event::time::Clock) -> Self {
+        self.set_time(clock.now());
+        self
+    }
+
+    pub(crate) fn set_time(&mut self, now: ego_core::event::time::Timestamp) {
+        self.as_of = Some(now);
+    }
+
+    pub(crate) fn set_prompt_cache(
+        &mut self,
+        cache: Option<ego_core::usage::PromptCacheDeadline>,
+    ) -> bool {
+        let cache = cache.filter(|cache| cache.model == self.model);
+        if self.prompt_cache == cache {
+            return false;
+        }
+        self.prompt_cache = cache;
+        true
+    }
+
+    pub(crate) fn cache_display(&self) -> String {
+        self.prompt_cache.as_ref().zip(self.as_of).map_or_else(
+            || "unknown".to_owned(),
+            |(cache, now)| {
+                let remaining = cache.remaining_seconds(now);
+                if remaining == 0 {
+                    "expired".to_owned()
+                } else if remaining >= 3_600 {
+                    format!(
+                        "{}:{:02}:{:02}",
+                        remaining / 3_600,
+                        remaining / 60 % 60,
+                        remaining % 60
+                    )
+                } else {
+                    format!("{}:{:02}", remaining / 60, remaining % 60)
+                }
+            },
+        )
+    }
+
+    pub(crate) fn cache_is_live(&self) -> bool {
+        self.prompt_cache
+            .as_ref()
+            .zip(self.as_of)
+            .is_some_and(|(cache, now)| cache.remaining_seconds(now) > 0)
+    }
+
     /// Replace the active goal counter from live reduced state.
     pub(crate) fn set_goal(&mut self, goal: Option<(String, u32, Option<u32>)>) {
         self.goal_objective = goal.as_ref().map(|goal| goal.0.clone());
@@ -383,6 +453,10 @@ impl SurfaceSnapshot {
 
     /// Replace the live generation choice without re-deriving session facts.
     pub fn set_selection(&mut self, model: ModelRef, effort: ThinkingLevel) {
+        self.prompt_cache = self
+            .prompt_cache
+            .take()
+            .filter(|cache| cache.model == model.0);
         self.model = model.0;
         self.effort = effort.as_str().to_owned();
     }
@@ -536,6 +610,9 @@ impl SurfaceSnapshot {
             StatusSegmentName::Fast => self.fast.then(|| SegmentValue::text("fast")),
             StatusSegmentName::Mode => Some(SegmentValue::text(&self.mode)),
             StatusSegmentName::Context => Some(SegmentValue::text(self.context_display())),
+            StatusSegmentName::Cache => Some(SegmentValue::text(
+                self.cache_hit.as_deref().unwrap_or("unknown"),
+            )),
             // An unpriced or unstarted session has no figure to show; a
             // `$0` here would claim the spend is known to be nothing.
             StatusSegmentName::Cost => self.cost_display.as_ref().map(SegmentValue::text),
@@ -671,6 +748,7 @@ pub enum StatusSegmentName {
     Effort,
     Mode,
     Context,
+    Cache,
     Cost,
     Goal,
     Queue,
@@ -695,6 +773,7 @@ impl StatusSegmentName {
             Self::Fast => "fast",
             Self::Mode => "mode",
             Self::Context => "context",
+            Self::Cache => "cache",
             Self::Cost => "cost",
             Self::Goal => "goal",
             Self::Queue => "queue",
@@ -716,6 +795,7 @@ impl StatusSegmentName {
                 | Self::Effort
                 | Self::Mode
                 | Self::Context
+                | Self::Cache
                 | Self::Cost
                 | Self::Cwd
                 | Self::Git
@@ -741,6 +821,7 @@ impl StatusSegmentName {
             Self::Git | Self::Custom(_) => 0,
             Self::Cwd => 1,
             Self::Cost => 2,
+            Self::Cache => 5,
             Self::Mode => 3,
             Self::Effort | Self::Fast => 4,
             // An untrusted `trust` segment outranks every convenience but the
@@ -1117,5 +1198,151 @@ fn remove_remaining(
             break;
         };
         omitted.push(segment.name);
+    }
+}
+
+#[cfg(test)]
+mod cache_countdown_tests {
+    use super::*;
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, GenerationRole};
+    use ego_core::event::id::{EventId, GenerationId, Producer, Seq, TurnId};
+    use ego_core::event::time::{Clock, Timestamp};
+    use ego_core::generator::attempt::AttemptRef;
+    use ego_core::usage::{PromptCachePolicy, PromptCacheRequest};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct FakeClock(AtomicU64);
+    impl Clock for FakeClock {
+        fn now(&self) -> Timestamp {
+            Timestamp::from_millis(self.0.load(Ordering::SeqCst))
+        }
+    }
+
+    // Catches: a frozen display, response-time renewal, missing request reset, or guessed unknown TTL.
+    #[test]
+    fn cache_countdown_status_uses_request_deadline_and_the_current_clock() {
+        let clock = FakeClock(AtomicU64::new(1_000));
+        let mut state = SessionState::default();
+        let mut seq = Seq::default();
+        for (at, request, expected) in [
+            (1_000, Some(Some(300)), "cache=5:00"),
+            (121_000, None, "cache=3:00"),
+            (121_000, Some(Some(300)), "cache=5:00"),
+            (421_000, None, "cache=expired"),
+            (422_000, Some(None), "cache=unknown"),
+        ] {
+            clock.0.store(at, Ordering::SeqCst);
+            if let Some(ttl) = request {
+                let current = seq;
+                seq.next();
+                state.apply(&DomainEvent {
+                    env: Envelope {
+                        seq: current,
+                        id: EventId::new(),
+                        turn: TurnId::new(),
+                        item: None,
+                        parent: None,
+                        ts: clock.now(),
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::GenerationStarted {
+                        attempt: AttemptRef::first(GenerationId::new()),
+                        role: GenerationRole::Main,
+                        snapshot: None,
+                        cache: Some(PromptCacheRequest {
+                            model: "provider/model".into(),
+                            policy: PromptCachePolicy {
+                                ttl_seconds: ttl.and_then(std::num::NonZeroU64::new),
+                                refresh_on_read: true,
+                                lock_ttl: false,
+                            },
+                        }),
+                    },
+                });
+            }
+            let snapshot = SurfaceSnapshot::from_state(
+                SessionId::new(),
+                &state,
+                SelectionFacts::new(
+                    ModelRef("provider/model".into()),
+                    ThinkingLevel::Low,
+                    Mode::Default,
+                ),
+                SeatFacts::new(QueueStatus::default(), 0, "/workspace", Trust::Trusted),
+                None,
+            )
+            .with_clock(&clock);
+            let (rendered, diagnostic) =
+                StatusTemplate::new(DEFAULT_TEMPLATE.into()).render(&snapshot, &[], 240);
+            assert!(diagnostic.is_none());
+            assert!(
+                rendered.text().contains("unknown"),
+                "at {at}: {}",
+                rendered.text()
+            );
+            let cache_only = StatusLine::render(&snapshot, &[StatusSegmentName::Cache], 240);
+            assert_eq!(cache_only.text(), "unknown");
+            let (custom, diagnostic) =
+                StatusTemplate::new("{{ cache }}\n{{ prompt }}".into()).render(&snapshot, &[], 240);
+            assert!(diagnostic.is_none());
+            assert!(
+                custom
+                    .text()
+                    .contains(expected.strip_prefix("cache=").unwrap())
+            );
+        }
+    }
+    // Catches: averaging request percentages or including output tokens in the input denominator.
+    #[test]
+    fn default_cache_rate_is_token_weighted_and_custom_cache_remains_ttl() {
+        let mut state = SessionState::default();
+        for (uncached, read, write, output) in [(0, 20, 0, 100), (70, 0, 10, 800)] {
+            state.apply(&DomainEvent {
+                env: Envelope {
+                    seq: Seq::default(),
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::from_millis(0),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::UsageUpdated {
+                    usage: ego_core::state::Usage {
+                        uncached_input_tokens: uncached,
+                        cache_read_tokens: read,
+                        cache_write_tokens: write,
+                        output_tokens: output,
+                        ..ego_core::state::Usage::IDENTITY
+                    },
+                    cost_delta: ego_core::cost::CostDelta::Unknown(
+                        ego_core::cost::UnknownCost::NoPricingQuote,
+                    ),
+                    attempt: None,
+                },
+            });
+        }
+        let snapshot = SurfaceSnapshot::from_state(
+            SessionId::new(),
+            &state,
+            SelectionFacts::new(
+                ModelRef("provider/model".into()),
+                ThinkingLevel::Low,
+                Mode::Default,
+            ),
+            SeatFacts::new(QueueStatus::default(), 0, "/workspace", Trust::Trusted),
+            None,
+        );
+        let (line, diagnostic) =
+            StatusTemplate::new(DEFAULT_TEMPLATE.into()).render(&snapshot, &[], 240);
+        assert!(diagnostic.is_none());
+        assert!(line.text().contains("20.0%"), "{}", line.text());
+        assert!(!line.text().contains("cache="));
+        let (custom, diagnostic) =
+            StatusTemplate::new("{{ cache }}\n{{ prompt }}".into()).render(&snapshot, &[], 240);
+        assert!(diagnostic.is_none());
+        assert!(custom.text().contains("unknown"));
+        let (narrow, _) = StatusTemplate::new(DEFAULT_TEMPLATE.into()).render(&snapshot, &[], 20);
+        assert!(narrow.width() <= 20);
     }
 }

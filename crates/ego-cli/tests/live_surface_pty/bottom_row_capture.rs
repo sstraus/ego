@@ -76,7 +76,7 @@ fn capture_installed_cli_bottom_rows() {
                 collect_for(&reader, &mut output, Duration::from_millis(300));
             }
             save_capture(&dir, name, rows, cols, "idle", &output);
-            input.write_all(b"\x1b[200~Do not use any tools. Write a detailed 2000-word explanation of terminal rendering, starting with CAPTURE-737.\x1b[201~").unwrap();
+            input.write_all(b"\x1b[200~Do not use any tools. Write a detailed 2000-word explanation of terminal rendering, starting with CAPTURE-MARK.\x1b[201~").unwrap();
             input.flush().unwrap();
             // Separate Enter from the paste burst: Codex's burst detector
             // otherwise treats the trailing CR as part of the pasted draft.

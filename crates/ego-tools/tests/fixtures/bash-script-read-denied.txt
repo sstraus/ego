@@ -1,1 +1,1 @@
-/bin/bash: /home/example/Gits/.tmp/example/executable-script.sh: Operation not permitted
+/bin/bash: /home/example/scratch/example/executable-script.sh: Operation not permitted

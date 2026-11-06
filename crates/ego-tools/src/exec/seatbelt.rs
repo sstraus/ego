@@ -102,7 +102,10 @@ impl SeatbeltBackend {
             user_config: if policy.level() == Confinement::Off {
                 Vec::new()
             } else {
-                super::user_config::capture()?
+                super::user_config::capture_for(&super::user_config::writable_roots(
+                    policy,
+                    private_scratch.as_path(),
+                ))?
             },
             adaptive,
             level: policy.level(),
@@ -159,7 +162,21 @@ impl SeatbeltBackend {
         grants: &[SandboxGrant],
         no_exec: &[CanonPath],
     ) -> Result<Self, ProcessError> {
-        Self::render_profile(self.base.clone(), grants, no_exec, self.maximum_caps)
+        let mut base = self.base.clone();
+        // A write grant can hold a hardlink alias of the config that the
+        // prepare-time scan of the original roots did not see.
+        let writable = grants
+            .iter()
+            .filter(|grant| grant.access == ego_core::permit::SandboxAccess::Write)
+            .map(|grant| grant.path.as_path())
+            .collect::<Vec<_>>();
+        if base.level != Confinement::Off && !writable.is_empty() {
+            base.user_config
+                .extend(super::user_config::capture_for(&writable)?);
+            base.user_config.sort();
+            base.user_config.dedup();
+        }
+        Self::render_profile(base, grants, no_exec, self.maximum_caps)
     }
 
     fn render_profile(
@@ -184,6 +201,9 @@ impl SeatbeltBackend {
             .cloned()
             .chain(base.read_only_roots.iter().cloned())
             .collect::<Vec<_>>();
+        // Configured roots are excluded. Judge grants still cross the shared
+        // floor recheck and cannot name an eligible maintenance file.
+        let maintenance = grants;
         let grants = base.roots.iter().chain(grants).cloned().collect::<Vec<_>>();
         let mut profile = profile::render(&ProfileInput {
             adaptive: base.adaptive.as_ref(),
@@ -194,6 +214,7 @@ impl SeatbeltBackend {
             runtime_roots: &runtime_roots,
             exec_paths: &exec_paths,
             grants: &grants,
+            maintenance,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
         if matches!(base.level, Confinement::Workspace | Confinement::Ro)
@@ -316,7 +337,7 @@ impl SeatbeltBackend {
             profile.push_str(")\n");
         }
         profile.push_str(
-            &profile::deny_exec(&no_exec)
+            &profile::deny_exec_with_owner(&no_exec, &grants)
                 .map_err(|error| ProcessError::Backend(error.to_string()))?,
         );
 

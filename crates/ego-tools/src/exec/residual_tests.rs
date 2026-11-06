@@ -28,7 +28,7 @@ fn residual_recheck_rejects_instruction_files_beneath_broad_grants() {
         });
     let recheck = admissible(policy);
     for name in [
-        ".codex/ORCHESTRATION.md",
+        ".codex/instructions.md",
         ".claude/CLAUDE.md",
         ".claude/skills/operator.md",
         "Gits/other/AGENTS.md",

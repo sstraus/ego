@@ -180,6 +180,17 @@ capability evidence and the actual admitted production path. Windows listener,
 process ownership, and private-state support exist, but Windows filesystem/network
 confinement remain unsupported. An unconfined acknowledgement does not establish confinement.
 
+On Windows, an interactive start with no sandbox chosen asks once whether to
+continue unconfined. A `yes` applies to every workspace of the same user, for the
+current contract revision, and is stored in `$EGO_HOME/windows-unconfined.json`.
+Each later start that relies on it prints a notice that execution is unconfined.
+The acknowledgement does not change other starts: a direct or piped start still
+needs `--sandbox off`, `--offline` still refuses, and an explicit or configured
+`workspace`, `ro` or `adaptive` sandbox still fails because Windows cannot give
+that guarantee. Delete `windows-unconfined.json` to be asked again. A changed
+contract revision or an unreadable file also asks again; an unreadable file is
+never overwritten.
+
 ## Diagnostics
 
 `EGO_LOG` selects tracing directives and `EGO_LOG_FILE` an explicit destination.
@@ -194,6 +205,17 @@ To compare provider request prefixes, set `EGO_LOG=ego::body=debug` and
 the JSON body and API path, without HTTP headers. Prompt text and tool results
 remain sensitive. Codex requests use one lineage routing key in both
 `prompt_cache_key` and the `session-id` header; `cache = 'none'` omits both.
+
+To record a provider refusal that arrives after status 200, set
+`EGO_LOG=ego::body::provider_failure=debug` and `EGO_LOG_FILE` to a private local
+file. When such a stream ends in an error, one entry records the status, the
+response headers and the last 64 KiB of stream frames. Header values other than
+`content-type`, `content-length`, `date`, `retry-after`, `retry-after-ms`,
+`server`, `x-request-id` and `x-ratelimit-*` are replaced with `[redacted]`. In
+JSON frames, values of any type whose key names a token, key, secret, auth value,
+account, user, email, session, password or credential are replaced too, and
+other non-JSON data is dropped. Model text in the frames is kept, so review the
+entry before you share it.
 
 Source: [doctor](../../crates/ego-cli/src/doctor.rs),
 [diagnostics](../../crates/ego-cli/src/diagnostics.rs),

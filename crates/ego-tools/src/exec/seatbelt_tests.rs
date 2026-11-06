@@ -427,6 +427,76 @@ fn user_config_symlink_target_cannot_rewrite_permissions() {
     );
 }
 
+// Catches: a write grant added after admission covers a hardlink alias of the
+// config that the admission scan never saw, so the widened child rewrites it.
+#[test]
+fn widened_write_grant_cannot_rewrite_config_through_hardlink_alias() {
+    let name =
+        "exec::seatbelt::tests::widened_write_grant_cannot_rewrite_config_through_hardlink_alias";
+    if std::env::var_os("EGO_WIDENED_ALIAS_CHILD").is_none() {
+        let root = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", name, "--nocapture"])
+            .env("EGO_WIDENED_ALIAS_CHILD", "1")
+            .env("EGO_HOME", root.path().join("ego"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let base = fs::canonicalize(root.path()).unwrap();
+    let workspace = base.join("workspace");
+    let scratch = base.join("scratch");
+    let dotfiles = base.join("dotfiles");
+    for path in [&workspace, &scratch, &dotfiles] {
+        fs::create_dir(path).unwrap();
+    }
+    fs::set_permissions(&scratch, fs::Permissions::from_mode(0o700)).unwrap();
+    let config_dir = PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+    fs::create_dir_all(&config_dir).unwrap();
+    let config = config_dir.join("config.toml");
+    fs::write(&config, "mode = 'default'\n").unwrap();
+    let alias = dotfiles.join("ego.toml");
+    fs::hard_link(&config, &alias).unwrap();
+    let policy =
+        RunConfinement::new(Confinement::Workspace, false, CanonPath::new(&workspace)).unwrap();
+    let backend = SeatbeltBackend::prepare(
+        &policy,
+        &CanonPath::new(&scratch),
+        &derived_runtime_roots().unwrap(),
+    )
+    .expect("hardlinked config outside the writable roots is admitted");
+    let widened = backend
+        .widened(
+            &[ego_core::permit::SandboxGrant {
+                path: CanonPath::new(&dotfiles),
+                access: SandboxAccess::Write,
+            }],
+            &[],
+        )
+        .unwrap();
+    // The grant is effective for the directory's ordinary files.
+    let ordinary = dotfiles.join("ordinary");
+    let touch = run(&widened, "/usr/bin/touch", &[ordinary.as_os_str()]);
+    assert!(touch.status.success(), "{touch:?}");
+    let write = run(
+        &widened,
+        "/bin/sh",
+        &[
+            "-c".as_ref(),
+            "printf changed > \"$1\"".as_ref(),
+            "write".as_ref(),
+            alias.as_os_str(),
+        ],
+    );
+    assert!(
+        !write.status.success(),
+        "widened grant rewrote the config through its alias: {write:?}"
+    );
+    assert_eq!(fs::read(&config).unwrap(), b"mode = 'default'\n");
+}
+
 // Catches: a valid EGO_HOME containing parent traversal prevents ordinary sandboxed work.
 #[test]
 fn user_config_parent_component_does_not_refuse_sandboxed_work() {

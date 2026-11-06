@@ -16,6 +16,10 @@ use super::{RequestRefused, RequestTarget, WireFormat, openai_completions};
 pub struct KimiOpenAi;
 
 impl WireFormat for KimiOpenAi {
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        super::cache::policy(req, true, true)
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,

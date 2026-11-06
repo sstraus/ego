@@ -83,6 +83,9 @@ fn render(
             _ => None,
         })
         .collect();
+    // TODO(2027-03-01): remove legacy AssistantDelta replay support.
+    // Only logs written by earlier versions carry chunks; a partial without a
+    // final message is printed from them.
     let mut last_delta = HashMap::new();
     for (index, event) in events.iter().enumerate() {
         if matches!(event.kind, EventKind::AssistantDelta { .. })
@@ -110,9 +113,12 @@ fn render(
             continue;
         }
         match &event.kind {
-            EventKind::UserPrompt { text, .. } => {
+            EventKind::UserPrompt { text, images, .. } => {
                 tools.separate();
                 output.line(&format!("> {text}"));
+                if let Some(label) = super::attachments::label(images.len()) {
+                    output.line(&label);
+                }
             }
             EventKind::AssistantMessage { text } => {
                 if event.env.item.and_then(|item| finals.get(&item)) == Some(&index) {
@@ -124,6 +130,7 @@ fn render(
                 tools.separate();
                 message(output, checkpoint, capabilities, workspace)
             }
+            // TODO(2027-03-01): remove legacy AssistantDelta replay support.
             EventKind::AssistantDelta { text } => {
                 let item = event.env.item.expect("transcript item checked above");
                 if !finals.contains_key(&item) {
@@ -153,6 +160,25 @@ fn render(
                         continue;
                     }
                     let text = result.model_text();
+                    if matches!(name.rsplit(" › ").next(), Some("write" | "edit")) {
+                        let call = tool_row::Finished {
+                            name,
+                            args,
+                            ok: *ok,
+                            result: &text,
+                            result_blocks: Some(&result.content),
+                            timing: timings.remove(&item),
+                            before_image: None,
+                        };
+                        for record in tools.record_writes(
+                            &call,
+                            result.file_writes(),
+                            capabilities.with_current_width(),
+                        ) {
+                            output.tool_row(&record.rows, record.detail);
+                        }
+                        continue;
+                    }
                     let record = tools.record(
                         &tool_row::Finished {
                             name,
@@ -161,6 +187,7 @@ fn render(
                             result: &text,
                             result_blocks: Some(&result.content),
                             timing: timings.remove(&item),
+                            before_image: result.before_image(),
                         },
                         capabilities.with_current_width(),
                     );
@@ -347,7 +374,7 @@ mod tests {
                 },
                 EventKind::ToolCallStarted {
                     name: "read".into(),
-                    args: r#"{"path":"first"}"#.into(),
+                    args: r#"{"files":[{"path":"first"}]}"#.into(),
                     call_id: None,
                 },
                 EventKind::ToolCallCompleted {

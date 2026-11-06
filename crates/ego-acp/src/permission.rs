@@ -169,6 +169,9 @@ impl AcpPermissionAdapter {
                     format!("{dimension:?}").to_lowercase()
                 ));
             }
+            if plan.discloses_values() {
+                title.push_str(&format!("\nWarning: {}", RememberPlan::DISCLOSURE_NOTICE));
+            }
         }
         Self::wire_request(
             &self.session,
@@ -193,7 +196,7 @@ impl AcpPermissionAdapter {
             v1::RequestPermissionOutcome::Selected(selected)
                 if selected.option_id.0.as_ref() == Self::ALLOW_ONCE =>
             {
-                PermissionDecision::Allow
+                PermissionDecision::AllowOnce
             }
             _ => PermissionDecision::Deny,
         }

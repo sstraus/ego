@@ -389,3 +389,25 @@ async fn explicit_proxy_without_ca_rejects_untrusted_tls_before_provider_request
         "the TLS server must not receive provider HTTP headers"
     );
 }
+
+// Catches: a proxied connect error that names no proxy, so a failure is blamed on the provider address.
+#[tokio::test]
+async fn explicit_proxy_connect_failure_names_the_proxy_address_and_route() {
+    let port = {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    let error = execute(
+        transport(Arc::default(), port, false, CancelToken::new(), false),
+        Instant::now() + Duration::from_secs(5),
+    )
+    .await
+    .err()
+    .unwrap();
+    let TransportFailure::Connect(detail) = error.failure() else {
+        panic!("expected a connection failure, got {error:?}");
+    };
+    assert!(detail.contains(&format!("127.0.0.1:{port}")), "{detail}");
+    assert!(detail.contains("IPv4"), "{detail}");
+    assert!(detail.contains("proxy: yes"), "{detail}");
+}

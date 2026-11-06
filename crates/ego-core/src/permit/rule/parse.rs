@@ -77,7 +77,7 @@ const OPERATIONS: &[(Head, Option<&str>)] = &[
     // which is the vacuous boundary two paragraphs up. `WriteTool` now
     // constructs one, so the entry flips back, and nothing else did: no rule
     // was rewritten and no ID recomputed. Which side this entry is on is
-    // decided by `ego-tools/tests/tools.rs`, the only crate that can see both
+    // decided by `ego-tools/tests/it/tools.rs`, the only crate that can see both
     // this table and `builtins()`.
     (Head::Write, None),
     (Head::List, None),

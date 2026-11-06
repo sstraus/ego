@@ -361,7 +361,13 @@ impl EditMode for SurfaceEditMode {
                 Intercept::Interrupt if self.phase.get() == EditPhase::Busy => {
                     return ReedlineEvent::ExecuteHostCommand(INTERRUPT_COMMAND.to_string());
                 }
-                Intercept::Editor | Intercept::SteerBusy | Intercept::Interrupt => {}
+                Intercept::Cancel if self.phase.get() == EditPhase::Busy => {
+                    return ReedlineEvent::ExecuteHostCommand(BUSY_CANCEL_COMMAND.to_string());
+                }
+                Intercept::Editor
+                | Intercept::SteerBusy
+                | Intercept::Interrupt
+                | Intercept::Cancel => {}
             }
         }
 

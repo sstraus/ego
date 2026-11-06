@@ -102,11 +102,14 @@ impl Default for Limits {
 /// reason attached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// The final component is a symlink.
+    /// A symlink that was not followed: a link in a parent component, or a
+    /// dangling or cyclic leaf link.
     ///
-    /// This text goes into a prompt sent to a provider at session start with no dialog in
-    /// its path, so a symlink is a one-hop exfiltration channel nothing else would
-    /// notice.
+    /// A leaf link whose canonical target resolves (through any chain of
+    /// links) is reported as [`Found::Link`] instead, and the target is read
+    /// under its own path, so the external-approval gate sees where the bytes
+    /// really are. Parent links stay refused: resolve-then-read-by-path
+    /// re-resolves at open, and that window is not closed.
     Symlink,
     /// Larger than [`Limits::max_file_bytes`]. Not truncated: half an
     /// instruction file can end mid-sentence and invert its own meaning.
@@ -136,7 +139,7 @@ pub enum Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::Symlink => write!(f, "it is a symlink, which is not followed"),
+            Refusal::Symlink => write!(f, "it is a symlink that cannot be followed safely"),
             Refusal::TooLarge { limit } => write!(f, "it is larger than {limit} bytes"),
             Refusal::NotAFile => write!(f, "it is not a regular file"),
             Refusal::NotText => write!(f, "it is not valid UTF-8"),
@@ -167,6 +170,11 @@ pub enum Found {
     Absent,
     /// A regular, non-symlinked file, read whole.
     Read { bytes: Vec<u8> },
+    /// A symlink in the final component, with the canonical path it resolves
+    /// to. The port does not read through it; [`load`] reads `target` under
+    /// its own path and scope, so a target outside the scope needs the same
+    /// approval as any external import.
+    Link { target: PathBuf },
     /// Something there, and it does not qualify.
     Refused(Refusal),
 }
@@ -180,7 +188,8 @@ pub enum Found {
 /// tool exists.
 pub trait InstructionIo {
     /// Read `path`, refusing anything that is not a regular file of at most
-    /// `max_bytes`, including a symlink in its final or parent components.
+    /// `max_bytes`. A symlink in the final component is answered with
+    /// [`Found::Link`]; one in a parent component is refused.
     ///
     /// An implementation must not follow a static symlink in the path,
     /// and must not read more than `max_bytes + 1` — one byte past the limit
@@ -385,6 +394,22 @@ fn load_one(
         io.load_external(path, limits.max_file_bytes)
     };
     let bytes = match found {
+        Found::Link { target } => {
+            load_one(
+                io,
+                &target,
+                imported,
+                scope,
+                home,
+                limits,
+                set,
+                total,
+                visited,
+                active,
+                import_attempts,
+            );
+            return;
+        }
         Found::Absent if imported => {
             set.skipped.push(Skipped {
                 path: path.to_path_buf(),

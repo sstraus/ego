@@ -27,10 +27,7 @@ to read it. Contributors can use [build and maintenance](maintaining.md).
 | Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
 | Implement an ACP client for ego's wire extensions | [ACP extensions](integrations/acp-extensions.md) |
 | Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
-| Read the upcoming release changes | [Release notes: 0.4.3](release-notes/0.4.3.md) |
-| Read the previous preparation changes | [Release notes: 0.4.2](release-notes/0.4.2.md) |
-| Read the previous preparation changes | [Release notes: 0.4.1](release-notes/0.4.1.md) |
-| Read the previous release changes | [Release notes: 0.4.0](release-notes/0.4.0.md) |
+| Read the changes in each version | [Changelog](changelog.md) |
 | Understand crate responsibilities and design | [Architecture](architecture.md) |
 
 The [generated command reference](reference/cli.md) remains at its generator-owned

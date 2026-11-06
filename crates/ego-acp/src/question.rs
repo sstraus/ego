@@ -23,6 +23,7 @@ pub use ego_core::question::QuestionRequest;
 pub struct CapabilityCapture {
     form: bool,
     child_activity: bool,
+    compacted: bool,
 }
 
 impl CapabilityCapture {
@@ -30,11 +31,13 @@ impl CapabilityCapture {
         Self {
             form: true,
             child_activity: false,
+            compacted: false,
         }
     }
 
     pub fn capture_initialize(&mut self, capabilities: &ClientCapabilities) {
         self.child_activity = crate::negotiate::child_activity_requested(capabilities);
+        self.compacted = crate::negotiate::compacted_requested(capabilities);
         self.form = capabilities
             .elicitation
             .as_ref()
@@ -44,6 +47,10 @@ impl CapabilityCapture {
 
     pub fn child_activity_available(&self) -> bool {
         self.child_activity
+    }
+
+    pub fn compacted_available(&self) -> bool {
+        self.compacted
     }
 
     pub fn form_available(&self) -> bool {

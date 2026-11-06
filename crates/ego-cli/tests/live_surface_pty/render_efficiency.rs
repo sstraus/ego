@@ -64,9 +64,12 @@ fn external_rows_do_not_emit_space_padding_erasers() {
         )))],
         ..Plan::default()
     });
+    // Adaptive requires its writable temporary root to be disjoint from home and workspace.
+    let temporary = tempfile::tempdir().expect("temporary root");
     let ego = Ego::against(&stub)
         .conversing()
         .args(["--model", "ollama/qwen3"])
+        .env("TMPDIR", temporary.path().to_str().expect("temporary path"))
         .env("TERM", "xterm-256color");
     ego.file("AGENTS.md", "# external row fixture\n");
     let (session, mut input, reader) = PtySession::start(&ego, 8, 120, Some((8, 120)));

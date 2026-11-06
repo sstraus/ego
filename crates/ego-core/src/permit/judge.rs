@@ -353,7 +353,9 @@ impl JudgeDecoder {
                     }
                 }
             }
-            AiEvent::ToolCall { .. } | AiEvent::WebSearch { .. } => {
+            AiEvent::ToolCall { .. }
+            | AiEvent::ToolCallRejected { .. }
+            | AiEvent::WebSearch { .. } => {
                 self.uncertain = Some("judge attempted a tool call");
             }
             AiEvent::Error { .. } => {
@@ -648,11 +650,16 @@ enum CanonicalChange {
     },
     Replace {
         replace_all: bool,
-        old_bytes: usize,
-        old_sha256: String,
-        new_bytes: usize,
-        new_sha256: String,
+        chunks: Vec<CanonicalReplaceChunk>,
     },
+}
+
+#[derive(Serialize)]
+struct CanonicalReplaceChunk {
+    old_bytes: usize,
+    old_sha256: String,
+    new_bytes: usize,
+    new_sha256: String,
 }
 
 impl From<&Change> for CanonicalChange {
@@ -671,14 +678,18 @@ impl From<&Change> for CanonicalChange {
             },
             Change::Replace {
                 replace_all,
-                old_string,
-                new_string,
+                chunks,
             } => Self::Replace {
                 replace_all: *replace_all,
-                old_bytes: old_string.len(),
-                old_sha256: sha256_hex(old_string.as_bytes()),
-                new_bytes: new_string.len(),
-                new_sha256: sha256_hex(new_string.as_bytes()),
+                chunks: chunks
+                    .iter()
+                    .map(|chunk| CanonicalReplaceChunk {
+                        old_bytes: chunk.old_string.len(),
+                        old_sha256: sha256_hex(chunk.old_string.as_bytes()),
+                        new_bytes: chunk.new_string.len(),
+                        new_sha256: sha256_hex(chunk.new_string.as_bytes()),
+                    })
+                    .collect(),
             },
         }
     }

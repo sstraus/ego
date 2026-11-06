@@ -37,6 +37,7 @@ fn configured_shared_instructions_respect_exclusions_and_repository_boundaries()
     let instructions = ego_core::config::InstructionConfig {
         shared_root: Some(gits.clone()),
         exclude_roots: vec![gits.join(".tmp")],
+        max_files: None,
     };
     let root = crate::trust::instruction_discovery_root(&project, &instructions)
         .expect("canonical instruction discovery root");
@@ -82,6 +83,39 @@ fn configured_shared_instructions_respect_exclusions_and_repository_boundaries()
             .expect("canonical scratch root"),
         std::fs::canonicalize(scratch).expect("canonical scratch"),
         "scratch fixtures do not inherit the human's shared instructions"
+    );
+}
+
+/// Catches: a downloaded repository's `AGENTS.md` symlink to private bytes reaching the prompt
+/// without workspace approval of that exact target.
+#[cfg(unix)]
+#[test]
+fn unapproved_instruction_symlink_to_private_bytes_never_reaches_the_prompt() {
+    #[derive(Default)]
+    struct Notes(Mutex<Vec<String>>);
+    impl crate::output::Diagnostics for Notes {
+        fn note(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+    let tree = tempdir().expect("fixture directory");
+    let base = std::fs::canonicalize(tree.path()).expect("canonical fixture");
+    let repo = base.join("repo");
+    std::fs::create_dir_all(&repo).expect("repository");
+    let private = base.join("private.txt");
+    std::fs::write(&private, "PRIVATE-FIXTURE-BYTES").expect("private fixture");
+    std::os::unix::fs::symlink(&private, repo.join("AGENTS.md")).expect("link");
+    let effective = ego_core::config::resolve(&[], Trust::Trusted, None).unwrap();
+    let args = protocol_args(None, crate::cli::SessionShape::default());
+    let notes = Notes::default();
+    let assembled = composition::instructions(&effective, &args, &repo, &repo, &notes).unwrap();
+    assert!(assembled.is_none(), "{assembled:?}");
+    let notes = notes.0.lock().unwrap();
+    assert!(
+        notes.iter().any(
+            |note| note.contains("private.txt") && note.contains("requires workspace approval")
+        ),
+        "{notes:?}"
     );
 }
 
@@ -1089,7 +1123,7 @@ fn only_tuic_is_told_what_ego_is_doing() {
     assert!(!elsewhere.preamble(None).contains("7770"));
 
     let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
-    assert!(inside.preamble(None).contains("\x1b]7770;state=busy\x07"));
+    assert!(!inside.preamble(None).contains("\x1b]7770;state=busy\x07"));
     assert!(
         inside
             .postamble(&RunTermination::Done, Duration::ZERO)
@@ -1806,7 +1840,7 @@ fn handle_policy_request_propagates_confirmation_terminal_lines_without_second_a
                 Ok(PolicyControlOutcome::RememberPreview(preview.clone()))
             },
             &output,
-            |_preview| crate::repl::Confirmation::Propagate(propagated.clone()),
+            |_preview| crate::repl::Confirmation::Propagate(Box::new(propagated.clone())),
         );
         assert_eq!(result.unwrap(), Some(propagated));
         assert_eq!(applies, 1);
@@ -2365,10 +2399,90 @@ fn recorded_cli_stream_replays_through_native_emitter() {
     }
 }
 
+// Catches: the headless opening and first turn both announce busy to TUIC.
+#[test]
+fn headless_opening_and_turn_publish_busy_once() {
+    for profile in [OscProfile::Tuic, OscProfile::Standard, OscProfile::None] {
+        let out = PolicyTextOutput::default();
+        let announce = Announce::new(&out, capabilities(profile), false);
+        let sink = Signalling {
+            inner: &ego_core::sink::NullSink,
+            announce: &announce,
+            seat: None,
+        };
+        let state = SessionState::default();
+        announce.opening(Some("explain the diff"));
+        let turn = TurnId::new();
+        sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+        sink.publish(&prompt_submitted("explain the diff"), &state);
+        sink.publish(
+            &PublicEvent::TurnCompleted {
+                turn,
+                ok: true,
+                exit_reason: ego_core::event::domain::ExitReason::Completed,
+            },
+            &state,
+        );
+        let bytes = out.0.lock().unwrap().concat();
+        assert_eq!(
+            bytes.matches("\x1b]7770;state=busy\x07").count(),
+            usize::from(profile == OscProfile::Tuic),
+            "headless turn emitted the wrong number of busy frames: {profile:?}: {bytes:?}"
+        );
+        assert_eq!(
+            bytes.matches("\x1b]7770;state=idle\x07").count(),
+            usize::from(profile == OscProfile::Tuic),
+            "headless turn emitted the wrong number of idle frames: {profile:?}: {bytes:?}"
+        );
+        if profile == OscProfile::Tuic {
+            assert!(bytes.contains("\x1b]0;ɛ । explain the diff\x07"));
+            assert!(bytes.contains("\x1b]7770;intent=explain the diff (εgo)\x07"));
+        } else {
+            assert!(!bytes.contains("\x1b]7770;"));
+        }
+    }
+}
+
+// Catches: resumed or automatic turns stay idle because no new user message is published.
+#[test]
+fn every_turn_announces_busy_without_a_user_message() {
+    for profile in [OscProfile::Tuic, OscProfile::Standard, OscProfile::None] {
+        let out = Stdout::new(CancelToken::new());
+        let announce = Announce::new(&out, capabilities(profile), false);
+        let state = SessionState::default();
+        for _ in 0..2 {
+            let turn = TurnId::new();
+            let opening = announce.signal(&PublicEvent::TurnStarted { turn }, &state);
+            assert_eq!(
+                opening.contains("\x1b]7770;state=busy\x07"),
+                profile == OscProfile::Tuic,
+                "turn start must signal activity without a user message: {profile:?}"
+            );
+            let prompt = announce.signal(&prompt_submitted("next step"), &state);
+            assert!(
+                !prompt.contains("\x1b]7770;state=busy\x07"),
+                "prompt metadata must not duplicate the turn activity signal"
+            );
+            let closing = announce.signal(
+                &PublicEvent::TurnCompleted {
+                    turn,
+                    ok: true,
+                    exit_reason: ego_core::event::domain::ExitReason::Completed,
+                },
+                &state,
+            );
+            assert_eq!(
+                closing.contains("\x1b]7770;state=idle\x07"),
+                profile == OscProfile::Tuic
+            );
+        }
+    }
+}
+
 /// catches: a TUIC tab with no intent or title for a turn, and a first turn
 /// whose title is empty because the session has none yet.
 #[test]
-fn a_turn_starts_with_the_title_the_intent_and_busy() {
+fn a_user_message_announces_the_title_and_intent() {
     let out = Stdout::new(CancelToken::new());
     let inside = Announce::new(&out, capabilities(OscProfile::Tuic), false);
 
@@ -2379,8 +2493,7 @@ fn a_turn_starts_with_the_title_the_intent_and_busy() {
         ),
         "\x1b]0;ɛ । explain the diff\x07\
          \x1b]7770;intent=explain the diff (εgo)\x07\
-         \x1b]9;4;0;0\x07\
-         \x1b]7770;state=busy\x07"
+         \x1b]9;4;0;0\x07"
     );
 
     // A session that already has a title shows it, not the latest prompt.
@@ -2489,6 +2602,52 @@ async fn system_root_ceiling_is_checked_before_run_effects() {
         !session_root.exists(),
         "refusal must precede session creation"
     );
+}
+
+// Catches: a child run (subagent or skill) of an `ego mcp-server` run asks the
+// same top-level concurrency semaphore as its parent, so under the default
+// `--max-concurrent-runs 1` every child of a running MCP run is refused.
+#[tokio::test]
+async fn mcp_child_run_does_not_need_a_second_top_level_concurrency_permit() {
+    let tree = tempdir().unwrap();
+    let workspace = tree.path().canonicalize().unwrap();
+    let store = Arc::new(JsonlStore::new(
+        workspace.join("sessions"),
+        workspace.clone(),
+        Box::new(OsIo),
+    ));
+    let mut parent = CliRunExecutor::for_acp(
+        None,
+        SessionShape::default(),
+        store,
+        Arc::new(EvidenceAdmissionService::new()),
+    );
+    parent.frozen = Some(Arc::new(config::FrozenRunConfig::from_layers(
+        Vec::new(),
+        &parent.args,
+        Trust::Untrusted,
+    )));
+    let ceiling = Arc::new(tokio::sync::Semaphore::new(1));
+    parent.concurrency = Some(Arc::clone(&ceiling));
+    let _running_parent = ceiling.try_acquire_owned().unwrap();
+    let child = parent.for_children();
+    let invocation = RunInvocationId::new();
+    let request = RunPreparation {
+        run_id: RunId::new(SessionId::new(), invocation.uuid()),
+        invocation,
+        root: ego_core::run::RunRoot::new(workspace).unwrap(),
+        selections: ego_core::run::RunSelections::new(None, None, None, None, None),
+        continuation: false,
+        origin: RunOrigin::TopLevel,
+    };
+    if let Err(error) = child.prepare(&request).await {
+        assert!(
+            !error
+                .to_string()
+                .contains("run concurrency ceiling is unavailable"),
+            "a child of a running MCP run was refused by the top-level ceiling: {error}"
+        );
+    }
 }
 
 // Catches: /yolo bypasses the system maximum when staging the next generation.
@@ -2718,6 +2877,7 @@ fn recovery_waiting_and_settlement_emit_exact_osc() {
         limit: 6,
         delay_ms: 0,
         kind: ego_core::generator::types::ErrorKind::Transient,
+        capacity: false,
         cause: "connection failed".into(),
         recovery_remaining_ms: Some(60_000),
     };
@@ -2780,6 +2940,7 @@ fn recovery_retrying_output_and_non_tty_boundaries() {
         limit: 6,
         delay_ms: u64::MAX,
         kind: ego_core::generator::types::ErrorKind::Transient,
+        capacity: false,
         cause: "untrusted \x1b\x07".into(),
         recovery_remaining_ms: Some(60_000),
     };
@@ -3403,6 +3564,34 @@ async fn cli_drain_repeated_empty_drain_does_not_duplicate_settlement() {
         "an empty second drain must not rerun hooks or append another settlement"
     );
 }
+// Catches: the lsp tool offered in every session, so a model starts language
+// servers the owner never turned on, or missing when the owner turned it on.
+#[test]
+fn the_lsp_tool_is_registered_only_when_the_owner_turned_it_on() {
+    let names = |opt_in| {
+        composition::tools_with_mode(
+            None,
+            None,
+            None,
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+            None,
+            opt_in,
+        )
+        .unwrap()
+        .iter()
+        .map(|tool| tool.descriptor().name)
+        .collect::<Vec<_>>()
+    };
+    assert!(!names(composition::OptInTools::default()).contains(&"lsp".to_owned()));
+    let workspace = tempfile::tempdir().unwrap();
+    let on = composition::OptInTools {
+        lsp: Some(workspace.path().to_path_buf()),
+        ..composition::OptInTools::default()
+    };
+    assert!(names(on).contains(&"lsp".to_owned()));
+}
+
 // Catches: native providers require EXA_API_KEY or expose Exa as a silent fallback.
 #[test]
 fn native_search_registry_does_not_require_or_select_exa() {
@@ -3414,6 +3603,7 @@ fn native_search_registry_does_not_require_or_select_exa() {
             None,
             ego_core::permit::EnvPolicy::Inherited,
             Some(model),
+            composition::OptInTools::default(),
         )
         .unwrap();
         assert_eq!(tools.len(), 1);
@@ -3428,6 +3618,7 @@ fn native_search_registry_does_not_require_or_select_exa() {
             None,
             ego_core::permit::EnvPolicy::Inherited,
             Some(model),
+            composition::OptInTools::default(),
         )
         .unwrap();
         assert!(
@@ -3975,7 +4166,16 @@ fn recorded_unrun_tools_keep_failure_receipt_and_host_signal() {
                     !notes.iter().any(|line| line.contains("retry finished")),
                     "{notes:?}"
                 );
-                let next = announce.signal(&prompt_submitted("continue"), &state);
+                let next = [
+                    announce.signal(
+                        &PublicEvent::TurnStarted {
+                            turn: TurnId::new(),
+                        },
+                        &state,
+                    ),
+                    announce.signal(&prompt_submitted("continue"), &state),
+                ]
+                .concat();
                 assert!(next.contains("\x1b]9;4;0;0\x07"), "{next:?}");
                 assert!(next.contains("state=busy"), "{next:?}");
             } else {

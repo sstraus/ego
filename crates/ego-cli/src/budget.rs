@@ -240,7 +240,8 @@ impl TableSource<'_> {
         revision: &PricingRevision,
     ) -> Result<Option<ResolvedRates>, NoRates> {
         let table = Table::decode(bytes).map_err(|source| NoRates::Table { source })?;
-        match table.quote(model.row.id(), &model.model) {
+        let (provider, key_prefix) = model.row.price_table_name();
+        match table.quote_in(provider, key_prefix, &model.model) {
             Ok(entry) => {
                 let rates = table_rates(entry.into_quote(revision.clone()));
                 Ok(Some(rates))

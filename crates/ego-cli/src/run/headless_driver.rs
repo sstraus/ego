@@ -22,8 +22,10 @@ pub(super) struct HeadlessGeneration<'a> {
     pub(super) goal_turns: u32,
     pub(super) goal_check_command: Option<Vec<String>>,
     pub(super) goal_ceilings: ego_core::ceiling::Ceilings,
+    pub(super) child_defaults: ego_core::turn::ChildDefaults,
     pub(super) gate: SharedBudgetGate,
     pub(super) hook_layers: Option<&'a [Sourced<ConfigLayer>]>,
+    pub(super) hooks_off: bool,
     pub(super) hook_trust: Trust,
     pub(super) policy_source: Arc<dyn GenerationPolicySource>,
     pub(super) judge_available: bool,
@@ -55,7 +57,26 @@ pub(super) struct HeadlessTurn<'a> {
     pub(super) attachment_specs: &'a [String],
     pub(super) input: HeadlessInput<'a>,
     pub(super) diagnostics: &'a dyn Diagnostics,
+    /// The host can activate a compaction successor and continue in it.
+    /// Context percent at which it compacts; `None` keeps explicit recovery.
+    pub(super) automatic_compaction: Option<ego_core::compact::ContextPercent>,
 }
+
+/// A published successor of the driven source session.
+pub(super) struct HeadlessCompaction {
+    pub(super) request: RequestId,
+    pub(super) receipt: CompactionReceipt,
+    /// Source turns driven before the compaction, for the run turn limit.
+    pub(super) turns_taken: u32,
+}
+
+/// What one headless drive produced; a compaction names the session to continue.
+pub(super) type HeadlessDriven = (
+    RunTermination,
+    SessionState,
+    Value,
+    Option<HeadlessCompaction>,
+);
 
 pub(super) async fn drive_headless_turn(
     session: HeadlessSession<'_, '_>,
@@ -63,7 +84,7 @@ pub(super) async fn drive_headless_turn(
     child: HeadlessChild,
     effects: HeadlessEffects<'_>,
     turn: HeadlessTurn<'_>,
-) -> Result<(RunTermination, SessionState, Value), RunTermination> {
+) -> Result<HeadlessDriven, RunTermination> {
     let HeadlessSession {
         active,
         opening,
@@ -83,8 +104,10 @@ pub(super) async fn drive_headless_turn(
         goal_turns,
         goal_check_command,
         goal_ceilings,
+        child_defaults,
         gate,
         hook_layers,
+        hooks_off,
         hook_trust,
         policy_source,
         judge_available,
@@ -113,16 +136,22 @@ pub(super) async fn drive_headless_turn(
         attachment_specs,
         input,
         diagnostics,
+        automatic_compaction,
     } = turn;
+    let opening_turns = opening.turns.len();
     let recovered_policy = match &input {
         HeadlessInput::Answered { policy, .. } => Some(Arc::clone(policy)),
-        HeadlessInput::Prompt(_) | HeadlessInput::Resumed(_) => None,
+        HeadlessInput::Prompt(_) | HeadlessInput::Resumed(_) | HeadlessInput::Checkpoint { .. } => {
+            None
+        }
     };
     let images = acquire_attachments(
         Attachments {
             inline: match &input {
                 HeadlessInput::Prompt(prompt) => prompt.images(),
-                HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => &[],
+                HeadlessInput::Resumed(_)
+                | HeadlessInput::Answered { .. }
+                | HeadlessInput::Checkpoint { .. } => &[],
             },
             specs: attachment_specs,
         },
@@ -157,6 +186,8 @@ pub(super) async fn drive_headless_turn(
         opening,
     ));
     let instructions_loaded = config.system.is_some();
+    // Fresh instructions and tools of this run seed a compaction successor.
+    let target_system = config.system.clone();
     let runtime = GenerationRuntime {
         source: source.bind(http, cancel.clone(), run_deadline),
         policy_source: Arc::clone(&policy_source),
@@ -192,6 +223,7 @@ pub(super) async fn drive_headless_turn(
         invocation,
         gate: gate.clone(),
         layers: hook_layers,
+        hooks_off,
         trust: hook_trust,
         source: Arc::clone(&source),
         ports: Arc::clone(&ports),
@@ -208,6 +240,7 @@ pub(super) async fn drive_headless_turn(
     family_executor.token_family = Some(token_family);
     let child_executor = Arc::new(family_executor);
     let family_store = Arc::clone(&child_store);
+    let session_store = Arc::clone(&child_store);
     let mut child_bindings = RunExecutionBindings::new(
         Arc::new(CliChildSinkFactory),
         elicitor.as_ref().map(Arc::clone),
@@ -277,7 +310,9 @@ pub(super) async fn drive_headless_turn(
                 catalogue.user_command(&named[..end], named[end..].trim_start())
             })
         }),
-        HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => None,
+        HeadlessInput::Resumed(_)
+        | HeadlessInput::Answered { .. }
+        | HeadlessInput::Checkpoint { .. } => None,
     };
     if (command.is_some() || mcp_command.is_some()) && (!images.is_empty() || !audio.is_empty()) {
         return Err(RunTermination::UsageError {
@@ -293,10 +328,12 @@ pub(super) async fn drive_headless_turn(
         }
         None => Tools::from_registry(registry, effect_ports, CanonPath::new(cwd)),
     };
-    let tools = tools.with_named_agents(
-        crate::named_agents::discover(cwd, hook_trust)
-            .map_err(|error| RunTermination::UsageError { message: error.0 })?,
-    );
+    let tools = tools
+        .with_named_agents(
+            crate::named_agents::discover(cwd, hook_trust)
+                .map_err(|error| RunTermination::UsageError { message: error.0 })?,
+        )
+        .with_child_defaults(child_defaults);
     let tools = match mcp_runtime.as_ref().and_then(|mcp| mcp.resume_sealer()) {
         Some(resume) => tools.with_resume(resume),
         None => tools,
@@ -327,6 +364,12 @@ pub(super) async fn drive_headless_turn(
     .with_background_task_port(skill_owner.clone())
     .with_task_guidance()
     .with_pause_token(pause.clone());
+    let loop_ = match automatic_compaction {
+        Some(threshold) => loop_
+            .with_automatic_compaction()
+            .with_compaction_threshold(threshold),
+        None => loop_,
+    };
     let loop_ = match recovered_policy.as_ref() {
         Some(policy) => loop_
             .with_hook_policy(Arc::clone(policy))
@@ -374,6 +417,13 @@ pub(super) async fn drive_headless_turn(
         })
         .unwrap_or_default();
     sink.context_commands(context_descriptors, &loop_.state());
+    let from_checkpoint = match &input {
+        HeadlessInput::Checkpoint { request } => {
+            dispatch_post_compact(&hooks, *request, diagnostics).await;
+            true
+        }
+        _ => false,
+    };
     let (termination, result) = match input {
         HeadlessInput::Prompt(_) if mcp_command.is_some() => {
             turns
@@ -416,6 +466,36 @@ pub(super) async fn drive_headless_turn(
                 .drive_answered(&mut loop_, question, answer, cancel, diagnostics)
                 .await
         }
+        HeadlessInput::Checkpoint { .. } => {
+            turns
+                .drive_checkpoint(&mut loop_, cancel, diagnostics)
+                .await
+        }
+    };
+    // A successor that overflows before any measured reply would compact the
+    // same checkpoint again; it keeps the typed overflow instead.
+    let compaction = if automatic_compaction.is_some()
+        && matches!(termination, RunTermination::ContextOverflow { .. })
+        && (!from_checkpoint || loop_.state().context.used_tokens.is_some())
+    {
+        let turns_taken = u32::try_from(loop_.state().turns.len().saturating_sub(opening_turns))
+            .unwrap_or(u32::MAX);
+        let target_tools = registry.iter().map(RegisteredTool::descriptor).collect();
+        compact_source(
+            &mut loop_,
+            &hooks,
+            (target_system, target_tools),
+            (active.id(), session_store.as_ref(), clock),
+            diagnostics,
+        )
+        .await
+        .map(|(request, receipt)| HeadlessCompaction {
+            request,
+            receipt,
+            turns_taken,
+        })
+    } else {
+        None
     };
     drop(loop_);
     skill_owner
@@ -445,5 +525,89 @@ pub(super) async fn drive_headless_turn(
     drop(hooks);
     let state = journal.try_into_state().map_err(hook_journal_termination)?;
     session_end?;
-    Ok((termination, state, result))
+    Ok((termination, state, result, compaction))
+}
+
+/// Run the interactive clean-session compaction on the driven source.
+///
+/// A failure is reported and returns `None`: the caller keeps the source's
+/// typed overflow, so the run still exits non-zero.
+async fn compact_source<'session: 'turn, 'turn>(
+    loop_: &mut TurnLoop<'session, 'turn>,
+    hooks: &SessionHookComposition<'_>,
+    target: (Option<SystemPrompt>, Vec<ToolDescriptor>),
+    source: (SessionId, &JsonlStore, &SystemClock),
+    diagnostics: &dyn Diagnostics,
+) -> Option<(RequestId, CompactionReceipt)> {
+    let (target_system, target_tools) = target;
+    let (source, store, clock) = source;
+    let failed = |message: String| {
+        diagnostics.note(&format!(
+            "compaction failed: {message}. The session is unchanged; retry with 'ego compact {source}'."
+        ));
+        None
+    };
+    diagnostics.note(
+        "Compacting the session now: saving a summary. The task will continue automatically.",
+    );
+    let request = RequestId::from_uuid(uuid::Uuid::now_v7());
+    if let Err(error) = dispatch_request_hook(
+        &hooks.runtime,
+        request,
+        hooks.turn,
+        None,
+        HookLifecycle::PreCompact,
+    )
+    .await
+    {
+        return failed(format!(
+            "blocked before preparation: {}",
+            error.exit_reason()
+        ));
+    }
+    let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
+        Box::pin(loop_.prepare_compaction(target_system, target_tools));
+    let mut preparation = DeferredCompactionPreparation {
+        source,
+        future: Some(future),
+    };
+    let receipt = CompactionTransitionService::new(*clock)
+        .compact(
+            CompactionTransitionRequest {
+                request_id: request,
+                source,
+            },
+            &mut preparation,
+            store,
+        )
+        .await;
+    drop(preparation);
+    match receipt {
+        Ok(receipt) => Some((request, receipt)),
+        Err(error) => failed(error.to_string()),
+    }
+}
+
+/// The successor's first hook boundary, as in an interactive compaction epoch.
+async fn dispatch_post_compact(
+    hooks: &SessionHookComposition<'_>,
+    request: RequestId,
+    diagnostics: &dyn Diagnostics,
+) {
+    // Compaction starts a clean event stream: the source PreCompact closure is
+    // not a parent in this session, and the request identifies the lifecycle.
+    if let Err(error) = dispatch_request_hook(
+        &hooks.runtime,
+        request,
+        hooks.turn,
+        None,
+        HookLifecycle::PostCompact,
+    )
+    .await
+    {
+        diagnostics.note(&format!(
+            "the compaction post hook failed: {}",
+            error.exit_reason()
+        ));
+    }
 }

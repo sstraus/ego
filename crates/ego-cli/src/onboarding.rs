@@ -62,6 +62,11 @@ pub(crate) fn credential_present(
         CredentialStrategy::BearerFromEnv { var }
         | CredentialStrategy::HeaderFromEnv { var, .. } => environment.has_nonblank(var),
         CredentialStrategy::OAuth { provider } => observed_provider_ids.contains(provider),
+        CredentialStrategy::GoogleCloud {
+            provider,
+            project_var,
+            ..
+        } => observed_provider_ids.contains(provider) && environment.has_nonblank(project_var),
         CredentialStrategy::OAuthOrEnv { provider, var } => {
             observed_provider_ids.contains(provider) || environment.has_nonblank(var)
         }
@@ -120,10 +125,14 @@ fn is_loopback(row: &ProviderRow) -> bool {
     }
 }
 
-/// The only three outcomes for startup after model resolution found no model.
+/// The only outcomes for startup after model resolution found no model.
 #[derive(Debug)]
 pub(crate) enum StartupDecision {
+    /// Interactive: use the sole usable provider's default and persist it.
     AutoSelect(ModelRef),
+    /// Headless: use the sole usable provider's default for this run only.
+    /// A script must not mutate the operator's configuration.
+    UseForRun(ModelRef),
     Pick(Arc<ModelCatalogueSnapshot>, Option<UsageError>),
     Headless(UsageError),
 }
@@ -136,15 +145,27 @@ pub(crate) fn decide_missing_model(
     _thinking: Option<ThinkingLevel>,
     interactive: bool,
 ) -> StartupDecision {
-    if !interactive {
-        return StartupDecision::Headless(headless_refusal(
-            &snapshot,
-            defaults,
-            usable_provider_ids,
-        ));
+    let sole = sole_provider_default(&snapshot, defaults, usable_provider_ids);
+    match (interactive, sole) {
+        (true, Ok(model)) => StartupDecision::AutoSelect(model),
+        (false, Ok(model)) => StartupDecision::UseForRun(model),
+        (true, Err(notice)) => StartupDecision::Pick(snapshot, notice),
+        (false, Err(_)) => {
+            StartupDecision::Headless(headless_refusal(&snapshot, defaults, usable_provider_ids))
+        }
     }
+}
+
+/// The selectable default of the only usable provider, or the notice that
+/// explains why the picker must ask instead (`None` with zero or several
+/// usable providers: the picker rows already name each provider's remedy).
+fn sole_provider_default(
+    snapshot: &ModelCatalogueSnapshot,
+    defaults: &BTreeMap<String, ModelSlug>,
+    usable_provider_ids: &BTreeSet<String>,
+) -> Result<ModelRef, Option<UsageError>> {
     if usable_provider_ids.len() != 1 {
-        return StartupDecision::Pick(snapshot, None);
+        return Err(None);
     }
 
     let provider = usable_provider_ids
@@ -152,26 +173,89 @@ pub(crate) fn decide_missing_model(
         .next()
         .expect("a singleton provider set has one member");
     let Some(default) = defaults.get(provider) else {
-        return StartupDecision::Pick(snapshot, Some(missing_default(provider)));
+        return Err(Some(missing_default(provider)));
     };
     if default.provider != *provider {
-        return StartupDecision::Pick(
-            snapshot,
-            Some(UsageError(format!(
-                "default model '{default}' does not belong to the available provider '{provider}'; choose an available model below"
-            ))),
-        );
+        return Err(Some(UsageError(format!(
+            "default model '{default}' does not belong to the available provider '{provider}'; choose an available model below"
+        ))));
     }
-    if let Err(error) = available_entry(&snapshot, &default.to_string()) {
-        return StartupDecision::Pick(
-            snapshot,
-            Some(UsageError(format!(
-                "default model '{default}' for provider '{provider}' cannot be selected: {error}; choose an available model below"
-            ))),
-        );
+    if let Err(error) = available_entry(snapshot, &default.to_string()) {
+        return Err(Some(UsageError(format!(
+            "default model '{default}' for provider '{provider}' cannot be selected: {error}; choose an available model below"
+        ))));
     }
+    Ok(ModelRef(default.to_string()))
+}
 
-    StartupDecision::AutoSelect(ModelRef(default.to_string()))
+/// One provider's credential readiness, observed from presence only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderReadiness {
+    pub(crate) provider: String,
+    pub(crate) ready: bool,
+    /// The remedy when not ready, or a caveat a ready row still has. Never a
+    /// credential value.
+    pub(crate) note: Option<String>,
+}
+
+impl std::fmt::Display for ProviderReadiness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let state = if self.ready { "ready" } else { "not ready" };
+        match &self.note {
+            Some(note) => write!(f, "{}: {state} — {note}", self.provider),
+            None => write!(f, "{}: {state}", self.provider),
+        }
+    }
+}
+
+/// Readiness of every provider row, with the same presence rule as first-run
+/// selection. It reads no secret, runs no command, and calls no provider.
+pub(crate) fn provider_readiness(
+    rows: &[ProviderRow],
+    environment: &dyn EnvironmentPresence,
+    observed_provider_ids: &BTreeSet<String>,
+) -> Vec<ProviderReadiness> {
+    rows.iter()
+        .map(|row| {
+            let id = row.id();
+            let ready = credential_present(&row.credential, environment, observed_provider_ids);
+            let login = format!("run 'ego auth login {id}'");
+            let note = match &row.credential {
+                CredentialStrategy::None => {
+                    Some("no credential; needs a running local server".to_owned())
+                }
+                _ if ready => None,
+                CredentialStrategy::BearerFromEnv { var }
+                | CredentialStrategy::HeaderFromEnv { var, .. } => Some(format!("set {var}")),
+                CredentialStrategy::OAuth { .. } => Some(login),
+                CredentialStrategy::GoogleCloud { project_var, .. } => {
+                    Some(format!("set {project_var} and {login}"))
+                }
+                CredentialStrategy::OAuthOrEnv { var, .. } => Some(format!("set {var} or {login}")),
+                CredentialStrategy::Anthropic { api_key_var, .. } => {
+                    Some(format!("set {api_key_var} or {login}"))
+                }
+            };
+            ProviderReadiness {
+                provider: id.to_owned(),
+                ready,
+                note,
+            }
+        })
+        .collect()
+}
+
+/// Current readiness for the setup guide, from this process's environment and
+/// the saved subscription identities under `home`.
+pub(crate) fn current_provider_readiness(
+    home: &std::path::Path,
+) -> Result<Vec<ProviderReadiness>, String> {
+    let auth = crate::config::auth().map_err(|error| error.to_string())?;
+    let rows = crate::model::rows(&auth).map_err(|error| error.to_string())?;
+    let observed = crate::auth::AuthStore::new(home)
+        .observed_provider_ids()
+        .map_err(|error| error.to_string())?;
+    Ok(provider_readiness(&rows, &ProcessEnvironment, &observed))
 }
 
 fn missing_default(provider: &str) -> UsageError {

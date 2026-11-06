@@ -62,3 +62,18 @@ pub fn child_activity_requested(
         .and_then(serde_json::Value::as_u64)
         == Some(1)
 }
+
+/// The client explicitly accepts version 1 of the ego compaction transition
+/// update (`session_info_update._meta.ego.compacted`).
+pub fn compacted_requested(
+    capabilities: &agent_client_protocol_schema::v1::ClientCapabilities,
+) -> bool {
+    capabilities
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("ego"))
+        .and_then(|ego| ego.get("compacted"))
+        .and_then(|compacted| compacted.get("version"))
+        .and_then(serde_json::Value::as_u64)
+        == Some(1)
+}

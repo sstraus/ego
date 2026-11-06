@@ -302,8 +302,9 @@ pub(super) fn answer_control(
             let prompt = Question::new(
                 crate::output::wrap_notice(
                     &format!(
-                        "Windows execution is unconfined in {workspace}; filesystem and network \
-                         isolation are not enforced. Continue? [y/N] "
+                        "Windows execution is unconfined: filesystem and network isolation are \
+                         not enforced in {workspace} or in any other workspace. Remember this \
+                         answer for this user and continue? [y/N] "
                     ),
                     Some(picker_capabilities(surface.status).width.saturating_sub(1)),
                 ),
@@ -1936,17 +1937,20 @@ fn live_plan_rows(status: &SurfaceStatus, status_rows: &str) -> String {
 fn activity_or_status_row(status: &SurfaceStatus) -> String {
     if let Some((message, started, delay_ms)) = &status.retry {
         let remaining = delay_ms.saturating_sub(started.elapsed().as_millis() as u64);
-        let message = if let Some((cause, rest)) =
-            message.split_once(" — connection problem, retrying in ")
-        {
-            let counter = rest
-                .split_once(" (")
-                .map(|(_, counter)| counter)
-                .unwrap_or("");
-            format!(
-                "{cause} — connection problem, retrying in {:.1}s ({counter}",
-                remaining as f64 / 1000.0
-            )
+        let message = if let Some((head, rest)) = [
+            " — connection problem, retrying in ",
+            " — provider at capacity, retrying in ",
+        ]
+        .into_iter()
+        .find_map(|phrase| {
+            message
+                .split_once(phrase)
+                .map(|(cause, rest)| (format!("{cause}{phrase}"), rest))
+        }) {
+            // Keep everything after the counted seconds: the next attempt's
+            // clock time, when shown, and the attempt counter.
+            let tail = rest.split_once('s').map_or("", |(_, tail)| tail);
+            format!("{head}{:.1}s{tail}", remaining as f64 / 1000.0)
         } else {
             message.clone()
         };
@@ -1956,13 +1960,6 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
             message,
             crate::render::style::Style::fg(crate::render::style::Palette::ERROR),
         ));
-        return format!(
-            "{}\n",
-            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
-                .render(status.permission_capabilities.depth)
-        );
-    }
-    if let Some(line) = &status.shell {
         return format!(
             "{}\n",
             line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
@@ -1996,10 +1993,29 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
         .saturating_sub(1);
         let hint = "· Esc to interrupt";
         let line = crate::render::line::Line::plain(&activity);
-        if line.width() + hint.len() <= width {
-            return format!("{activity}\x1b[2m{hint}\x1b[22m\n");
+        let hint_width = crate::render::line::cells(hint);
+        if line.width() + hint_width <= width {
+            let separator = " · ";
+            let available = width
+                .saturating_sub(line.width() + hint_width + crate::render::line::cells(separator));
+            let requested = status.shell.as_ref().map_or_else(String::new, |line| {
+                let text = line.truncate_to(available).text();
+                if text.is_empty() {
+                    String::new()
+                } else {
+                    format!("{separator}{text}")
+                }
+            });
+            return format!("{activity}\x1b[2m{hint}\x1b[22m{requested}\n");
         }
         return format!("{}\n", line.truncate_to(width).text());
+    }
+    if let Some(line) = &status.shell {
+        return format!(
+            "{}\n",
+            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
+                .render(status.permission_capabilities.depth)
+        );
     }
     let text = status
         .painter

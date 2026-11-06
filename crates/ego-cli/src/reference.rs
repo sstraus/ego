@@ -55,7 +55,7 @@ pub fn reference() -> String {
     out.push_str("# ego command reference\n\n");
     out.push_str(
         "Generated from the clap definitions in `crates/ego-cli/src/cli.rs`.\n\
-         Do not edit: `crates/ego-cli/tests/reference.rs` regenerates and compares it.\n\n\
+         Do not edit: `crates/ego-cli/tests/it/reference.rs` regenerates and compares it.\n\n\
          `ego PROMPT` with no subcommand starts an interactive session.\n\n",
     );
     section(&mut out, &root, "ego");
@@ -105,7 +105,8 @@ fn section(out: &mut String, command: &Command, path: &str) {
              In the terminal use `/resume [ID]` or `/continue`. Current execution authority\n\
              is measured before effects: narrower authority is automatic; potentially\n\
              wider authority requires explicit human consent. Headless callers cannot\n\
-             approve wider authority.\n\n\
+             be asked; `--accept-authority-delta` allows the change shown for this one\n\
+             resume and nothing later.\n\n\
              With terminal stdin and stdout, `ego resume ID \"next task\"` opens the\n\
              interactive seat, submits the task once, and accepts further messages.\n\
              Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file,\n\
@@ -166,10 +167,18 @@ fn metadata(command: &Command, arg: &clap::Arg) -> String {
     if !defaults.is_empty() {
         let _ = write!(out, " Default: {}.", defaults.join(", "));
     }
-    if matches!(
-        arg.get_action(),
-        clap::ArgAction::Append | clap::ArgAction::Count
-    ) {
+    let says_repeatable = arg.get_help().is_some_and(|help| {
+        help.to_string()
+            .trim_end()
+            .trim_end_matches('.')
+            .ends_with("Repeatable")
+    });
+    if !says_repeatable
+        && matches!(
+            arg.get_action(),
+            clap::ArgAction::Append | clap::ArgAction::Count
+        )
+    {
         out.push_str(" Repeatable.");
     }
     let values: Vec<_> = arg
@@ -217,4 +226,39 @@ fn value_name(arg: &clap::Arg) -> String {
 fn help(arg: &clap::Arg) -> String {
     arg.get_help()
         .map_or_else(|| "(undocumented)".to_owned(), |help| help.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metadata;
+    use clap::{Arg, ArgAction, Command};
+
+    // Catches: an Append flag whose help already ends with Repeatable is rendered with the
+    // word twice ("Repeatable Repeatable."), while one without it still gains the word.
+    #[test]
+    fn repeatable_is_rendered_once_for_append_flags() {
+        let command = Command::new("t")
+            .arg(
+                Arg::new("own")
+                    .long("own")
+                    .action(ArgAction::Append)
+                    .help("Allow rule. Repeatable."),
+            )
+            .arg(
+                Arg::new("plain")
+                    .long("plain")
+                    .action(ArgAction::Append)
+                    .help("Allow rule."),
+            );
+        let own = command
+            .get_arguments()
+            .find(|a| a.get_id() == "own")
+            .unwrap();
+        let plain = command
+            .get_arguments()
+            .find(|a| a.get_id() == "plain")
+            .unwrap();
+        assert_eq!(metadata(&command, own), "");
+        assert_eq!(metadata(&command, plain), " Repeatable.");
+    }
 }

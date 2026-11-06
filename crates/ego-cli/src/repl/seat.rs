@@ -35,8 +35,8 @@ use super::status::{
 };
 use super::surface::InteractivePainter;
 use super::{
-    BACKGROUND_COMMAND, BUSY_RECALL_COMMAND, BUSY_STEER_COMMAND, BUSY_SUBMIT_COMMAND,
-    DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, PASTE_PATH_COMMAND,
+    BACKGROUND_COMMAND, BUSY_CANCEL_COMMAND, BUSY_RECALL_COMMAND, BUSY_STEER_COMMAND,
+    BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, PASTE_PATH_COMMAND,
     REMOVE_PASTE_IMAGE_COMMAND, answer,
 };
 use crate::cli::{managed_rule, managed_rule_effect, managed_rule_id};
@@ -108,6 +108,7 @@ enum SurfaceActionEffect {
     Fork,
     Sessions,
     Usage,
+    Context,
     New,
     Name,
     Goal,
@@ -116,6 +117,7 @@ enum SurfaceActionEffect {
     Statusline,
     Mcp,
     Tasks,
+    Side,
     Tools,
     Expand,
     Skills,
@@ -155,6 +157,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Fork => SurfaceActionEffect::Fork,
             ActionId::Sessions => SurfaceActionEffect::Sessions,
             ActionId::Usage => SurfaceActionEffect::Usage,
+            ActionId::Context => SurfaceActionEffect::Context,
             ActionId::New => SurfaceActionEffect::New,
             ActionId::Name => SurfaceActionEffect::Name,
             ActionId::Goal => SurfaceActionEffect::Goal,
@@ -163,6 +166,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Statusline => SurfaceActionEffect::Statusline,
             ActionId::Mcp => SurfaceActionEffect::Mcp,
             ActionId::Tasks => SurfaceActionEffect::Tasks,
+            ActionId::Side => SurfaceActionEffect::Side,
             ActionId::Tools => SurfaceActionEffect::Tools,
             ActionId::Expand => SurfaceActionEffect::Expand,
             ActionId::Skills => SurfaceActionEffect::Skills,
@@ -428,6 +432,11 @@ fn repaint_status(status: &SharedStatus) {
     let (painter, line) = {
         let mut status = status.lock().expect("surface status lock");
         let painter = Arc::clone(&status.painter);
+        if let Some(snapshot) = status.snapshot.as_mut() {
+            snapshot.set_time(ego_core::event::time::Clock::now(
+                &ego_tools::clock::SystemClock,
+            ));
+        }
         let rendered = status
             .native_status
             .then(|| status.snapshot.as_ref())
@@ -828,6 +837,7 @@ pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentN
     ego_core::config::StatusSegmentName::Mode,
     ego_core::config::StatusSegmentName::Context,
     ego_core::config::StatusSegmentName::Cost,
+    ego_core::config::StatusSegmentName::Cache,
     ego_core::config::StatusSegmentName::Queue,
     ego_core::config::StatusSegmentName::Drafts,
     ego_core::config::StatusSegmentName::Interrupt,
@@ -909,6 +919,7 @@ pub struct SurfaceOutput {
     pending: String,
     pending_answer: bool,
     shell: Option<String>,
+    running_tools: Vec<(ego_core::event::id::ItemId, crate::render::Line)>,
     status: Option<SharedStatus>,
     answer_block: bool,
     wrote: bool,
@@ -926,6 +937,7 @@ impl SurfaceOutput {
             pending: String::new(),
             pending_answer: false,
             shell: None,
+            running_tools: Vec::new(),
             status: None,
             answer_block: false,
             wrote: false,
@@ -993,6 +1005,7 @@ impl SurfaceOutput {
                 pending: String::new(),
                 pending_answer: false,
                 shell: None,
+                running_tools: Vec::new(),
                 status: None,
                 answer_block: false,
                 wrote: false,
@@ -1058,6 +1071,35 @@ impl SurfaceOutput {
         self.write_with_kind(text, false)
     }
 
+    pub(crate) fn start_tool(
+        &mut self,
+        item: ego_core::event::id::ItemId,
+        line: crate::render::Line,
+    ) {
+        self.running_tools.push((item, line));
+        self.repaint_running_tool();
+    }
+
+    pub(crate) fn finish_tool(&mut self, item: ego_core::event::id::ItemId) {
+        self.running_tools.retain(|(id, _)| *id != item);
+        self.repaint_running_tool();
+    }
+
+    pub(crate) fn clear_tools(&mut self) {
+        if !self.running_tools.is_empty() {
+            self.running_tools.clear();
+            self.repaint_running_tool();
+        }
+    }
+
+    fn repaint_running_tool(&self) {
+        if let Some(status) = &self.status {
+            status.lock().expect("surface status lock").shell =
+                self.running_tools.first().map(|(_, line)| line.clone());
+            repaint_status(status);
+        }
+    }
+
     pub(crate) fn write_shell(
         &mut self,
         rows: &str,
@@ -1067,7 +1109,12 @@ impl SurfaceOutput {
             return self.write_tool(rows);
         };
         self.shell = Some(rows.to_owned());
-        status.lock().expect("surface status lock").shell = Some(live);
+        status.lock().expect("surface status lock").shell = Some(
+            self.running_tools
+                .first()
+                .map(|(_, line)| line.clone())
+                .unwrap_or(live),
+        );
         repaint_status(status);
         Ok(())
     }
@@ -1075,7 +1122,8 @@ impl SurfaceOutput {
     pub(crate) fn settle_shell(&mut self) -> Result<(), SendError<String>> {
         if let Some(rows) = self.shell.take() {
             if let Some(status) = &self.status {
-                status.lock().expect("surface status lock").shell = None;
+                status.lock().expect("surface status lock").shell =
+                    self.running_tools.first().map(|(_, line)| line.clone());
                 repaint_status(status);
             }
             self.write_tool(&rows)?;
@@ -1529,6 +1577,10 @@ impl Seat {
                         let state = status.lock().expect("surface status lock");
                         (activity_phase.get() == EditPhase::Busy && state.activity)
                             || !state.background_children.rows.is_empty()
+                            || state
+                                .snapshot
+                                .as_ref()
+                                .is_some_and(|snapshot| snapshot.cache_is_live())
                     };
                     if repaint {
                         repaint_status(&status);
@@ -1566,29 +1618,43 @@ impl Seat {
         ))
     }
 
+    /// Read one live line, or `None` when `timeout` fires first.
+    fn read_live(live: &LiveSeat, timeout: &Receiver<Instant>) -> Option<Line> {
+        // Already admitted inspections belong to the current session, so
+        // answer them before ordinary input can switch or close it.
+        let line = crossbeam::channel::select_biased! {
+            recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
+            recv(live.input) -> line => line.unwrap_or(Line::Ended),
+            recv(live.background_ready) -> _ => Line::HostCommand(HostCommand::BackgroundExecSettled),
+            recv(timeout) -> _ => return None,
+        };
+        if matches!(
+            line,
+            Line::Submitted(_) | Line::HostCommand(HostCommand::SubmittedDraft { .. })
+        ) {
+            let mut status = live.status.lock().expect("surface status lock");
+            status.begin_activity();
+            live.phase.set_activity(EditPhase::Busy);
+            drop(status);
+            repaint_status(&live.status);
+        }
+        Some(line)
+    }
+
+    /// Read one line, or `None` when a live seat stays idle until `deadline`.
+    /// A sequential seat has no idle period, so it never times out.
+    pub fn read_before(&self, deadline: Instant) -> Option<Line> {
+        match &self.kind {
+            SeatKind::Live(live) => Self::read_live(live, &crossbeam::channel::at(deadline)),
+            SeatKind::Sequential(_) => Some(self.read()),
+        }
+    }
+
     /// Read one line.
     pub fn read(&self) -> Line {
         match &self.kind {
-            SeatKind::Live(live) => {
-                // Already admitted inspections belong to the current session, so
-                // answer them before ordinary input can switch or close it.
-                let line = crossbeam::channel::select_biased! {
-                    recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
-                    recv(live.input) -> line => line.unwrap_or(Line::Ended),
-                    recv(live.background_ready) -> _ => Line::HostCommand(HostCommand::BackgroundExecSettled),
-                };
-                if matches!(
-                    line,
-                    Line::Submitted(_) | Line::HostCommand(HostCommand::SubmittedDraft { .. })
-                ) {
-                    let mut status = live.status.lock().expect("surface status lock");
-                    status.begin_activity();
-                    live.phase.set_activity(EditPhase::Busy);
-                    drop(status);
-                    repaint_status(&live.status);
-                }
-                line
-            }
+            SeatKind::Live(live) => Self::read_live(live, &crossbeam::channel::never())
+                .expect("a read without a deadline cannot time out"),
             SeatKind::Sequential(seat) => {
                 let line =
                     read_sequential_line(&mut *seat.input.lock().expect("sequential input lock"));
@@ -1613,6 +1679,9 @@ impl Seat {
                     Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Tasks(arguments) => Line::HostCommand(HostCommand::Tasks(arguments)),
+                    Dispatch::Side(question) => {
+                        Line::HostCommand(HostCommand::SideQuestion(question))
+                    }
                     Dispatch::Pins(command) => Line::HostCommand(HostCommand::Pins(command)),
                     Dispatch::McpContext(command) => {
                         Line::HostCommand(HostCommand::McpContext(command))
@@ -1760,6 +1829,7 @@ impl Seat {
             ActionId::Fork,
             ActionId::Sessions,
             ActionId::Usage,
+            ActionId::Context,
             ActionId::New,
             ActionId::Name,
             ActionId::Goal,
@@ -1768,6 +1838,7 @@ impl Seat {
             ActionId::Statusline,
             ActionId::Mcp,
             ActionId::Tasks,
+            ActionId::Side,
             ActionId::Tools,
             ActionId::Expand,
             ActionId::Skills,
@@ -2059,6 +2130,23 @@ impl Seat {
         }
     }
 
+    /// Project the session's cache authority; the seat never resets a deadline.
+    pub(crate) fn observe_prompt_cache(&self, state: &SessionState) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        let changed = live
+            .status
+            .lock()
+            .expect("surface status lock")
+            .snapshot
+            .as_mut()
+            .is_some_and(|snapshot| snapshot.set_prompt_cache(state.prompt_cache.clone()));
+        if changed {
+            repaint_status(&live.status);
+        }
+    }
+
     /// Replace state/selection facts and request one coalesced Git refresh.
     pub fn refresh_status(&self, state: &SessionState, selection: GenerationSelectionSnapshot) {
         let SeatKind::Live(live) = &self.kind else {
@@ -2188,9 +2276,19 @@ impl Seat {
 }
 
 fn read_sequential_line(input: &mut impl BufRead) -> Line {
+    read_sequential_line_reporting(input, &mut crate::output::note)
+}
+
+/// [`read_sequential_line`], naming through `report` the cause of a read that
+/// failed.
+fn read_sequential_line_reporting(input: &mut impl BufRead, report: &mut dyn FnMut(&str)) -> Line {
     let mut text = String::new();
     match input.read_line(&mut text) {
-        Ok(0) | Err(_) => Line::Ended,
+        Ok(0) => Line::Ended,
+        Err(error) => {
+            super::report_input_failure(&error, report);
+            Line::Ended
+        }
         Ok(_) => {
             if text.ends_with('\n') {
                 text.pop();
@@ -2210,6 +2308,10 @@ impl crate::run::Reads for Seat {
 }
 
 impl crate::run::InteractiveSeat for Seat {
+    fn read_before(&self, deadline: Instant) -> Option<Line> {
+        Seat::read_before(self, deadline)
+    }
+
     fn wake_background_exec(&self) {
         if let SeatKind::Live(live) = &self.kind {
             // One token covers every ready snapshot; no process task waits
@@ -2534,7 +2636,8 @@ fn own_terminal(
         }
         if !active && pending_control.is_none() {
             // A startup modal's read_line restores cooked mode on return.
-            if crossterm::terminal::enable_raw_mode().is_err() {
+            if let Err(error) = crossterm::terminal::enable_raw_mode() {
+                report_terminal_failure("raw mode", error);
                 cancel.cancel(CancelCause::Host);
                 break;
             }
@@ -2544,7 +2647,8 @@ fn own_terminal(
                 recv(signals) -> sequence => {
                     let Ok(sequence) = sequence else { break };
                     let mut out = std::io::stdout().lock();
-                    if out.write_all(sequence.as_bytes()).and_then(|()| out.flush()).is_err() {
+                    if let Err(error) = out.write_all(sequence.as_bytes()).and_then(|()| out.flush()) {
+                        report_terminal_failure("output", error);
                         cancel.cancel(CancelCause::Host);
                         break;
                     }
@@ -2552,7 +2656,8 @@ fn own_terminal(
                 }
                 recv(startup_output) -> row => {
                     let Ok(row) = row else { break };
-                    if write_printer_message(&mut std::io::stdout().lock(), &row).is_err() {
+                    if let Err(error) = write_printer_message(&mut std::io::stdout().lock(), &row) {
+                        report_terminal_failure("output", error);
                         cancel.cancel(CancelCause::Host);
                         break;
                     }
@@ -2690,11 +2795,12 @@ fn own_terminal(
             } else {
                 false
             };
-            if editor
-                .accept_buffer(&Waiting::new(Arc::clone(&status)))
-                .is_err()
-            {
+            if let Err(error) = editor.accept_buffer(&Waiting::new(Arc::clone(&status))) {
+                report_terminal_failure("output", error);
                 break;
+            }
+            if let Some(label) = crate::render::attachments::label(images.len()) {
+                commit_to_transcript(&status, &label);
             }
             draft.clear();
             {
@@ -2823,6 +2929,7 @@ fn own_terminal(
                             )
                         }
                         HostCommand::Tasks(_) => "/tasks".to_owned(),
+                        HostCommand::SideQuestion(_) => "/side".to_owned(),
                         HostCommand::Config(_) => "/config".to_owned(),
                         HostCommand::Fork(_) => "/fork".to_owned(),
                         HostCommand::Resume(_) => "/resume".to_owned(),
@@ -2874,14 +2981,26 @@ fn wait_image_reply(
             recv(signals) -> sequence => {
                 let Ok(sequence) = sequence else { return None; };
                 let mut out = std::io::stdout().lock();
-                if out.write_all(sequence.as_bytes()).and_then(|()| out.flush()).is_err() { return None; }
+                if let Err(error) = out.write_all(sequence.as_bytes()).and_then(|()| out.flush()) {
+                    report_terminal_failure("output", error);
+                    return None;
+                }
             }
             recv(output) -> row => {
                 let Ok(row) = row else { return None; };
-                if write_printer_message(&mut std::io::stdout().lock(), &row).is_err() { return None; }
+                if let Err(error) = write_printer_message(&mut std::io::stdout().lock(), &row) {
+                    report_terminal_failure("output", error);
+                    return None;
+                }
             }
         }
     }
+}
+
+/// Name the terminal failure that stops the terminal owner. Its exit ends the
+/// interactive session, which would otherwise end with the cause unrecorded.
+fn report_terminal_failure(what: &str, error: std::io::Error) {
+    crate::output::note(&format!("terminal {what} failed: {error}"));
 }
 
 /// Write one external-printer message before Reedline reads, with the line

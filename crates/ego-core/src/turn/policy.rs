@@ -132,6 +132,7 @@ impl GenerationPolicySnapshot {
             mode,
             allow,
             deny,
+            web_private_network,
         } = serde_json::from_slice(encoded)
             .map_err(|_| GenerationPolicyCaptureError::InvalidSnapshot)?;
         if version != WIRE_VERSION {
@@ -141,6 +142,7 @@ impl GenerationPolicySnapshot {
         let ruleset = Ruleset {
             allow: decode_rules(allow)?,
             deny: decode_rules(deny)?,
+            web_private_network,
         };
         let snapshot = Self::from_semantics(workspace, roots, mode, ruleset, read_perimeter)?;
         if snapshot.canonical.expose_secret_bytes() != encoded {
@@ -227,6 +229,18 @@ impl GenerationPolicyCapture {
         snapshot: Arc<GenerationPolicySnapshot>,
         human: Option<Arc<dyn HumanApprover>>,
     ) -> Result<Self, GenerationPolicyCaptureError> {
+        Self::restore_with_session_approvals(
+            snapshot,
+            human,
+            crate::permit::SessionApprovals::default(),
+        )
+    }
+
+    fn restore_with_session_approvals(
+        snapshot: Arc<GenerationPolicySnapshot>,
+        human: Option<Arc<dyn HumanApprover>>,
+        approvals: crate::permit::SessionApprovals,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
         let policy = match human.clone() {
             Some(human) => PolicyEngine::with_human(
                 snapshot.workspace.clone(),
@@ -240,6 +254,7 @@ impl GenerationPolicyCapture {
                 snapshot.ruleset.clone(),
             ),
         }
+        .with_session_approvals(approvals)
         .with_profile_roots(snapshot.roots.clone())
         .with_read_perimeter(snapshot.read_perimeter.clone());
         Ok(Self {
@@ -247,6 +262,14 @@ impl GenerationPolicyCapture {
             snapshot,
             human,
         })
+    }
+
+    /// Attach live-session decisions without serializing them into the snapshot.
+    pub fn with_session_approvals(
+        self,
+        approvals: crate::permit::SessionApprovals,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        Self::restore_with_session_approvals(self.snapshot, self.human, approvals)
     }
 
     /// Pin the admitted sandbox read authority in both engine and snapshot.
@@ -261,7 +284,8 @@ impl GenerationPolicyCapture {
             self.snapshot.ruleset.clone(),
             read_perimeter,
         )?;
-        Self::restore(Arc::new(snapshot), self.human)
+        let approvals = self.policy.session_approvals();
+        Self::restore_with_session_approvals(Arc::new(snapshot), self.human, approvals)
     }
 
     /// Pin the session's public MCP output directory with read-only authority.
@@ -284,7 +308,8 @@ impl GenerationPolicyCapture {
             self.snapshot.ruleset.clone(),
             self.snapshot.read_perimeter.clone(),
         )?;
-        Self::restore(Arc::new(snapshot), self.human)
+        let approvals = self.policy.session_approvals();
+        Self::restore_with_session_approvals(Arc::new(snapshot), self.human, approvals)
     }
 
     pub fn policy(&self) -> Arc<PolicyEngine> {
@@ -322,7 +347,8 @@ impl GenerationPolicyCapture {
             ruleset,
             self.snapshot.read_perimeter.clone(),
         )?;
-        Self::restore(Arc::new(snapshot), self.human)
+        let approvals = self.policy.session_approvals();
+        Self::restore_with_session_approvals(Arc::new(snapshot), self.human, approvals)
     }
 
     pub fn snapshot(&self) -> Arc<GenerationPolicySnapshot> {
@@ -502,6 +528,9 @@ struct PolicyWire {
     mode: Mode,
     allow: Vec<RuleWire>,
     deny: Vec<RuleWire>,
+    /// Absent when false, so a policy without the owner setting keeps its digest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    web_private_network: bool,
 }
 
 fn snapshot_mode<S: serde::Serializer>(mode: &Mode, serializer: S) -> Result<S::Ok, S::Error> {
@@ -528,6 +557,7 @@ impl PolicyWire {
             mode,
             allow: encode_rules(&ruleset.allow),
             deny: encode_rules(&ruleset.deny),
+            web_private_network: ruleset.web_private_network,
         }
     }
 }

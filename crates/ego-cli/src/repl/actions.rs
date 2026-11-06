@@ -12,6 +12,7 @@ use crate::skill::{SkillCatalogueCapture, SkillCatalogueView};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionId {
     Help,
+    Context,
     Model,
     Thinking,
     Fast,
@@ -38,6 +39,7 @@ pub enum ActionId {
     Name,
     Goal,
     Tasks,
+    Side,
     Tools,
     Expand,
     Skills,
@@ -50,6 +52,8 @@ pub enum ActionId {
 pub(crate) const NAME_GRAMMAR: &str = "usage: /name [show|set TEXT|clear]";
 pub(crate) const GOAL_GRAMMAR: &str =
     "usage: /goal [TEXT|show|set TEXT|extend N|achieve|block REASON]";
+pub(crate) const SIDE_GRAMMAR: &str =
+    "usage: /side QUESTION (answers from the running turn's context, with no tools)";
 pub(crate) const MCP_GRAMMAR: &str = "usage: /mcp [login NAME | toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,6 +132,7 @@ pub enum Dispatch {
     Mode(ego_core::config::Mode),
     Setup(String),
     Tasks(String),
+    Side(String),
     Pins(ego_core::compact::PinCommand),
     Mcp(String),
     McpContext(McpContextCommand),
@@ -553,6 +558,11 @@ impl ActionRegistry {
             enabled(Unpin, "unpin", "Remove a standing user constraint — /unpin NUMBER"),
             enabled(Clear, "clear", "Clear composer and menu state"),
             enabled(Usage, "usage", "Show usage, context, cost and budget"),
+            enabled(
+                Context,
+                "context",
+                "Show the instruction files and workspace memory in the system prompt",
+            ),
             enabled(Statusline, "statusline", "Configure the native status line"),
             enabled(
                 Export,
@@ -562,7 +572,7 @@ impl ActionRegistry {
             enabled(
                 Config,
                 "config",
-                "Inspect configuration — /config [perimeter | set KEY VALUE | roots revoke EXACT_PATH]",
+                "Inspect configuration — /config [perimeter | roots | set KEY VALUE | roots revoke EXACT_PATH]",
             ),
             enabled(Setup, "setup", "Inspect expected work without effects"),
             enabled(Doctor, "doctor", "Show health — /doctor [details]"),
@@ -579,6 +589,11 @@ impl ActionRegistry {
                 Tasks,
                 "tasks",
                 "Inspect background exec — /tasks [ID | cancel ID]",
+            ),
+            enabled(
+                Side,
+                "side",
+                "Ask a side question during a turn — /side QUESTION",
             ),
             enabled(Tools, "tools", "Show tools — /tools [details]"),
             enabled(
@@ -1125,13 +1140,14 @@ impl ActionRegistry {
         if arguments.is_empty() {
             Dispatch::Action(ActionId::Config)
         } else if arguments == "perimeter"
+            || arguments == "roots"
             || arguments.starts_with("set ")
             || arguments.starts_with("roots revoke ")
         {
             Dispatch::Config(arguments.to_owned())
         } else {
             Dispatch::Refused {
-                reason: "usage: /config [perimeter | set KEY TOML_VALUE | roots revoke EXACT_PATH]",
+                reason: "usage: /config [perimeter | roots | set KEY TOML_VALUE | roots revoke EXACT_PATH]",
             }
         }
     }
@@ -1254,6 +1270,16 @@ impl ActionRegistry {
             }
             if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
                 return Dispatch::Tasks(raw_arguments.trim().to_owned());
+            }
+            if name == "side" && self.resolve_slash(name) == Some(ActionId::Side) {
+                let question = raw_arguments.trim();
+                return if question.is_empty() {
+                    Dispatch::Refused {
+                        reason: SIDE_GRAMMAR,
+                    }
+                } else {
+                    Dispatch::Side(question.to_owned())
+                };
             }
             if matches!(name, "resume" | "continue")
                 && self.resolve_alias(name) == Some(ActionId::Sessions)

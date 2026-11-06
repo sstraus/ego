@@ -1236,29 +1236,36 @@ impl GuardedHttp {
         })
     }
 
-    /// Public web requests reject special-use destinations before opening a socket.
-    pub fn execute_public_admitted(
+    /// Web requests reject special-use destinations before opening a socket.
+    /// An exact owner endpoint grant (`owner_endpoint`) also admits loopback,
+    /// private, link-local and shared-address-space destinations, never
+    /// unspecified, broadcast or multicast ones.
+    pub fn execute_web_admitted(
         &self,
         route: HttpRoute,
         connect: PreparedConnect,
         request: HttpRequest,
         deadline: std::time::Instant,
+        owner_endpoint: bool,
     ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
         if route.target != connect.target || !connect.matches(&request) {
             return Box::pin(futures::future::ready(Err(authority_mismatch())));
         }
         let resolver = Arc::clone(&self.resolver);
         let one_hop = Arc::clone(&self.one_hop);
+        let admits = move |address| {
+            if owner_endpoint {
+                owner_web_address(address)
+            } else {
+                public_web_address(address)
+            }
+        };
         Box::pin(async move {
             let resolved = if connect.target.ip().is_some() {
                 ResolvedConnect::literal(route, connect)?
             } else {
                 let resolution = resolver.resolve(connect.target.clone(), deadline).await?;
-                if resolution
-                    .addresses
-                    .iter()
-                    .any(|address| !public_web_address(*address))
-                {
+                if resolution.addresses.iter().any(|address| !admits(*address)) {
                     return Err(authority_mismatch());
                 }
                 let selected = resolution
@@ -1268,7 +1275,7 @@ impl GuardedHttp {
                     .ok_or_else(authority_mismatch)?;
                 ResolvedConnect::from_resolution(route, connect, resolution, selected)?
             };
-            if !public_web_address(resolved.selected()) {
+            if !admits(resolved.selected()) {
                 return Err(authority_mismatch());
             }
             one_hop.execute(resolved, request, deadline).await
@@ -1512,6 +1519,18 @@ mod windows_native_codec_tests {
             decode_native(&base64url_encode(&[0x41, 0x00, 0x42])),
             Err("invalid native string encoding")
         );
+    }
+}
+
+/// Addresses an exact owner endpoint grant may reach: everything routable to
+/// one host, including loopback, LAN and CGNAT (Tailscale) space.
+fn owner_web_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => !(ip.is_unspecified() || ip.is_broadcast() || ip.is_multicast()),
+        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
+            Some(ip) => owner_web_address(IpAddr::V4(ip)),
+            None => !(ip.is_unspecified() || ip.is_multicast()),
+        },
     }
 }
 

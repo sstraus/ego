@@ -140,6 +140,7 @@ fn discover_roots(roots: &[PathBuf]) -> Result<Vec<NamedAgent>, UsageError> {
                 name: name.to_owned(),
                 prompt: file.body().to_owned(),
                 model: layer.model,
+                effort: layer.thinking,
                 tools: file.tools.map(|tools| tools.into_iter().collect()),
                 mode: layer.mode,
                 deny: permissions.deny,
@@ -170,6 +171,29 @@ mod tests {
         assert_eq!(agents[0].model.as_ref().unwrap().0, "ollama/qwen3");
         assert!(agents[0].tools.as_ref().unwrap().is_empty());
         assert_eq!(agents[0].deny.len(), 1);
+    }
+
+    #[test]
+    fn definition_accepts_a_valid_effort_and_refuses_an_unknown_one() {
+        // Catches: `effort` refused as an unknown field, or an unknown level reaching a child.
+        let temporary = tempfile::tempdir().unwrap();
+        let root = temporary.path().canonicalize().unwrap();
+        std::fs::write(
+            root.as_path().join("deep.md"),
+            "---\nversion: 1\neffort: high\n---\nThink.",
+        )
+        .unwrap();
+        let agents = discover_roots(&[root.as_path().to_path_buf()]).unwrap();
+        assert_eq!(
+            agents[0].effort,
+            Some(ego_core::generator::types::ThinkingLevel::High)
+        );
+        std::fs::write(
+            root.as_path().join("deep.md"),
+            "---\nversion: 1\neffort: ludicrous\n---\nThink.",
+        )
+        .unwrap();
+        assert!(discover_roots(&[root.as_path().to_path_buf()]).is_err());
     }
 
     #[test]

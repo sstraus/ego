@@ -277,6 +277,34 @@ impl Lease {
     }
 }
 
+/// The heartbeat a holder recorded, read without taking the lease (cold storage).
+pub(super) fn recorded_heartbeat(path: &Path) -> io::Result<Option<Timestamp>> {
+    match read_lock_file(path) {
+        Ok(contents) => Ok(contents.map(|contents| contents.heartbeat)),
+        Err(LeaseError::Io(error)) => Err(error),
+        Err(error) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            error.to_string(),
+        )),
+    }
+}
+
+/// Whether a writer holds the lease right now. Never creates the lease file;
+/// the probe is released before this returns.
+pub(super) fn is_held(path: &Path) -> io::Result<bool> {
+    let file = match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    let mut lock = RwLock::new(file);
+    match lock.try_write() {
+        Ok(_guard) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
 /// Whether a recorded lease-holder should be treated as gone. Both signals
 /// must agree: a PID `is_alive` reports as alive always wins, even with a
 /// stale heartbeat (it may simply be busy — see the module doc comment on

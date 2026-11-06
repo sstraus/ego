@@ -67,6 +67,7 @@ pub(super) fn run_model_picker(
         .map(|(column, row)| usize::from(row) + usize::from(column > 0));
     let result = loop {
         let view = picker.lock().expect("model picker lock").view();
+        let notice = status.lock().expect("surface status lock").notice.clone();
         let caps = picker_capabilities(status);
         let terminal = crossterm::terminal::size().ok();
         let width = caps.width;
@@ -75,7 +76,7 @@ pub(super) fn run_model_picker(
             start_row,
         );
         let prompt = Question::new(
-            model_picker_prompt(&view, width, height, caps.depth),
+            model_picker_prompt(&view, notice.as_deref(), width, height, caps.depth),
             Arc::clone(status),
         );
         let line = answer(false, suspend::read_line(editor, &prompt, status));
@@ -172,12 +173,22 @@ const MIN_VISIBLE_MODELS: usize = 3;
 
 fn model_picker_prompt(
     view: &ModelPickerView,
+    notice: Option<&str>,
     width: usize,
     height: usize,
     depth: Depth,
 ) -> String {
     let width = width.max(40);
-    let mut rows = Vec::new();
+    // The prompt owns every row of the modal, so the status notice is part of
+    // the frame and takes its rows out of the frame budget.
+    let mut rows = notice
+        .map(|notice| wrap_instruction(notice, width))
+        .unwrap_or_default();
+    let height = height.saturating_sub(rows.len());
+    rows = rows
+        .into_iter()
+        .map(|row| picker_row(row, PickerRole::Hint, depth))
+        .collect();
     match view.focus {
         PickerFocus::Model => {
             let (full, compact) = if view.persistent_only {
@@ -487,7 +498,7 @@ mod tests {
     }
 
     fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> String {
-        super::model_picker_prompt(view, width, height, Depth::TrueColor)
+        super::model_picker_prompt(view, None, width, height, Depth::TrueColor)
     }
 
     fn plain_picker(rendered: &str) -> String {
@@ -505,6 +516,27 @@ mod tests {
             }
         }
         plain
+    }
+
+    // Catches: a notice stored for the picker is never part of the frame.
+    #[test]
+    fn picker_frame_carries_the_notice_within_eighty_columns() {
+        let notice = "provider 'ollama' has no startup default; choose an available model below";
+        for width in [40, 80] {
+            let rendered =
+                super::model_picker_prompt(&view(), Some(notice), width, 24, Depth::TrueColor);
+            let plain = plain_picker(&rendered);
+            assert!(
+                plain
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("no startup default; choose an available model below"),
+                "{plain}"
+            );
+            assert!(plain.lines().all(|line| line.width() <= width), "{plain}");
+            assert!(plain.lines().count() <= 24, "{plain}");
+        }
     }
 
     // Catches: scrolled model rows depend on a legend for a bare pipe and symbol.

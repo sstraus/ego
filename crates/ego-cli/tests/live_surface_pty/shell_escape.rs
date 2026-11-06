@@ -5,7 +5,7 @@ use super::*;
 #[test]
 fn headless_bang_remains_a_model_prompt() {
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("HEADLESS-BANG-755"))],
+        completions: vec![Reply::Sse(text("HEADLESS-BANG-MARK"))],
         ..Plan::default()
     });
     let places = support::Places::new();
@@ -20,7 +20,7 @@ fn headless_bang_remains_a_model_prompt() {
             "--mode",
             "yolo",
         ])
-        .arg("! printf WRONG-755 > headless-marker")
+        .arg("! printf WRONG-MARK > headless-marker")
         .run();
     assert_eq!(run.code, Some(0), "{}", run.stderr);
     assert!(!places.workspace_path().join("headless-marker").exists());
@@ -29,7 +29,7 @@ fn headless_bang_remains_a_model_prompt() {
     assert!(
         generations[0]
             .to_string()
-            .contains("! printf WRONG-755 > headless-marker")
+            .contains("! printf WRONG-MARK > headless-marker")
     );
 }
 
@@ -60,7 +60,7 @@ fn terminal_bang_executes_locally_without_a_model_turn() {
     until_prompt_from(&reader, &mut output, trust);
     let start = output.len();
     input
-        .write_all(b"! printf BANG-755 > shell-marker\r")
+        .write_all(b"! printf BANG-MARK > shell-marker\r")
         .unwrap();
     input.flush().unwrap();
     until_prompt_from(&reader, &mut output, start);
@@ -69,7 +69,7 @@ fn terminal_bang_executes_locally_without_a_model_turn() {
     assert!(session.quit(input).success());
     assert_eq!(
         std::fs::read_to_string(places.workspace_path().join("shell-marker")).unwrap(),
-        "BANG-755"
+        "BANG-MARK"
     );
     assert!(
         stub.generations().is_empty(),
@@ -85,9 +85,9 @@ fn busy_bang_is_refused_and_stays_in_the_editor_until_idle() {
         ("enter", b"\r".as_slice()),
         ("ctrl-enter", b"\x1b[13;5u".as_slice()),
     ] {
-        let (reply, gate) = gated_paced_line("BANG-755-BUSY");
+        let (reply, gate) = gated_paced_line("BANG-MARK-BUSY");
         let stub = Stub::start(Plan {
-            completions: vec![reply, Reply::Sse(text("QUEUED-755-UNEXPECTED"))],
+            completions: vec![reply, Reply::Sse(text("QUEUED-MARK-UNEXPECTED"))],
             ..Plan::default()
         });
         let places = support::Places::new();
@@ -109,10 +109,10 @@ fn busy_bang_is_refused_and_stays_in_the_editor_until_idle() {
         until_prompt_from(&reader, &mut output, trust);
         input.write_all(b"hold turn\r").unwrap();
         input.flush().unwrap();
-        until(&reader, &mut output, b"BANG-755-BUSY");
+        until(&reader, &mut output, b"BANG-MARK-BUSY");
         let start = output.len();
         input
-            .write_all(b"! printf BANG-755-IDLE > busy-marker")
+            .write_all(b"! printf BANG-MARK-IDLE > busy-marker")
             .unwrap();
         input.write_all(submit).unwrap();
         input.flush().unwrap();
@@ -139,7 +139,7 @@ fn busy_bang_is_refused_and_stays_in_the_editor_until_idle() {
         assert!(session.quit(input).success(), "{label}");
         assert_eq!(
             std::fs::read_to_string(places.workspace_path().join("busy-marker")).unwrap(),
-            "BANG-755-IDLE",
+            "BANG-MARK-IDLE",
             "{label}: the refused editor draft was lost",
         );
         assert_eq!(
@@ -176,7 +176,7 @@ fn terminal_bang_still_obeys_a_deny_rule() {
     until_prompt_from(&reader, &mut output, trust);
     let start = output.len();
     input
-        .write_all(b"! printf WRONG-755 > denied-marker\r")
+        .write_all(b"! printf WRONG-MARK > denied-marker\r")
         .unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "denied by");
@@ -193,7 +193,7 @@ fn terminal_bang_still_obeys_a_deny_rule() {
 #[test]
 fn model_text_containing_bang_cannot_execute_a_shell_command() {
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("! printf ATTACK-755 > model-marker"))],
+        completions: vec![Reply::Sse(text("! printf ATTACK-MARK > model-marker"))],
         ..Plan::default()
     });
     let places = support::Places::new();
@@ -216,7 +216,7 @@ fn model_text_containing_bang_cannot_execute_a_shell_command() {
     let start = output.len();
     input.write_all(b"describe this\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "ATTACK-755");
+    until_normalized(&reader, &mut output, start, "ATTACK-MARK");
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();

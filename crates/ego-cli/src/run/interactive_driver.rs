@@ -552,7 +552,7 @@ pub(super) async fn interactive_process(
                 .columns
                 .is_some_and(|width| width >= crate::render::startup_logo::WIDTH)
         {
-            out.write(crate::render::startup_logo::render(capabilities.depth));
+            out.write(&crate::render::startup_logo::render(capabilities.depth));
         }
         out.note(&format!("ego {}", env!("CARGO_PKG_VERSION")));
     }
@@ -704,6 +704,8 @@ pub(super) async fn interactive_through(
         if let Err(error) = select_recorded_session(&mut args, &meta) {
             break Ended::refused(RunTermination::UsageError { message: error.0 });
         }
+        // The owner accepted the delta of the resume named at startup, not of a later seat resume.
+        args.accept_authority_delta = false;
         seat.action_registry().release_skill_view();
         if !interactive_seat.activate_session(meta.id) {
             break Ended::refused(RunTermination::UsageError {
@@ -737,7 +739,8 @@ fn select_recorded_session(
         session::store_root(args.session_dir.as_ref())?,
     ));
     args.directory = Some(meta.workspace_root.clone());
-    args.session = crate::cli::SessionChoice::Resume(Some(meta.id.to_string()));
+    args.session =
+        crate::cli::SessionChoice::Resume(Some(crate::cli::ResumeTarget::Id(meta.id.to_string())));
     Ok(())
 }
 
@@ -816,7 +819,7 @@ impl<'a> Announce<'a> {
     pub(super) fn preamble(&self, prompt: Option<&str>) -> String {
         [
             self.osc.title(&title(prompt)),
-            self.osc.state(State::Busy),
+            // Busy belongs to TurnStarted, not to opening a session that may not run a turn.
             // Indeterminate rather than a percentage: the number of turns is
             // not known in advance, and a bar that advances on a guess is a lie
             // with a progress bar's authority. `--budget` would make a fraction
@@ -843,6 +846,8 @@ impl<'a> Announce<'a> {
             .expect("native event lock")
             .observe(self.osc, event);
         let coarse = match event {
+            // Resumed and automatic turns need not publish a new user message.
+            PublicEvent::TurnStarted { .. } => self.osc.state(State::Busy),
             PublicEvent::ProviderRetry {
                 attempt, delay_ms, ..
             } => {
@@ -898,7 +903,7 @@ impl<'a> Announce<'a> {
         }
     }
 
-    /// Title, intent and busy, in the order TUIC's tab should learn them.
+    /// Title and intent from a newly published user message.
     ///
     /// The title is the session's own once it has one (a resumed session
     /// does), and the prompt until then. The intent carries a fixed trailing
@@ -918,7 +923,6 @@ impl<'a> Announce<'a> {
             self.osc.title(&label),
             intent,
             self.osc.progress(Progress::Cleared),
-            self.osc.state(State::Busy),
         ]
         .concat()
     }
@@ -1027,6 +1031,7 @@ impl EventSink for Signalling<'_> {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         if let Some(seat) = self.seat {
             seat.observe_native_turn(event);
+            seat.observe_prompt_cache(state);
         }
         // Ingress acknowledgements cover acceptance/retraction. Consumption
         // and turn settlement happen here, before the next generation ends.

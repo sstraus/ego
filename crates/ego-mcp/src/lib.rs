@@ -74,7 +74,7 @@ pub use server::{
 pub use state::{
     CacheScope, McpInputMapping, McpInputRequestId, McpInputRequired, McpInputResponse,
     McpInputState, McpManualOutcome, McpMappedInput, McpRefreshRequest, McpResultMetadata,
-    McpRetryRequest, McpSubscription, McpSubscriptionEvent, McpToolResult,
+    McpRetryRequest, McpSubscription, McpSubscriptionEvent, McpTaskState, McpToolResult,
 };
 
 mod session_stdio;

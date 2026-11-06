@@ -1,6 +1,6 @@
 # CLI help from a verified binary
 
-Captured from `ego 0.4.3` on 2026-11-01. Binary SHA-256: `13c4ea47c1bfdeee8530ac304f01bd518c15f97d647c69b72b0d9a2e68b02c0e`.
+Captured from `ego 0.4.3` on 2026-11-02. Binary SHA-256: `14dc356740797b798dd65d6c3510e6179c5f0ebce236df1e97b26eaf0affe58c`.
 
 This is a dated help-only snapshot, not a separate command specification. The [generated reference](cli.md) follows the source parser. For your installed binary, use `ego COMMAND SUBCOMMAND --help`.
 
@@ -87,6 +87,8 @@ Commands:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session <SESSION>
           Named session: created or attached
       --session-id <SESSION_ID>
@@ -207,6 +209,8 @@ Options:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session <SESSION>
           Named session: created or attached
       --session-id <SESSION_ID>
@@ -281,6 +285,8 @@ Arguments:
 Options:
       --answer <QUESTION_ID=JSON>
           Settle a pending question. Repeat for multiple sibling questions
+      --accept-authority-delta
+          Accept the authority change shown for this resume, without a question. Applies to this resume only
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
@@ -327,6 +333,8 @@ Options:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session-dir <SESSION_DIR>
           Override the store location
   -C <DIR>
@@ -403,6 +411,8 @@ Arguments:
 Options:
       --answer <QUESTION_ID=JSON>
           Settle a pending question. Repeat for multiple sibling questions
+      --accept-authority-delta
+          Accept the authority change shown for this resume, without a question. Applies to this resume only
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
@@ -449,6 +459,8 @@ Options:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session-dir <SESSION_DIR>
           Override the store location
   -C <DIR>
@@ -731,7 +743,7 @@ Options:
 ## `ego setup --help`
 
 ```text
-Configure saved user settings in an interactive terminal.
+Review provider readiness and configure saved user settings in an interactive terminal.
 
 Usage: ego setup [OPTIONS]
 
@@ -1360,6 +1372,8 @@ Arguments:
 Options:
       --answer <QUESTION_ID=JSON>
           Settle a pending question. Repeat for multiple sibling questions
+      --accept-authority-delta
+          Accept the authority change shown for this resume, without a question. Applies to this resume only
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
@@ -1406,6 +1420,8 @@ Options:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session-dir <SESSION_DIR>
           Override the store location
   -C <DIR>

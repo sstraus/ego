@@ -71,7 +71,7 @@ impl TypedTool for ExecTool {
     }
 
     fn description(&self) -> &str {
-        "Run one argv-native process: pass executable and arguments separately, with no implicit shell, pipes or redirects. Use cwd for its working directory. timeout_ms limits the entire process lifetime, not how long to wait for a handle. Foreground defaults to 120000 ms (2 min), with overrides from 1 to 600000 ms (10 min); omitted or null uses the default. Background has no deadline when timeout_ms is omitted or null, and accepts an explicit lifetime limit. Set background=true for long work; returns a session-owned ID immediately for exec_status or exec_cancel, and completion wakes an idle interactive session. Use read_tool_result with returned full-output references for truncated output"
+        "Run one argv-native process: pass executable and arguments separately, with no implicit shell, pipes or redirects. Use cwd for its working directory. timeout_ms limits the entire process lifetime, not how long to wait for a handle. Foreground defaults to 120000 ms (2 min), with overrides from 1 to 600000 ms (10 min); omitted or null uses the default. Background has no deadline when timeout_ms is omitted or null, and accepts an explicit lifetime limit. Set background=true for long work; returns a session-owned ID immediately for exec_status, exec_monitor or exec_cancel, and completion wakes an idle interactive session. Use read_tool_result with returned full-output references for truncated output"
     }
 
     fn prepare_typed(

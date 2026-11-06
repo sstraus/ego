@@ -47,6 +47,18 @@ pub(super) struct ResumeCommand {
     )]
     pub(super) answers: Vec<ResumeAnswer>,
 
+    /// Accept the authority change shown for this resume, without a question. Applies to this resume only.
+    #[arg(long, conflicts_with_all = ["name", "goal_operation"])]
+    pub(super) accept_authority_delta: bool,
+
+    /// Resume the session of this workspace whose title is exactly TITLE.
+    #[arg(long, value_name = "TITLE", conflicts_with_all = ["name", "goal_operation"])]
+    pub(super) title: Option<String>,
+
+    /// Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout.
+    #[arg(long, conflicts_with = "answers")]
+    pub(super) queue: bool,
+
     /// Read or change the session title without starting a turn: show, set=TEXT, clear.
     #[arg(long, value_parser = parse_name_operation, requires = "id", conflicts_with_all = ["goal_operation", "prompt", "answers", "resume-run-options"])]
     pub(super) name: Option<NameOperation>,
@@ -116,6 +128,24 @@ pub(super) struct ForkCommand {
 
     #[arg(long, value_name = "ITEM_ID")]
     pub(super) at: Option<String>,
+
+    #[command(flatten)]
+    pub(super) common: Common,
+}
+
+/// `ego rewind ID --at ITEM` — restore the files and fork the conversation.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego rewind",
+    about = "Restore the files a session changed after a completed turn, then fork the conversation there.",
+    disable_help_subcommand = true
+)]
+pub(super) struct RewindCommand {
+    pub(super) source: String,
+
+    /// A user or assistant message of the turn to return to.
+    #[arg(long, value_name = "ITEM_ID")]
+    pub(super) at: String,
 
     #[command(flatten)]
     pub(super) common: Common,
@@ -222,6 +252,12 @@ pub(super) struct DoctorCommand {
     /// Emit the exact versioned health snapshot.
     #[arg(long)]
     pub(super) json: bool,
+    /// Skip every provider network probe.
+    #[arg(long)]
+    pub(super) offline: bool,
+    /// Probe the network reachability of each configured provider, like `doctor_network = true`.
+    #[arg(long)]
+    pub(super) probe_network: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -314,6 +350,10 @@ pub(super) struct Shape {
     #[arg(long, conflicts_with = "tools")]
     pub(super) no_tools: bool,
 
+    /// Run with every hook off for this invocation; configuration is unchanged.
+    #[arg(long)]
+    pub(super) no_hooks: bool,
+
     /// Allow rule, e.g. 'read(src/**)'. Repeatable.
     #[arg(long, value_name = "RULE", action = ArgAction::Append)]
     pub(super) allow: Vec<String>,
@@ -371,6 +411,11 @@ pub(super) struct A2aCommand {
     pub(super) allow_public_bind: bool,
 }
 
+/// Finite launch limits when the owner names none.
+const MCP_DEFAULT_CONCURRENT_RUNS: NonZeroUsize = NonZeroUsize::new(1).unwrap();
+const MCP_DEFAULT_RETAINED_REQUESTS: NonZeroUsize = NonZeroUsize::new(16).unwrap();
+const MCP_DEFAULT_RESOURCE_BYTES: NonZeroUsize = NonZeroUsize::new(65536).unwrap();
+
 /// `ego mcp-server` — the scoped run protocol, on stdio.
 #[derive(Debug, Parser)]
 #[command(
@@ -382,14 +427,34 @@ pub(super) struct McpServerCommand {
     #[command(flatten)]
     pub(super) places: Places,
 
-    #[arg(long)]
+    /// Runs that may execute at once.
+    #[arg(long, default_value_t = MCP_DEFAULT_CONCURRENT_RUNS)]
     pub(super) max_concurrent_runs: NonZeroUsize,
 
-    #[arg(long)]
+    /// Finished requests kept for status and resource reads.
+    #[arg(long, default_value_t = MCP_DEFAULT_RETAINED_REQUESTS)]
     pub(super) retained_requests: NonZeroUsize,
 
-    #[arg(long)]
+    /// Largest resource body returned to a client, in bytes.
+    #[arg(long, default_value_t = MCP_DEFAULT_RESOURCE_BYTES)]
     pub(super) max_resource_bytes: NonZeroUsize,
+
+    /// Also let clients run in DIR. The directory given with -C (or the current one) is always allowed.
+    #[arg(long, value_name = "DIR", action = ArgAction::Append)]
+    pub(super) allow_root: Vec<PathBuf>,
+
+    /// Also let clients select this model. The configured model is always allowed.
+    #[arg(
+        long,
+        value_name = "P/M",
+        action = ArgAction::Append,
+        value_parser = parse_model_ref
+    )]
+    pub(super) allow_model: Vec<ModelRef>,
+
+    /// Also let clients select this mode. The configured mode is always allowed.
+    #[arg(long, value_parser = parse_mode, action = ArgAction::Append)]
+    pub(super) allow_mode: Vec<Mode>,
 }
 
 /// Arguments shared by the three auth operations.
@@ -617,7 +682,7 @@ pub(super) enum McpSubcommand {
 
 #[derive(Debug, ClapArgs)]
 #[command(
-    override_usage = "ego mcp add <NAME> --stdio [--cwd <DIR>] [--inherit-env <NAME>]... -- <COMMAND> [ARG]...\n       ego mcp add <NAME> --http <URL> [--auth <none|oauth>] [--allow-insecure-loopback]"
+    override_usage = "ego mcp add <NAME> --stdio [--cwd <DIR>] [--inherit-env <NAME>]... -- <COMMAND> [ARG]...\n       ego mcp add <NAME> --http <URL> [--auth <none|oauth>] [--allow-insecure-loopback] [--oauth-host <URL>]..."
 )]
 pub(super) struct McpAddCommand {
     pub(super) name: String,
@@ -662,9 +727,20 @@ pub(super) struct McpAddCommand {
     )]
     pub(super) auth: Option<String>,
 
-    /// Consent to plaintext HTTP for an exact loopback host.
+    /// Consent to plaintext HTTP for this server on loopback or the owner network.
     #[arg(long, requires = "http", conflicts_with = "stdio")]
     pub(super) allow_insecure_loopback: bool,
+
+    /// Extra OAuth origin that may host this server's authorization, token or
+    /// registration endpoint when it differs from the issuer's. Repeatable.
+    #[arg(
+        long,
+        value_name = "URL",
+        action = ArgAction::Append,
+        requires = "http",
+        conflicts_with = "stdio"
+    )]
+    pub(super) oauth_host: Vec<String>,
 }
 
 /// The three flags every subcommand takes, declared once.
@@ -760,6 +836,10 @@ pub(super) struct Flags {
     /// Trust this launch's workspace without asking; remember the answer.
     #[arg(long, conflicts_with = "bare")]
     pub(super) trust_workspace: bool,
+
+    /// Trust this workspace and future edits to its current named programs; remember the grant.
+    #[arg(long, conflicts_with_all = ["bare", "trust_workspace"])]
+    pub(super) trust_development_programs: bool,
 
     /// Named session: created or attached.
     #[arg(long, group = "session-choice")]
@@ -880,6 +960,18 @@ pub(super) struct Flags {
     /// Use Vim normal/insert editing in the interactive composer.
     #[arg(long)]
     pub(super) vim: bool,
+
+    /// Keep a memory file for this workspace that the model can add to.
+    #[arg(long)]
+    pub(super) memory: bool,
+
+    /// Do not compress old sessions in the background during this run.
+    #[arg(long)]
+    pub(super) no_session_compression: bool,
+
+    /// Do not save file checkpoints before writes during this run.
+    #[arg(long)]
+    pub(super) no_checkpoints: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -933,7 +1025,7 @@ impl clap::ValueEnum for RootAccessValue {
 #[derive(Debug, Parser)]
 #[command(
     name = "ego setup",
-    about = "Configure saved user settings in an interactive terminal.",
+    about = "Review provider readiness and configure saved user settings in an interactive terminal.",
     disable_help_subcommand = true
 )]
 pub(super) struct SetupCommand {

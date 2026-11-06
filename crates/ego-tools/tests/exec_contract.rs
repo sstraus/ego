@@ -504,6 +504,36 @@ fn exec_contract_fixture_waits_after_large_output() {
     std::process::exit(7);
 }
 
+#[test]
+#[ignore]
+fn exec_contract_fixture_prints_between_barriers() {
+    let mut args = std::env::args()
+        .skip_while(|argument| argument != "--")
+        .skip(1);
+    let ready = args.next().expect("ready marker path");
+    let go = args.next().expect("go marker path");
+    let release = args.next().expect("release marker path");
+    let wait = |marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::path::Path::new(marker).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(b"booting: server ready on 1\n").unwrap();
+    stdout.flush().unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    wait(&go);
+    stdout
+        .write_all(b"warming up\nserver ready on 3000\n")
+        .unwrap();
+    stdout.flush().unwrap();
+    std::io::stderr().write_all(b"warn: slow\n").unwrap();
+    wait(&release);
+    stdout.write_all(b"server ready again on 3001\n").unwrap();
+    stdout.flush().unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 #[ignore]
@@ -1587,6 +1617,147 @@ fn detached_exec_output_is_bounded_and_cancel_preserves_the_settled_exit() {
         result.model_text()
     );
     assert!(inspect(&id).contains("exited code 7"));
+}
+
+/// Catches: monitored lines that reach the model only through polling, a
+/// pattern that lets other lines through, lines printed before the
+/// subscription reported as new, and a monitor that outlives its process.
+#[test]
+fn a_monitored_match_wakes_the_host_and_the_monitor_ends_at_settlement() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let marker = |name: &str| directory.path().join(name);
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: Vec::new(),
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let (wake, woken) = std::sync::mpsc::channel();
+    run.ports.set_background_waker(Arc::new(move || {
+        let _ = wake.send(());
+    }));
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let call = |name: &str, arguments: serde_json::Value| -> Result<String, String> {
+        let (tool, call) = tools.prepare(name, &arguments.to_string()).unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("{name} must be authorized");
+        };
+        match block_on(tools.execute(&policy, tool.as_ref(), authorized, None)) {
+            Ok(ego_core::mcp::ToolExecution::Complete(result)) => Ok(result.model_text()),
+            Ok(_) => panic!("{name} must complete"),
+            Err(error) => Err(error.into_failed_result().model_text()),
+        }
+    };
+    let started = call(
+        "exec",
+        serde_json::json!({
+            "argv": [executable_text, "--ignored", "--exact",
+                "exec_contract_fixture_prints_between_barriers", "--nocapture", "--",
+                marker("ready").to_string_lossy(), marker("go").to_string_lossy(),
+                marker("release").to_string_lossy()],
+            "background": true
+        }),
+    )
+    .unwrap();
+    let id = started.split_whitespace().last().unwrap().to_owned();
+    let exec_id: ego_core::event::id::DetachedExecId = id.parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker("ready").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker("ready").exists(),
+        "child did not reach its first barrier"
+    );
+    // The pipe reader runs on its own thread: the first line is "before the
+    // subscription" only once the status tail holds it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !String::from_utf8_lossy(
+        &run.ports
+            .process()
+            .background_status(exec_id)
+            .unwrap()
+            .stdout_tail,
+    )
+    .contains("booting")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "first line did not reach the tail"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let subscribed = call(
+        "exec_monitor",
+        serde_json::json!({ "id": id, "pattern": "ready (again )?on [0-9]+" }),
+    )
+    .unwrap();
+    assert!(subscribed.contains("monitoring"), "{subscribed}");
+    let process = run.ports.process();
+    assert_eq!(
+        process.take_background_output(exec_id).unwrap(),
+        None,
+        "a line printed before the subscription is not new output"
+    );
+
+    std::fs::write(marker("go"), b"go").unwrap();
+    woken
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a matching line wakes the host without a status call");
+    assert!(process.background_output_ready(exec_id));
+    let delivered = process.take_background_output(exec_id).unwrap().unwrap();
+    assert_eq!(
+        delivered.model_text(),
+        format!("background exec {id} monitor: 1 new lines\nstdout: server ready on 3000")
+    );
+
+    std::fs::write(marker("release"), b"release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process
+        .background_status(exec_id)
+        .unwrap()
+        .outcome
+        .is_none()
+    {
+        assert!(Instant::now() < deadline, "child did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let last = process.take_background_output(exec_id).unwrap().unwrap();
+    assert_eq!(
+        last.lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>(),
+        ["server ready again on 3001"],
+        "a line queued before settlement is still delivered"
+    );
+    assert_eq!(process.take_background_output(exec_id).unwrap(), None);
+    let refused = call("exec_monitor", serde_json::json!({ "id": id })).unwrap_err();
+    assert!(refused.contains("settled"), "{refused}");
 }
 
 #[test]
@@ -2902,7 +3073,7 @@ fn macos_exec_paths_expose_the_metadata_of_their_ancestors_and_nothing_more() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_workspace_ancestor_metadata_allows_standalone_stat_and_mkdir() {
-    // node's `realpathSync(cwd)` is how wiz-run finds its project: it lstats
+    // node's `realpathSync(cwd)` is how a Node tool finds its project: it lstats
     // every ancestor of the workspace.
     // The workspace sits in its own parent, which no exec path shares.
     let outer = tempfile::tempdir().expect("outer directory");
@@ -3014,25 +3185,31 @@ fn sandbox_blocked(run: &Run, spec: SpawnSpec) -> (bool, String) {
     }
 }
 
-/// `mdkb stats` must exit 0 inside ego where it exits 0 outside, in a
-/// repository that has an index. Run by hand, like the test below.
+/// An operator tool that reads a repository index (`EGO_ACCEPT_INDEX_TOOL`,
+/// run with the whitespace-separated `EGO_ACCEPT_INDEX_ARGS`) must exit 0
+/// inside ego where it exits 0 outside, in the repository that holds the index
+/// (`EGO_ACCEPT_INDEX_REPOSITORY`). Run by hand, like the test below.
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "acceptance: needs mdkb and an indexed repository on this machine"]
-fn macos_mdkb_stats_exits_as_outside_ego_in_an_indexed_workspace() {
-    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
-    let mdkb = std::fs::canonicalize(home.join(".local/bin/mdkb")).expect("mdkb");
+#[ignore = "acceptance: needs an index tool and an indexed repository on this machine"]
+fn macos_index_tool_exits_as_outside_ego_in_an_indexed_workspace() {
+    let tool = std::fs::canonicalize(
+        std::env::var_os("EGO_ACCEPT_INDEX_TOOL").expect("EGO_ACCEPT_INDEX_TOOL"),
+    )
+    .expect("index tool");
+    let args = std::env::var("EGO_ACCEPT_INDEX_ARGS").expect("EGO_ACCEPT_INDEX_ARGS");
+    let args = args.split_whitespace().collect::<Vec<_>>();
     // A worktree resolves its index outside its own directory, which a
-    // workspace run cannot reach; name the checkout that holds `.mdkb`.
+    // workspace run cannot reach; name the checkout that holds the index.
     let repository = std::fs::canonicalize(
-        std::env::var_os("EGO_ACCEPT_MDKB_REPOSITORY").expect("EGO_ACCEPT_MDKB_REPOSITORY"),
+        std::env::var_os("EGO_ACCEPT_INDEX_REPOSITORY").expect("EGO_ACCEPT_INDEX_REPOSITORY"),
     )
     .expect("indexed repository");
-    let outside = Command::new(&mdkb)
-        .arg("stats")
+    let outside = Command::new(&tool)
+        .args(&args)
         .current_dir(&repository)
         .output()
-        .expect("unsandboxed mdkb");
+        .expect("unsandboxed index tool");
     assert_eq!(
         outside.status.code(),
         Some(0),
@@ -3041,10 +3218,12 @@ fn macos_mdkb_stats_exits_as_outside_ego_in_an_indexed_workspace() {
 
     let policy = RunConfinement::new(Confinement::Workspace, true, CanonPath::new(&repository))
         .expect("policy")
-        .with_exec_paths(vec![CanonPath::new(mdkb.clone())]);
+        .with_exec_paths(vec![CanonPath::new(tool.clone())]);
     let run = open_policy(policy, 1024 * 1024, 1024).expect("profiled run");
     let spec = SpawnSpec::new(
-        vec![mdkb.into_os_string(), "stats".into()],
+        std::iter::once(tool.into_os_string())
+            .chain(args.iter().map(OsString::from))
+            .collect(),
         Some(CanonPath::new(&repository)),
         Some(Duration::from_secs(30)),
         EnvPolicy::Inherited,
@@ -3053,53 +3232,68 @@ fn macos_mdkb_stats_exits_as_outside_ego_in_an_indexed_workspace() {
     let (blocked, note) = sandbox_blocked(&run, spec);
     assert!(
         !blocked && note == "exit 0",
-        "mdkb stats inside ego: {note}"
+        "index tool inside ego: {note}"
     );
 }
 
-/// Acceptance on the coordinator machine: the tools operator named run under
+/// Acceptance on an operator machine: the operator's tools run under
 /// `workspace` with profile exec paths, offline so a script cannot reach the
 /// TUIC socket, from a scratch workspace so nothing real is written.
+/// `EGO_ACCEPT_COMMANDS` names the tools as `;`-separated commands whose first
+/// word is an absolute program path; each must exit as it does outside ego.
+/// `EGO_ACCEPT_EXEC_PATHS` adds `:`-separated exec paths, and the optional
+/// `EGO_ACCEPT_SCRIPTS` names a directory whose executable `*.sh` scripts must
+/// answer `--help` without a sandbox refusal.
 /// Run by hand: `cargo nextest run -p ego-tools --test exec_contract --run-ignored only`.
 #[cfg(target_os = "macos")]
 #[test]
-#[ignore = "acceptance: needs the coordinator toolchain installed on this machine"]
-fn macos_coordinator_tools_run_under_workspace_with_profile_exec_paths() {
+#[ignore = "acceptance: needs the operator toolchain installed on this machine"]
+fn macos_operator_tools_run_under_workspace_with_profile_exec_paths() {
     let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
     let canon = |path: &std::path::Path| {
         std::fs::canonicalize(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
     };
-    let tuic = canon(std::path::Path::new("/usr/local/bin/tuic"));
-    let mdkb = canon(&home.join(".local/bin/mdkb"));
-    let wiz_run = canon(&home.join(".local/bin/wiz-run"));
-    let wiz_root = wiz_run
-        .parent()
-        .and_then(|bin| bin.parent())
-        .expect("wiz plugin root");
-    let tools = canon(&std::path::PathBuf::from(
-        std::env::var_os("EGO_TEST_TOOLS_DIRECTORY")
-            .expect("set EGO_TEST_TOOLS_DIRECTORY to the external tools directory"),
-    ));
+    let commands = std::env::var("EGO_ACCEPT_COMMANDS").expect("EGO_ACCEPT_COMMANDS");
+    let mut named: Vec<(String, Vec<OsString>)> = commands
+        .split(';')
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(|command| {
+            let mut words = command.split_whitespace();
+            let program = canon(std::path::Path::new(words.next().expect("program")));
+            let argv = std::iter::once(program.into_os_string())
+                .chain(words.map(OsString::from))
+                .collect();
+            (command.to_owned(), argv)
+        })
+        .collect();
+    let scripts = std::env::var_os("EGO_ACCEPT_SCRIPTS").map(|dir| canon(dir.as_ref()));
     let exec_paths = [
         canon(std::path::Path::new("/opt/homebrew")),
-        // The PATH directories themselves: bash finds `tuic` and `mdkb` there.
+        // The PATH directories themselves: bash finds the named tools there.
         canon(std::path::Path::new("/usr/local/bin")),
         canon(&home.join(".local/bin")),
-        // git, and so wiz-run, dies with `unable to access ~/.gitconfig` when
-        // the file is unreadable; an exec path is also a read root.
+        // git, and so any tool that asks git for its root, dies with
+        // `unable to access ~/.gitconfig` when the file is unreadable; an exec
+        // path is also a read root.
         canon(&home.join(".gitconfig")),
-        tuic.clone(),
-        mdkb.clone(),
-        wiz_root.to_path_buf(),
-        tools.clone(),
     ]
     .into_iter()
+    .chain(
+        std::env::var("EGO_ACCEPT_EXEC_PATHS")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|path| !path.is_empty())
+            .map(|path| canon(std::path::Path::new(path))),
+    )
+    .chain(named.iter().map(|(_, argv)| canon(argv[0].as_ref())))
+    .chain(scripts.clone())
     .map(CanonPath::new)
     .collect::<Vec<_>>();
 
     let workspace = tempfile::tempdir().expect("workspace");
-    // wiz-run wants a git root; the workspace is its own so the answer does not
-    // depend on a `.git` above it, which would be a read-root question.
+    // A tool that wants a git root finds the workspace itself, so the answer
+    // does not depend on a `.git` above it, which would be a read-root question.
     assert!(
         Command::new("git")
             .args(["init", "-q"])
@@ -3114,29 +3308,26 @@ fn macos_coordinator_tools_run_under_workspace_with_profile_exec_paths() {
         .with_exec_paths(exec_paths);
     let run = open_policy(policy, 1024 * 1024, 1024).expect("profiled offline workspace run");
 
-    let mut cases: Vec<(String, Vec<OsString>)> = vec![
-        ("tuic --help".into(), vec![tuic.into(), "--help".into()]),
-        ("mdkb stats".into(), vec![mdkb.into(), "stats".into()]),
-        (
-            "wiz-run stories-cli.js list".into(),
-            vec![wiz_run.into(), "stories-cli.js".into(), "list".into()],
-        ),
-        (
-            "git rev-parse".into(),
-            vec![
-                "/opt/homebrew/bin/git".into(),
-                "rev-parse".into(),
-                "--show-toplevel".into(),
-            ],
-        ),
-        (
-            "jq --version".into(),
-            vec!["/opt/homebrew/bin/jq".into(), "--version".into()],
-        ),
-    ];
-    let mut pending = vec![tools.clone()];
+    named.push((
+        "git rev-parse".into(),
+        vec![
+            "/opt/homebrew/bin/git".into(),
+            "rev-parse".into(),
+            "--show-toplevel".into(),
+        ],
+    ));
+    let compared = named.len();
+    let mut cases = named;
+    cases.push((
+        "jq --version".into(),
+        vec!["/opt/homebrew/bin/jq".into(), "--version".into()],
+    ));
+    let mut pending = scripts.iter().cloned().collect::<Vec<_>>();
     while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("tools directory").flatten() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("scripts directory")
+            .flatten()
+        {
             let path = entry.path();
             if path.is_dir() {
                 pending.push(path);
@@ -3147,7 +3338,8 @@ fn macos_coordinator_tools_run_under_workspace_with_profile_exec_paths() {
                     std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0
                 })
             {
-                let label = path.strip_prefix(&tools).unwrap().display().to_string();
+                let root = scripts.as_ref().expect("a scanned directory has a root");
+                let label = path.strip_prefix(root).unwrap().display().to_string();
                 cases.push((
                     format!("{label} --help"),
                     vec![path.into(), "--help".into()],
@@ -3158,7 +3350,7 @@ fn macos_coordinator_tools_run_under_workspace_with_profile_exec_paths() {
 
     // The named tools must also exit exactly as they do outside ego.
     let mut diverged = Vec::new();
-    for (label, argv) in cases.iter().take(4) {
+    for (label, argv) in cases.iter().take(compared) {
         let outside = Command::new(&argv[0])
             .args(&argv[1..])
             .current_dir(workspace.path())

@@ -20,6 +20,7 @@ impl SandboxGrantPort for Seat {
 }
 
 // Catches: a binding Adaptive floor offers a human allowance that cannot work.
+// Exact Git control files can now be maintained by the owner.
 #[test]
 fn adaptive_floor_denials_never_offer_an_ineffective_grant() {
     let Some(root) =
@@ -56,7 +57,7 @@ fn adaptive_floor_denials_never_offer_an_ineffective_grant() {
         (&credential, "exec /bin/cat \"$1\"", true),
         (&alias, "exec /bin/cat \"$1\"", true),
         (&env, "exec /bin/cat \"$1\"", true),
-        (&config, "printf compromised > \"$1\"", true),
+        (&config, "printf compromised > \"$1\"", false),
         (&metadata_directory, "exec /bin/rmdir \"$1\"", true),
         (
             &root.join("home/ordinary-output"),
@@ -98,7 +99,7 @@ fn adaptive_floor_denials_never_offer_an_ineffective_grant() {
             assert_eq!(
                 questions.len(),
                 1,
-                "ordinary residual write lost its grant request"
+                "eligible denied path lost its owner grant request"
             );
         }
     }
@@ -182,10 +183,19 @@ fn adaptive_internal_write_to_an_existing_file_is_asked_as_one_write() {
     let seat = Arc::new(AllowingSeat::default());
     let script = format!("printf new >> '{}'", target.display());
     let result = execute_with_grants(
-        policy,
+        policy.clone(),
         &root,
-        vec!["/bin/sh".into(), "-c".into(), script.into()],
+        vec!["/bin/sh".into(), "-c".into(), script.clone().into()],
         Some(seat.clone()),
+    );
+    assert!(
+        matches!(result, Err(ProcessError::Exit { .. })),
+        "{result:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        "old",
+        "approval replayed the write"
     );
     assert_eq!(
         *seat.0.lock().unwrap(),
@@ -195,6 +205,17 @@ fn adaptive_internal_write_to_an_existing_file_is_asked_as_one_write() {
         )],
         "result: {result:?}"
     );
+    let result = execute_with_grants(
+        policy,
+        &root,
+        vec!["/bin/sh".into(), "-c".into(), script.into()],
+        Some(seat.clone()),
+    );
     assert!(result.is_ok(), "{result:?}");
+    assert_eq!(
+        seat.0.lock().unwrap().len(),
+        1,
+        "the next explicit write asked again"
+    );
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "oldnew");
 }

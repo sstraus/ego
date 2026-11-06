@@ -135,8 +135,9 @@ fn an_internal_write_refusal_reaches_the_judge_without_an_argv_path() {
 // Catches: a judge-granted root is writable and executable, so a command can
 // drop a program there and run it outside every exec rule.
 #[test]
-fn a_binary_in_a_judge_granted_root_is_denied_exec() {
-    let Some(root) = isolated("adaptive_residual::a_binary_in_a_judge_granted_root_is_denied_exec")
+fn judge_write_grant_never_executes_or_replays_partial_command() {
+    let Some(root) =
+        isolated("adaptive_residual::judge_write_grant_never_executes_or_replays_partial_command")
     else {
         return;
     };
@@ -148,7 +149,19 @@ fn a_binary_in_a_judge_granted_root_is_denied_exec() {
     let desk = ResidualWriteDesk::new();
     let _heard = serve(&desk, grant());
     let make = "/bin/mkdir \"$EGO_ADMISSION_ROOT/outside/tools\"";
-    let first = execute_with_desk(policy.clone(), &root, shell(make), None, Some(desk.clone()));
+    let first_script = format!("printf x >> marker; {make}");
+    let first = execute_with_desk(
+        policy.clone(),
+        &root,
+        shell(&first_script),
+        None,
+        Some(desk.clone()),
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("workspace/marker")).unwrap(),
+        "x",
+        "judge grant replayed a partial mutation"
+    );
     assert!(matches!(first, Err(ProcessError::Exit { .. })), "{first:?}");
     assert_eq!(desk.grants(), vec![CanonPath::new(&tools)]);
 
@@ -356,7 +369,7 @@ fn adaptive_judge_cannot_overwrite_agent_instruction_files() {
         return;
     };
     let files = [
-        ".codex/ORCHESTRATION.md",
+        ".codex/instructions.md",
         ".claude/CLAUDE.md",
         "Gits/other/AGENTS.md",
         "Gits/other/CLAUDE.md",

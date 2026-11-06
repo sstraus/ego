@@ -25,6 +25,9 @@ pub(super) enum Intercept {
     SteerBusy,
     /// Expedite the durable pending-steer prefix.
     Interrupt,
+    /// `Ctrl+C`: clear the draft and cancel the running turn. Busy only: an
+    /// idle `Ctrl+C` stays the editor's own, for the double-press exit.
+    Cancel,
     Background,
 }
 
@@ -57,6 +60,8 @@ pub(super) fn intercept(code: KeyCode, modifiers: KeyModifiers) -> Intercept {
         Intercept::SubmitBusy
     } else if code == KeyCode::Esc && modifiers.is_empty() {
         Intercept::Interrupt
+    } else if code == KeyCode::Char('c') && modifiers == KeyModifiers::CONTROL {
+        Intercept::Cancel
     } else {
         Intercept::Editor
     }
@@ -167,12 +172,11 @@ mod tests {
         );
     }
 
-    /// The editor's own control keys have to keep working. `Ctrl+C` and
-    /// `Ctrl+D` are how a person abandons a line and ends a session, and this
-    /// function is upstream of both.
+    /// The editor's own control keys have to keep working. `Ctrl+D` is how a
+    /// person ends a session, and this function is upstream of it.
     #[test]
     fn the_keys_that_end_a_line_or_a_session_are_left_alone() {
-        for key in ['c', 'd', 'a', 'e', 'k', 'u', 'w'] {
+        for key in ['d', 'a', 'e', 'k', 'u', 'w'] {
             assert_eq!(
                 intercept(KeyCode::Char(key), KeyModifiers::CONTROL),
                 Intercept::Editor,

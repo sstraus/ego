@@ -58,6 +58,14 @@ impl WireFormat for OpenAiCompletions {
 pub struct OpenRouterCompletions;
 
 impl WireFormat for OpenRouterCompletions {
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        if req.model.starts_with("anthropic/") {
+            super::cache::policy(req, true, false)
+        } else {
+            ego_core::usage::PromptCachePolicy::default()
+        }
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -844,8 +852,8 @@ pub struct StreamDecoder {
     /// the end, and a second report replaces the first instead of adding to
     /// it.
     usage: Option<Usage>,
-    /// A usage object whose parts did not fit its total. Held so it can be
-    /// reported once, at the end, beside everything else that went wrong.
+    /// A usage object whose parts did not fit its total. The shared
+    /// [`policy`](super::policy) stage reports it.
     usage_incoherent: bool,
     /// An explicit provider error carried after the response status was
     /// already 200. It outranks any finish reason in the same stream.
@@ -859,6 +867,10 @@ impl super::StreamSink for StreamDecoder {
 
     fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent> {
         StreamDecoder::finish(*self, transport)
+    }
+
+    fn usage_incoherent(&self) -> bool {
+        self.usage_incoherent
     }
 }
 
@@ -895,22 +907,6 @@ impl StreamDecoder {
         let mut out = Vec::new();
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
-        }
-        if self.usage_incoherent {
-            // `Unclassified` on purpose, and it is the honest answer rather
-            // than an unconsidered default. The generation itself did not
-            // fail — it completes and settles at its bound — so `Transient`
-            // would invite a retry of a turn that succeeded, and neither the
-            // request nor the account is what went wrong. None of the other
-            // three describes "the provider contradicted itself about a
-            // number", which is precisely what `Unclassified` is for.
-            out.push(AiEvent::Error {
-                message: "the provider's prompt cache breakdown was larger than \
-                          the prompt it broke down, so no usage figure could be \
-                          trusted; this generation settles at its bound"
-                    .to_string(),
-                kind: ErrorKind::Unclassified,
-            });
         }
         if let Some((message, kind)) = self.provider_error.take() {
             self.calls.clear();
@@ -1160,8 +1156,8 @@ impl StreamDecoder {
         // Flushed here rather than at the end so tool calls precede the usage
         // chunk that follows this one — and because this is the point at which
         // the arguments are known to be whole.
-        for (index, call) in std::mem::take(&mut self.calls) {
-            Self::emit_call(index, call, out);
+        for call in std::mem::take(&mut self.calls).into_values() {
+            Self::emit_call(call, out);
         }
         if self.finish_reason.is_some() {
             tracing::warn!(reason, "ignoring a second finish_reason");
@@ -1228,7 +1224,7 @@ impl StreamDecoder {
         self.finish_reason = Some(stop);
     }
 
-    fn emit_call(index: u32, call: PartialToolCall, out: &mut Vec<AiEvent>) {
+    fn emit_call(call: PartialToolCall, out: &mut Vec<AiEvent>) {
         if let Some(conflict) = call.conflict {
             out.push(AiEvent::Error {
                 message: format!(
@@ -1239,39 +1235,11 @@ impl StreamDecoder {
             });
             return;
         }
-        // Both of these are unanswerable rather than merely incomplete. A
-        // result message needs the `tool_call_id` to send back, and a dispatch
-        // needs a name; inventing either produces a request the provider
-        // rejects, or a call to the wrong tool.
-        //
-        // `""` is treated as absent, and this guard is fail-closed rather
-        // than an accommodation for a row that needs it. No implementation
-        // speaking this wire is known to emit an empty id — Ollama's compat
-        // layer, the row the survey suspected, overwrites the field
-        // unconditionally and so cannot (measured, `server/routes.go`;
-        // the survey's original claim was retracted). The guard exists
-        // because an empty id is *unusable* if one ever arrives: it would be
-        // carried into `ContentBlock::ToolUse` as a legitimate key, where
-        // `Conversation`'s uniqueness invariant would then read two
-        // unidentified calls as one duplicate. Refusing it costs a call that
-        // could not have been answered anyway.
-        let Some(call_id) = call.id.filter(|id| !id.is_empty()) else {
-            out.push(AiEvent::Error {
-                message: format!(
-                    "the provider streamed a tool call at index {index} with no id, \
-                     so its result could never be attributed back to it"
-                ),
-                kind: ErrorKind::Unclassified,
-            });
-            return;
-        };
-        let Some(name) = call.name.filter(|name| !name.is_empty()) else {
-            out.push(AiEvent::Error {
-                message: format!("tool call {call_id} arrived with no function name"),
-                kind: ErrorKind::Unclassified,
-            });
-            return;
-        };
+        // An absent id or name is passed on empty. Whether a call can be
+        // attributed or dispatched is the shared post-adapter stage's
+        // decision, made once for every wire.
+        let call_id = call.id.unwrap_or_default();
+        let name = call.name.unwrap_or_default();
         // `args` is passed through exactly as assembled, including when it is
         // not valid JSON. The schema warns that "the model does not always
         // generate valid JSON", the tool owns the schema that would judge it,

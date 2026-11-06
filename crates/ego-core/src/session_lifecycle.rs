@@ -1011,6 +1011,7 @@ where
                             && matches!(
                                 event.kind,
                                 EventKind::UserPrompt { .. }
+                                    // TODO(2027-03-01): remove legacy AssistantDelta replay support.
                                     | EventKind::AssistantDelta { .. }
                                     | EventKind::AssistantMessage { .. }
                             ) =>

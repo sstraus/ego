@@ -1,0 +1,29 @@
+{
+  "body": {
+    "max_tokens": 16,
+    "messages": [
+      {
+        "content": [
+          {
+            "text": "Reply with the single word: ok",
+            "type": "text"
+          }
+        ],
+        "role": "user"
+      }
+    ],
+    "model": "anthropic.claude-opus-5-5",
+    "stream": true,
+    "thinking": {
+      "type": "disabled"
+    }
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "x-api-key",
+    "anthropic-version"
+  ],
+  "method": "Post",
+  "url": "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages"
+}

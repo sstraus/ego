@@ -41,8 +41,7 @@ use crate::store::blob::BlobRef;
 /// rates from uncached input — typically a fraction and a premium
 /// respectively — so an `input_tokens` field that silently mixed all three
 /// made the cost of a cached conversation unknowable, and made even the
-/// standard context-occupancy proxy impossible to compute. See the mdkb
-/// decision `ego-acp-usage-verdict`.
+/// standard context-occupancy proxy impossible to compute.
 ///
 /// Used both as one attempt's increment (`AiEvent::Usage`,
 /// `EventKind::UsageUpdated`) and as the session's running totals
@@ -97,7 +96,7 @@ pub struct Usage {
     /// nothing**, so on that row the split is not merely undeclared but
     /// unrecoverable after the fact. A `0` there would state a measurement
     /// nobody made. The cost of getting this wrong is recorded live in
-    /// `crates/ego-ai/tests/ollama_reasoning.rs`: a turn whose visible answer
+    /// `crates/ego-ai/tests/it/ollama_reasoning.rs`: a turn whose visible answer
     /// was the single character `9` reported 118 output tokens, 117 of them
     /// reasoning, and the daemon reported none of that.
     ///
@@ -1057,6 +1056,9 @@ impl QueuedPrompt {
 /// function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    /// The sole prompt-cache deadline, reduced from admitted request policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<crate::usage::PromptCacheDeadline>,
     /// Per-configured-filter variables; new session identities start empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub protocol_filter_variables:
@@ -1079,6 +1081,8 @@ pub struct SessionState {
     /// Approved roots belong to this session, not to a fork or live process.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub session_roots: Vec<crate::permit::ProfileRoot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_sandbox_grants: Vec<crate::permit::SandboxGrant>,
     /// Terminal consent for a profile root, retained only for policy re-admission.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permanent_root_consents: Vec<crate::permit::PermanentRootConsent>,
@@ -1088,6 +1092,10 @@ pub struct SessionState {
     /// the caller's replay order and never reorders, clamps or rejects on
     /// this value — see `Seq`'s and `Timestamp`'s doc comments.
     pub last_seq: Seq,
+    /// When the last turn completed, from that event's timestamp. Measures an
+    /// absence across restarts (`crate::recap`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_completed_at: Option<Timestamp>,
     /// The tagged source boundary that created this fork or compaction target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
@@ -1235,15 +1243,18 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            prompt_cache: None,
             constraints: Default::default(),
             context_request: None,
             context_cooldown: 0,
             execution_observation: None,
             session_selections: None,
             session_roots: Vec::new(),
+            owner_sandbox_grants: Vec::new(),
             permanent_root_consents: Vec::new(),
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
+            last_turn_completed_at: None,
             lineage: None,
             prompt_snapshot: None,
             title: None,
@@ -2064,10 +2075,15 @@ impl SessionState {
                     item.audio = audio.clone();
                 }
             }
+            // TODO(2027-03-01): remove legacy AssistantDelta replay support.
             EventKind::AssistantDelta { text } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::Assistant) {
                     item.text.push_str(text);
                 }
+            }
+            // Opens the item, so its `seq` is the place the message began.
+            EventKind::AssistantMessageStarted => {
+                self.item_mut(ev, ItemKind::Assistant);
             }
             EventKind::AssistantMessage { text } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::Assistant) {
@@ -2168,6 +2184,13 @@ impl SessionState {
             EventKind::DetachedExecStarted { id } => {
                 self.detached_execs.entry(*id).or_insert(None);
             }
+            EventKind::DetachedExecOutput { output } => {
+                if matches!(self.detached_execs.get(&output.id), Some(None))
+                    && let Some(item) = self.item_mut(ev, ItemKind::DetachedExecNotification)
+                {
+                    item.text = output.model_text();
+                }
+            }
             EventKind::DetachedExecSettled { snapshot } => {
                 if let Some(entry @ None) = self.detached_execs.get_mut(&snapshot.id)
                     && snapshot.outcome.is_some()
@@ -2222,8 +2245,21 @@ impl SessionState {
                 attempt,
                 role,
                 snapshot,
+                cache,
             } => {
                 self.start(ev, attempt, *role);
+                // Mirrored child charges do not represent requests in this session.
+                if (*role != GenerationRole::Subagent || cache.is_some())
+                    && self.generations.contains_key(&ev.env.id)
+                {
+                    self.prompt_cache = cache.as_ref().and_then(|request| {
+                        crate::usage::PromptCacheDeadline::observe(
+                            self.prompt_cache.as_ref(),
+                            request,
+                            ev.env.ts,
+                        )
+                    });
+                }
                 if self.generations.contains_key(&ev.env.id)
                     && let Some(snapshot) = snapshot
                 {
@@ -2233,6 +2269,11 @@ impl SessionState {
             EventKind::FallbackDecision { .. } | EventKind::PermanentRootGrantPending { .. } => {}
             EventKind::SessionSelectionsSelected { selections } => {
                 self.session_selections = Some(selections.clone());
+            }
+            EventKind::SandboxOwnerGranted { grant } => {
+                if !self.owner_sandbox_grants.contains(grant) {
+                    self.owner_sandbox_grants.push(grant.clone());
+                }
             }
             EventKind::SessionRootGranted { root } => {
                 if !self.session_roots.contains(root) {
@@ -2246,6 +2287,8 @@ impl SessionState {
             }
             EventKind::RootRevoked { path } => {
                 self.session_roots.retain(|root| root.path() != path);
+                self.owner_sandbox_grants
+                    .retain(|grant| &grant.path != path);
                 self.permanent_root_consents
                     .retain(|consent| consent.root.path() != path);
             }
@@ -2288,6 +2331,7 @@ impl SessionState {
                 };
             }
             EventKind::TurnCompleted { ok, exit_reason } => {
+                self.last_turn_completed_at = Some(ev.env.ts);
                 self.complete_turn(ev.env.turn, *ok, *exit_reason);
             }
             EventKind::CompactionSeeded {

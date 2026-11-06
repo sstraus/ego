@@ -29,6 +29,8 @@ of a successful live login or entitlement to every model.
 | `kimi-coding` | Kimi coding subscription | `ego auth login kimi-coding` |
 | `minimax-oauth` | MiniMax subscription Messages profile | `ego auth login minimax-oauth` |
 | `nous` | Nous subscription profile | `ego auth login nous` |
+| `bedrock` | Claude in Amazon Bedrock, Messages; supplied catalogue | `AWS_BEARER_TOKEN_BEDROCK`; region from `AWS_REGION` |
+| `vertex` | Claude Models on Google Cloud (Vertex AI); supplied catalogue | `GOOGLE_CLOUD_PROJECT` and `ego auth login vertex` |
 
 For `openrouter`, rows in the user `models.toml` supply the capabilities of
 models that the gateway lists dynamically. The run and `ego models` both use
@@ -39,6 +41,9 @@ The separate API-key `xai` row is not in the CLI's selectable inventory. Design
 mentions of LM Studio, vLLM, or llama.cpp are not additional selectable profiles.
 
 ## API keys and model selection
+
+`ego setup` lists every profile above as ready or not ready, with the variable or
+login it still needs. It checks presence only and never shows a key.
 
 Set the relevant key in the process environment using your secret-management
 workflow. Ego does not load a repository `.env` file. For Anthropic, a key
@@ -53,6 +58,73 @@ capabilities again.
 
 OpenAI and Gemini are selectable. Offline contract tests do not prove live
 availability for every hosted provider.
+
+## Amazon Bedrock and Google Cloud Vertex AI
+
+Both rows serve Claude models through the cloud account of your company. The
+request and the stream are the Claude Messages API; billing, quotas and data
+handling are the cloud provider's.
+
+### Amazon Bedrock
+
+1. Enable access to the Claude models in the Amazon Bedrock console.
+2. Create an Amazon Bedrock API key, or mint a short-term token from your IAM
+   credentials with `aws-bedrock-token-generator`. Put it in
+   `AWS_BEARER_TOKEN_BEDROCK`. Ego sends it in the `x-api-key` header.
+3. Set `AWS_REGION` (or `AWS_DEFAULT_REGION`) to a region that serves Claude.
+   Without one, ego uses `us-east-1`.
+4. Select a model with its Bedrock id, for example
+   `ego -m bedrock/anthropic.claude-opus-5-5`.
+
+Ego sends requests to `https://bedrock-mantle.REGION.api.aws/anthropic/v1/messages`,
+the endpoint for Claude Opus 4.7 and later models. The older `InvokeModel` and
+`Converse` APIs are not used. Ego does not sign requests with IAM SigV4; use a
+Bedrock API key or a minted token. A short-term token expires (12 hours at
+most): mint a new one and set the variable again.
+
+### Google Cloud Vertex AI
+
+1. Enable the Claude models in Model Garden for your project. The identity that
+   calls them needs the `aiplatform.endpoints.predict` permission, for example
+   the role `roles/aiplatform.user`.
+2. Create Application Default Credentials: run
+   `gcloud auth application-default login`. To use a file in another place,
+   set `GOOGLE_APPLICATION_CREDENTIALS` to it.
+3. Set `GOOGLE_CLOUD_PROJECT` to the project ID. Set `GOOGLE_CLOUD_LOCATION` to
+   `us`, `eu` or a region only when you need data residency; the default is
+   `global`.
+4. Run `ego auth login vertex`. Ego reads the credentials file, gets an access
+   token from `oauth2.googleapis.com`, and keeps it in `$EGO_HOME/auth.json`.
+   Before the token expires, ego gets a new one from the same file. If you
+   replace or revoke the file, the next renewal uses the change.
+5. Select a model, for example `ego -m vertex/claude-opus-5-5`.
+
+Ego accepts only the `authorized_user` credential type, which
+`gcloud auth application-default login` writes. Service-account key files
+(`service_account`), workload identity federation (`external_account`) and the
+metadata server of a Google Cloud VM are not supported; ego refuses the file
+with its type name.
+Claude 4.7 and later models are on the global and multi-region endpoints only;
+a regional location serves older models.
+
+### What differs from the Anthropic row
+
+- The model list is the current Claude generation. A cloud-only or older model
+  needs a row in your `models.toml`.
+- Prompt caching uses the same 5-minute and 1-hour durations.
+- Thinking state is kept per platform: a session that changes between
+  `anthropic`, `bedrock` and `vertex` refuses to send thinking blocks from the
+  other platform, because no published source says that they are accepted.
+- Server-side web search and fast mode are not offered.
+- Prices come from the litellm table (`bedrock_mantle` and
+  `vertex_ai-anthropic_models` entries). The Bedrock entries are the regional
+  prices. The Vertex entries are the global prices: a `us`, `eu` or regional
+  location costs 10% more than the price ego records.
+- The fixtures in `crates/ego-ai/tests/goldens/profile/bedrock` and `vertex` are
+  derived from the published contract. To record them from the live service on
+  a machine with access, run
+  `EGO_SMOKE=bedrock EGO_SMOKE_RECORD=1 cargo test -p ego-cli --test it smoke -- --ignored`
+  (or `EGO_SMOKE=vertex`).
 
 ## Codex transport
 
@@ -74,7 +146,7 @@ Sources: [Codex mapping](../../crates/ego-ai/src/wire/openai_codex_responses.rs)
 [continuation owner](../../crates/ego-ai/src/codex_session.rs),
 [generator dispatch](../../crates/ego-ai/src/generator.rs), and
 [guarded CLI transport](../../crates/ego-cli/src/provider_http.rs).
-Existing [public boundary coverage](../../crates/ego-ai/tests/generator.rs)
+Existing [public boundary coverage](../../crates/ego-ai/tests/it/generator.rs)
 and [CLI generation coverage](../../crates/ego-cli/src/model.rs) protect
 same-session continuation and lineage invalidation. These are implementation
 claims, not measured cache-hit parity or latency improvements.
@@ -147,12 +219,12 @@ a token ceiling does not invent a monetary quote. See
 
 Sources: [budget admission and settlement](../../crates/ego-core/src/budget.rs),
 [durable notice deduplication](../../crates/ego-core/src/turn/journal.rs), and
-[budget regression coverage](../../crates/ego-core/tests/budget.rs).
+[budget regression coverage](../../crates/ego-core/tests/it/budget.rs).
 
 Sources and existing coverage: [model selection](../../crates/ego-cli/src/model.rs),
 [authentication](../../crates/ego-cli/src/auth.rs),
 [provider conformance tests](../../crates/ego-ai/tests/profiles/mod.rs), and
-[catalogue command tests](../../crates/ego-cli/tests/models_command.rs).
+[catalogue command tests](../../crates/ego-cli/tests/it/models_command.rs).
 
 Provider function names are wire identities. Ego keeps the original tool name
 in the catalogue and journal, and maps it at the provider boundary when it is

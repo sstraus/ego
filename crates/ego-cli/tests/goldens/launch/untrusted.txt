@@ -1,7 +1,7 @@
 # untrusted: first launch
-⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄
-⠀⢴⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇
-⠀⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀
+⠠⠀⠤⠀⠤⠄⠤⢤⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄
+⠂⠀⠂⠐⠂⠐⠒⠐⠒⢶⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇
+⠈⠀⠉⠀⠉⠁⠉⠉⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀
 εgo: ego <version>
 Project files offered for trust:
 - <workspace>/AGENTS.md
@@ -20,9 +20,9 @@ a launch transcript
 εgo: To resume: 'ego resume <session>'
 
 # untrusted: next launch
-⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄
-⠀⢴⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇
-⠀⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀
+⠠⠀⠤⠀⠤⠄⠤⢤⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄
+⠂⠀⠂⠐⠂⠐⠒⠐⠒⢶⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇
+⠈⠀⠉⠀⠉⠁⠉⠉⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀
 εgo: ego <version>
 εgo: sandbox is off; commands can access any file your user account can access
 εgo: model ollama/qwen3

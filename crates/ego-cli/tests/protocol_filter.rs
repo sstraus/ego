@@ -176,7 +176,8 @@ fn protocol_filter_first_value_survives_resume_and_is_isolated_and_immutable() {
 #[test]
 fn protocol_filter_retry_attempts_match_actual_provider_deliveries() {
     for (first, retries, expected, success) in [
-        (Reply::Status(503), "1", 2, true),
+        // A lost stream, not a capacity refusal, so the retry waits a second.
+        (Reply::TruncatedSse, "1", 2, true),
         (Reply::TruncatedSse, "0", 1, false),
     ] {
         let stub = Stub::start(Plan {

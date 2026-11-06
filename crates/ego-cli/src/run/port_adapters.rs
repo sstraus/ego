@@ -282,6 +282,10 @@ pub(super) enum HeadlessInput<'a> {
         answer: QuestionAnswer,
         policy: Arc<PolicyEngine>,
     },
+    /// Continue a compaction successor from its checkpoint; `request` is the compaction.
+    Checkpoint {
+        request: RequestId,
+    },
 }
 
 pub(super) enum RuntimeResume {
@@ -333,6 +337,8 @@ pub(super) struct SessionHookInput<'a> {
     pub(super) invocation: RunInvocationId,
     pub(super) gate: SharedBudgetGate,
     pub(super) layers: Option<&'a [Sourced<ConfigLayer>]>,
+    /// `--no-hooks`: admit nothing, whatever the layers hold.
+    pub(super) hooks_off: bool,
     pub(super) trust: Trust,
     pub(super) source: Arc<model::CliGenerationModelSource>,
     pub(super) ports: Arc<RunEffectPorts>,
@@ -356,6 +362,7 @@ pub(super) async fn compose_session_hooks<'a>(
         invocation,
         gate,
         layers,
+        hooks_off,
         trust,
         source,
         ports,
@@ -366,12 +373,15 @@ pub(super) async fn compose_session_hooks<'a>(
         deadline,
         instructions_loaded,
     } = input;
-    let catalogue =
+    let catalogue = if hooks_off {
+        HookCatalogue::off()
+    } else {
         HookCatalogue::admit_typed(layers.unwrap_or_default(), &[], trust).map_err(|error| {
             RunTermination::Failed {
                 message: format!("the session hook catalogue is invalid: {error}"),
             }
-        })?;
+        })?
+    };
     let admitted = catalogue.evidence();
     let (session_start_turn, session_end_turn) = journal
         .inspect(|state| {
@@ -858,6 +868,23 @@ impl<'a> CliSkillInvocationOwner<'a> {
         for (id, task) in tasks.iter() {
             if !state.delivered_subagents.contains_key(id)
                 && task
+                    .service
+                    .is_settled(*id)
+                    .map_err(|error| error.to_string())?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Whether a background task of this epoch is still running.
+    pub(super) fn has_unsettled_tasks(&self) -> Result<bool, String> {
+        let state = self.hooks.hook_state().state();
+        let tasks = self.tasks.lock().expect("background tasks");
+        for (id, task) in tasks.iter() {
+            if !state.delivered_subagents.contains_key(id)
+                && !task
                     .service
                     .is_settled(*id)
                     .map_err(|error| error.to_string())?

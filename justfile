@@ -27,6 +27,11 @@ python := if os() == "windows" { "python" } else { "python3" }
 catalogue-check:
     {{ python }} -B scripts/catalogue.py check
 
+# Refuse a release whose CHANGELOG.md section is missing, incomplete or not moved.
+changelog-check *args:
+    {{ python }} -B scripts/test-check-changelog.py
+    {{ python }} -B scripts/check-changelog.py release --history {{ args }}
+
 # Reject owner-specific filesystem literals in production source.
 portable-paths-check:
     {{ python }} -B scripts/test-check-portable-paths.py
@@ -58,7 +63,7 @@ lint-windows target="x86_64-pc-windows-gnu":
 
 # The full suite, the way CI runs it.
 test:
-    cargo test --workspace
+    {{ python }} -B scripts/run-gate-command.py cargo test --workspace
 
 # Local iteration only, deliberately not part of `gate`: nextest's
 # process-per-test model is what makes it fast and also what makes it a
@@ -86,7 +91,7 @@ audit:
 
 # Live provider check; costs money for any provider but ollama.
 smoke providers="ollama":
-    EGO_SMOKE={{ providers }} cargo test -p ego-cli --test smoke -- --ignored
+    EGO_SMOKE={{ providers }} cargo test -p ego-cli --test it -- --ignored smoke::
 
 # `check` and not `test`: this answers "does the promised toolchain compile
 # this?", which is all `rust-version` claims.

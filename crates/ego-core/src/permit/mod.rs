@@ -21,6 +21,8 @@ pub mod rule;
 mod sandbox_grant;
 mod scan;
 mod scope;
+mod session_approvals;
+pub use session_approvals::SessionApprovals;
 pub mod shell;
 mod spawn;
 mod tool;
@@ -39,18 +41,18 @@ pub use foreign::{
     ResolvedConnect, Resolver, Subject, TransportError, TransportFailure, WebSocketSession,
 };
 pub use fs::{
-    Fs, FsError, GuardedEffects, GuardedIo, IoDenied, McpAcpClaim, McpHttpClaim, McpStdioClaim,
-    PathResolver,
+    Fs, FsError, FsWriteAttempt, GuardedEffects, GuardedIo, GuardedWriteAttempt, IoDenied,
+    MAX_WEB_REDIRECTS, McpAcpClaim, McpHttpClaim, McpStdioClaim, PathResolver,
 };
-pub(crate) use grant::PermissionPresentationInput;
 pub use grant::{
     Authorized, Classification, Escalation, Pending, PermissionPresentation, PermissionRequest,
     Permit, PermitDenied, PolicyDenied, PolicyEngine, Resolution,
 };
+pub(crate) use grant::{InheritedGrant, PermissionPresentationInput};
 pub use path::CanonPath;
 pub use prepared_call::{
     Change, HookHttpPreparedEnvelope, McpPreparedEnvelope, NotebookCellEdit, NotebookCellType, Op,
-    OpName, PreparedCall, SecretEgressAuthority, SessionProcessAction,
+    OpName, PreparedCall, ReplaceChunk, SecretEgressAuthority, SessionProcessAction,
 };
 pub use roots::{
     PermanentRootConsent, ProfileRoot, RootAccess, RootCfg, RootConsent, RootsError, admit_roots,
@@ -60,17 +62,22 @@ pub use sandbox_grant::{SandboxAccess, SandboxGrant, SandboxGrantPort};
 pub use scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanLimits, ScanRequest};
 pub use scope::Scope;
 pub use spawn::{
-    BackendIdentity, Confinement, ConfinementParseError, DetachedExecOutcome, DetachedExecSnapshot,
-    EnvName, EnvNameError, EnvPolicy, ExecCaps, ExecObservation, ExecRequirements,
-    ExplicitEnvBinding, ExplicitEnvValueError, MissingExecCaps, PolicyDigest, PolicyDigestError,
-    ProcessError, ProcessExecutor, RunConfinement, RunConfinementError, SpawnSpec, SpawnSpecError,
+    BackendIdentity, Confinement, ConfinementParseError, DetachedExecLines, DetachedExecMonitor,
+    DetachedExecOutcome, DetachedExecSnapshot, EnvName, EnvNameError, EnvPolicy, ExecCaps,
+    ExecObservation, ExecRequirements, ExplicitEnvBinding, ExplicitEnvValueError, MissingExecCaps,
+    MonitoredLine, PolicyDigest, PolicyDigestError, ProcessError, ProcessExecutor, RunConfinement,
+    RunConfinementError, SpawnSpec, SpawnSpecError,
 };
 pub(crate) use tool::ToolResultProvenance;
 pub use tool::{
-    LineChange, MAX_TOOL_ERROR_DIAGNOSTIC_BYTES, PrepareCtx, StreamProvenance, Tool,
-    ToolContentBlock, ToolDescriptor, ToolError, ToolOutputEncoding, ToolOutputProvenance,
-    ToolResult, Typed, TypedTool,
+    BEFORE_IMAGE_LIMIT, BeforeImage, FileWriteEvidence, LineChange,
+    MAX_TOOL_ERROR_DIAGNOSTIC_BYTES, PrepareCtx, StreamProvenance, Tool, ToolContentBlock,
+    ToolDescriptor, ToolError, ToolOutputEncoding, ToolOutputProvenance, ToolResult, Typed,
+    TypedTool,
 };
 
 mod terminal_text;
 pub use terminal_text::{TerminalSafe, shell_word, terminal_output_safe, terminal_safe};
+
+#[cfg(test)]
+mod session_approval_tests;

@@ -26,19 +26,33 @@ pub fn render(change: &Change, capabilities: Capabilities) -> String {
         }
         Change::Replace {
             replace_all,
-            old_string,
-            new_string,
-        } => (
-            old_string.as_str(),
-            new_string.as_str(),
-            "old fragment",
-            "new fragment",
-            if *replace_all {
+            chunks,
+        } => {
+            let note = if *replace_all {
                 "Replacement fragment: replace all original non-overlapping occurrences; final content depends on the file at execution time."
             } else {
                 "Replacement fragment: replace exactly one occurrence; final content depends on the file at execution time."
-            },
-        ),
+            };
+            return chunks
+                .iter()
+                .enumerate()
+                .map(|(index, chunk)| {
+                    format!(
+                        "Chunk {}:\n{}",
+                        index + 1,
+                        render_diff(
+                            &chunk.old_string,
+                            &chunk.new_string,
+                            "old fragment",
+                            "new fragment",
+                            note,
+                            capabilities
+                        )
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
         Change::Whole(bytes) => match std::str::from_utf8(bytes) {
             Ok(content) => (
                 "",
@@ -55,6 +69,17 @@ pub fn render(change: &Change, capabilities: Capabilities) -> String {
             }
         },
     };
+    render_diff(old, new, before, after, note, capabilities)
+}
+
+fn render_diff(
+    old: &str,
+    new: &str,
+    before: &str,
+    after: &str,
+    note: &str,
+    capabilities: Capabilities,
+) -> String {
     let unified = TextDiff::from_lines(old, new)
         .unified_diff()
         .header(before, after)

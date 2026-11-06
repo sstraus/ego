@@ -66,6 +66,16 @@ fn expected(snapshot: &Value, policy: &toml::Table) -> Vec<(String, BTreeSet<Str
         .collect()
 }
 
+/// The builtin slug of snapshot model `id` under provider `name`, with the
+/// cloud id prefix the policy states.
+fn slug(policy: &toml::Table, name: &str, id: &str) -> String {
+    let prefix = policy["provider"][name]
+        .get("id_prefix")
+        .and_then(toml::Value::as_str)
+        .unwrap_or_default();
+    format!("{name}/{prefix}{id}")
+}
+
 fn row<'a>(
     rows: &'a [(String, HostedModel)],
     slug: &str,
@@ -89,7 +99,7 @@ fn every_current_snapshot_model_is_in_the_builtin_catalogue_with_the_snapshot_li
         let provider = &policy["provider"][&name];
         let models = &snapshot["providers"][provider["models_dev"].as_str().unwrap()];
         for id in ids {
-            let caps = row(&rows, &format!("{name}/{id}"));
+            let caps = row(&rows, &slug(&policy, &name, &id));
             let context = provider
                 .get("context_override")
                 .and_then(toml::Value::as_integer)
@@ -116,7 +126,10 @@ fn the_builtin_catalogue_lists_nothing_beyond_the_current_generations() {
     let (snapshot, policy) = (snapshot(), policy());
     let mut wanted: BTreeSet<String> = expected(&snapshot, &policy)
         .into_iter()
-        .flat_map(|(name, ids)| ids.into_iter().map(move |id| format!("{name}/{id}")))
+        .flat_map(|(name, ids)| {
+            let policy = &policy;
+            ids.into_iter().map(move |id| slug(policy, &name, &id))
+        })
         .collect();
     wanted.extend(policy["stated"].as_table().unwrap().keys().cloned());
     let listed: BTreeSet<String> = builtin().model.into_keys().collect();
@@ -176,7 +189,7 @@ fn reasoning_efforts_follow_the_snapshot_controls() {
                 want.remove(dropped.as_str());
             }
             let ReasoningEffortSupport::Only(have) =
-                &row(&rows, &format!("{name}/{id}")).reasoning_efforts
+                &row(&rows, &slug(&policy, &name, &id)).reasoning_efforts
             else {
                 panic!("{name}/{id}: efforts are not an explicit set");
             };

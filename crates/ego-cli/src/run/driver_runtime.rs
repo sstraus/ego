@@ -2,6 +2,7 @@
 
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 async fn admit_saved_session_policy(
     active: &mut ActiveSession<'_>,
     observation: &ExecObservation,
@@ -10,6 +11,7 @@ async fn admit_saved_session_policy(
     journal_ports: (&SystemClock, &dyn EventSink),
     diagnostics: &dyn Diagnostics,
     human: Option<&dyn HumanApprover>,
+    accept_delta: bool,
 ) -> Result<(), RunTermination> {
     // The saved authority is the observation the last admitted turn journaled.
     let Some(previous) = active.state().execution_observation.clone() else {
@@ -53,6 +55,7 @@ async fn admit_saved_session_policy(
         &approved_roots,
         CanonPath::new(root),
         human,
+        accept_delta,
         &mut journal,
         |message| {
             diagnostics.note(message);
@@ -202,10 +205,18 @@ enum EpochStart {
     },
 }
 
+/// A terminal change of saved root authority. Both re-enter the same session.
+enum RootReadmission {
+    Revoke(CanonPath),
+    Grant,
+}
+
 enum EpochTransition<'store> {
     RevokeRoot {
         path: CanonPath,
     },
+    /// A saved root grant becomes effective through full same-session admission.
+    GrantRoot,
     Resume {
         meta: ego_core::store::session_store::SessionMeta,
     },
@@ -262,6 +273,7 @@ pub(super) async fn drive_execution<S: EventSink>(
     } = host;
     let ScopedInvocation {
         mcp_scope: _mcp_scope,
+        mcp_task_port,
         mcp_runtime,
         mcp_registry,
         artifact_store,
@@ -280,6 +292,7 @@ pub(super) async fn drive_execution<S: EventSink>(
         generation: _,
         skill_trust,
         skill_profile_layers,
+        no_hooks,
         run_deadline,
         root,
         cwd,
@@ -377,6 +390,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                 invocation,
                 gate: gate.clone(),
                 layers: skill_profile_layers.as_deref(),
+                hooks_off: no_hooks,
                 trust: skill_trust,
                 source: Arc::clone(&source),
                 ports: Arc::clone(&$hook_ports),
@@ -395,91 +409,168 @@ pub(super) async fn drive_execution<S: EventSink>(
     match driver {
         Driver::Once => {
             let prompt = RunPrompt::from(text.clone());
-            let input = headless_input(resume, &prompt);
-            // One run is one session: the judge's grants die with it.
-            let residual = judge_available.then(ResidualWriteDesk::new);
-            let (ports, observation, probe_evidence) = effect_scope(
-                &confinement,
-                active.evidence(),
-                &cancel,
-                run_deadline,
-                residual.clone(),
-                None,
-            )
-            .await?;
-            admit_saved_session_policy(
-                &mut active,
-                &observation,
-                &effective,
-                &root,
-                (&clock, sink),
-                diagnostics,
-                None,
-            )
-            .await?;
-            record_session_selections(
-                &mut active,
-                &effective,
-                &selection,
-                &confinement,
-                &clock,
-                sink,
-            )?;
-            let opening = active.state().clone();
-            let pause = PauseToken::default();
-            let driven = drive_headless_turn(
-                HeadlessSession {
-                    active: &mut active,
-                    opening,
-                    clock: &clock,
-                    sink,
-                    cancel: &cancel,
-                    pause: &pause,
-                    control: None,
-                },
-                HeadlessGeneration {
-                    source: Arc::clone(&source),
-                    admission: Arc::clone(&evidence),
-                    invocation,
-                    config: config.clone(),
-                    provider_recovery: args.provider_recovery,
-                    goal: args.goal.clone(),
-                    goal_turns: args.goal_turns,
-                    goal_check_command: args.goal_check_command.clone(),
-                    goal_ceilings: effective.ceilings.clone(),
-                    gate: gate.clone(),
-                    hook_layers: skill_profile_layers.as_deref(),
-                    hook_trust: skill_trust,
-                    policy_source: Arc::clone(&policy_source),
-                    judge_available,
-                },
-                HeadlessChild {
-                    parent_run: run_id,
-                    root: child_root.clone(),
-                    store: Arc::clone(jsonl_store),
-                    executor: Arc::clone(&child_executor),
-                    inherited_effect_tools: None,
-                },
-                HeadlessEffects {
-                    mcp_runtime: Some(mcp_runtime.clone()),
-                    registry: &registry,
-                    admitted_tools: admitted_tools.clone(),
-                    cwd: &cwd,
-                    confinement: &confinement,
+            let mut input = headless_input(resume, &prompt);
+            let mut accept_authority_delta = args.accept_authority_delta;
+            // A CI bundle covers one session, so that profile keeps explicit recovery.
+            let compaction_host = artifact_store.is_none();
+            let mut turns_taken: u32 = 0;
+            let driven = loop {
+                // One session is one judge: its grants die with it.
+                let residual = Some(ResidualWriteDesk::with_limits(effective.residual_limits));
+                let (ports, observation, probe_evidence) = effect_scope(
+                    &confinement,
+                    active.evidence(),
+                    &cancel,
                     run_deadline,
-                    ports,
-                    observation,
-                    probe_evidence,
-                    elicitor,
-                },
-                HeadlessTurn {
-                    turns: &turns,
-                    attachment_specs: &args.attach,
-                    input,
+                    residual.clone(),
+                    None,
+                )
+                .await?;
+                admit_saved_session_policy(
+                    &mut active,
+                    &observation,
+                    &effective,
+                    &root,
+                    (&clock, sink),
                     diagnostics,
-                },
-            )
-            .await;
+                    None,
+                    std::mem::take(&mut accept_authority_delta),
+                )
+                .await?;
+                record_session_selections(
+                    &mut active,
+                    &effective,
+                    &selection,
+                    &confinement,
+                    &clock,
+                    sink,
+                )?;
+                let opening = active.state().clone();
+                // Session roots cannot cross an in-process session transition.
+                // Opt-in: `compaction.headless`.
+                let automatic_compaction = (compaction_host
+                    && effective.compaction.headless
+                    && opening.session_roots.is_empty())
+                .then_some(effective.compaction.threshold);
+                let segment_turns = Turns {
+                    parent_cancel: turns.parent_cancel.clone(),
+                    schema: turns.schema,
+                    retries: turns.retries,
+                    max_turns: turns.max_turns.map(|max| max.saturating_sub(turns_taken)),
+                    deadline: turns.deadline,
+                };
+                let pause = PauseToken::default();
+                let driven = drive_headless_turn(
+                    HeadlessSession {
+                        active: &mut active,
+                        opening,
+                        clock: &clock,
+                        sink,
+                        cancel: &cancel,
+                        pause: &pause,
+                        control: None,
+                    },
+                    HeadlessGeneration {
+                        source: Arc::clone(&source),
+                        admission: Arc::clone(&evidence),
+                        invocation,
+                        config: config.clone(),
+                        provider_recovery: args.provider_recovery,
+                        goal: args.goal.clone(),
+                        goal_turns: args.goal_turns,
+                        goal_check_command: args.goal_check_command.clone(),
+                        goal_ceilings: effective.ceilings.clone(),
+                        child_defaults: effective.task.clone(),
+                        gate: gate.clone(),
+                        hook_layers: skill_profile_layers.as_deref(),
+                        hooks_off: no_hooks,
+                        hook_trust: skill_trust,
+                        policy_source: Arc::clone(&policy_source),
+                        judge_available,
+                    },
+                    HeadlessChild {
+                        parent_run: run_id,
+                        root: child_root.clone(),
+                        store: Arc::clone(jsonl_store),
+                        executor: Arc::clone(&child_executor),
+                        inherited_effect_tools: None,
+                    },
+                    HeadlessEffects {
+                        mcp_runtime: Some(mcp_runtime.clone()),
+                        registry: &registry,
+                        admitted_tools: admitted_tools.clone(),
+                        cwd: &cwd,
+                        confinement: &confinement,
+                        run_deadline,
+                        ports,
+                        observation,
+                        probe_evidence,
+                        elicitor: elicitor.clone(),
+                    },
+                    HeadlessTurn {
+                        turns: &segment_turns,
+                        attachment_specs: &args.attach,
+                        input,
+                        diagnostics,
+                        automatic_compaction,
+                    },
+                )
+                .await;
+                let (termination, state, result, compaction) = match driven {
+                    Ok(driven) => driven,
+                    Err(termination) => break Err(termination),
+                };
+                let Some(compaction) = compaction else {
+                    break Ok((termination, state, result));
+                };
+                let source_context = state.context;
+                active.replace_state(state);
+                activate_headless_successor(
+                    &mut active,
+                    &compaction.receipt,
+                    jsonl_store.as_ref(),
+                    &clock,
+                    (evidence.as_ref(), &run_context),
+                )?;
+                diagnostics.note(&compaction_activation_note(
+                    compaction.receipt.source,
+                    active.id(),
+                    source_context,
+                ));
+                let started = active.state().clone();
+                sink.publish(
+                    &PublicEvent::SessionCompacted {
+                        source: compaction.receipt.source,
+                        source_seq: compaction.receipt.source_seq,
+                        target: active.id(),
+                    },
+                    &started,
+                );
+                sink.publish(
+                    &PublicEvent::SessionStarted {
+                        v: PUBLIC_EVENT_VERSION,
+                        session: active.id(),
+                        capabilities: capabilities(
+                            &registry,
+                            config.system.is_some(),
+                            compiled.is_some(),
+                            no_hooks,
+                        ),
+                        mcp_errors: mcp_errors.to_vec(),
+                        hook_errors: Vec::new(),
+                        instructions: config
+                            .system
+                            .as_ref()
+                            .map(|prompt| prompt.sources.clone())
+                            .unwrap_or_default(),
+                    },
+                    &started,
+                );
+                turns_taken = turns_taken.saturating_add(compaction.turns_taken);
+                input = HeadlessInput::Checkpoint {
+                    request: compaction.request,
+                };
+            };
             Ok(finish_headless_execution(
                 &mut active,
                 driven,
@@ -512,18 +603,22 @@ pub(super) async fn drive_execution<S: EventSink>(
             let mut resumed = resume;
             let mut pending_attachments = args.attach.clone();
             let mut epoch_start = EpochStart::Initial;
-            register_context_tool(&args, &mut registry);
+            // The owner's option covers the resume it was given for, not a later `/resume`.
+            let mut accept_authority_delta = args.accept_authority_delta;
+            register_context_tool(&args, &effective, &mut registry);
             let mut checkpoint_pending = false;
             let mut last_generation_request = None;
             let mut automatic_compaction_failed = false;
+            // The prompt-cache deadline of the last idle compaction attempt.
+            let mut idle_compaction_attempt = None;
 
             // Borrow-scoped session authorities live in one lexical epoch.
             // Only owned transition data crosses the boundary where the
             // replaceable ActiveSession is mutated or replaced.
             'sessions: loop {
-                // A new, forked, compacted or resumed epoch is another
-                // session, so the judge's grants do not cross into it.
-                let residual = judge_available.then(ResidualWriteDesk::new);
+                // Judge grants never cross epochs. The executing turn restores
+                // owner grants only from this session's durable receipts.
+                let residual = Some(ResidualWriteDesk::with_limits(effective.residual_limits));
                 let sandbox_grants = SeatSandboxGrants::for_seat(Arc::clone(&seat));
                 let (transition, source_state, session_end) = {
                     let (session_hook_ports, observation, probe_evidence) = effect_scope(
@@ -540,6 +635,14 @@ pub(super) async fn drive_execution<S: EventSink>(
                         wake_seat.wake_background_exec();
                     });
                     session_hook_ports.set_background_waker(Arc::clone(&background_waker));
+                    // A live MCP task wakes the idle seat at its poll time;
+                    // dropping the timer with this epoch stops it.
+                    let _mcp_task_wake = mcp_task_port.as_ref().map(|port| {
+                        super::mcp_task_wake::McpTaskWake::start(
+                            Arc::clone(port),
+                            Arc::clone(&background_waker),
+                        )
+                    });
                     let human = seat
                         .has_human()
                         .then(|| SeatApprover { seat: seat.clone() });
@@ -551,6 +654,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                         (&clock, sink),
                         diagnostics,
                         human.as_ref().map(|human| human as &dyn HumanApprover),
+                        std::mem::take(&mut accept_authority_delta),
                     )
                     .await?;
                     record_session_selections(
@@ -640,6 +744,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                             registry: &registry,
                             system: config.system.as_ref(),
                             has_schema: compiled.is_some(),
+                            hooks_off: no_hooks,
                             mcp_errors: &mcp_errors,
                         },
                         diagnostics,
@@ -660,6 +765,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                             ),
                         };
                     }
+                    // A root saved in this epoch waits for a quiet turn boundary.
+                    let mut root_grant_pending = false;
                     let transition = if activation_failed {
                         EpochTransition::Exit
                     } else {
@@ -677,6 +784,20 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 Some(input)
                             } else {
                                 let pending_work = interactive_work_pending(&control, &state);
+                                // The snapshot reads model facts from disk; skip it
+                                // on every idle read while idle compaction is off.
+                                let idle = effective
+                                    .compaction
+                                    .idle
+                                    .then(|| selection.snapshot().ok())
+                                    .flatten()
+                                    .map(|selected| IdleCompactionWatch {
+                                        config: &effective.compaction,
+                                        state: &state,
+                                        model: selected.identity.0,
+                                        attempted: &mut idle_compaction_attempt,
+                                        clock: &clock,
+                                    });
                                 let (line, model_compaction, automatic_compaction) =
                                     next_interactive_command(
                                         seat.as_ref(),
@@ -685,7 +806,9 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         &args,
                                         &mut seeded,
                                         pending_work,
-                                        automatic_compaction_failed,
+                                        (automatic_compaction_failed, &last.termination),
+                                        idle,
+                                        effective.compaction.threshold,
                                     );
 
                                 if let Some(residual) = &residual {
@@ -721,6 +844,8 @@ pub(super) async fn drive_execution<S: EventSink>(
                                         policy_application: &policy_application,
                                         text_output,
                                         session_hook_ports: &session_hook_ports,
+                                        mcp_task_port: mcp_task_port.as_ref(),
+                                        session_evidence: active.evidence(),
                                         task_owner: &skill_owner,
                                         skill_profile_layers: &skill_profile_layers,
                                         perimeter: &perimeter,
@@ -762,69 +887,92 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 }
                             };
 
-                            // Fresh work re-arms pressure recovery. The turn journals it
-                            // before yielding at pressure, so the next checkpoint includes
-                            // the prompt rather than refusing it forever after a failure.
-                            automatic_compaction_failed = false;
-                            let (exit, next_perimeter, revoked_root) =
-                                drive_interactive_turn_phase(
-                                    InteractiveTurnPhase {
-                                        seat: seat.as_ref(),
-                                        status: status.as_ref(),
-                                        confinement: &confinement,
-                                        active: &active,
-                                        run_deadline,
-                                        residual: residual.clone(),
-                                        sandbox_grants: sandbox_grants.clone(),
-                                        perimeter,
-                                        session_hook_ports: &session_hook_ports,
-                                        pending_attachments: &mut pending_attachments,
-                                        source: &source,
-                                        cwd: &cwd,
-                                        diagnostics,
-                                        state: &mut state,
-                                        args: &args,
-                                        effective: &effective,
-                                        policy_source: &policy_source,
-                                        gate: &gate,
-                                        config: &config,
-                                        evidence: &evidence,
-                                        invocation,
-                                        registry: &registry,
-                                        admitted_tools: &admitted_tools,
-                                        mcp_runtime: mcp_runtime.as_ref(),
-                                        skill_resource_roots: &skill_resource_roots,
-                                        elicitor: &elicitor,
-                                        judge_available,
-                                        skill_trust,
-                                        session_hooks: &session_hooks,
-                                        session_journal: &session_journal,
-                                        skill_owner: skill_owner.clone(),
-                                        refresh_prompt: &mut refresh_prompt,
-                                        control: &mut control,
-                                        turns: &turns,
-                                        last_generation_request: &mut last_generation_request,
-                                        policy_selection: &policy_selection,
-                                        selection: &selection,
-                                        between,
-                                        cancel: &cancel,
-                                        last: &mut last,
-                                        mcp_errors: &mcp_errors,
-                                        jsonl_store,
-                                        root: &root,
-                                        clock: &clock,
-                                        skill_profile_layers: skill_profile_layers.as_deref(),
-                                    },
-                                    resumed_turn,
-                                    asked,
-                                )
-                                .await?;
+                            // Only fresh operator work re-arms recovery. An internal
+                            // checkpoint continuation must yield if its successor overflows.
+                            if asked.as_ref().is_some_and(|input| {
+                                !matches!(input, InteractiveTurnInput::Checkpoint)
+                            }) || !state.unacknowledged_prompts().is_empty()
+                            {
+                                automatic_compaction_failed = false;
+                            }
+                            let (exit, next_perimeter, readmission) = drive_interactive_turn_phase(
+                                InteractiveTurnPhase {
+                                    seat: seat.as_ref(),
+                                    status: status.as_ref(),
+                                    confinement: &confinement,
+                                    active: &active,
+                                    run_deadline,
+                                    residual: residual.clone(),
+                                    sandbox_grants: sandbox_grants.clone(),
+                                    perimeter,
+                                    session_hook_ports: &session_hook_ports,
+                                    pending_attachments: &mut pending_attachments,
+                                    source: &source,
+                                    cwd: &cwd,
+                                    diagnostics,
+                                    state: &mut state,
+                                    args: &args,
+                                    effective: &effective,
+                                    policy_source: &policy_source,
+                                    gate: &gate,
+                                    config: &config,
+                                    evidence: &evidence,
+                                    invocation,
+                                    registry: &registry,
+                                    admitted_tools: &admitted_tools,
+                                    mcp_runtime: mcp_runtime.as_ref(),
+                                    skill_resource_roots: &skill_resource_roots,
+                                    elicitor: &elicitor,
+                                    judge_available,
+                                    skill_trust,
+                                    session_hooks: &session_hooks,
+                                    session_journal: &session_journal,
+                                    skill_owner: skill_owner.clone(),
+                                    mcp_task_port: mcp_task_port.clone(),
+                                    refresh_prompt: &mut refresh_prompt,
+                                    control: &mut control,
+                                    turns: &turns,
+                                    last_generation_request: &mut last_generation_request,
+                                    policy_selection: &policy_selection,
+                                    selection: &selection,
+                                    between,
+                                    cancel: &cancel,
+                                    last: &mut last,
+                                    mcp_errors: &mcp_errors,
+                                    jsonl_store,
+                                    root: &root,
+                                    clock: &clock,
+                                    skill_profile_layers: skill_profile_layers.as_deref(),
+                                },
+                                resumed_turn,
+                                asked,
+                            )
+                            .await?;
                             perimeter = next_perimeter;
-                            if let Some(path) = revoked_root {
+                            let granted = matches!(readmission, Some(RootReadmission::Grant));
+                            if let Some(RootReadmission::Revoke(path)) = readmission {
                                 break 'epoch EpochTransition::RevokeRoot { path };
                             }
                             if exit {
                                 break 'epoch EpochTransition::Exit;
+                            }
+                            root_grant_pending |= granted;
+                            if root_grant_pending {
+                                // Re-admission ends this epoch's effect owners, so
+                                // it never stops background work the owner started.
+                                if state.detached_execs.values().any(Option::is_none)
+                                    || skill_owner
+                                        .has_unsettled_tasks()
+                                        .map_err(|message| RunTermination::Failed { message })?
+                                {
+                                    if granted {
+                                        diagnostics.note(
+                                            "Root saved; ego re-admits this session when background work ends",
+                                        );
+                                    }
+                                } else {
+                                    break 'epoch EpochTransition::GrantRoot;
+                                }
                             }
                         }
                     };
@@ -844,6 +992,25 @@ pub(super) async fn drive_execution<S: EventSink>(
                     let source_state = leased_session_journal
                         .try_into_state()
                         .map_err(hook_journal_termination)?;
+                    // MCP tasks belong to the session that started them. A root
+                    // change keeps the session; every other transition ends it.
+                    if let Some(port) = &mcp_task_port
+                        && !matches!(
+                            transition,
+                            EpochTransition::RevokeRoot { .. } | EpochTransition::GrantRoot
+                        )
+                    {
+                        let fs = OsFs;
+                        let effects = ToolEffectPorts::new(
+                            &fs,
+                            session_hook_ports.process(),
+                            active.evidence(),
+                            session_hook_ports.resolver_handle(),
+                            session_hook_ports.one_hop_handle(),
+                            session_hook_ports.duplex_handle(),
+                        );
+                        port.cancel_all(effects).await;
+                    }
                     drop(session_hook_ports);
                     (transition, source_state, session_end)
                 };
@@ -869,6 +1036,26 @@ pub(super) async fn drive_execution<S: EventSink>(
                         seat.restore_control(control);
                         diagnostics
                             .note("Root revoked; children stopped; rebuilding session authority");
+                        break 'sessions Ok(last);
+                    }
+                    EpochTransition::GrantRoot => {
+                        // The same boundary as revocation: this epoch's effect
+                        // owners are gone, and the outer loop admits the session
+                        // again from its journal and config. No live guard changes.
+                        session_end?;
+                        active.replace_state(source_state);
+                        let meta = jsonl_store
+                            .readable_meta(&active.id())
+                            .map_err(|error| RunTermination::Failed {
+                                message: error.to_string(),
+                            })?
+                            .ok_or_else(|| RunTermination::Failed {
+                                message: "granted session metadata is unavailable".into(),
+                            })?;
+                        last.state = active.state().clone();
+                        last.selected_session = Some(meta);
+                        seat.restore_control(control);
+                        diagnostics.note("Root granted; rebuilding session authority");
                         break 'sessions Ok(last);
                     }
                     EpochTransition::Exit => {
@@ -977,7 +1164,8 @@ fn activate_session_transition<'store>(
         ),
         EpochTransition::Exit
         | EpochTransition::Resume { .. }
-        | EpochTransition::RevokeRoot { .. } => {
+        | EpochTransition::RevokeRoot { .. }
+        | EpochTransition::GrantRoot => {
             unreachable!("terminal transitions retain the driver control owner")
         }
     }
@@ -1037,8 +1225,8 @@ fn finish_headless_execution(
     ended
 }
 
-fn register_context_tool(args: &Args, registry: &mut Vec<RegisteredTool>) {
-    if !args.no_context_tool && args.tools.is_none() {
+fn register_context_tool(args: &Args, effective: &Effective, registry: &mut Vec<RegisteredTool>) {
+    if !args.no_context_tool && super::composition::selected_tools(args, effective).is_none() {
         registry.push(RegisteredTool::Context);
     }
 }
@@ -1145,6 +1333,35 @@ fn interactive_work_pending(control: &InteractiveControl, state: &SessionState) 
         || state.pending_question().is_some()
 }
 
+/// Why a compaction runs without the operator's `/compact` confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutomaticCompaction {
+    /// Context pressure or a model request; the task continues afterwards.
+    Pressure,
+    /// The idle session's prompt cache is about to expire; nothing continues.
+    CacheExpiry,
+}
+
+/// Pending work, model-requested compaction, and the automatic trigger.
+type CommandPosture = (bool, bool, Option<AutomaticCompaction>);
+
+/// The facts an idle read needs to start compaction before the cache expires.
+struct IdleCompactionWatch<'a> {
+    config: &'a ego_core::compact::CompactionConfig,
+    state: &'a SessionState,
+    model: String,
+    attempted: &'a mut Option<ego_core::event::time::Timestamp>,
+    clock: &'a dyn ego_core::event::time::Clock,
+}
+
+impl IdleCompactionWatch<'_> {
+    fn decide(&self) -> ego_core::compact::IdleCompaction {
+        self.config
+            .idle_compaction(self.state, &self.model, *self.attempted, self.clock.now())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn next_interactive_command(
     seat: &dyn InteractiveSeat,
     status: Option<&InteractiveStatus>,
@@ -1152,24 +1369,42 @@ fn next_interactive_command(
     args: &Args,
     seeded: &mut Option<String>,
     pending_work: bool,
-    automatic_compaction_failed: bool,
-) -> (repl::Line, bool, bool) {
+    recovery: (bool, &RunTermination),
+    idle: Option<IdleCompactionWatch<'_>>,
+    threshold: ego_core::compact::ContextPercent,
+) -> (repl::Line, bool, Option<AutomaticCompaction>) {
+    let (automatic_compaction_failed, termination) = recovery;
     // Reopened attempts are journaled interruptions, not live terminal work.
     seat.set_compaction_availability(compaction_availability(pending_work));
     let model_compaction = state.context_request.is_some() && !args.no_context_tool;
-    let automatic_compaction = !automatic_compaction_failed
+    let pressure = !automatic_compaction_failed
         && !pending_work
-        && (model_compaction || ego_core::turn::compaction_due(state.context));
+        && (model_compaction
+            || ego_core::turn::compaction_due(state.context, threshold)
+            || matches!(termination, RunTermination::ContextOverflow { .. }));
+    let compact =
+        || repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Compact));
     // Keep reads on the terminal owner and return output through its painter.
-    let line = if automatic_compaction {
-        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Compact))
-    } else {
-        match seeded.take() {
-            Some(first) => repl::Line::Submitted(first),
-            None => read_interactive_command(seat, status),
-        }
-    };
-    (line, model_compaction, automatic_compaction)
+    if pressure {
+        return (
+            compact(),
+            model_compaction,
+            Some(AutomaticCompaction::Pressure),
+        );
+    }
+    if let Some(first) = seeded.take() {
+        return (repl::Line::Submitted(first), model_compaction, None);
+    }
+    // A failed compaction stays idle until fresh operator work re-arms it.
+    let idle = idle.filter(|_| !automatic_compaction_failed && !pending_work);
+    match read_interactive_command(seat, status, idle) {
+        Some(line) => (line, model_compaction, None),
+        None => (
+            compact(),
+            model_compaction,
+            Some(AutomaticCompaction::CacheExpiry),
+        ),
+    }
 }
 
 fn recover_epoch_policy(
@@ -1312,6 +1547,54 @@ fn image_inputs(draft: &repl::ImageDraft) -> Vec<attachment::AttachmentInput> {
             }
         })
         .collect()
+}
+
+/// The recap shown before the first prompt after an absence. It never enters
+/// the session history; the usage line states what it cost, and `/usage`
+/// counts it with the main model. A failure is shown and the prompt runs.
+fn render_recap(recap: Result<ego_core::turn::Recap, ego_core::turn::RecapFailure>) -> String {
+    match recap {
+        Ok(recap) => {
+            let usage = recap.usage().map_or_else(
+                || "usage not reported".to_owned(),
+                |usage| {
+                    format!(
+                        "usage: {} input, {} cached, {} output tokens",
+                        usage.uncached_input_tokens, usage.cache_read_tokens, usage.output_tokens
+                    )
+                },
+            );
+            format!("While you were away — recap:\n{}\n({usage})", recap.text())
+        }
+        Err(error) => format!("recap unavailable: {error}"),
+    }
+}
+
+const SIDE_QUESTION_IDLE: &str =
+    "/side needs a running turn; send the question as a normal prompt instead";
+
+/// Answer one side question beside the running turn and render it as a notice.
+/// The notice never enters the session history; the usage line states what the
+/// answer cost, and `/usage` counts it with the main model.
+async fn answer_side_question(
+    port: &ego_core::turn::SideQuestionPort<'_, '_>,
+    question: &str,
+) -> String {
+    match port.ask(question, &CancelToken::new()).await {
+        Ok(answer) => {
+            let usage = answer.usage().map_or_else(
+                || "usage not reported".to_owned(),
+                |usage| {
+                    format!(
+                        "usage: {} input, {} cached, {} output tokens",
+                        usage.uncached_input_tokens, usage.cache_read_tokens, usage.output_tokens
+                    )
+                },
+            );
+            format!("side question: {question}\n{}\n({usage})", answer.text())
+        }
+        Err(error) => format!("side question failed: {error}"),
+    }
 }
 
 async fn answer_image_request(
@@ -1465,7 +1748,16 @@ async fn run_interactive_setup(
         status,
         diagnostics,
     };
-    if let Err(error) = crate::setup_config::run(&mut screen, root, &home, None, Some(effective)) {
+    let providers = match crate::onboarding::current_provider_readiness(&home) {
+        Ok(providers) => providers,
+        Err(error) => {
+            diagnostics.note(&format!("Setup: {error}"));
+            return;
+        }
+    };
+    if let Err(error) =
+        crate::setup_config::run(&mut screen, root, &home, None, Some(effective), &providers)
+    {
         diagnostics.note(&format!("Setup: {error}"));
     }
 }
@@ -1848,6 +2140,7 @@ struct EpochCapabilities<'a> {
     registry: &'a [RegisteredTool],
     system: Option<&'a SystemPrompt>,
     has_schema: bool,
+    hooks_off: bool,
     mcp_errors: &'a [String],
 }
 
@@ -1864,6 +2157,7 @@ fn activate_epoch(
         registry,
         system,
         has_schema,
+        hooks_off,
         mcp_errors,
     } = capabilities_input;
     match epoch_start {
@@ -1873,7 +2167,7 @@ fn activate_epoch(
                 &PublicEvent::SessionStarted {
                     v: PUBLIC_EVENT_VERSION,
                     session: session_id,
-                    capabilities: capabilities(registry, system.is_some(), has_schema),
+                    capabilities: capabilities(registry, system.is_some(), has_schema, hooks_off),
                     mcp_errors: mcp_errors.to_vec(),
                     hook_errors: Vec::new(),
                     instructions: system
@@ -1898,7 +2192,7 @@ fn activate_epoch(
                 &PublicEvent::SessionStarted {
                     v: PUBLIC_EVENT_VERSION,
                     session: session_id,
-                    capabilities: capabilities(registry, system.is_some(), has_schema),
+                    capabilities: capabilities(registry, system.is_some(), has_schema, hooks_off),
                     mcp_errors: mcp_errors.to_vec(),
                     hook_errors: Vec::new(),
                     instructions: system
@@ -1922,7 +2216,7 @@ fn activate_epoch(
                 &PublicEvent::SessionStarted {
                     v: PUBLIC_EVENT_VERSION,
                     session: session_id,
-                    capabilities: capabilities(registry, system.is_some(), has_schema),
+                    capabilities: capabilities(registry, system.is_some(), has_schema, hooks_off),
                     mcp_errors: mcp_errors.to_vec(),
                     hook_errors: Vec::new(),
                     instructions: system
@@ -2174,6 +2468,7 @@ struct InteractiveTurnBuild<'a, 'session> {
     hooks: &'a SessionHookComposition<'session>,
     journal: &'a SharedJournal<'session>,
     skill_owner: Arc<CliSkillInvocationOwner<'session>>,
+    mcp_task_port: Option<Arc<dyn ego_core::mcp::McpTaskPort>>,
 }
 
 fn build_interactive_turn<'session: 'turn, 'turn>(
@@ -2209,6 +2504,7 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         hooks,
         journal,
         skill_owner,
+        mcp_task_port,
     } = input;
     let (ports, cancel, observation, probe_evidence) = effects;
     let http = source.provider_http(Arc::clone(ports));
@@ -2243,10 +2539,12 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         })?,
         None => Tools::from_registry(registry, effect_ports, CanonPath::new(cwd)),
     };
-    let tools = tools.with_named_agents(
-        crate::named_agents::discover(cwd, skill_trust)
-            .map_err(|error| RunTermination::UsageError { message: error.0 })?,
-    );
+    let tools = tools
+        .with_named_agents(
+            crate::named_agents::discover(cwd, skill_trust)
+                .map_err(|error| RunTermination::UsageError { message: error.0 })?,
+        )
+        .with_child_defaults(effective.task.clone());
     let tools = match McpRuntimeBinding::resume_sealer(mcp_runtime) {
         Some(resume) => tools.with_resume(resume),
         None => tools,
@@ -2286,6 +2584,10 @@ fn build_interactive_turn<'session: 'turn, 'turn>(
         .with_skill_invocation_port(skill_owner.clone())
         .with_background_task_port(skill_owner)
         .with_task_guidance();
+    let loop_ = match mcp_task_port {
+        Some(port) => loop_.with_mcp_task_port(port),
+        None => loop_,
+    };
     let loop_ = match active.replayed() {
         Some(replayed) => loop_.with_replayed_context(replayed),
         None => loop_,
@@ -2395,7 +2697,7 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         .as_ref()
         .map(crate::skill::PreparedSkillRescan::capture);
     let mut target_registry = super::composition::tools_with_mode(
-        args.tools.as_ref(),
+        super::composition::selected_tools(args, effective),
         target_skills
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
@@ -2411,9 +2713,10 @@ async fn prepare_interactive_compaction<'session: 'turn, 'turn>(
         args.model
             .as_deref()
             .or_else(|| effective.model.as_ref().map(|model| model.0.as_str())),
+        super::composition::opt_in_tools(effective, args, root),
     )
     .map_err(|error| CompactionError::Internal(error.to_string()))?;
-    if !args.no_context_tool && args.tools.is_none() {
+    if !args.no_context_tool && super::composition::selected_tools(args, effective).is_none() {
         target_registry.push(RegisteredTool::Context);
     }
     let target_tools: Vec<ToolDescriptor> = target_registry
@@ -2625,10 +2928,11 @@ fn rescan_session_skills(
         &Effective,
         &Arc<JsonlStore>,
         ego_core::permit::EnvPolicy,
+        &Path,
     ),
     diagnostics: &dyn Diagnostics,
 ) -> Result<Option<Vec<RegisteredTool>>, RunTermination> {
-    let (args, effective, jsonl_store, exec_environment) = inputs;
+    let (args, effective, jsonl_store, exec_environment, root) = inputs;
 
     if pending_work {
         diagnostics.note("cannot rescan skills while work is pending; wait for it to finish");
@@ -2651,8 +2955,14 @@ fn rescan_session_skills(
     let published = prepared.published();
     let prospective = prepared.capture();
     debug_assert_eq!(prospective.retained_last_good(), !published);
-    let next_registry =
-        rescanned_skill_tools(&prospective, args, effective, jsonl_store, exec_environment)?;
+    let next_registry = rescanned_skill_tools(
+        &prospective,
+        args,
+        effective,
+        jsonl_store,
+        exec_environment,
+        root,
+    )?;
     let capture = match catalogue.commit_rescan(prepared) {
         Ok(capture) => capture,
         Err(error) => {
@@ -2662,7 +2972,7 @@ fn rescan_session_skills(
         }
     };
     let mut registry = next_registry;
-    register_context_tool(args, &mut registry);
+    register_context_tool(args, effective, &mut registry);
     if published {
         diagnostics.note(&format!(
             "skills: published generation {}",
@@ -2684,9 +2994,10 @@ fn rescanned_skill_tools(
     effective: &Effective,
     jsonl_store: &Arc<JsonlStore>,
     exec_environment: ego_core::permit::EnvPolicy,
+    root: &Path,
 ) -> Result<Vec<RegisteredTool>, RunTermination> {
     let registry = match super::composition::tools_with_mode(
-        args.tools.as_ref(),
+        super::composition::selected_tools(args, effective),
         Some(capture.core()),
         effective
             .active_profile
@@ -2697,6 +3008,7 @@ fn rescanned_skill_tools(
         args.model
             .as_deref()
             .or_else(|| effective.model.as_ref().map(|model| model.0.as_str())),
+        super::composition::opt_in_tools(effective, args, root),
     ) {
         Ok(registry) => registry,
         Err(error) => {
@@ -2744,6 +3056,9 @@ struct InteractiveCommand<'a, 'session, 'store> {
     policy_application: &'a Option<Arc<PolicyApplicationOwner>>,
     text_output: Option<&'a dyn TextOutput>,
     session_hook_ports: &'a Arc<RunEffectPorts>,
+    /// The session's live MCP tasks, when `mcp_tasks` is on.
+    mcp_task_port: Option<&'a Arc<dyn ego_core::mcp::McpTaskPort>>,
+    session_evidence: &'a ego_tools::store::SessionEvidenceStore,
     task_owner: &'a CliSkillInvocationOwner<'session>,
     skill_profile_layers: &'a Option<Vec<Sourced<ConfigLayer>>>,
     perimeter: &'a crate::perimeter::Perimeter,
@@ -2774,8 +3089,16 @@ struct InteractiveCommand<'a, 'session, 'store> {
 async fn dispatch_interactive_command<'session: 'a, 'a, 'store: 'session>(
     input: InteractiveCommand<'a, 'session, 'store>,
     line: repl::Line,
-    posture: (bool, bool, bool),
+    posture: CommandPosture,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
+    if let repl::Line::HostCommand(repl::HostCommand::Config(arguments)) = &line
+        && arguments == "roots"
+    {
+        input
+            .diagnostics
+            .note(&root_revocation::listing(input.state));
+        return Ok(CommandOutcome::Continue);
+    }
     if let repl::Line::HostCommand(repl::HostCommand::Config(arguments)) = &line
         && arguments.starts_with("roots revoke ")
     {
@@ -3017,7 +3340,7 @@ async fn dispatch_workspace_command<'session: 'a, 'a, 'store: 'session>(
 async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
     input: InteractiveCommand<'a, 'session, 'store>,
     line: repl::Line,
-    posture: (bool, bool, bool),
+    posture: CommandPosture,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     match line {
         repl::Line::HostCommand(
@@ -3033,7 +3356,8 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
             | repl::HostCommand::Skill(_)
             | repl::HostCommand::Skills(_)
             | repl::HostCommand::Hooks
-            | repl::HostCommand::Tasks(_),
+            | repl::HostCommand::Tasks(_)
+            | repl::HostCommand::SideQuestion(_),
         ) => dispatch_session_resources(input, line, posture).await,
         repl::Line::HostCommand(
             repl::HostCommand::Action(
@@ -3043,6 +3367,7 @@ async fn dispatch_session_command<'session: 'a, 'a, 'store: 'session>(
                 | repl::actions::ActionId::Tools
                 | repl::actions::ActionId::Doctor
                 | repl::actions::ActionId::Usage
+                | repl::actions::ActionId::Context
                 | repl::actions::ActionId::Refresh,
             )
             | repl::HostCommand::Details(
@@ -3063,11 +3388,14 @@ async fn dispatch_session_input<'session: 'a, 'a, 'store: 'session>(
     line: repl::Line,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     let InteractiveCommand {
+        seat,
         last,
         state,
         diagnostics,
         session_hook_ports,
         task_owner,
+        mcp_task_port,
+        session_evidence,
         ..
     } = input;
     match line {
@@ -3087,16 +3415,37 @@ async fn dispatch_session_input<'session: 'a, 'a, 'store: 'session>(
         repl::Line::HostCommand(repl::HostCommand::BackgroundExecSettled) => {
             // A stale/coalesced wake must not buy another generation. The
             // generation boundary settles every ready process and task in the journal.
+            // Queued monitor lines are ready context too.
             let ready = state.unsettled_detached_execs().into_iter().any(|id| {
-                session_hook_ports
-                    .process()
-                    .background_status(id)
-                    .is_ok_and(|snapshot| snapshot.outcome.is_some())
+                let process = session_hook_ports.process();
+                process.background_output_ready(id)
+                    || process
+                        .background_status(id)
+                        .is_ok_and(|snapshot| snapshot.outcome.is_some())
             });
             let task_ready = task_owner
                 .has_ready_tasks()
                 .map_err(|message| RunTermination::Failed { message })?;
-            Ok(if ready || task_ready {
+            // A wake of the MCP task timer: poll the due tasks here, so a task
+            // that is still working costs no generation.
+            let mcp_ready = match mcp_task_port {
+                Some(port) => {
+                    let fs = OsFs;
+                    let effects = ToolEffectPorts::new(
+                        &fs,
+                        session_hook_ports.process(),
+                        session_evidence,
+                        session_hook_ports.resolver_handle(),
+                        session_hook_ports.one_hop_handle(),
+                        session_hook_ports.duplex_handle(),
+                    );
+                    port.poll_due(effects)
+                        .await
+                        .map_err(|message| RunTermination::Failed { message })?
+                }
+                None => false,
+            };
+            Ok(if ready || task_ready || mcp_ready {
                 CommandOutcome::Input(InteractiveTurnInput::Checkpoint)
             } else {
                 CommandOutcome::Continue
@@ -3111,14 +3460,18 @@ async fn dispatch_session_input<'session: 'a, 'a, 'store: 'session>(
         // lose the session by pressing it once more.
         repl::Line::Interrupted => Ok(CommandOutcome::Continue),
         repl::Line::Ended => {
-            // The last turn's provider/model refusal was already shown.
-            // Preserve cancellation, permission, and other outcomes.
-            if matches!(
-                &last.termination,
-                RunTermination::Provider { .. }
-                    | RunTermination::ProviderUncertain { .. }
-                    | RunTermination::UsageError { .. }
-            ) {
+            // A human closes the session after seeing the turn's refusal.
+            // Redirected EOF must preserve that turn's failure for its caller.
+            // Preserve cancellation, permission, and other outcomes in both seats.
+            if seat.has_human()
+                && matches!(
+                    &last.termination,
+                    RunTermination::Provider { .. }
+                        | RunTermination::ProviderUncertain { .. }
+                        | RunTermination::UsageError { .. }
+                        | RunTermination::ContextOverflow { .. }
+                )
+            {
                 last.termination = RunTermination::Done;
             }
             Ok(CommandOutcome::Transition(Box::new(EpochTransition::Exit)))
@@ -3134,7 +3487,7 @@ async fn dispatch_session_input<'session: 'a, 'a, 'store: 'session>(
 async fn dispatch_session_resources<'session: 'a, 'a, 'store: 'session>(
     input: InteractiveCommand<'a, 'session, 'store>,
     line: repl::Line,
-    posture: (bool, bool, bool),
+    posture: CommandPosture,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     if matches!(
         line,
@@ -3235,6 +3588,10 @@ async fn dispatch_session_resources<'session: 'a, 'a, 'store: 'session>(
             render_session_hooks(&session_hooks.state, diagnostics);
             Ok(CommandOutcome::Continue)
         }
+        repl::Line::HostCommand(repl::HostCommand::SideQuestion(_)) => {
+            diagnostics.note(SIDE_QUESTION_IDLE);
+            Ok(CommandOutcome::Continue)
+        }
         repl::Line::HostCommand(repl::HostCommand::Tasks(arguments)) => {
             ego_core::turn::BackgroundTaskPort::refresh_tasks(
                 task_owner,
@@ -3273,13 +3630,14 @@ fn rescan_skill_command<'store>(
         exec_environment,
         registry,
         diagnostics,
+        root,
         ..
     } = input;
     match rescan_session_skills(
         pending_work,
         skills.as_deref(),
         seat.as_ref(),
-        (args, effective, jsonl_store, exec_environment.clone()),
+        (args, effective, jsonl_store, exec_environment.clone(), root),
         diagnostics,
     ) {
         Ok(Some(next_registry)) => *registry = next_registry,
@@ -3295,7 +3653,7 @@ fn rescan_skill_command<'store>(
 async fn dispatch_session_inspection<'session: 'a, 'a, 'store: 'session>(
     input: InteractiveCommand<'a, 'session, 'store>,
     line: repl::Line,
-    posture: (bool, bool, bool),
+    posture: CommandPosture,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     let InteractiveCommand {
         args,
@@ -3323,6 +3681,14 @@ async fn dispatch_session_inspection<'session: 'a, 'a, 'store: 'session>(
     match line {
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Help)) => {
             diagnostics.note(&seat.action_help());
+            Ok(CommandOutcome::Continue)
+        }
+        repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Context)) => {
+            let store = super::composition::memory_store(effective, args, root);
+            diagnostics.note(&crate::memory::context_text(
+                config.system.as_ref(),
+                store.as_deref(),
+            ));
             Ok(CommandOutcome::Continue)
         }
         repl::Line::HostCommand(repl::HostCommand::Action(repl::actions::ActionId::Expand)) => {
@@ -3482,7 +3848,7 @@ async fn dispatch_session_inspection<'session: 'a, 'a, 'store: 'session>(
 async fn dispatch_session_navigation<'session: 'a, 'a, 'store: 'session>(
     input: InteractiveCommand<'a, 'session, 'store>,
     line: repl::Line,
-    posture: (bool, bool, bool),
+    posture: CommandPosture,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     let InteractiveCommand {
         active,
@@ -3641,7 +4007,7 @@ fn update_session_metadata<'store>(
 
 async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     input: InteractiveCommand<'a, 'session, 'store>,
-    posture: (bool, bool, bool),
+    posture: CommandPosture,
 ) -> Result<CommandOutcome<'store>, RunTermination> {
     let InteractiveCommand {
         args,
@@ -3652,7 +4018,6 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         run_deadline,
         state,
         diagnostics,
-        last,
         session_journal,
         status,
         selection,
@@ -3689,34 +4054,26 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         let message =
             "session roots cannot cross a compaction session; exit and resume in a new process";
         *automatic_compaction_failed = true;
-        if automatic_compaction && ego_core::turn::compaction_due(state.context) {
-            return Ok(compaction_failure_outcome(
-                last,
-                diagnostics,
-                true,
-                message.to_owned(),
-            ));
-        }
-        diagnostics.note(message);
+        return Ok(compaction_failure_outcome(diagnostics, message.to_owned()));
+    }
+    if automatic_compaction.is_none() && !seat.confirm_compaction(active.id()) {
         return Ok(CommandOutcome::Continue);
     }
-    if !automatic_compaction && !seat.confirm_compaction(active.id()) {
-        return Ok(CommandOutcome::Continue);
-    }
-    // Required pressure recovery cannot return to a prompt that cannot run.
-    let required_compaction = automatic_compaction && ego_core::turn::compaction_due(state.context);
     // Failed or cancelled pressure recovery stays idle until fresh work or an
     // explicit /compact retry. The core owns backoff within each preparation.
-    *automatic_compaction_failed =
-        automatic_compaction || ego_core::turn::compaction_due(state.context);
+    *automatic_compaction_failed = true;
     seat.busy();
     seat.set_compaction_availability(repl::actions::Availability::BusyWithReason {
         reason: "ego is busy; compaction already running",
     });
-    diagnostics.note(if automatic_compaction {
-        "Compacting the session now: saving a summary. The task will continue automatically."
-    } else {
-        "Compacting the session now: saving a summary to make room."
+    diagnostics.note(match automatic_compaction {
+        Some(AutomaticCompaction::Pressure) => {
+            "Compacting the session now: saving a summary. The task will continue automatically."
+        }
+        Some(AutomaticCompaction::CacheExpiry) => {
+            "Compacting the idle session before its prompt cache expires: saving a summary."
+        }
+        None => "Compacting the session now: saving a summary to make room.",
     });
 
     let target_runtime = Arc::new(Mutex::new(None));
@@ -3733,9 +4090,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     .await
     {
         return Ok(compaction_failure_outcome(
-            last,
             diagnostics,
-            required_compaction,
             format!(
                 "compaction was blocked before preparation: {}",
                 error.exit_reason()
@@ -3807,28 +4162,8 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
             {
                 status.seat.refresh_status(state, selected);
             }
-            if matches!(
-                &error,
-                CompactionTransitionError::Preparation(CompactionError::Generation {
-                    kind: ego_core::generator::types::ErrorKind::Transient,
-                    ..
-                })
-            ) {
-                // Keep the latch until fresh work or /compact: unchanged pressure
-                // must not start another exhausted recovery without input.
-                diagnostics.note(&format!(
-                    "Compaction paused; the session is still open: {error}. Retry with '/compact'."
-                ));
-                return Ok(CommandOutcome::Continue);
-            }
-            let cancelled = matches!(
-                &error,
-                CompactionTransitionError::Preparation(CompactionError::Cancelled(_))
-            );
             return Ok(compaction_failure_outcome(
-                last,
                 diagnostics,
-                required_compaction && !cancelled,
                 format!("compaction failed: {error}"),
             ));
         }
@@ -3846,9 +4181,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         Ok(opened) => Opened::Durable(Box::new(opened)),
         Err(error) => {
             return Ok(compaction_failure_outcome(
-                last,
                 diagnostics,
-                required_compaction,
                 format!("compaction target could not be opened: {error}"),
             ));
         }
@@ -3858,9 +4191,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         Ok(owner) => owner,
         Err(error) => {
             return Ok(compaction_failure_outcome(
-                last,
                 diagnostics,
-                required_compaction,
                 format!("compaction target evidence could not be opened: {error}"),
             ));
         }
@@ -3871,9 +4202,7 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         ego_core::session::TargetPublication::NotPublished { .. }
     ) {
         return Ok(compaction_failure_outcome(
-            last,
             diagnostics,
-            required_compaction,
             "compaction target was not published".to_owned(),
         ));
     }
@@ -3881,8 +4210,8 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
         .lock()
         .expect("interactive compaction runtime")
         .take();
-    *checkpoint_pending = automatic_compaction;
-    *automatic_compaction_failed = false;
+    // Only pressure recovery interrupted a task; cache-expiry compaction waits for the operator.
+    *checkpoint_pending = automatic_compaction == Some(AutomaticCompaction::Pressure);
     Ok(CommandOutcome::Transition(Box::new(
         EpochTransition::Compact {
             target: target_owner,
@@ -3895,20 +4224,13 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
 }
 
 fn compaction_failure_outcome<'store>(
-    last: &mut Ended,
     diagnostics: &dyn Diagnostics,
-    required_compaction: bool,
     message: String,
 ) -> CommandOutcome<'store> {
-    if required_compaction {
-        let message = format!("automatic compaction failed; session stopped: {message}");
-        diagnostics.note(&message);
-        last.termination = RunTermination::Failed { message };
-        CommandOutcome::Transition(Box::new(EpochTransition::Exit))
-    } else {
-        diagnostics.note(&message);
-        CommandOutcome::Continue
-    }
+    diagnostics.note(&format!(
+        "Compaction paused; the session is still open: {message}. Retry with '/compact'."
+    ));
+    CommandOutcome::Continue
 }
 
 async fn end_session_epoch(
@@ -4199,6 +4521,46 @@ struct CompactionActivation<'a> {
     registry: &'a mut Vec<RegisteredTool>,
     config: &'a mut TurnConfig,
 }
+/// The operator-facing receipt of an activated compaction successor.
+pub(super) fn compaction_activation_note(
+    source: SessionId,
+    target: SessionId,
+    source_context: ego_core::state::ContextWindow,
+) -> String {
+    format!(
+        "compacted session {source} into {target}; this is now session {target}. \
+         Before: {}; after: known once the next reply is generated. \
+         To return to the original session: 'ego resume {source}'",
+        crate::usage::context_line(source_context)
+    )
+}
+
+/// Make a published headless compaction target the active session.
+pub(super) fn activate_headless_successor<'store>(
+    active: &mut ActiveSession<'store>,
+    receipt: &ego_core::compact::CompactionReceipt,
+    store: &'store JsonlStore,
+    clock: &SystemClock,
+    admission: (&EvidenceAdmissionService, &Option<RunContextEvidence>),
+) -> Result<(), RunTermination> {
+    let failed = |message: String| RunTermination::Failed {
+        message: format!(
+            "compacted session {} could not be activated: {message}; resume it with 'ego resume {}'",
+            receipt.target, receipt.target
+        ),
+    };
+    let opened = session::open_candidate(store, &receipt.target, clock)
+        .map_err(|error| failed(error.to_string()))?;
+    let opened = Opened::Durable(Box::new(opened));
+    let state = opened.state();
+    let target = ActiveSession::durable(opened, state, EVIDENCE_CAP).map_err(failed)?;
+    if !active.apply_publication(target, &receipt.publication) {
+        return Err(failed("the target was not published".to_owned()));
+    }
+    let (evidence, run_context) = admission;
+    admit_successor_context(evidence, active, run_context)
+}
+
 fn activate_compaction_transition<'store>(
     active: &mut ActiveSession<'store>,
     source_state: SessionState,
@@ -4237,13 +4599,10 @@ fn activate_compaction_transition<'store>(
         ));
     }
     publish_compaction_runtime(runtime, skills, registry, config, diagnostics)?;
-    diagnostics.note(&format!(
-        "compacted session {parent_id} into {}; this is now session {}. \
-                             Before: {}; after: known once the next reply is generated. \
-                             To return to the original session: 'ego resume {parent_id}'",
+    diagnostics.note(&compaction_activation_note(
+        parent_id,
         active.id(),
-        active.id(),
-        crate::usage::context_line(parent_context)
+        parent_context,
     ));
     Ok(EpochStart::Compact {
         diagnostic,
@@ -4283,6 +4642,7 @@ struct InteractiveTurnPhase<'a, 'session, 'store> {
     session_hooks: &'a SessionHookComposition<'session>,
     session_journal: &'a SharedJournal<'session>,
     skill_owner: Arc<CliSkillInvocationOwner<'session>>,
+    mcp_task_port: Option<Arc<dyn ego_core::mcp::McpTaskPort>>,
     refresh_prompt: &'a mut bool,
     control: &'a mut InteractiveControl,
     turns: &'a Turns<'a>,
@@ -4303,7 +4663,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     input: InteractiveTurnPhase<'a, 'session, 'store>,
     resumed_turn: Option<RuntimeResume>,
     asked: Option<InteractiveTurnInput>,
-) -> Result<(bool, crate::perimeter::Perimeter, Option<CanonPath>), RunTermination> {
+) -> Result<(bool, crate::perimeter::Perimeter, Option<RootReadmission>), RunTermination> {
     let InteractiveTurnPhase {
         seat,
         status,
@@ -4336,6 +4696,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
         session_hooks,
         session_journal,
         skill_owner,
+        mcp_task_port,
         refresh_prompt,
         control,
         turns,
@@ -4441,6 +4802,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
             hooks: session_hooks,
             journal: session_journal,
             skill_owner: skill_owner.clone(),
+            mcp_task_port,
         },
         (&ports, &turn_cancel, observation, probe_evidence),
     )?;
@@ -4462,8 +4824,22 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     };
     let mut loop_ = loop_
         .with_automatic_compaction()
+        .with_compaction_threshold(effective.compaction.threshold)
         .with_interactive_control(control);
     let mut revoked_root = None;
+    let roots_before = (
+        state.session_roots.clone(),
+        state.permanent_root_consents.clone(),
+    );
+    if matches!(asked, Some(InteractiveTurnInput::Prompt { .. }))
+        && resumed_turn.is_none()
+        && effective
+            .recap
+            .due(state, ego_core::event::time::Clock::now(clock))
+    {
+        diagnostics.note(&render_recap(loop_.recap(&turn_cancel).await));
+    }
+    let side_port = loop_.side_question_port();
     let driven = {
         let driving = drive_interactive_input(
             turns,
@@ -4516,6 +4892,22 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
                             futures::future::Either::Right((_, _)) => continue,
                         }
                     }
+                    if let repl::HostCommand::SideQuestion(question) = command {
+                        let answer = answer_side_question(&side_port, &question);
+                        futures::pin_mut!(answer);
+                        match futures::future::select(driving.as_mut(), answer).await {
+                            futures::future::Either::Left((result, answer)) => {
+                                // The question was accepted: settle its attempt
+                                // and show the answer even if the turn ended first.
+                                diagnostics.note(&answer.await);
+                                break result;
+                            }
+                            futures::future::Either::Right((note, _)) => {
+                                diagnostics.note(&note);
+                                continue;
+                            }
+                        }
+                    }
                     assert!(
                         command.is_read_only_inspection(),
                         "inspection inbox is read-only"
@@ -4543,6 +4935,9 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
                         repl::HostCommand::Config(arguments) if arguments == "perimeter" => {
                             diagnostics.note(&perimeter.text())
                         }
+                        repl::HostCommand::Config(arguments) if arguments == "roots" => {
+                            diagnostics.note(&root_revocation::listing(&current))
+                        }
                         repl::HostCommand::Action(repl::actions::ActionId::Usage) => {
                             report_session_usage(
                                 jsonl_store,
@@ -4564,10 +4959,13 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     *last_generation_request = loop_.last_generation_request();
     drop(loop_);
     *state = session_hooks.state.state();
-    if revoked_root.is_some() {
+    if let Some(path) = revoked_root {
         between();
-        return Ok((false, perimeter, revoked_root));
+        return Ok((false, perimeter, Some(RootReadmission::Revoke(path))));
     }
+    let granted = (state.session_roots != roots_before.0
+        || state.permanent_root_consents != roots_before.1)
+        .then_some(RootReadmission::Grant);
     report_settled_execs(state, &settled_before, diagnostics);
     if state
         .prompt_snapshot
@@ -4580,7 +4978,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     refresh_turn_status(status, policy_selection, selection, state, diagnostics);
     seat.refresh_queue(state);
     let Some((termination, result)) = driven else {
-        return Ok((false, perimeter, None));
+        return Ok((false, perimeter, granted));
     };
     report_interactive_turn_end(&termination, cancel, seat, turn_started, diagnostics);
     between();
@@ -4599,7 +4997,7 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     if cancel.is_cancelled() {
         return Ok((true, perimeter, None));
     }
-    Ok((false, perimeter, None))
+    Ok((false, perimeter, granted))
 }
 
 fn finish_interactive_session(
@@ -4623,10 +5021,13 @@ fn finish_interactive_session(
     }
 }
 
+/// Read the next operator line. `None` means the idle session reached its
+/// cache-expiry compaction point first; that deadline is then marked attempted.
 fn read_interactive_command(
     seat: &dyn InteractiveSeat,
     status: Option<&InteractiveStatus>,
-) -> repl::Line {
+    idle: Option<IdleCompactionWatch<'_>>,
+) -> Option<repl::Line> {
     #[cfg(all(test, unix))]
     let modal_idle_gate = super::interactive_driver::modal_finish::before_idle();
     seat.idle();
@@ -4637,7 +5038,24 @@ fn read_interactive_command(
     {
         status.seat.activate();
     }
-    seat.read()
+    let Some(idle) = idle else {
+        return Some(seat.read());
+    };
+    loop {
+        match idle.decide() {
+            ego_core::compact::IdleCompaction::Never => return Some(seat.read()),
+            ego_core::compact::IdleCompaction::Now { expires_at } => {
+                *idle.attempted = Some(expires_at);
+                return None;
+            }
+            // Wall-clock deadline, monotonic wait: decide again after the wait.
+            ego_core::compact::IdleCompaction::After(wait) => {
+                if let Some(line) = seat.read_before(std::time::Instant::now() + wait) {
+                    return Some(line);
+                }
+            }
+        }
+    }
 }
 
 fn activate_new_session<'store>(

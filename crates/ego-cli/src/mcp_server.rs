@@ -282,11 +282,24 @@ async fn compose_and_serve(
     )
     .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
 
+    let mut roots = BTreeSet::from([deployment.root]);
+    for allowed in &args.allow_roots {
+        let allowed = run::workspace(Some(&run::rooted_path(&root, allowed.clone())))
+            .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+        roots.insert(
+            RunRoot::new(allowed)
+                .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?,
+        );
+    }
+    let mut models = BTreeSet::from([deployment.model]);
+    models.extend(args.allow_models.iter().cloned());
+    let mut modes = BTreeSet::from([deployment.mode]);
+    modes.extend(args.allow_modes.iter().copied());
     let policy = McpRunSelectionPolicy::new(
-        BTreeSet::from([deployment.root]),
-        BTreeSet::from([deployment.model]),
+        roots,
+        models,
         deployment.thinking,
-        BTreeSet::from([deployment.mode]),
+        modes,
         deployment.ceilings,
         deployment.profile.into_iter().collect(),
     )?;

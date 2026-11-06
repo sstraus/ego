@@ -74,6 +74,7 @@ impl RescanFixture {
                 &self.effective,
                 &self.store,
                 ego_core::permit::EnvPolicy::Inherited,
+                std::path::Path::new("/ws"),
             ),
             &self.notes,
         )

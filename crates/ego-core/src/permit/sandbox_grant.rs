@@ -73,7 +73,7 @@ pub trait SandboxGrantPort: Send + Sync {
     /// Ask the human whether `request` may be added to the sandbox. `true`
     /// means the port has recorded the grant, and the next [`Self::granted`]
     /// includes it; anything else, including a failed transport, is `false`.
-    /// Show `command`, the exact command line that runs again if allowed.
+    /// Show `command`, the exact refused command. An approval never replays it.
     fn ask<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool>;
 }
 

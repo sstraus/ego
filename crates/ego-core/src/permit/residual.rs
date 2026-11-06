@@ -15,7 +15,14 @@ use futures::StreamExt as _;
 use futures::channel::{mpsc, oneshot};
 use serde::Serialize;
 
-use super::{CanonPath, SpawnSpec};
+use super::{CanonPath, SandboxGrant, SpawnSpec};
+
+#[path = "residual_owner.rs"]
+mod owner;
+pub use owner::OwnerGrantRequest;
+#[path = "residual_limits.rs"]
+mod limits;
+pub use limits::ResidualLimits;
 
 /// Judge decisions one command may raise.
 pub const MAX_DECISIONS_PER_CALL: usize = 3;
@@ -136,11 +143,15 @@ pub struct ResidualWriteRequest {
 struct Ledger {
     grants: Vec<CanonPath>,
     decisions: usize,
+    owner: Vec<SandboxGrant>,
 }
 
 /// One session's residual-write authority.
 pub struct ResidualWriteDesk {
     ledger: Mutex<Ledger>,
+    limits: Mutex<ResidualLimits>,
+    owner_sender: mpsc::UnboundedSender<OwnerGrantRequest>,
+    owner_receiver: futures::lock::Mutex<mpsc::UnboundedReceiver<OwnerGrantRequest>>,
     sender: mpsc::UnboundedSender<ResidualWriteRequest>,
     receiver: futures::lock::Mutex<mpsc::UnboundedReceiver<ResidualWriteRequest>>,
 }
@@ -155,9 +166,17 @@ impl std::fmt::Debug for ResidualWriteDesk {
 
 impl ResidualWriteDesk {
     pub fn new() -> Arc<Self> {
+        Self::with_limits(ResidualLimits::default())
+    }
+
+    pub fn with_limits(limits: ResidualLimits) -> Arc<Self> {
         let (sender, receiver) = mpsc::unbounded();
+        let (owner_sender, owner_receiver) = mpsc::unbounded();
         Arc::new(Self {
             ledger: Mutex::default(),
+            limits: Mutex::new(limits),
+            owner_sender,
+            owner_receiver: futures::lock::Mutex::new(owner_receiver),
             sender,
             receiver: futures::lock::Mutex::new(receiver),
         })
@@ -185,7 +204,7 @@ impl ResidualWriteDesk {
     ) -> ResidualDecision {
         {
             let mut ledger = self.ledger();
-            if ledger.decisions >= MAX_DECISIONS_PER_SESSION {
+            if ledger.decisions >= self.limits().decisions_per_session.get() {
                 return unavailable("the session used all residual judge decisions");
             }
             ledger.decisions += 1;

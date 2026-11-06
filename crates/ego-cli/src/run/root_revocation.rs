@@ -1,4 +1,5 @@
-//! Terminal revocation tears down effect ownership before same-session recomposition.
+//! The terminal surface for saved session targets: listing and revocation.
+//! Revocation tears down effect ownership before same-session recomposition.
 use super::*;
 
 pub(super) fn requested(
@@ -32,7 +33,9 @@ pub(super) fn requested(
                 .iter()
                 .map(|consent| &consent.root),
         )
-        .any(|root| root.path() == &path)
+        .map(ego_core::permit::ProfileRoot::path)
+        .chain(state.owner_sandbox_grants.iter().map(|grant| &grant.path))
+        .any(|saved| saved == &path)
     {
         return Err(format!(
             "no saved root grant for {}",
@@ -40,6 +43,38 @@ pub(super) fn requested(
         ));
     }
     Ok(path)
+}
+
+/// Every explicit read, write and exec target this session holds. Roots are
+/// data reach for tools and children; only a sandbox exec grant runs programs.
+pub(super) fn listing(state: &SessionState) -> String {
+    let safe = |path: &CanonPath| ego_core::permit::terminal_safe(&path.to_string());
+    let mut lines = vec!["session targets:".to_owned()];
+    lines.extend(state.session_roots.iter().map(|root| {
+        format!(
+            "  root\t{}\t{}\tsession",
+            safe(root.path()),
+            root.access().as_str()
+        )
+    }));
+    lines.extend(state.permanent_root_consents.iter().map(|consent| {
+        format!(
+            "  root\t{}\t{}\tpermanent",
+            safe(consent.root.path()),
+            consent.root.access().as_str()
+        )
+    }));
+    lines.extend(
+        state
+            .owner_sandbox_grants
+            .iter()
+            .map(|grant| format!("  grant\t{}\t{}\tsandbox", safe(&grant.path), grant.access)),
+    );
+    if lines.len() == 1 {
+        lines.push("  none".into());
+    }
+    lines.push("  revoke\t/config roots revoke EXACT_PATH".into());
+    lines.join("\n")
 }
 
 pub(super) fn revoke(

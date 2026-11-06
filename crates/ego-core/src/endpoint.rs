@@ -14,7 +14,6 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use crate::credentials::SecretMaterial;
-use crate::permit::Confinement;
 
 /// One already-loaded bearer secret, compared without interpreting HTTP.
 ///
@@ -116,18 +115,6 @@ impl Admitted {
         match self {
             Self::Local { .. } => Authentication::PeerIdentity,
             Self::Loopback(_) | Self::Public(_) => Authentication::BearerCredential,
-        }
-    }
-
-    /// Narrow the operator's confinement ceiling for this endpoint.
-    ///
-    /// A publicly reachable peer may select at most Workspace execution. Local
-    /// and loopback endpoints add no restriction, and a public endpoint never
-    /// weakens an already stricter operator choice.
-    pub fn cap_confinement(&self, configured: Confinement) -> Confinement {
-        match (self, configured) {
-            (Self::Public(_), Confinement::Off | Confinement::Adaptive) => Confinement::Workspace,
-            _ => configured,
         }
     }
 }

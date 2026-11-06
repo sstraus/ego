@@ -10,8 +10,8 @@ fn startup_name_precedes_notices() {
         (40, 120, "colour"),
         (24, 80, "no_color"),
         (24, 80, "dumb"),
-        (24, 17, "colour"),
-        (24, 16, "colour"),
+        (24, 25, "colour"),
+        (24, 24, "colour"),
     ] {
         for (name, flags) in [
             ("bare", vec!["--bare"]),
@@ -79,9 +79,9 @@ fn startup_name_precedes_notices() {
                 .expect("emulated capture");
             }
             let logo = [
-                "⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄",
-                "⠀⢴⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇",
-                "⠀⠀⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀",
+                "⠠⠀⠠⠀⠤⠀⠤⠄⠤⢤⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄",
+                "⠂⠀⠂⠐⠂⠐⠒⠐⠒⢶⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇",
+                "⠈⠀⠈⠀⠉⠀⠉⠁⠉⠉⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀",
             ];
             let identity = concat!("εgo: ego ", env!("CARGO_PKG_VERSION"));
             let raw = String::from_utf8_lossy(&output);
@@ -89,32 +89,37 @@ fn startup_name_precedes_notices() {
             let prefix = &raw[..identity_at];
             let mut header = vt100::Parser::new(rows, cols, 0);
             header.process(prefix.as_bytes());
-            if cols >= 17 {
+            if cols >= 25 {
                 let mut expected = String::new();
                 for (row, text) in logo.iter().enumerate() {
-                    if colour == "colour" {
-                        let (epsilon, go) = text.split_at(6 * 3);
-                        expected.push_str(&format!("\x1b[1;35m{epsilon}\x1b[36m{go}\x1b[0m\r\n"));
-                    } else {
-                        expected.push_str(&format!("{text}\r\n"));
-                    }
+                    expected.push_str(&format!("{text}\r\n"));
+                    let mut colours = Vec::new();
                     for (column, glyph) in text.chars().enumerate() {
                         let cell = header
                             .screen()
                             .cell(row as u16, column as u16)
                             .expect("logo cell");
                         assert_eq!(cell.contents(), glyph.to_string(), "{name} {cols} {colour}");
+                        assert!(!cell.bold());
                         if colour == "colour" {
-                            assert_eq!(
-                                cell.fgcolor(),
-                                vt100::Color::Idx(if column < 6 { 5 } else { 6 })
-                            );
-                            assert!(cell.bold());
+                            assert_ne!(cell.fgcolor(), vt100::Color::Default);
                         } else {
                             assert_eq!(cell.fgcolor(), vt100::Color::Default);
-                            assert!(!cell.bold());
                         }
+                        colours.push(cell.fgcolor());
                     }
+                    if colour == "colour" {
+                        // Trail, ε and go must not collapse into one colour.
+                        assert_ne!(colours[0], colours[12], "{name} {cols}: trail vs ε");
+                        assert_ne!(colours[12], colours[23], "{name} {cols}: ε vs go");
+                    }
+                }
+                let prefix = String::from_utf8_lossy(&strip_csi(prefix.as_bytes())).into_owned();
+                if colour != "colour" {
+                    assert!(
+                        !raw[..identity_at].contains("\x1b["),
+                        "{name} {colour}: SGR leaked"
+                    );
                 }
                 if prefix != expected {
                     failures.push(format!("{name} {cols}x{rows} {colour}: logo bytes before identity differ: {prefix:?}"));
@@ -169,8 +174,8 @@ fn startup_logo_stays_out_of_non_tty_and_protocol_output() {
             ego.without_fixture_thinking().subcommand(mode)
         };
         let result = ego.run();
-        assert!(!result.stdout.contains("⢀⡴"), "{mode}: {}", result.stdout);
-        assert!(!result.stderr.contains("⢀⡴"), "{mode}: {}", result.stderr);
+        assert!(!result.stdout.contains("⢤⡴"), "{mode}: {}", result.stdout);
+        assert!(!result.stderr.contains("⢤⡴"), "{mode}: {}", result.stderr);
     }
 }
 
@@ -214,8 +219,8 @@ fn startup_logo_skips_piped_stdout_with_tty_stdin() {
     session.quit(input);
     let piped = std::fs::read_to_string(places.workspace_path().join("piped-output.txt"))
         .expect("piped stdout");
-    assert!(!piped.contains("⢀⡴"), "{piped}");
-    assert!(!normalized(&output).contains("⢀⡴"));
+    assert!(!piped.contains("⢤⡴"), "{piped}");
+    assert!(!normalized(&output).contains("⢤⡴"));
 }
 
 // Catches: replacing the startup quiet/TTY conjunction with OR prints identity and logo.
@@ -233,7 +238,7 @@ fn quiet_tty_start_prints_no_identity_or_logo() {
         result.stdout
     );
     assert!(
-        !normalized(result.stdout.as_bytes()).contains("⢀⡴"),
+        !normalized(result.stdout.as_bytes()).contains("⢤⡴"),
         "{}",
         result.stdout
     );
@@ -250,7 +255,7 @@ fn piped_stdin_start_prints_no_identity_or_logo() {
         !shown.contains(concat!("ego ", env!("CARGO_PKG_VERSION"))),
         "{shown}"
     );
-    assert!(!shown.contains("⢀⡴"), "{shown}");
+    assert!(!shown.contains("⢤⡴"), "{shown}");
 }
 
 // Catches: deleting interactive_process's flag_plain initializer styles the logo.
@@ -267,7 +272,7 @@ fn plain_flag_start_has_no_sgr() {
         !startup.contains("\x1b["),
         "plain startup contains terminal styling: {startup:?}"
     );
-    assert!(startup.contains("⠀⢀⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄"), "{startup:?}");
+    assert!(startup.contains("⠠⠀⠠⠀⠤⠀⠤⠄⠤⢤⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄"), "{startup:?}");
 }
 
 // Refuse immediately after the real startup block, before terminal-editor or

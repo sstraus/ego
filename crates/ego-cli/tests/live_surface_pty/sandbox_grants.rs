@@ -46,25 +46,23 @@ fn interactive_workspace_denial_asks_and_keeps_a_session_grant() {
     assert!(prompt.contains(path.to_str().unwrap()), "{prompt}");
     input.write_all(b"y").unwrap();
     input.flush().unwrap();
-    // The second call still requires command approval, not another path grant.
-    until_normalized(&reader, &mut output, start, "READ-VPX-SUCCESS");
-    let second = output.len();
-    until_normalized(&reader, &mut output, second, "[y] yes");
-    input.write_all(b"y").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, second, "SANDBOX-VPX-DONE");
+    // The command's exact session approval also covers the second call.
+    until_normalized(&reader, &mut output, start, "SANDBOX-VPX-DONE");
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
     let requests = stub.generations();
     assert_eq!(requests.len(), 3);
-    for request in &requests[1..] {
+    assert!(
+        !requests[1].to_string().contains("READ-SUCCESS"),
+        "owner approval replayed the first command"
+    );
+    for request in &requests[2..] {
         assert!(
             request.to_string().contains("READ-VPX-SUCCESS"),
             "{request}"
         );
     }
-    assert!(!normalized(&output[second..]).contains("for this session"));
 }
 
 // Catches: Ctrl+B leaves an outstanding sandbox question attached to detached
@@ -207,14 +205,14 @@ fn promoted_denial_has_no_terminal_authority(pending: bool) {
 // Catches: an interactive shell exec refusal offers Read and then Write instead
 // of explaining the executable authority the user actually needs to change.
 #[test]
-fn interactive_shell_exec_refusal_shows_recovery_without_filesystem_grants() {
+fn interactive_shell_exec_refusal_offers_separate_owner_exec_grant() {
     interactive_exec_refusal(false);
 }
 
 // Catches: bad-interpreter exit 126 returns silently without exec recovery in
 // the terminal, even though the command approval seat is interactive.
 #[test]
-fn interactive_interpreter_refusal_shows_recovery_without_filesystem_grants() {
+fn interactive_interpreter_refusal_offers_separate_owner_exec_grant() {
     interactive_exec_refusal(true);
 }
 
@@ -288,32 +286,25 @@ fn interactive_exec_refusal(bad_interpreter: bool) {
     };
     if offered_grant {
         session.press(b"n");
+        session.wait("What should it do instead?");
+        session.press(b"\r");
     }
     session.wait(TOOL_TURN_DONE);
     let transcript = normalized(&session.output[after_approval..]);
     let session_output = session.output.clone();
     let (generations, _) = session.finish();
-    assert!(
-        !offered_grant,
-        "filesystem grant offered for executable: {transcript}"
-    );
-    // Read the retained terminal rows: the working spinner redraws between the
-    // notice's wrapped rows in the byte stream and splits phrases there.
+    assert_eq!(offered_grant, cfg!(target_os = "macos"), "{transcript}");
     let retained = support::terminal_transcript(&session_output, MODAL_ROWS, MODAL_COLS);
     let visible: String = retained.chars().filter(|ch| !ch.is_whitespace()).collect();
-    for expected in [
-        "sandbox exec denied",
-        "exec_paths",
-        "read-only root",
-        "ego config edit",
-        "/quit",
-        "ego resume",
-        "--mode",
-        "--sandbox",
-        "--model",
-        program.to_str().unwrap(),
-        tools.to_str().unwrap(),
-    ] {
+    for expected in if cfg!(target_os = "macos") {
+        vec![
+            "sandbox exec",
+            program.to_str().unwrap(),
+            "No command will be retried",
+        ]
+    } else {
+        vec!["sandbox denied exec", program.to_str().unwrap()]
+    } {
         let expected_cells: String = expected.chars().filter(|ch| !ch.is_whitespace()).collect();
         assert!(
             visible.contains(&expected_cells),
@@ -328,6 +319,13 @@ fn interactive_exec_refusal(bad_interpreter: bool) {
         .find(|message| message["role"] == "tool")
         .and_then(|message| message["content"].as_str())
         .unwrap();
-    assert!(result.contains("sandbox exec denied"), "{result}");
-    assert!(result.contains("No command was retried"), "{result}");
+    assert!(result.contains("sandbox denied exec"), "{result}");
+    assert!(
+        result.contains(if cfg!(target_os = "macos") {
+            "declined"
+        } else {
+            "cannot open extra paths"
+        }),
+        "{result}"
+    );
 }

@@ -120,8 +120,8 @@ fn captured_home_cannot_be_offered_as_a_grant() {
 #[test]
 fn recorded_macos_tool_lines_yield_their_path() {
     assert_eq!(
-        printed_path("cat: /Users/u/Gits/.tmp/x//outside.txt: Operation not permitted"),
-        Some("/Users/u/Gits/.tmp/x//outside.txt")
+        printed_path("cat: /Users/u/Gits/.scratch/x//outside.txt: Operation not permitted"),
+        Some("/Users/u/Gits/.scratch/x//outside.txt")
     );
     assert_eq!(
         printed_path("touch: /Users/u/new: Operation not permitted"),
@@ -495,8 +495,8 @@ fn executable_script_operand_read_denial_offers_read_grant() {
                 super::analyze(&spec, &bad_interpreter, &policy, &[])
                     .unwrap()
                     .request
-                    .is_none(),
-                "bad-interpreter launch refusals must remain fail-closed"
+                    .is_some_and(|grant| grant.access == SandboxAccess::Exec),
+                "bad-interpreter launch refusals need separate owner exec authority"
             );
         }
     }
@@ -562,25 +562,12 @@ fn executable_refusal_fixture(bad_interpreter: bool) {
     ] {
         let denied = super::analyze(&spec, &result, &policy, &grants)
             .expect("executable refusal recognized");
-        assert!(
-            denied.request.is_none(),
-            "filesystem grant offered for executable: {denied:?}"
+        assert_eq!(
+            denied.request.as_ref().map(|grant| grant.access),
+            Some(SandboxAccess::Exec),
+            "only an explicit exec approval can authorize this program"
         );
-        let note = super::note(&denied, &policy, super::Outcome::NobodyToAsk);
-        for expected in [
-            "exec",
-            "exec_paths",
-            "/quit",
-            "ego resume",
-            "--mode",
-            "--sandbox",
-            "--model",
-            tools.to_str().unwrap(),
-            program.to_str().unwrap(),
-        ] {
-            assert!(note.contains(expected), "missing {expected:?}: {note}");
-        }
-        assert!(note.contains("read-only root"), "{note}");
+        assert_eq!(denied.request.unwrap().path.as_path(), program);
     }
 }
 

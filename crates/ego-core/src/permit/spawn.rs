@@ -1083,16 +1083,12 @@ impl RunConfinement {
         self.offline
     }
 
-    /// Whether this invocation may open an MCP HTTP transport.
+    /// Whether this invocation may open an MCP transport of any kind.
     ///
-    /// HTTP MCP runs in process, so only an online invocation with no
-    /// filesystem sandbox can admit it.
-    pub const fn admits_mcp_http(&self) -> bool {
-        !self.offline && matches!(self.level, Confinement::Off)
-    }
-
-    /// Whether this invocation may spawn an MCP stdio transport.
-    pub const fn admits_mcp_stdio(&self) -> bool {
+    /// Only `--offline` refuses MCP. A stdio server runs under the spawn
+    /// sandbox; an HTTP server runs in process, like the provider connection,
+    /// and reaches only the destination the owner configured.
+    pub const fn admits_mcp(&self) -> bool {
         !self.offline
     }
 
@@ -1141,6 +1137,15 @@ pub trait ProcessExecutor: Send + Sync {
         Ok(())
     }
 
+    /// Revalidate a call a person approved moments ago for this one launch.
+    ///
+    /// An adapter may skip a repeat of its most expensive content check here,
+    /// because it repeats that check at launch. A reusable approval never calls
+    /// this; it takes [`revalidate`](Self::revalidate).
+    fn revalidate_fresh_approval(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
+        self.revalidate(spec)
+    }
+
     fn execute<'a>(
         &'a self,
         spec: &'a SpawnSpec,
@@ -1177,6 +1182,31 @@ pub trait ProcessExecutor: Send + Sync {
         Err(ProcessError::Invariant(
             "process executor has no background lifecycle".to_owned(),
         ))
+    }
+
+    /// Subscribe the model to new complete output lines of one running
+    /// session-owned process. A later subscription replaces the earlier one.
+    fn monitor_background(
+        &self,
+        _id: DetachedExecId,
+        _monitor: DetachedExecMonitor,
+    ) -> Result<(), ProcessError> {
+        Err(ProcessError::Invariant(
+            "process executor has no background lifecycle".to_owned(),
+        ))
+    }
+
+    /// Remove and return the monitored lines queued since the last call.
+    fn take_background_output(
+        &self,
+        _id: DetachedExecId,
+    ) -> Result<Option<DetachedExecLines>, ProcessError> {
+        Ok(None)
+    }
+
+    /// Whether monitored lines are queued for delivery, without taking them.
+    fn background_output_ready(&self, _id: DetachedExecId) -> bool {
+        false
     }
 
     /// Execute one admitted hook handler with its strict request on stdin.
@@ -1235,6 +1265,67 @@ impl DetachedExecSnapshot {
                     text.push_str(&format!("\n[read_tool_result {reference}]"));
                 }
             }
+        }
+        text
+    }
+}
+
+/// What the model asked to see of one running session-owned process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedExecMonitor {
+    /// Deliver only complete lines this regular expression matches; `None`
+    /// delivers every new line.
+    pub pattern: Option<String>,
+    /// The largest number of lines one delivery carries.
+    pub max_lines: usize,
+}
+
+impl DetachedExecMonitor {
+    /// Lines one delivery carries when the model names no limit.
+    pub const DEFAULT_LINES: usize = 20;
+    /// The largest `max_lines` the model can choose.
+    pub const MAX_LINES: usize = 100;
+    /// Bytes of one delivered line; a longer line is cut and marked.
+    pub const LINE_BYTES: usize = 512;
+    /// Bytes of line text one delivery carries.
+    pub const DELIVERY_BYTES: usize = 4096;
+}
+
+/// One monitored line, after secret masking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitoredLine {
+    pub stream: StreamProvenance,
+    pub text: String,
+}
+
+/// The monitored lines of one process queued since the previous delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetachedExecLines {
+    pub id: DetachedExecId,
+    pub lines: Vec<MonitoredLine>,
+    /// Lines that matched after the delivery bound was reached.
+    pub omitted: u64,
+}
+
+impl DetachedExecLines {
+    pub fn model_text(&self) -> String {
+        let mut text = format!(
+            "background exec {} monitor: {} new lines",
+            self.id,
+            self.lines.len()
+        );
+        if self.omitted > 0 {
+            text.push_str(&format!(
+                " ({} later lines omitted; exec_status shows the current tail)",
+                self.omitted
+            ));
+        }
+        for line in &self.lines {
+            let stream = match line.stream {
+                StreamProvenance::Stdout => "stdout",
+                StreamProvenance::Stderr => "stderr",
+            };
+            text.push_str(&format!("\n{stream}: {}", line.text));
         }
         text
     }

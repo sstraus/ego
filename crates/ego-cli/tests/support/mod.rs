@@ -28,7 +28,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -418,13 +418,14 @@ pub struct Recorded {
 
 /// A fake Ollama/OpenAI daemon on loopback.
 ///
-/// The listener is dropped when the `Stub` is, which ends the serving thread on
-/// its next `accept`. Tests therefore keep it alive for as long as the child
-/// runs, which the borrow checker enforces for them.
+/// Dropping the `Stub` ends the serving thread on its next `accept`, and the
+/// thread closes the listener. Tests therefore keep it alive for as long as the
+/// child runs, which the borrow checker enforces for them.
 pub struct Stub {
     pub address: String,
     seen: Arc<Mutex<Vec<Recorded>>>,
     mode: StubMode,
+    stopped: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -432,6 +433,10 @@ enum StubMode {
     Provider,
     Mcp,
     McpTool,
+    /// An MCP tool server that answers `tools/call` with a task (SEP-2663).
+    McpTask,
+    /// The same server, but its task never settles: `tasks/get` answers `working`.
+    McpTaskWorking,
 }
 
 impl Stub {
@@ -450,6 +455,17 @@ impl Stub {
         Self::start_mode(plan, StubMode::McpTool, false)
     }
 
+    /// The tool endpoint of [`Stub::start_mcp_tool`] that runs every call as a
+    /// task: `tasks/get` answers `completed` with `task-result-text`.
+    pub fn start_mcp_task(plan: Plan) -> Self {
+        Self::start_mode(plan, StubMode::McpTask, false)
+    }
+
+    /// [`Stub::start_mcp_task`] whose tasks stay `working` at every poll.
+    pub fn start_mcp_task_working(plan: Plan) -> Self {
+        Self::start_mode(plan, StubMode::McpTaskWorking, false)
+    }
+
     /// Serve concurrent generations without one gated response blocking admission.
     pub fn start_concurrent(plan: Plan) -> Self {
         Self::start_mode(plan, StubMode::Provider, true)
@@ -464,10 +480,15 @@ impl Stub {
         let seen = Arc::new(Mutex::new(Vec::new()));
 
         let thread_seen = Arc::clone(&seen);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let thread_stopped = Arc::clone(&stopped);
         std::thread::spawn(move || {
             let generation = Arc::new(AtomicUsize::new(0));
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { break };
+                if thread_stopped.load(Ordering::SeqCst) {
+                    break;
+                }
                 // One request per connection, then closed. Keep-alive would
                 // buy nothing here and would make the reply logic guess where
                 // one exchange ends.
@@ -488,6 +509,7 @@ impl Stub {
             address,
             seen,
             mode,
+            stopped,
         }
     }
 
@@ -503,6 +525,17 @@ impl Stub {
             .filter(|req| req.path.contains("chat/completions") || req.path.ends_with("/messages"))
             .map(|req| serde_json::from_str(&req.body).expect("the request body is JSON"))
             .collect()
+    }
+}
+
+impl Drop for Stub {
+    /// The serving thread owns the listener and blocks in `accept`, so set the
+    /// flag and wake it with one connection. Without this every stub keeps its
+    /// socket for the rest of the process, and a test binary that starts
+    /// hundreds of stubs runs out of descriptors.
+    fn drop(&mut self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        let _ = TcpStream::connect(&self.address);
     }
 }
 
@@ -554,6 +587,9 @@ fn serve(
         body: body.clone(),
     });
 
+    if matches!(mode, StubMode::McpTask | StubMode::McpTaskWorking) && path == "/mcp" {
+        return mcp_task_response(&mut stream, &body, matches!(mode, StubMode::McpTask));
+    }
     if matches!(mode, StubMode::Mcp | StubMode::McpTool) && path == "/mcp" {
         return mcp_response(&mut stream, &body, matches!(mode, StubMode::McpTool));
     }
@@ -682,6 +718,64 @@ fn serve(
             sse(&mut stream, reply, &path)
         }
     }
+}
+
+/// The MCP tool endpoint of a server that runs every `tools/call` as a task.
+fn mcp_task_response(stream: &mut TcpStream, body: &str, completes: bool) -> std::io::Result<()> {
+    let request: serde_json::Value =
+        serde_json::from_str(body).expect("MCP probe receives JSON-RPC request");
+    let method = request["method"].as_str().unwrap_or_default();
+    let when = "2026-11-05T10:00:00Z";
+    let result = match (method, request.get("id")) {
+        ("server/discover", Some(_)) => serde_json::json!({
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28"],
+            "capabilities": {
+                "tools": {"listChanged": false},
+                "extensions": {"io.modelcontextprotocol/tasks": {}}
+            },
+            "ttlMs": 0,
+            "cacheScope": "private"
+        }),
+        ("tools/call", Some(_)) => serde_json::json!({
+            "resultType": "task",
+            "taskId": format!("task-{}", request["params"]["_meta"]["tuic/call_id"].as_str().unwrap_or("0")),
+            "status": "working",
+            "createdAt": when,
+            "lastUpdatedAt": when,
+            "pollIntervalMs": 500
+        }),
+        ("tasks/get", Some(_)) if !completes => serde_json::json!({
+            "resultType": "complete",
+            "taskId": request["params"]["taskId"],
+            "status": "working",
+            "createdAt": when,
+            "lastUpdatedAt": when,
+            "pollIntervalMs": 500
+        }),
+        ("tasks/get", Some(_)) => serde_json::json!({
+            "resultType": "complete",
+            "taskId": request["params"]["taskId"],
+            "status": "completed",
+            "createdAt": when,
+            "lastUpdatedAt": when,
+            "result": {
+                "resultType": "complete",
+                "content": [{"type": "text", "text": "task-result-text"}],
+                "isError": false
+            }
+        }),
+        ("tasks/cancel", Some(_)) => serde_json::json!({"resultType": "complete"}),
+        _ => return mcp_response(stream, body, true),
+    };
+    let response = serde_json::json!({ "jsonrpc": "2.0", "id": request["id"], "result": result });
+    let body = response.to_string();
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    stream.flush()
 }
 
 fn mcp_response(stream: &mut TcpStream, body: &str, tool: bool) -> std::io::Result<()> {
@@ -989,6 +1083,8 @@ pub struct Ego {
     env: HashMap<String, String>,
     stdin: Option<String>,
     fixture_default_thinking: bool,
+    /// How long a scripted PTY session stays at its idle prompt before EOF.
+    idle_before_exit: Option<Duration>,
 }
 
 /// What a finished invocation left behind.
@@ -1162,6 +1258,7 @@ impl Ego {
             env,
             stdin: None,
             fixture_default_thinking: false,
+            idle_before_exit: None,
         }
     }
 
@@ -1182,6 +1279,13 @@ impl Ego {
     /// distinction is the whole of what this method exists to make.
     pub fn conversing(mut self) -> Self {
         self.subcommand.clear();
+        self
+    }
+
+    /// Keep a scripted PTY session at its idle prompt for `idle` after the
+    /// scripted turn before EOF, so work that wakes an idle session can run.
+    pub fn idle_before_exit(mut self, idle: Duration) -> Self {
+        self.idle_before_exit = Some(idle);
         self
     }
 
@@ -1267,7 +1371,14 @@ impl Ego {
     /// so a startup admission can be tested without teaching every caller
     /// about PTY cursor handshakes.
     pub fn run_pty_responding(self, prompt: &str, answer: &str, input: &str) -> Finished {
-        self.run_pty_script(prompt, answer, Some(input), false)
+        self.run_pty_script(prompt, answer, Some(input), false, false)
+    }
+
+    /// Submit one interactive line, then answer the modal it opens by its stable
+    /// prompt text. The terminal is closed only at the first idle prompt after
+    /// the answer, because a pending modal does not read the EOF.
+    pub fn run_pty_answering_after(self, input: &str, prompt: &str, answer: &str) -> Finished {
+        self.run_pty_script(prompt, answer, Some(input), false, true)
     }
 
     /// Run a conversation whose first turn is already present in argv, then
@@ -1279,13 +1390,19 @@ impl Ego {
     /// Answer one startup modal for an argv-seeded conversation, then close
     /// the terminal at the first idle prompt.
     pub fn run_pty_responding_seeded(self, prompt: &str, answer: &str) -> Finished {
-        self.run_pty_script(prompt, answer, None, false)
+        self.run_pty_script(prompt, answer, None, false, false)
     }
 
     /// Use real cursor coordinates and return retained terminal history rather
     /// than interleaved redraw bytes for wrapped notice assertions.
     pub fn run_pty_trusting_screen(self, trust_answer: &str, input: &str) -> Finished {
-        self.run_pty_script("Trust project files", trust_answer, Some(input), true)
+        self.run_pty_script(
+            "Trust project files",
+            trust_answer,
+            Some(input),
+            true,
+            false,
+        )
     }
 
     fn run_pty_script(
@@ -1294,6 +1411,7 @@ impl Ego {
         answer: &str,
         input: Option<&str>,
         screen_backed: bool,
+        answer_after_script: bool,
     ) -> Finished {
         assert!(
             input.is_none_or(|line| !line.contains('\r') && !line.contains('\n')),
@@ -1347,10 +1465,12 @@ impl Ego {
             output
         });
         let mut output = Vec::new();
+        let mut idle_before_exit = self.idle_before_exit;
         let mut trust_answered = false;
         let mut submitted = false;
         let mut eof_sent = false;
         let mut prompt_count_before_submit = 0;
+        let mut prompt_count_at_answer = 0;
         while !eof_sent {
             let chunk = received
                 .recv_timeout(Self::QUIET_DEADLINE)
@@ -1375,6 +1495,7 @@ impl Ego {
                 });
             output.extend_from_slice(&chunk);
             if !trust_answered
+                && (!answer_after_script || submitted)
                 && output
                     .windows(prompt.len())
                     .any(|window| window == prompt.as_bytes())
@@ -1385,6 +1506,7 @@ impl Ego {
                     .expect("startup answer");
                 writer.flush().expect("startup answer flush");
                 trust_answered = true;
+                prompt_count_at_answer = ready_prompt_count(&output);
             }
             let prompt_count = ready_prompt_count(&output);
             if !submitted && prompt_count > 0 {
@@ -1410,7 +1532,20 @@ impl Ego {
                 writer.flush().expect("interactive script flush");
                 prompt_count_before_submit = prompt_count;
                 submitted = true;
-            } else if submitted && prompt_count > prompt_count_before_submit {
+            } else if submitted
+                && prompt_count > prompt_count_before_submit
+                && (!answer_after_script
+                    || (trust_answered && prompt_count > prompt_count_at_answer))
+            {
+                if let Some(idle) = idle_before_exit.take() {
+                    // Stay at the idle prompt, still reading, then exit.
+                    let until = Instant::now() + idle;
+                    while let Some(left) = until.checked_duration_since(Instant::now()) {
+                        if let Ok(chunk) = received.recv_timeout(left) {
+                            output.extend_from_slice(&chunk);
+                        }
+                    }
+                }
                 let mut writer = writer.lock().expect("pty writer lock");
                 writer.write_all(b"\x04").expect("interactive EOF");
                 writer.flush().expect("interactive EOF flush");
@@ -1807,9 +1942,13 @@ impl AcpHost {
     }
 
     pub fn initialize(&mut self) -> serde_json::Value {
+        self.initialize_with(serde_json::json!({}))
+    }
+
+    pub fn initialize_with(&mut self, client_capabilities: serde_json::Value) -> serde_json::Value {
         self.request(
             "initialize",
-            serde_json::json!({"protocolVersion": 1, "clientCapabilities": {}}),
+            serde_json::json!({"protocolVersion": 1, "clientCapabilities": client_capabilities}),
         )
     }
 

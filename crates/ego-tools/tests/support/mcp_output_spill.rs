@@ -57,7 +57,7 @@ impl TypedTool for ForeignRead {
             Op::Read {
                 path: ctx
                     .resolver
-                    .canonicalize(&ctx.cwd.as_path().join(params.path))?,
+                    .canonicalize(&ctx.cwd.as_path().join(params.files.into_iter().next().ok_or_else(|| ToolError::InvalidParams("missing fixture file".into()))?.path))?,
             },
         ))
     }
@@ -98,7 +98,7 @@ fn mcp_output_spill_large_result_keeps_full_bytes_readable_and_events_small() {
     );
     assert_eq!(
         path.parent().unwrap().parent().unwrap(),
-        directory.path().join(session.to_string())
+        fs::canonicalize(directory.path().join(session.to_string())).unwrap()
     );
     assert_eq!(fs::read(&path).unwrap(), text.as_bytes());
     assert!(answer.model_text().starts_with(&"row\n".repeat(5120)));
@@ -107,7 +107,7 @@ fn mcp_output_spill_large_result_keeps_full_bytes_readable_and_events_small() {
             .model_text()
             .contains("showing first 20480 bytes of 120019 bytes")
     );
-    assert!(answer.model_text().contains("Use read(path) to read it."));
+    assert!(answer.model_text().contains("Use read with a files array containing this path to read it."));
     assert!(!answer.model_text().contains("grep(query, path)"));
     assert!(!answer.model_text().contains("TAIL ONLY IN FILE"));
     let event = serde_json::to_string(&EventKind::ToolCallCompleted {
@@ -176,12 +176,12 @@ fn mcp_output_spill_large_result_keeps_full_bytes_readable_and_events_small() {
             AiEvent::ToolCall {
                 call_id: "read-spill".into(),
                 name: "read".into(),
-                args: json!({"path":path}).to_string(),
+                args: json!({"files":[{"path":path}]}).to_string(),
             },
             AiEvent::ToolCall {
                 call_id: "foreign-spill".into(),
                 name: "fixture_foreign".into(),
-                args: json!({"path":"large.txt"}).to_string(),
+                args: json!({"files":[{"path":"large.txt"}]}).to_string(),
             },
             AiEvent::Stop(StopReason::ToolUse),
         ],
@@ -189,7 +189,7 @@ fn mcp_output_spill_large_result_keeps_full_bytes_readable_and_events_small() {
             AiEvent::ToolCall {
                 call_id: "read-spill-tail".into(),
                 name: "read".into(),
-                args: json!({"path":path, "offset":120001}).to_string(),
+                args: json!({"files":[{"path":path, "offset":120001}]}).to_string(),
             },
             AiEvent::Stop(StopReason::ToolUse),
         ],
@@ -263,7 +263,8 @@ fn mcp_output_spill_large_result_keeps_full_bytes_readable_and_events_small() {
     assert!(!foreign.model_text().contains("TAIL ONLY IN FILE"));
     assert!(serde_json::to_string(foreign).unwrap().len() < 60_000);
     let first_page = format!("{:?}", generator.calls()[1].messages);
-    assert!(first_page.contains("offset=8000"));
+    assert!(first_page.contains("next_offset"));
+    assert!(first_page.contains("8000"));
     assert!(!first_page.contains("TAIL ONLY IN FILE"));
     assert!(format!("{:?}", generator.calls()[2].messages).contains("TAIL ONLY IN FILE"));
 }

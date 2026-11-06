@@ -37,28 +37,44 @@ use crate::http::{AdmittedMcpHttpProfile, header, path_and_query};
 use crate::stdio::SharedDuplex;
 use crate::{
     McpAcpEffects, McpDuplexEffects, McpError, McpFailure, McpHttpEffects, McpHttpEnd,
-    McpHttpPurpose, McpHttpSettlement, McpManualOutcome, McpRequestId,
+    McpHttpPurpose, McpHttpSettlement, McpManualOutcome, McpRequestId, McpTaskState,
 };
 
 pub const MCP_PROTOCOL_REVISION: &str = "2026-07-28";
 const MAX_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
-pub(crate) fn current_client_capabilities() -> ClientCapabilities {
-    ClientCapabilities::builder()
-        .enable_elicitation_with(
-            ElicitationCapability::new()
-                .with_form(FormElicitationCapability::new().with_schema_validation(true)),
-        )
-        .build()
+/// The capabilities ego declares. `tasks` adds the MCP Tasks extension
+/// (`io.modelcontextprotocol/tasks`); it is declared only on an HTTP session
+/// whose options ask for it.
+pub(crate) fn client_capabilities(tasks: bool) -> ClientCapabilities {
+    let builder = ClientCapabilities::builder().enable_elicitation_with(
+        ElicitationCapability::new()
+            .with_form(FormElicitationCapability::new().with_schema_validation(true)),
+    );
+    if tasks {
+        builder.enable_tasks().build()
+    } else {
+        builder.build()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct McpClientOptions {
     max_sse_event_size: usize,
     deadline: Instant,
+    tasks: bool,
 }
 
 impl McpClientOptions {
+    /// Declare the MCP Tasks extension on an HTTP session. Stdio and ACP
+    /// sessions never declare it: each call there spawns and settles its own
+    /// server, so a task would be gone before its first poll.
+    #[must_use]
+    pub fn with_tasks(mut self, tasks: bool) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
     pub(crate) fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -73,6 +89,7 @@ impl McpClientOptions {
         Ok(Self {
             max_sse_event_size,
             deadline,
+            tasks: false,
         })
     }
 }
@@ -841,8 +858,10 @@ impl McpClient {
         let lifecycle = ClientLifecycleMode::Discover {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
         };
+        let tasks = self.options.tasks
+            && matches!(state, ClientState::Pending(PendingTransport::Http { .. }));
         let client_info = ClientInfo::new(
-            current_client_capabilities(),
+            client_capabilities(tasks),
             Implementation::new("ego", env!("CARGO_PKG_VERSION")),
         )
         .with_protocol_version(ProtocolVersion::V_2026_07_28);
@@ -1165,14 +1184,49 @@ impl McpClient {
                     ));
                 }
             };
-            return McpManualOutcome::from_call(response);
+            return McpManualOutcome::from_call(response, false);
         }
+        let tasks = self.options.tasks;
         let service = self.running_service_mut()?;
         let response = service
             .call_tool_once(params)
             .await
             .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
-        McpManualOutcome::from_call(response)
+        McpManualOutcome::from_call(response, tasks)
+    }
+
+    /// One `tasks/get` round for a task this session created. HTTP only.
+    pub async fn get_task_once(&mut self, task_id: &str) -> Result<McpTaskState, McpError> {
+        self.claim_operation()?;
+        if !self.options.tasks {
+            return Err(McpError::new(
+                McpFailure::Authority,
+                "MCP Tasks were not declared for this client",
+            ));
+        }
+        let service = self.running_service_mut()?;
+        let result = service
+            .get_task(rmcp::model::GetTaskParams::new(task_id))
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
+        McpTaskState::from_rmcp(task_id, result.task)
+    }
+
+    /// One `tasks/cancel` round for a task this session created. HTTP only.
+    /// The acknowledgement does not guarantee that the server stops the task.
+    pub async fn cancel_task_once(&mut self, task_id: &str) -> Result<(), McpError> {
+        self.claim_operation()?;
+        if !self.options.tasks {
+            return Err(McpError::new(
+                McpFailure::Authority,
+                "MCP Tasks were not declared for this client",
+            ));
+        }
+        let service = self.running_service_mut()?;
+        service
+            .cancel_task(rmcp::model::CancelTaskParams::new(task_id))
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))
     }
 
     /// Perform one manual resources/read round without entering rmcp's MRTR

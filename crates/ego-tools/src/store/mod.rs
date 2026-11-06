@@ -4,6 +4,8 @@
 //! `ego-core` opens no files.
 
 mod blob;
+mod cold;
+mod cold_read;
 mod evidence;
 mod history;
 mod io;
@@ -15,6 +17,9 @@ mod snapshot;
 mod writer;
 
 pub use blob::SessionBlobStore;
+pub use cold::{
+    ColdStoragePolicy, ColdStorageReport, JOB_NICE_INCREMENT, lower_job_thread_priority,
+};
 pub use evidence::SessionEvidenceStore;
 pub use history::{HistoryError, HistoryHit, HistoryIndex};
 #[cfg(feature = "test-support")]
