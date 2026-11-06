@@ -1,7 +1,7 @@
 # ego command reference
 
 Generated from the clap definitions in `crates/ego-cli/src/cli.rs`.
-Do not edit: `crates/ego-cli/tests/reference.rs` regenerates and compares it.
+Do not edit: `crates/ego-cli/tests/it/reference.rs` regenerates and compares it.
 
 `ego PROMPT` with no subcommand starts an interactive session.
 
@@ -17,6 +17,7 @@ Run an agent, from one command line.
 - `ego resume` — Continue a stored session.
 - `ego continue` — Continue a stored session.
 - `ego fork` — Fork a session at its tip or after the completed turn containing a message.
+- `ego rewind` — Restore the files a session changed after a completed turn, then fork the conversation there.
 - `ego rm` — Delete a stored session (history is retained for descendants).
 - `ego compact` — Compact a session into its deterministic successor.
 - `ego export` — Export a session locally or as a structurally sanitized bundle.
@@ -26,7 +27,7 @@ Run an agent, from one command line.
 - `ego hooks` — Inspect the admitted system and user hook catalogue.
 - `ego doctor` — Report a read-only redacted health snapshot of this installation.
 - `ego checkpoint` — Preview or selectively restore session-owned Git file checkpoints.
-- `ego setup` — Configure saved user settings in an interactive terminal.
+- `ego setup` — Review provider readiness and configure saved user settings in an interactive terminal.
 - `ego acp` — Serve the Agent Client Protocol on stdio or an endpoint.
 - `ego a2a` — Serve the Agent2Agent protocol on a local or loopback endpoint.
 - `ego auth` — Manage subscription credentials.
@@ -37,7 +38,7 @@ Run an agent, from one command line.
 - `ego mcp-server` — Serve scoped ego runs over MCP on stdio.
 - `ego worktree` — Inspect or clean up a retained local worktree.
 
-- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
+- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text Repeatable.
@@ -46,7 +47,7 @@ Run an agent, from one command line.
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
 - `--continua` — Resume the latest saved session in this workspace without the terminal picker Default: `false`. Conflicts: `<PROMPT>`, `--file`, `--session`, `--session-id`, `--worktree`.
-- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
+- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
@@ -58,10 +59,14 @@ Run an agent, from one command line.
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
+- `--memory` — Keep a memory file for this workspace that the model can add to Default: `false`.
 - `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
+- `--no-checkpoints` — Do not save file checkpoints before writes during this run Default: `false`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
+- `--no-hooks` — Run with every hook off for this invocation; configuration is unchanged Default: `false`.
+- `--no-session-compression` — Do not compress old sessions in the background during this run Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
 - `--offline` — No non-loopback egress from ego's own HTTP transport Default: `false`.
 - `--output <OUTPUT>` — text|json|jsonl Values: `text`, `json`, `jsonl`.
@@ -85,6 +90,7 @@ Run an agent, from one command line.
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
+- `--trust-development-programs` — Trust this workspace and future edits to its current named programs; remember the grant Default: `false`. Conflicts: `--bare`, `--trust-workspace`.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable. Conflicts: `<PROMPT>`.
 - `-V, --version` — Print version
@@ -101,7 +107,7 @@ Usage: ego run [OPTIONS] [PROMPT]
 
 Run an agent from a prompt, headless.
 
-- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
+- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
 - `--attach <IMAGE_PATH|HTTPS_IMAGE_URL>` — Add exact image bytes as ordered context before the prompt text Repeatable.
@@ -109,7 +115,7 @@ Run an agent from a prompt, headless.
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
-- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
+- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
@@ -121,10 +127,14 @@ Run an agent from a prompt, headless.
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
+- `--memory` — Keep a memory file for this workspace that the model can add to Default: `false`.
 - `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
+- `--no-checkpoints` — Do not save file checkpoints before writes during this run Default: `false`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
+- `--no-hooks` — Run with every hook off for this invocation; configuration is unchanged Default: `false`.
+- `--no-session-compression` — Do not compress old sessions in the background during this run Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
 - `--offline` — No non-loopback egress from ego's own HTTP transport Default: `false`.
 - `--output <OUTPUT>` — text|json|jsonl Values: `text`, `json`, `jsonl`.
@@ -148,6 +158,7 @@ Run an agent from a prompt, headless.
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
+- `--trust-development-programs` — Trust this workspace and future edits to its current named programs; remember the grant Default: `false`. Conflicts: `--bare`, `--trust-workspace`.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable. Conflicts: `<PROMPT>`.
 - `--worktree <BRANCH>` — Create a retained managed worktree on this explicitly approved new branch Conflicts: `--session`, `--session-id`.
@@ -162,7 +173,8 @@ Usage: ego resume [OPTIONS] [ID] [PROMPT]
 
 Continue a stored session.
 
-- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
+- `--accept-authority-delta` — Accept the authority change shown for this resume, without a question. Applies to this resume only Default: `false`. Conflicts: `--name`, `--goal-operation`.
+- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable
 - `--answer <QUESTION_ID=JSON>` — Settle a pending question. Repeat for multiple sibling questions Repeatable.
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
@@ -171,24 +183,28 @@ Continue a stored session.
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
-- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
+- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
-- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--title`, `--queue`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--no-hooks`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--trust-development-programs`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--memory`, `--no-session-compression`, `--no-checkpoints`, `--session`, `--session-id`, `--worktree`.
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
+- `--memory` — Keep a memory file for this workspace that the model can add to Default: `false`.
 - `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
-- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--title`, `--queue`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--no-hooks`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--trust-development-programs`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--memory`, `--no-session-compression`, `--no-checkpoints`, `--session`, `--session-id`, `--worktree`.
+- `--no-checkpoints` — Do not save file checkpoints before writes during this run Default: `false`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
+- `--no-hooks` — Run with every hook off for this invocation; configuration is unchanged Default: `false`.
+- `--no-session-compression` — Do not compress old sessions in the background during this run Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
 - `--offline` — No non-loopback egress from ego's own HTTP transport Default: `false`.
 - `--output <OUTPUT>` — text|json|jsonl Values: `text`, `json`, `jsonl`.
@@ -198,6 +214,7 @@ Continue a stored session.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `--proxy <http://HOST[:PORT]>` — Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
 - `--proxy-ca <FILE>` — Additional PEM trust anchor for provider HTTPS through --proxy only
+- `--queue` — Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout Default: `false`. Conflicts: `--answer`.
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected Default: `false`.
 - `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
@@ -209,7 +226,9 @@ Continue a stored session.
 - `--system <SYSTEM>` — Replace the system prompt. `@file` reads it from a file
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
+- `--title <TITLE>` — Resume the session of this workspace whose title is exactly TITLE Conflicts: `--name`, `--goal-operation`.
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
+- `--trust-development-programs` — Trust this workspace and future edits to its current named programs; remember the grant Default: `false`. Conflicts: `--bare`, `--trust-workspace`.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable. Conflicts: `<PROMPT>`.
 - `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
@@ -221,7 +240,8 @@ Continue a stored session.
 In the terminal use `/resume [ID]` or `/continue`. Current execution authority
 is measured before effects: narrower authority is automatic; potentially
 wider authority requires explicit human consent. Headless callers cannot
-approve wider authority.
+be asked; `--accept-authority-delta` allows the change shown for this one
+resume and nothing later.
 
 With terminal stdin and stdout, `ego resume ID "next task"` opens the
 interactive seat, submits the task once, and accepts further messages.
@@ -255,7 +275,8 @@ Usage: ego continue [OPTIONS] [ID] [PROMPT]
 
 Continue a stored session.
 
-- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
+- `--accept-authority-delta` — Accept the authority change shown for this resume, without a question. Applies to this resume only Default: `false`. Conflicts: `--name`, `--goal-operation`.
+- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable
 - `--answer <QUESTION_ID=JSON>` — Settle a pending question. Repeat for multiple sibling questions Repeatable.
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--artifact-dir <ARTIFACT_DIR>` — Override the sanitized run-artifact root for profile `ci`
@@ -264,24 +285,28 @@ Continue a stored session.
 - `--budget <BUDGET>` — Hard cap: '2.5$' or '400k' tokens
 - `--context-clear` — Permit the model to discard conversation history using clear Default: `false`.
 - `--context-interval <CONTEXT_INTERVAL>` — Minimum completed turns between model-requested transitions Default: `10`.
-- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
+- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `--fallback <P/M>` — Ordered provider/model candidate used after a delivery-safe failure Repeatable.
 - `-f, --file <FILE>` — Read the instruction and its invocation configuration from an agent file Conflicts: `<PROMPT>`.
 - `--goal <GOAL>` — Set a checked session objective
 - `--goal-check-command <GOAL_CHECK_COMMAND>` — Evaluator argv as a JSON string array; reads evidence JSON on stdin
-- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--goal-operation <GOAL_OPERATION>` — Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON Conflicts: `--name`, `<PROMPT>`, `--answer`, `--title`, `--queue`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--no-hooks`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--trust-development-programs`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--memory`, `--no-session-compression`, `--no-checkpoints`, `--session`, `--session-id`, `--worktree`.
 - `--goal-turns <GOAL_TURNS>` — Maximum automatic goal continuation turns Default: `20`.
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--max-output-tokens <MAX_OUTPUT_TOKENS>` — Maximum generated tokens per request
 - `--max-turns <MAX_TURNS>` — Cap the turns this run may take
 - `--mcp <NAME|@FILE>` — Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server Repeatable.
+- `--memory` — Keep a memory file for this workspace that the model can add to Default: `false`.
 - `--mode <MODE>` — Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
 - `-m, --model <MODEL>` — provider/model slug, e.g. ollama/qwen3
-- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--session`, `--session-id`, `--worktree`.
+- `--name <NAME>` — Read or change the session title without starting a turn: show, set=TEXT, clear Conflicts: `--goal-operation`, `<PROMPT>`, `--answer`, `--title`, `--queue`, `--file`, `--var`, `--attach`, `--model`, `--offline`, `--proxy`, `--proxy-ca`, `--sandbox`, `--thinking`, `--read-only-dir`, `--system`, `--bare`, `--append-system`, `--output-style`, `--instructions`, `--tools`, `--no-tools`, `--no-hooks`, `--allow`, `--deny`, `--profile`, `--trust-workspace`, `--trust-development-programs`, `--ephemeral`, `--artifact-dir`, `--schema`, `--schema-retries`, `--retry`, `--fallback`, `--budget`, `--max-output-tokens`, `--goal`, `--no-context-tool`, `--context-clear`, `--context-interval`, `--goal-turns`, `--goal-check-command`, `--max-turns`, `--timeout`, `--mcp`, `--mode`, `--plan`, `--yolo`, `--set`, `--quiet`, `--no-color`, `--plain`, `--vim`, `--memory`, `--no-session-compression`, `--no-checkpoints`, `--session`, `--session-id`, `--worktree`.
+- `--no-checkpoints` — Do not save file checkpoints before writes during this run Default: `false`.
 - `--no-color` — Never emit ANSI colour, whatever the terminal claims to support Default: `false`.
 - `--no-context-tool` — Disable model-requested context transitions Default: `false`.
+- `--no-hooks` — Run with every hook off for this invocation; configuration is unchanged Default: `false`.
+- `--no-session-compression` — Do not compress old sessions in the background during this run Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
 - `--offline` — No non-loopback egress from ego's own HTTP transport Default: `false`.
 - `--output <OUTPUT>` — text|json|jsonl Values: `text`, `json`, `jsonl`.
@@ -291,6 +316,7 @@ Continue a stored session.
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
 - `--proxy <http://HOST[:PORT]>` — Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)
 - `--proxy-ca <FILE>` — Additional PEM trust anchor for provider HTTPS through --proxy only
+- `--queue` — Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout Default: `false`. Conflicts: `--answer`.
 - `-q, --quiet` — Suppress progress and diagnostics on stderr; stdout is unaffected Default: `false`.
 - `--read-only-dir <DIR>` — Grant reads of one existing canonical absolute upload directory
 - `--retry <RETRY>` — Additional delivery-safe attempts for each candidate
@@ -302,7 +328,9 @@ Continue a stored session.
 - `--system <SYSTEM>` — Replace the system prompt. `@file` reads it from a file
 - `--thinking <THINKING>` — off|minimal|low|medium|high|xhigh|max
 - `--timeout <TIMEOUT>` — Wall clock, e.g. '90s' or '10m'
+- `--title <TITLE>` — Resume the session of this workspace whose title is exactly TITLE Conflicts: `--name`, `--goal-operation`.
 - `--tools <TOOLS>` — Restrict the builtin tools to this comma-separated list Repeatable.
+- `--trust-development-programs` — Trust this workspace and future edits to its current named programs; remember the grant Default: `false`. Conflicts: `--bare`, `--trust-workspace`.
 - `--trust-workspace` — Trust this launch's workspace without asking; remember the answer Default: `false`. Conflicts: `--bare`.
 - `--var <KEY=VALUE>` — Supply one declared agent-file template variable. Requires --file Repeatable. Conflicts: `<PROMPT>`.
 - `--vim` — Use Vim normal/insert editing in the interactive composer Default: `false`.
@@ -314,7 +342,8 @@ Continue a stored session.
 In the terminal use `/resume [ID]` or `/continue`. Current execution authority
 is measured before effects: narrower authority is automatic; potentially
 wider authority requires explicit human consent. Headless callers cannot
-approve wider authority.
+be asked; `--accept-authority-delta` allows the change shown for this one
+resume and nothing later.
 
 With terminal stdin and stdout, `ego resume ID "next task"` opens the
 interactive seat, submits the task once, and accepts further messages.
@@ -349,6 +378,21 @@ Usage: ego fork [OPTIONS] <SOURCE>
 Fork a session at its tip or after the completed turn containing a message.
 
 - `--at <ITEM_ID>` — (undocumented)
+- `-C <DIR>` — Run as if started in DIR
+- `-h, --help` — Print help
+- `--output <OUTPUT>` — text|json|jsonl Values: `text`, `json`, `jsonl`.
+- `--session-dir <SESSION_DIR>` — Override the store location
+- `<SOURCE>` — (undocumented) Required.
+
+## `ego rewind`
+
+```text
+Usage: ego rewind [OPTIONS] --at <ITEM_ID> <SOURCE>
+```
+
+Restore the files a session changed after a completed turn, then fork the conversation there.
+
+- `--at <ITEM_ID>` — A user or assistant message of the turn to return to Required.
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help
 - `--output <OUTPUT>` — text|json|jsonl Values: `text`, `json`, `jsonl`.
@@ -480,6 +524,8 @@ Report a read-only redacted health snapshot of this installation.
 
 - `-h, --help` — Print help
 - `--json` — Emit the exact versioned health snapshot Default: `false`.
+- `--offline` — Skip every provider network probe Default: `false`.
+- `--probe-network` — Probe the network reachability of each configured provider, like `doctor_network = true` Default: `false`.
 
 ## `ego checkpoint`
 
@@ -534,7 +580,7 @@ Close checkpoint ownership and delete the session's private Git ref
 Usage: ego setup [OPTIONS]
 ```
 
-Configure saved user settings in an interactive terminal.
+Review provider readiness and configure saved user settings in an interactive terminal.
 
 - `-C, --directory <DIRECTORY>` — Resolve effective settings for this workspace
 - `-h, --help` — Print help
@@ -548,18 +594,19 @@ Usage: ego acp [OPTIONS]
 
 Serve the Agent Client Protocol on stdio or an endpoint.
 
-- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable Repeatable.
+- `--allow <RULE>` — Allow rule, e.g. 'read(src/**)'. Repeatable
 - `--allow-public-bind` — Serve on an address reachable from outside this machine Default: `false`.
 - `--append-system <APPEND_SYSTEM>` — Append to the system prompt. `@file` reads it from a file
 - `--bare` — No ambient discovery, even in a trusted workspace Default: `false`. Conflicts: `--instructions`.
 - `--connection-lifetime <CONNECTION_LIFETIME>` — Maximum lifetime of one listener connection: 90s, 10m or 2h (runtime default: 24h)
-- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable Repeatable.
+- `--deny <RULE>` — Deny rule, e.g. 'write(**)'. Repeatable
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help
 - `--instructions <INSTRUCTIONS>` — Use this instruction file instead of discovering one
 - `--listen <LISTEN>` — Serve on a socket path or address instead of stdio
 - `--max-connections <MAX_CONNECTIONS>` — Maximum simultaneous listener connections (runtime default: 32)
 - `--max-ingress-bytes <MAX_INGRESS_BYTES>` — Maximum cumulative bytes read from one listener connection (runtime default: 134217728 bytes)
+- `--no-hooks` — Run with every hook off for this invocation; configuration is unchanged Default: `false`.
 - `--no-tools` — Offer no tools at all Default: `false`. Conflicts: `--tools`.
 - `--output-style <NAME>` — Select a trusted prompt-only style: concise, explanatory, or NAME from EGO_HOME/output-styles/NAME.md
 - `--profile <PROFILE>` — Layer [profile.NAME] from config
@@ -663,17 +710,18 @@ Manage configured MCP servers.
 
 ```text
 Usage: ego mcp add <NAME> --stdio [--cwd <DIR>] [--inherit-env <NAME>]... -- <COMMAND> [ARG]...
-       ego mcp add <NAME> --http <URL> [--auth <none|oauth>] [--allow-insecure-loopback]
+       ego mcp add <NAME> --http <URL> [--auth <none|oauth>] [--allow-insecure-loopback] [--oauth-host <URL>]...
 ```
 
 Add or replace one complete server entry
 
-- `--allow-insecure-loopback` — Consent to plaintext HTTP for an exact loopback host Default: `false`. Conflicts: `--stdio`.
+- `--allow-insecure-loopback` — Consent to plaintext HTTP for this server on loopback or the owner network Default: `false`. Conflicts: `--stdio`.
 - `--auth <AUTH>` — HTTP authentication mode Values: `none`, `oauth`. Conflicts: `--stdio`.
 - `--cwd <DIR>` — Working directory for the stdio child Conflicts: `--http`.
 - `-h, --help` — Print help
 - `--http <URL>` — Configure a Streamable HTTP transport Conflicts: `--stdio`.
-- `--inherit-env <NAME>` — Environment variable inherited by the stdio child. Repeatable Repeatable. Conflicts: `--http`.
+- `--inherit-env <NAME>` — Environment variable inherited by the stdio child. Repeatable Conflicts: `--http`.
+- `--oauth-host <URL>` — Extra OAuth origin that may host this server's authorization, token or registration endpoint when it differs from the issuer's. Repeatable Conflicts: `--stdio`.
 - `--profile <PROFILE>` — Explicit HTTP wire profile; never selected by fallback Values: `current`, `legacy-sse`. Conflicts: `--stdio`.
 - `--stdio` — Configure a subprocess transport. Its command follows literal `--` Default: `false`. Conflicts: `--http`.
 - `<NAME>` — (undocumented) Required.
@@ -991,16 +1039,19 @@ Explain one prepared builtin call without running it
 ## `ego mcp-server`
 
 ```text
-Usage: ego mcp-server [OPTIONS] --max-concurrent-runs <MAX_CONCURRENT_RUNS> --retained-requests <RETAINED_REQUESTS> --max-resource-bytes <MAX_RESOURCE_BYTES>
+Usage: ego mcp-server [OPTIONS]
 ```
 
 Serve scoped ego runs over MCP on stdio.
 
+- `--allow-mode <ALLOW_MODE>` — Also let clients select this mode. The configured mode is always allowed Repeatable.
+- `--allow-model <P/M>` — Also let clients select this model. The configured model is always allowed Repeatable.
+- `--allow-root <DIR>` — Also let clients run in DIR. The directory given with -C (or the current one) is always allowed Repeatable.
 - `-C <DIR>` — Run as if started in DIR
 - `-h, --help` — Print help
-- `--max-concurrent-runs <MAX_CONCURRENT_RUNS>` — (undocumented) Required.
-- `--max-resource-bytes <MAX_RESOURCE_BYTES>` — (undocumented) Required.
-- `--retained-requests <RETAINED_REQUESTS>` — (undocumented) Required.
+- `--max-concurrent-runs <MAX_CONCURRENT_RUNS>` — Runs that may execute at once Default: `1`.
+- `--max-resource-bytes <MAX_RESOURCE_BYTES>` — Largest resource body returned to a client, in bytes Default: `65536`.
+- `--retained-requests <RETAINED_REQUESTS>` — Finished requests kept for status and resource reads Default: `16`.
 - `--session-dir <SESSION_DIR>` — Override the store location
 
 ## `ego worktree`

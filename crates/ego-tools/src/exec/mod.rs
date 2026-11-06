@@ -9,6 +9,8 @@ mod editor_process;
 pub(crate) mod identity;
 #[cfg(target_os = "linux")]
 mod landlock;
+mod maintenance;
+mod monitor;
 mod null;
 #[cfg(target_os = "macos")]
 mod pnpm;
@@ -480,6 +482,10 @@ impl ProcessExecutor for GuardedExec {
     fn revalidate(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
         identity::revalidate(spec)
     }
+
+    fn revalidate_fresh_approval(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
+        identity::revalidate_fresh_approval(spec)
+    }
     fn execute<'a>(
         &'a self,
         spec: &'a SpawnSpec,
@@ -520,6 +526,25 @@ impl ProcessExecutor for GuardedExec {
 
     fn cancel_background(&self, id: DetachedExecId) -> Result<(), ProcessError> {
         self.session_context().cancel_background(id)
+    }
+
+    fn monitor_background(
+        &self,
+        id: DetachedExecId,
+        monitor: ego_core::permit::DetachedExecMonitor,
+    ) -> Result<(), ProcessError> {
+        self.session_context().monitor_background(id, monitor)
+    }
+
+    fn take_background_output(
+        &self,
+        id: DetachedExecId,
+    ) -> Result<Option<ego_core::permit::DetachedExecLines>, ProcessError> {
+        self.session_context().take_background_output(id)
+    }
+
+    fn background_output_ready(&self, id: DetachedExecId) -> bool {
+        self.session_context().background_output_ready(id)
     }
 
     fn execute_handler<'a>(

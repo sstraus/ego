@@ -38,7 +38,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::client::{MCP_PROTOCOL_REVISION, current_client_capabilities};
+use crate::client::{MCP_PROTOCOL_REVISION, client_capabilities};
 use crate::dynamic::{McpCollapsedBootstrap, McpOperation, McpOperationFactory};
 use crate::http::AdmittedMcpHttpProfile;
 use crate::registry::{
@@ -54,6 +54,8 @@ use crate::{
 
 #[path = "session_stdio_operation.rs"]
 mod session_stdio_operation;
+#[path = "task_operation.rs"]
+mod task_operation;
 
 #[derive(Clone, Copy)]
 struct OperationLimits {
@@ -102,6 +104,8 @@ pub struct McpHttpOperationFactory {
     continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     collapsed: Option<CollapsedSchemaAdmission>,
+    /// Declare MCP Tasks to this server (an HTTP session only).
+    tasks: bool,
 }
 
 /// Exact immutable registry capture lookup owned by continuation recovery.
@@ -723,7 +727,15 @@ impl McpHttpOperationFactory {
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             collapsed: None,
+            tasks: false,
         })
+    }
+
+    /// Declare the MCP Tasks extension to this server and track the tasks it starts.
+    #[must_use]
+    pub fn with_tasks(mut self, tasks: bool) -> Self {
+        self.tasks = tasks;
+        self
     }
 
     pub(crate) fn runtime(
@@ -741,6 +753,7 @@ impl McpHttpOperationFactory {
                 bootstrap,
                 admission,
             }),
+            tasks: false,
         })
     }
 }
@@ -1212,22 +1225,29 @@ async fn execute_http(
     if claim.envelope() != &envelope {
         return Err(authority("guarded MCP HTTP claim changed its envelope"));
     }
-    let broker = Arc::new(SplitMcpHttpEffects::new(
-        claim,
-        server.clone(),
-        profile.fingerprint(),
-        route,
-        envelope.clone(),
-        expected_wire_params,
-        admission
-            .authorization_headers(None, Instant::now() + factory.limits.timeout)
-            .await?,
-        admission.oauth_session().cloned(),
-    ));
+    let broker = Arc::new(
+        SplitMcpHttpEffects::new(
+            claim,
+            server.clone(),
+            profile.fingerprint(),
+            route,
+            envelope.clone(),
+            expected_wire_params,
+            admission
+                .authorization_headers(None, Instant::now() + factory.limits.timeout)
+                .await?,
+            admission.oauth_session().cloned(),
+        )
+        .with_tasks(factory.tasks),
+    );
     let effects: Arc<dyn McpHttpEffects> = broker.clone();
-    let mut client =
-        McpClient::connect_http(server, config.clone(), factory.limits.options()?, effects)?
-            .with_identity_retry(Arc::clone(&factory.identity_retry));
+    let mut client = McpClient::connect_http(
+        server,
+        config.clone(),
+        factory.limits.options()?.with_tasks(factory.tasks),
+        effects,
+    )?
+    .with_identity_retry(Arc::clone(&factory.identity_retry));
     if let Err(error) = client.discover().await {
         let _ = client.settle().await;
         return Err(error);
@@ -1239,6 +1259,15 @@ async fn execute_http(
     let selected = broker
         .selected_settlement()?
         .ok_or_else(|| protocol("selected MCP HTTP operation was not settled"))?;
+    if let OperationOutcome::TaskCreated(task) = &outcome {
+        return Ok(task_operation::task_started(
+            task,
+            &envelope,
+            config,
+            admission,
+            factory.limits,
+        ));
+    }
     let schema = tool_schema_command(
         &outcome,
         &envelope,
@@ -1612,6 +1641,7 @@ enum CompleteResult {
 enum OperationOutcome {
     Complete(CompleteResult),
     InputRequired(crate::McpMappedInput),
+    TaskCreated(Box<rmcp::model::Task>),
 }
 
 fn map_manual<T>(
@@ -1621,6 +1651,7 @@ fn map_manual<T>(
     match outcome {
         McpManualOutcome::Complete(result) => OperationOutcome::Complete(complete(result)),
         McpManualOutcome::InputRequired(required) => OperationOutcome::InputRequired(*required),
+        McpManualOutcome::TaskCreated(task) => OperationOutcome::TaskCreated(task),
     }
 }
 
@@ -1765,6 +1796,10 @@ async fn project_outcome(
                 .await
                 .map(ToolExecution::InputRequired)
         }
+        OperationOutcome::TaskCreated(_) => Err(McpError::new(
+            McpFailure::Protocol,
+            "a task answer reached a transport that does not support MCP Tasks",
+        )),
         OperationOutcome::Complete(result) => {
             let projected = project_complete(result)?;
             let evidence = io
@@ -1935,6 +1970,8 @@ struct SplitMcpHttpEffects {
     expected_wire_params: Value,
     headers: Arc<[HttpHeader]>,
     oauth: Option<Arc<crate::oauth::McpOAuthSession>>,
+    /// The session declared MCP Tasks, so its per-request metadata says so.
+    tasks: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1970,7 +2007,13 @@ impl SplitMcpHttpEffects {
             expected_wire_params,
             headers: headers.into(),
             oauth,
+            tasks: false,
         }
+    }
+
+    fn with_tasks(mut self, tasks: bool) -> Self {
+        self.tasks = tasks;
+        self
     }
 
     fn selected_settlement(&self) -> Result<Option<McpHttpSettlement>, McpError> {
@@ -2016,7 +2059,7 @@ impl SplitMcpHttpEffects {
             || body.get("id").is_none()
             || body.get("method").and_then(Value::as_str)
                 != Some(self.envelope.operation().method())
-            || !selected_wire_params_match(params, &self.expected_wire_params)
+            || !selected_wire_params_match(params, &self.expected_wire_params, self.tasks)
         {
             return Err(authority("selected MCP HTTP method or parameters changed"));
         }
@@ -2086,7 +2129,7 @@ impl SplitMcpHttpEffects {
     }
 }
 
-fn selected_wire_params_match(mut actual: Value, expected: &Value) -> bool {
+fn selected_wire_params_match(mut actual: Value, expected: &Value, tasks: bool) -> bool {
     let Some(params) = actual.as_object_mut() else {
         return false;
     };
@@ -2099,7 +2142,7 @@ fn selected_wire_params_match(mut actual: Value, expected: &Value) -> bool {
     if !progress.is_u64() && !progress.as_str().is_some_and(|value| !value.is_empty()) {
         return false;
     }
-    let Ok(capabilities) = serde_json::to_value(current_client_capabilities()) else {
+    let Ok(capabilities) = serde_json::to_value(client_capabilities(tasks)) else {
         return false;
     };
     let mut expected_metadata = serde_json::json!({
@@ -2731,7 +2774,7 @@ mod stdio_fingerprint_tests {
                 "progressToken": 7
             }
         });
-        assert!(selected_wire_params_match(actual.clone(), &expected));
+        assert!(selected_wire_params_match(actual.clone(), &expected, false));
 
         for changed in [
             {
@@ -2757,7 +2800,7 @@ mod stdio_fingerprint_tests {
             },
         ] {
             assert!(
-                !selected_wire_params_match(changed.clone(), &expected),
+                !selected_wire_params_match(changed.clone(), &expected, false),
                 "changed selected HTTP authority was accepted: {changed}"
             );
         }

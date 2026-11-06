@@ -1,6 +1,6 @@
 //! Workspace decisions stored outside the workspace that cannot grant
-//! themselves. Executable authority invalidates a decision; instructions do
-//! not.
+//! themselves. Executable authority invalidates a decision, except edits to
+//! named programs covered by an explicit development grant.
 //!
 //! `ego-core` decides trust inventory meaning and whether a stored answer
 //! still applies. This module owns reads and separately locked documents
@@ -17,7 +17,7 @@ use ego_core::config::{
     ExecutableDeclaration, ExecutableSurface, ProgramEvidence, TRUST_DIGEST_MAX_BYTES, Trust,
     TrustInventory, TrustLedger, TrustedContent,
 };
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use ego_core::config::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger};
 use ego_tools::instructions::OsInstructionIo;
 use ego_tools::privacy::{PrivatePathKind, harden_private_path};
@@ -66,9 +66,14 @@ pub(crate) fn instruction_discovery_root(
     Ok(shared)
 }
 
-fn user_instruction_discovery_root(root: &Path) -> std::io::Result<PathBuf> {
+fn user_instruction_discovery_root(
+    root: &Path,
+) -> std::io::Result<(PathBuf, ego_core::config::Limits)> {
     let effective = crate::config::user_effective().map_err(std::io::Error::other)?;
-    instruction_discovery_root(root, &effective.instructions)
+    Ok((
+        instruction_discovery_root(root, &effective.instructions)?,
+        effective.instructions.limits(),
+    ))
 }
 
 /// The terminal launch resolves the same per-root answer ACP uses.
@@ -84,9 +89,15 @@ pub(crate) fn resolve(
     explicit_grant: bool,
     ask: impl FnOnce(&str) -> Trust,
 ) -> Trust {
-    resolve_selected(root, home, diagnostics, explicit_grant, None, |context| {
-        Some(ask(context))
-    })
+    resolve_selected(
+        root,
+        home,
+        diagnostics,
+        explicit_grant,
+        false,
+        None,
+        |context| Some(ask(context)),
+    )
 }
 
 /// Headless launches may reuse an answer, but never manufacture a refusal.
@@ -97,7 +108,9 @@ pub(crate) fn resolve_headless(
     diagnostics: &dyn Diagnostics,
     explicit_grant: bool,
 ) -> Trust {
-    resolve_selected(root, home, diagnostics, explicit_grant, None, |_| None)
+    resolve_selected(root, home, diagnostics, explicit_grant, false, None, |_| {
+        None
+    })
 }
 
 pub(crate) fn resolve_selected(
@@ -105,6 +118,7 @@ pub(crate) fn resolve_selected(
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
     explicit_grant: bool,
+    development_grant: bool,
     selected: Option<&Path>,
     ask: impl FnOnce(&str) -> Option<Trust>,
 ) -> Trust {
@@ -123,10 +137,18 @@ pub(crate) fn resolve_selected(
     let surface = executable_surface_selected(root, selected);
     let key = root.display().to_string();
     let store = home.map(TrustStore::new);
-    if !explicit_grant && let Some(store) = &store {
+    if !explicit_grant
+        && !development_grant
+        && let Some(store) = &store
+    {
         match store.read() {
             Ok(ledger) => {
                 if let Some(remembered) = ledger.remembered(&key, &surface) {
+                    if let Some(changes) = ledger.development_changes(&key, &surface) {
+                        diagnostics.note(&format!(
+                            "workspace development grant covers changed programs:\n{changes}"
+                        ));
+                    }
                     if ledger.is_legacy(&key)
                         && let Err(error) = store.migrate_legacy(&key, surface.clone(), remembered)
                     {
@@ -160,7 +182,7 @@ pub(crate) fn resolve_selected(
         }
         None => content,
     };
-    let decision = if explicit_grant {
+    let decision = if explicit_grant || development_grant {
         Trust::Trusted
     } else {
         let Some(answer) = ask(&context) else {
@@ -173,7 +195,13 @@ pub(crate) fn resolve_selected(
         return Trust::Untrusted;
     }
     if let Some(store) = &store
-        && let Err(error) = store.remember(&key, surface, decision)
+        && let Err(error) = if development_grant {
+            store
+                .0
+                .update(|ledger| ledger.remember_development(&key, surface))
+        } else {
+            store.remember(&key, surface, decision)
+        }
     {
         // The person answered, and this session honours that answer. Losing
         // the memory of it costs one more question next launch, which is not
@@ -213,7 +241,13 @@ fn collect_executable_declarations(
                         env_keys: env_keys_in(entry),
                         details: details_in(
                             entry,
-                            &["transport", "profile", "cwd", "allow_insecure_loopback"],
+                            &[
+                                "transport",
+                                "profile",
+                                "cwd",
+                                "allow_insecure_loopback",
+                                "oauth_hosts",
+                            ],
                         ),
                     },
                 );
@@ -253,6 +287,23 @@ fn collect_executable_declarations(
                 );
             }
         }
+        if let Some(grants) = config.get("grants").and_then(toml::Value::as_table) {
+            collect_grant_declarations(surface, relative, grants);
+        }
+        if selects_long_cache(&config) {
+            surface.declarations.insert(
+                format!("{relative}:cache"),
+                ExecutableDeclaration {
+                    config: relative.to_owned(),
+                    kind: "prompt-cache retention".to_owned(),
+                    name: "cache".to_owned(),
+                    command: "long".to_owned(),
+                    args: Vec::new(),
+                    env_keys: Vec::new(),
+                    details: Default::default(),
+                },
+            );
+        }
         if let Some(auth) = config.get("auth").and_then(toml::Value::as_table) {
             for (name, entry) in auth {
                 if let Some(command) = entry
@@ -273,6 +324,54 @@ fn collect_executable_declarations(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Each proposed root, executable path and MCP grant is its own declaration,
+/// keyed by its content, so the owner's answer covers exactly this text and a
+/// changed proposal is listed as added or removed.
+fn collect_grant_declarations(
+    surface: &mut ExecutableSurface,
+    relative: &str,
+    grants: &toml::Table,
+) {
+    let mut propose = |kind: &str, name: String, details| {
+        surface.declarations.insert(
+            format!("{relative}:grant:{kind}:{name}"),
+            ExecutableDeclaration {
+                config: relative.to_owned(),
+                kind: format!("grant {kind}"),
+                name,
+                command: String::new(),
+                args: Vec::new(),
+                env_keys: Vec::new(),
+                details,
+            },
+        );
+    };
+    for root in grants
+        .get("roots")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let path = root
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        let details = details_in(root, &["access"]);
+        propose("root", path.to_owned(), details);
+    }
+    for (key, kind) in [("exec_paths", "exec path"), ("allow", "mcp")] {
+        for value in grants
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+        {
+            propose(kind, value.to_owned(), Default::default());
         }
     }
 }
@@ -324,6 +423,7 @@ pub(crate) fn executable_surface_selected(
                     digest: ego_core::digest::sha256_hex(&bytes),
                     executable: false,
                     link_target: None,
+                    resolved_target: None,
                 },
             );
         }
@@ -361,6 +461,7 @@ pub(crate) fn executable_surface_selected(
                         digest: format!("{:x}", Sha256::digest(target.as_bytes())),
                         executable: false,
                         link_target: Some(target),
+                        resolved_target: None,
                     },
                 );
             }
@@ -391,12 +492,16 @@ pub(crate) fn executable_surface_selected(
                 digest,
                 executable,
                 link_target,
+                resolved_target: resolved
+                    .as_deref()
+                    .and_then(|path| path.strip_prefix(root).ok())
+                    .map(|path| path.to_string_lossy().into_owned()),
             },
         );
     }
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
-        if let Ok(discovery_root) = user_instruction_discovery_root(root) {
+        if let Ok((discovery_root, limits)) = user_instruction_discovery_root(root) {
             let mut selections = vec![ego_core::config::Selection::Ambient];
             if let Some(selected) = selected {
                 selections.push(ego_core::config::Selection::Explicit(
@@ -415,7 +520,7 @@ pub(crate) fn executable_surface_selected(
                     &discovery_root,
                     root,
                     &selection,
-                    ego_core::config::Limits::default(),
+                    limits,
                     Some(&home),
                 ) {
                     for file in set.loaded {
@@ -448,6 +553,9 @@ pub(crate) fn remembered_decision(
         }
     };
     let decision = ledger.remembered(&key, surface)?;
+    if let Some(changes) = ledger.development_changes(&key, surface) {
+        tracing::warn!("workspace development grant covers changed programs:\n{changes}");
+    }
     if ledger.is_legacy(&key)
         && let Err(error) = store.migrate_legacy(&key, surface.clone(), decision)
     {
@@ -528,25 +636,34 @@ fn details_in(entry: &toml::Value, names: &[&str]) -> std::collections::BTreeMap
         .collect()
 }
 
-/// Resolve the separate host-risk acknowledgement for one canonical workspace.
+/// Resolve the user's host-risk acknowledgement of Windows unconfined execution.
+///
+/// One answer per user and contract revision covers every workspace, because
+/// the missing confinement is a property of the platform, not of a project.
+/// A start that relies on the remembered answer says so, so the unconfined
+/// posture stays visible after the question stops being asked.
 ///
 /// A broken document is not an acknowledgement and is never replaced by a
 /// fresh answer. The answer still governs this invocation, so a failed write
 /// costs another question rather than making an informed interactive start
 /// unusable.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub(crate) fn resolve_unconfined(
-    root: &Path,
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
     ask: impl FnOnce() -> bool,
 ) -> bool {
-    let key = root.display().to_string();
     let store = home.map(UnconfinedStore::new);
     if let Some(store) = &store {
         match store.read() {
             Ok(ledger) => {
-                if ledger.acknowledged(&key, UNCONFINED_CONTRACT_REVISION) {
+                if ledger.acknowledged(UNCONFINED_CONTRACT_REVISION) {
+                    diagnostics.note(&format!(
+                        "Windows execution is unconfined: filesystem and network isolation are \
+                         not enforced (acknowledged once for this user; delete {} to be asked \
+                         again)",
+                        store.path().display()
+                    ));
                     return true;
                 }
             }
@@ -561,16 +678,16 @@ pub(crate) fn resolve_unconfined(
     if accepted && store.is_none() {
         diagnostics.note(
             "this Windows unconfined acknowledgement could not be remembered because EGO_HOME \
-             is unavailable; this workspace will be asked about again",
+             is unavailable; the next start will ask again",
         );
     }
     if accepted
         && let Some(store) = &store
-        && let Err(error) = store.acknowledge(&key)
+        && let Err(error) = store.acknowledge()
     {
         diagnostics.note(&format!(
             "this Windows unconfined acknowledgement could not be remembered ({error}); \
-             this workspace will be asked about again"
+             the next start will ask again"
         ));
     }
     accepted
@@ -650,13 +767,49 @@ fn trustable_content_selected(root: &Path, selected: Option<&Path>) -> Option<St
             rendered.push_str(&format!("- {}\n", entry.path()));
         }
     }
+    let long_cache: Vec<_> = project_configs(root)
+        .into_iter()
+        .filter(|(_, config)| selects_long_cache(config))
+        .map(|(relative, _)| relative)
+        .collect();
+    if !long_cache.is_empty() {
+        rendered.push_str(
+            "\nRequests long prompt-cache retention (1 hour; the provider keeps cached prompt \
+             content longer and may bill a higher cache-write rate):\n",
+        );
+        for relative in long_cache {
+            rendered.push_str(&format!("- {relative}\n"));
+        }
+    }
     if let Some(selected) = selected {
         rendered.push_str(&format!(
             "- {} (selected instructions)\n",
             selected.display()
         ));
     }
-    let external = executable_surface_selected(root, selected).external_instructions;
+    let surface = executable_surface_selected(root, selected);
+    let proposed: Vec<_> = surface
+        .declarations
+        .values()
+        .filter(|declaration| declaration.kind.starts_with("grant "))
+        .collect();
+    if !proposed.is_empty() {
+        rendered.push_str("\nThe project proposes this extra authority (yes approves it):\n");
+        for declaration in proposed {
+            rendered.push_str(&format!(
+                "- {} {} ({}){}\n",
+                declaration.kind,
+                declaration.name,
+                declaration.config,
+                declaration
+                    .details
+                    .get("access")
+                    .map(|access| format!(" access={access}"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    let external = surface.external_instructions;
     if !external.is_empty() {
         rendered.push_str("\nExternal instructions offered for disclosure to the model:\n");
         for (path, digest) in external {
@@ -697,8 +850,8 @@ fn inventory(root: &Path) -> TrustInventory {
         content(path.parent()?, path)
     }));
 
-    let discovery_root = match user_instruction_discovery_root(root) {
-        Ok(discovery_root) => discovery_root,
+    let (discovery_root, limits) = match user_instruction_discovery_root(root) {
+        Ok(resolved) => resolved,
         Err(error) => {
             tracing::warn!(%error, "the workspace instruction discovery root could not be resolved");
             return TrustInventory::new(Vec::new());
@@ -709,7 +862,7 @@ fn inventory(root: &Path) -> TrustInventory {
         &discovery_root,
         root,
         &ego_core::config::Selection::Ambient,
-        ego_core::config::Limits::default(),
+        limits,
     ) {
         entries.extend(instructions.loaded.into_iter().map(|file| {
             TrustedContent::regular(
@@ -757,6 +910,11 @@ fn project_configs(root: &Path) -> Vec<(&'static str, toml::Table)> {
             Some((relative, text.parse().ok()?))
         })
         .collect()
+}
+
+/// Whether one parsed project config sets `cache = "long"`.
+fn selects_long_cache(config: &toml::Table) -> bool {
+    config.get("cache").and_then(toml::Value::as_str) == Some("long")
 }
 
 /// Every program string one parsed config declares.
@@ -1048,23 +1206,27 @@ impl TrustStore {
     }
 }
 
-/// Windows unconfined-execution acknowledgements under one ego home.
-#[cfg(windows)]
+/// The user's Windows unconfined-execution acknowledgement under one ego home.
+#[cfg(any(windows, test))]
 struct UnconfinedStore(LockedJsonStore<UnconfinedLedger>);
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl UnconfinedStore {
     fn new(home: &Path) -> Self {
-        Self(LockedJsonStore::new(home, "unconfined"))
+        Self(LockedJsonStore::new(home, "windows-unconfined"))
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0.path()
     }
 
     fn read(&self) -> Result<UnconfinedLedger, String> {
         self.0.read()
     }
 
-    fn acknowledge(&self, root: &str) -> Result<(), String> {
+    fn acknowledge(&self) -> Result<(), String> {
         self.0
-            .update(|ledger| ledger.acknowledge(root, UNCONFINED_CONTRACT_REVISION))
+            .update(|ledger| ledger.acknowledge(UNCONFINED_CONTRACT_REVISION))
     }
 }
 
@@ -1139,6 +1301,38 @@ mod tests {
         fn note(&self, _message: &str) {}
     }
 
+    #[derive(Default)]
+    struct Notes(std::sync::Mutex<Vec<String>>);
+
+    impl Diagnostics for Notes {
+        fn note(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+
+    // Catches: the owner must acknowledge the same platform limitation in each workspace.
+    #[test]
+    fn windows_user_acknowledgement_applies_to_second_workspace() {
+        let home = tempfile::tempdir().expect("an ego home");
+        let notes = Notes::default();
+        let asked = Cell::new(0);
+        let ask = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+
+        // The caller asks about its own workspace; the answer is the user's.
+        assert!(resolve_unconfined(Some(home.path()), &notes, ask));
+        assert!(resolve_unconfined(Some(home.path()), &notes, ask));
+
+        assert_eq!(asked.get(), 1, "the second workspace asked again");
+        let notes = notes.0.into_inner().unwrap();
+        assert!(
+            notes.iter().any(|note| note.contains("unconfined")),
+            "a remembered acknowledgement started without a visible indicator: {notes:?}"
+        );
+    }
+
     /// One workspace and one ego home, and a counter for how often the seat
     /// was consulted.
     struct Fixture {
@@ -1205,6 +1399,25 @@ mod tests {
             before
         );
         assert_eq!(resolve(true), Trust::Trusted);
+    }
+
+    // Catches: a project selects 1-hour remote cache retention and the trust
+    // question never says so, or a later edit adds it without a new question.
+    #[test]
+    fn trusted_project_long_cache_is_admitted_and_disclosed() {
+        let fixture = Fixture::new();
+        fixture.write(".ego/config.toml", "cache = \"short\"\n");
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.asked.get(), 1);
+
+        fixture.write(".ego/config.toml", "cache = \"long\"\n");
+        let rendered = trustable_content(fixture.workspace.path()).expect("an inventory");
+        assert!(
+            rendered.contains("long prompt-cache retention"),
+            "the trust question did not disclose long cache: {rendered}"
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2, "adding long cache must ask again");
     }
 
     #[test]
@@ -1499,6 +1712,65 @@ mod tests {
         assert_eq!(fixture.asked.get(), 2);
     }
 
+    const PROPOSAL: &str = "[grants]\nroots = [{ path = '/srv/shared', access = 'read-write' }]\n\
+                            exec_paths = ['/opt/tools/bin']\nallow = ['tool(docs/*)']\n";
+
+    // Catches: a project proposal is applied without the owner's answer covering
+    // its exact text, or an edited proposal rides on an older answer.
+    #[test]
+    fn a_project_grant_proposal_is_approved_once_and_asks_again_when_it_changes() {
+        let fixture = Fixture::new();
+        fixture.write(".ego/config.toml", PROPOSAL);
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
+        assert_eq!(
+            fixture.asked.get(),
+            1,
+            "an unchanged proposal is not asked about again"
+        );
+
+        fixture.write(
+            ".ego/config.toml",
+            &PROPOSAL
+                .replace("read-write", "read")
+                .replace("/opt/tools/bin", "/opt/other"),
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(
+            fixture.asked.get(),
+            2,
+            "a changed proposal needs a new answer"
+        );
+
+        fixture.write(
+            ".ego/config.toml",
+            &format!("{PROPOSAL}allow = ['tool(more/*)']\n"),
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+    }
+
+    // Catches: the owner approves proposed authority without seeing it.
+    #[test]
+    fn the_trust_question_lists_each_proposed_grant() {
+        let fixture = Fixture::new();
+        fixture.write(".ego/config.toml", PROPOSAL);
+        let rendered = trustable_content(fixture.workspace.path()).expect("offered content");
+        for expected in [
+            "grant root /srv/shared",
+            "access=\"read-write\"",
+            "grant exec path /opt/tools/bin",
+            "grant mcp tool(docs/*)",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "{expected} missing from: {rendered}"
+            );
+        }
+        let surface = executable_surface(fixture.workspace.path());
+        let changes = surface.changes_from(&ExecutableSurface::default());
+        assert!(changes.contains("grant root /srv/shared"), "{changes}");
+    }
+
     #[test]
     fn command_only_workspace_requires_trust_again_when_shell_source_changes() {
         let fixture = Fixture::new();
@@ -1601,6 +1873,7 @@ mod tests {
                 &root,
                 Some(fixture.home.path()),
                 &Silent,
+                false,
                 false,
                 Some(&selected),
                 |context| {
@@ -1762,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn a_symlinked_instruction_file_is_not_content_to_be_trusted_with() {
+    fn a_symlinked_instruction_file_with_an_in_workspace_target_is_content_to_be_trusted_with() {
         let fixture = Fixture::new();
         fixture.write("elsewhere.md", "content\n");
         #[cfg(unix)]
@@ -1772,8 +2045,8 @@ mod tests {
         )
         .expect("a temp dir is writable");
 
-        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Untrusted);
-        assert_eq!(fixture.asked.get(), 0);
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.asked.get(), 1);
     }
 
     #[test]
@@ -1826,3 +2099,7 @@ mod portable_skill_trust {
         assert_ne!(before.digest(), inventory(&nested).digest());
     }
 }
+
+#[cfg(test)]
+#[path = "trust/development_tests.rs"]
+mod development_tests;

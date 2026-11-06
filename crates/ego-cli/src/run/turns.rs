@@ -70,6 +70,7 @@ pub(super) fn run_trust(
         home,
         diagnostics,
         args.trust_workspace,
+        args.trust_development_programs,
         selected.as_deref(),
         |context| match driver {
             Driver::Interactive { seat, .. } if seat.has_human() => Some(seat.trust(root, context)),
@@ -123,6 +124,11 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn next_inspection(&self) -> futures::future::BoxFuture<'_, repl::HostCommand> {
         Box::pin(futures::future::pending())
     }
+    /// Read one line, or `None` when the seat stays idle until `deadline`.
+    /// Seats without an idle period never time out.
+    fn read_before(&self, _deadline: std::time::Instant) -> Option<repl::Line> {
+        Some(self.read())
+    }
     /// Wake an idle read without replacing the composer draft.
     fn wake_background_exec(&self) {}
     fn busy(&self) {}
@@ -174,7 +180,7 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
         false
     }
     fn trust(&self, workspace: &Path, context: &str) -> Trust;
-    /// Acknowledge the Windows host's lack of confinement for this workspace.
+    /// Acknowledge, once for this user, the Windows host's lack of confinement.
     /// Test and non-human seats deny unless they explicitly own this authority.
     fn acknowledge_windows_unconfined(&self, _workspace: &Path) -> bool {
         false
@@ -277,21 +283,27 @@ impl ego_core::turn::RootGrantPort for SeatRootGrants {
                 return Err("root path changed since the refused operation".into());
             }
             let mut proposed = self.effective.clone();
+            // A root removed from disk since admission (a deleted adjacent
+            // checkout) has no reach left; it must not block this question.
+            proposed.roots.retain(|root| {
+                !(root.path.is_absolute() && matches!(root.path.try_exists(), Ok(false)))
+            });
             proposed.roots.push(ego_core::permit::RootCfg {
                 consent: None,
                 path: path.as_path().to_path_buf(),
                 access: request.access,
             });
-            super::profile_roots::admit(&proposed, &self.workspace)?;
+            let admitted = super::profile_roots::admit(&proposed, &self.workspace)?;
             let shown_path = ego_core::permit::terminal_safe(&request.path.to_string());
             let question = QuestionRequest::new(
                 format!(
-                    "{} may not {} {}: outside the workspace. Exact canonical root: {} ({}). If this root is a directory, a sandboxed command can read its descendants, including credentials. Choose Deny, Session, or Permanent. Neither grant applies in this process; exit, then run ego resume {}.",
+                    "{} may not {} {}: outside the workspace. Exact canonical root: {} ({}). {} If this root is a directory, a sandboxed command can read its descendants, including credentials. Choose Deny, Session, or Permanent. Neither grant changes this turn; when it ends, ego re-admits session {} with the root.",
                     ego_core::permit::terminal_safe(&request.tool),
                     request.operation,
                     shown_path,
                     shown_path,
                     request.access.as_str(),
+                    perimeter_preview(&self.workspace, &admitted, &path),
                     session,
                 ),
                 QuestionMode::Single,
@@ -352,6 +364,32 @@ impl ego_core::turn::RootGrantPort for SeatRootGrants {
             Ok(())
         })
     }
+}
+
+/// The effective perimeter after an approval: every retained root stays, and
+/// the new exact root carries data access only.
+fn perimeter_preview(
+    workspace: &CanonPath,
+    admitted: &[ego_core::permit::ProfileRoot],
+    added: &CanonPath,
+) -> String {
+    let roots = admitted
+        .iter()
+        .map(|root| {
+            format!(
+                "{} ({}, {})",
+                ego_core::permit::terminal_safe(&root.path().to_string()),
+                root.access().as_str(),
+                if root.path() == added { "new" } else { "kept" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    format!(
+        "Perimeter after approval: workspace {}; {}. Exec reach is separate: this approval adds no exec grant (see /config roots).",
+        ego_core::permit::terminal_safe(&workspace.to_string()),
+        roots
+    )
 }
 
 /// The run-level limits, and the loop that applies them between turns.
@@ -842,6 +880,7 @@ mod deadline_tests {
             denied: None,
             skill: None,
             provider_failure: None,
+            guard_failure: None,
             usage_error: None,
         }
     }
@@ -921,5 +960,99 @@ mod deadline_tests {
             )
             .await;
         assert!(matches!(result, Err(RunTermination::TimedOut)));
+    }
+}
+
+#[cfg(test)]
+mod root_grant_ceiling_tests {
+    use super::*;
+    use ego_core::permit::{RootAccess, RootCfg};
+    use ego_core::turn::{RootGrantChoice, RootGrantPort, RootGrantRequest};
+    use std::sync::Mutex;
+
+    /// Answers every question with Session and keeps the prompts it saw.
+    #[derive(Default)]
+    struct Owner(Mutex<Vec<String>>);
+
+    impl Elicitor for Owner {
+        fn elicit<'a>(
+            &'a self,
+            _question: ItemId,
+            request: ego_core::question::QuestionRequest,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<QuestionOutcome, ego_core::question::ElicitorError>,
+        > {
+            self.0.lock().unwrap().push(request.prompt);
+            Box::pin(async {
+                Ok(QuestionOutcome::Answered(QuestionAnswer::Single(
+                    "session".into(),
+                )))
+            })
+        }
+    }
+
+    fn canon(path: &std::path::Path) -> CanonPath {
+        CanonPath::new(std::fs::canonicalize(path).unwrap())
+    }
+
+    // Catches: an owner approval admits a root outside the system ceiling,
+    // or widens a read-only ceiling to read-write, because the seat asks the
+    // owner before it checks the ceiling.
+    #[tokio::test]
+    async fn session_path_grant_cannot_widen_parent_or_bypass_system_ceiling() {
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("workspace");
+        let allowed = tree.path().join("allowed");
+        let child = allowed.join("child");
+        let sibling = tree.path().join("sibling");
+        for dir in [&workspace, &child, &sibling] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mut effective =
+            ego_core::config::resolve(&[], ego_core::config::Trust::Untrusted, None).unwrap();
+        effective.root_ceilings = vec![vec![RootCfg {
+            consent: None,
+            path: canon(&allowed).as_path().to_path_buf(),
+            access: RootAccess::Read,
+        }]];
+        let owner = Arc::new(Owner::default());
+        let seat = SeatRootGrants {
+            elicitor: owner.clone(),
+            effective,
+            workspace: canon(&workspace),
+            target: ego_core::config::UserConfigTarget::Base,
+            store_root: tree.path().join("store"),
+        };
+        let ask = |path: &std::path::Path, access| {
+            seat.ask(
+                SessionId::new(),
+                ItemId::new(),
+                RootGrantRequest {
+                    tool: "read".into(),
+                    operation: ego_core::permit::OpName::Read,
+                    path: canon(path),
+                    access,
+                },
+            )
+        };
+
+        let outside = ask(&sibling, RootAccess::Read).await;
+        let parent = ask(tree.path(), RootAccess::Read).await;
+        let widened = ask(&child, RootAccess::ReadWrite).await;
+        assert!(outside.is_err(), "sibling outside the ceiling: {outside:?}");
+        assert!(parent.is_err(), "parent of the ceiling: {parent:?}");
+        assert!(
+            widened.is_err(),
+            "read-write under a read ceiling: {widened:?}"
+        );
+        assert!(owner.0.lock().unwrap().is_empty(), "the owner was asked");
+
+        let inside = ask(&child, RootAccess::Read).await;
+        assert_eq!(inside, Ok(RootGrantChoice::Session));
+        let prompts = owner.0.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(prompts[0].contains("(read, new)"), "{}", prompts[0]);
+        assert!(prompts[0].contains("adds no exec grant"), "{}", prompts[0]);
     }
 }

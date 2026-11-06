@@ -59,6 +59,8 @@ pub struct Finished<'a> {
     /// Authoritative blocks, when the reduced item or replay supplies them.
     pub result_blocks: Option<&'a [ego_core::permit::ToolContentBlock]>,
     pub timing: Option<ego_core::event::domain::ToolTiming>,
+    /// What a `write` or repeated `edit` replaced, when the result carries it.
+    pub before_image: Option<&'a ego_core::permit::BeforeImage>,
 }
 
 /// Presentation state for adjacent completed calls, shared by live output and replay.
@@ -71,6 +73,45 @@ impl ToolRows {
     /// Prose, parent diagnostics or a new turn ends the current task group.
     pub fn separate(&mut self) {
         self.task = None;
+    }
+
+    /// Render each attempted whole-file write with its own before-image.
+    pub fn record_writes(
+        &mut self,
+        call: &Finished<'_>,
+        files: &[ego_core::permit::FileWriteEvidence],
+        capabilities: Capabilities,
+    ) -> Vec<ToolRecord> {
+        let result: Value = serde_json::from_str(call.result).unwrap_or(Value::Null);
+        let Some(outcomes) = result.get("files").and_then(Value::as_array) else {
+            return vec![self.record(
+                &Finished {
+                    args: "{}",
+                    before_image: None,
+                    ..*call
+                },
+                capabilities,
+            )];
+        };
+        outcomes.iter().enumerate().map(|(index, outcome)| {
+            let status = outcome["status"].as_str().unwrap_or("unknown");
+            let file = files.get(index);
+            let after = file.filter(|f| status == "completed" && f.completed).and_then(|f| f.after_image.as_deref());
+            let args = serde_json::json!({"path": outcome["path"].as_str().unwrap_or("?"), "contents": after}).to_string();
+            let text = match status {
+                "completed" => format!("wrote{}", outcome["summary"].as_str().unwrap_or("")),
+                "failed" => format!("{}{}", outcome["error"].as_str().unwrap_or("write failed"), if outcome["possibly_modified"].as_bool() == Some(true) { " (may modify)" } else { "" }),
+                "unattempted" => "unattempted".to_owned(),
+                _ => "unknown write outcome".to_owned(),
+            };
+            let mut record = self.record(&Finished { name: call.name, args: &args, ok: status == "completed", result: &text, result_blocks: None, timing: call.timing, before_image: file.and_then(|file| file.before_image.as_ref()) }, capabilities);
+            if let Some(notice) = file.and_then(|file| file.notice.as_deref()).or_else(|| outcome["notice"].as_str()) {
+                let notice = printable_block(notice);
+                let lines = notice.lines().flat_map(|line| Line::plain(line).wrap(capabilities.width.saturating_sub(2).max(1))).map(|line| format!("  {}", line.render(capabilities.depth))).collect::<Vec<_>>().join("\n");
+                record.detail = cap(format!("{}\n{}", record.detail, lines));
+            }
+            record
+        }).collect()
     }
 
     pub fn record(&mut self, call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
@@ -110,6 +151,46 @@ impl ToolRows {
     }
 }
 
+/// A request with an incomplete exec command cannot be shown as a command.
+pub(crate) fn can_show_request(name: &str, args: &str) -> bool {
+    if name.rsplit(" › ").next() != Some("exec") {
+        return true;
+    }
+    let Ok(args) = serde_json::from_str::<Value>(args) else {
+        return false;
+    };
+    let Some(argv) = args.get("argv").and_then(Value::as_array) else {
+        return false;
+    };
+    argv.first()
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty())
+        && argv.iter().all(Value::is_string)
+}
+
+/// A running call has no outcome yet. Do not render a success or failure mark.
+pub(crate) fn running(name: &str, args: &str, capabilities: Capabilities) -> Line {
+    let args: Value = serde_json::from_str(args).unwrap_or(Value::Null);
+    let (task, tool) = name
+        .rsplit_once(" › ")
+        .map_or((None, name), |(task, tool)| (Some(task), tool));
+    let target = if tool == "exec" {
+        printable(&command_line(&args))
+    } else {
+        String::new()
+    };
+    let verb = if tool == "exec" { "$" } else { tool };
+    let context = task
+        .map(|task| format!("{} › ", printable(task)))
+        .unwrap_or_default();
+    Line::plain(format!(
+        "… requested: {context}{} {}",
+        printable(verb),
+        target
+    ))
+    .truncate_to(capabilities.width)
+}
+
 /// A standalone call retains its task context even without a preceding group.
 pub fn record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     ToolRows::default().record(call, capabilities)
@@ -121,14 +202,12 @@ fn plain_record(call: &Finished<'_>, capabilities: Capabilities) -> ToolRecord {
     let args: Value = serde_json::from_str(call.args).unwrap_or(Value::Null);
     let heading = header(call, &args, width, depth);
 
-    let body = body(call, &args, width);
+    let diff = diff_body(call, &args, width);
+    let body = diff.clone().unwrap_or_else(|| body(call, width));
     let mut rows = vec![heading.clone()];
     if call.name == "exec" {
         rows.extend(tail(call, width));
-    } else if call.ok
-        && call.name == "edit"
-        && args.get("replace_all").and_then(Value::as_bool) != Some(true)
-    {
+    } else if diff.is_some() {
         rows.extend(body.iter().take(INLINE_DIFF_ROWS).cloned());
         if body.len() > INLINE_DIFF_ROWS {
             rows.push(hidden_lines(body.len() - INLINE_DIFF_ROWS, width));
@@ -235,47 +314,97 @@ fn line_count(text: &str) -> usize {
     text.lines().count()
 }
 
+fn read_items(result: &str) -> Option<Vec<Value>> {
+    serde_json::from_str::<Value>(result)
+        .ok()?
+        .get("files")?
+        .as_array()
+        .cloned()
+}
+
+fn read_failures(call: &Finished<'_>) -> usize {
+    if call.name != "read" {
+        return 0;
+    }
+    read_items(call.result).map_or(0, |items| {
+        items
+            .iter()
+            .filter(|item| item["status"] == "error")
+            .count()
+    })
+}
+
+fn read_body(result: &str) -> Option<String> {
+    let items = read_items(result)?;
+    let multiple = items.len() > 1;
+    let mut output = String::new();
+    for item in items {
+        if multiple {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&format!("{}:\n", item["path"].as_str().unwrap_or("?")));
+        }
+        if item["status"] == "error" {
+            output.push_str("error: ");
+            output.push_str(item["error"].as_str().unwrap_or("unknown read error"));
+            output.push('\n');
+        } else {
+            let content = item["content"].as_str()?;
+            output.push_str(content);
+            if let Some(offset) = item["next_offset"].as_u64() {
+                if !output.is_empty() && !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str(&format!("[continue at offset {offset}]\n"));
+            }
+        }
+    }
+    Some(output)
+}
+
 /// The words after the verb, and the parts that never give way to width.
 struct Parts {
     verb: String,
     target: String,
     /// Joined to the target with a space: `+3 -1`.
-    stat: Option<String>,
+    stat: Option<(usize, usize)>,
     /// Joined with ` · `: line count, exit status, duration.
     notes: Vec<String>,
 }
 
 fn parts(call: &Finished<'_>, args: &Value, width: usize) -> Parts {
-    let (verb, target) = match call.name {
-        "read" | "write" | "edit" => (
-            call.name.to_owned(),
-            string_arg(args, "path").unwrap_or("?").to_owned(),
-        ),
-        "exec" => ("$".to_owned(), command_line(args)),
-        "task" => (
-            "task".to_owned(),
-            string_arg(args, "name").unwrap_or("?").to_owned(),
-        ),
-        _ => (
-            String::new(),
-            format!("{} {}", call.name, compact(call.args)),
-        ),
+    let verb = ego_core::permit::terminal_safe(if call.name == "exec" { "$" } else { call.name });
+    let target = if call.name == "exec" {
+        printable(&command_line(args))
+    } else {
+        String::new()
     };
-    let stat = if call.ok && call.name == "edit" {
-        edit_stat(args, call.result).map(|(added, removed)| format!("+{added} -{removed}"))
+    let stat = if call.ok && matches!(call.name, "edit" | "write") {
+        edit_stat(args, call.result)
     } else {
         None
     };
     let outcome = match (call.ok, call.name) {
         (false, _) => Some(failure(call.result, width)),
         (true, "exec") => Some("exit 0".to_owned()),
-        (true, "read") => Some(lines_note(line_count(call.result))),
+        (true, "read") if read_failures(call) > 0 => {
+            Some(format!("{} failed", read_failures(call)))
+        }
+        (true, "read") => Some(lines_note(read_items(call.result).map_or_else(
+            || line_count(call.result),
+            |items| {
+                items
+                    .iter()
+                    .filter_map(|item| item["content"].as_str())
+                    .map(line_count)
+                    .sum()
+            },
+        ))),
         (true, "edit") if args.get("replace_all").and_then(Value::as_bool) == Some(true) => {
             Some("all occurrences".to_owned())
         }
-        (true, "write") => Some(lines_note(line_count(
-            string_arg(args, "contents").unwrap_or(""),
-        ))),
+        (true, "write") => string_arg(args, "contents").map(|text| lines_note(line_count(text))),
         (true, _) => None,
     };
     let mut notes: Vec<String> = outcome.into_iter().collect();
@@ -331,11 +460,146 @@ fn quote(argument: &str) -> String {
     ego_core::permit::shell_word(argument)
 }
 
-/// The arguments of a tool with no specialised row, on one line.
-fn compact(args: &str) -> String {
-    serde_json::from_str::<Value>(args)
-        .map(|value| value.to_string())
-        .unwrap_or_else(|_| args.trim().to_owned())
+/// Argument previews use the shell receipt's existing syntax roles. JSON
+/// objects retain serde_json's deterministic key order; no foreign defaults
+/// are inferred. Only common builtins have semantic subjects.
+fn argument_line(call: &Finished<'_>, args: &Value) -> Line {
+    let read_files = args.get("files").and_then(Value::as_array);
+    let subject = match call.name {
+        "read" => read_files.and_then(|files| {
+            (files.len() == 1)
+                .then(|| files[0].get("path").and_then(Value::as_str))
+                .flatten()
+        }),
+        "write" | "edit" => string_arg(args, "path"),
+        "task" => string_arg(args, "name"),
+        "glob" => string_arg(args, "pattern"),
+        "grep" => string_arg(args, "query"),
+        _ => None,
+    };
+    let mut line = Line::empty();
+    if let Some(subject) = subject {
+        let subject = if call.name == "grep" {
+            Value::String(subject.to_owned()).to_string()
+        } else {
+            subject.to_owned()
+        };
+        argument_span(&mut line, &subject, Palette::ADDED_FG);
+        match call.name {
+            "glob" | "grep" => {
+                if let Some(path) = args.get("path").filter(|value| !value.is_null()) {
+                    line.push(Span::plain(" "));
+                    argument_span(&mut line, "--path", Palette::WARNING);
+                    line.push(Span::plain(" "));
+                    json_value(&mut line, path);
+                }
+            }
+            "read" => {
+                if let Some(offset) = read_files
+                    .and_then(|files| files.first())
+                    .and_then(|file| file.get("offset"))
+                    .filter(|value| value.as_u64() != Some(0))
+                {
+                    line.push(Span::plain(" "));
+                    key_value(&mut line, "offset", offset);
+                }
+            }
+            "edit" => {
+                if let Some(all) = args
+                    .get("replace_all")
+                    .filter(|value| value.as_bool() != Some(false))
+                {
+                    line.push(Span::plain(" "));
+                    key_value(&mut line, "replace_all", all);
+                }
+            }
+            _ => {}
+        }
+    } else if let Some(files) = read_files.filter(|_| call.name == "read") {
+        for (index, file) in files.iter().enumerate() {
+            if index > 0 {
+                line.push(Span::plain(", "));
+            }
+            argument_span(
+                &mut line,
+                file.get("path").and_then(Value::as_str).unwrap_or("?"),
+                Palette::ADDED_FG,
+            );
+            if let Some(offset) = file.get("offset").filter(|value| value.as_u64() != Some(0)) {
+                line.push(Span::plain(" "));
+                key_value(&mut line, "offset", offset);
+            }
+        }
+    } else if let Value::Object(fields) = args {
+        for (index, (key, value)) in fields.iter().enumerate() {
+            if index > 0 {
+                line.push(Span::plain(" "));
+            }
+            key_value(&mut line, key, value);
+        }
+    } else if serde_json::from_str::<Value>(call.args).is_ok() {
+        json_value(&mut line, args);
+    } else {
+        line.push(Span::plain(ego_core::permit::terminal_safe(
+            call.args.trim(),
+        )));
+    }
+    line
+}
+
+fn argument_span(line: &mut Line, text: &str, colour: super::style::Rgb) {
+    line.push(Span::new(
+        ego_core::permit::terminal_safe(text),
+        Style::fg(colour),
+    ));
+}
+
+fn key_value(line: &mut Line, key: &str, value: &Value) {
+    let key = if !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-".contains(c))
+    {
+        key.to_owned()
+    } else {
+        Value::String(key.to_owned()).to_string()
+    };
+    argument_span(line, &key, Palette::WARNING);
+    argument_span(line, "=", Palette::LINK);
+    json_value(line, value);
+}
+
+fn json_value(line: &mut Line, value: &Value) {
+    match value {
+        Value::Object(fields) => {
+            argument_span(line, "{", Palette::LINK);
+            for (index, (key, value)) in fields.iter().enumerate() {
+                if index > 0 {
+                    argument_span(line, ",", Palette::LINK);
+                }
+                argument_span(
+                    line,
+                    &Value::String(key.to_owned()).to_string(),
+                    Palette::WARNING,
+                );
+                argument_span(line, ":", Palette::LINK);
+                json_value(line, value);
+            }
+            argument_span(line, "}", Palette::LINK);
+        }
+        Value::Array(values) => {
+            argument_span(line, "[", Palette::LINK);
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    argument_span(line, ",", Palette::LINK);
+                }
+                json_value(line, value);
+            }
+            argument_span(line, "]", Palette::LINK);
+        }
+        Value::String(_) => argument_span(line, &value.to_string(), Palette::ADDED_FG),
+        _ => argument_span(line, &value.to_string(), Palette::CODE),
+    }
 }
 
 /// The reason a call failed, in a few words: `exit 3` for a process, the last
@@ -386,8 +650,9 @@ fn keep_end(text: &str, budget: usize) -> String {
 /// a narrow terminal has lost the only thing it was for.
 fn header(call: &Finished<'_>, args: &Value, width: usize, depth: Depth) -> Line {
     let parts = parts(call, args, width);
-    let mark = if call.ok { "✓" } else { "✗" };
-    let colour = if call.ok {
+    let ok = call.ok && read_failures(call) == 0;
+    let mark = if ok { "✓" } else { "✗" };
+    let colour = if ok {
         Palette::ADDED_FG
     } else {
         Palette::ERROR
@@ -400,8 +665,7 @@ fn header(call: &Finished<'_>, args: &Value, width: usize, depth: Depth) -> Line
     };
     let stat = parts
         .stat
-        .as_ref()
-        .map(|stat| format!(" {stat}"))
+        .map(|(added, removed)| format!(" +{added} -{removed}"))
         .unwrap_or_default();
     let notes = if parts.notes.is_empty() {
         String::new()
@@ -413,7 +677,7 @@ fn header(call: &Finished<'_>, args: &Value, width: usize, depth: Depth) -> Line
     let mut target = if call.name == "exec" {
         super::shell::command(args, &parts.target, depth)
     } else {
-        Line::plain(parts.target)
+        argument_line(call, args)
     };
     if target.width() > room {
         target = target.truncate_to(room.saturating_sub(1));
@@ -422,11 +686,25 @@ fn header(call: &Finished<'_>, args: &Value, width: usize, depth: Depth) -> Line
 
     let mut line = Line::empty();
     line.push(Span::new(mark, Style::fg(colour)));
-    line.push(Span::plain(lead[mark.len()..].to_owned()));
+    if call.name == "exec" {
+        line.push(Span::plain(lead[mark.len()..].to_owned()));
+    } else {
+        line.push(Span::plain(" "));
+        argument_span(&mut line, &parts.verb, Palette::TOOL);
+        line.push(Span::plain(" "));
+    }
     for span in target.spans {
         line.push(span);
     }
-    line.push(Span::plain(stat));
+    if let Some((added, removed)) = parts.stat {
+        line.push(Span::plain(" "));
+        line.push(Span::new(format!("+{added}"), Style::fg(Palette::ADDED_FG)));
+        line.push(Span::plain(" "));
+        line.push(Span::new(
+            format!("-{removed}"),
+            Style::fg(Palette::REMOVED_FG),
+        ));
+    }
     line.push(Span::new(notes, Style::fg(Palette::NOTE)));
     line.truncate_to(width)
 }
@@ -511,24 +789,58 @@ fn tail(call: &Finished<'_>, width: usize) -> Vec<Line> {
     rows
 }
 
+/// The line diff of a successful file change that the row can draw, or `None`
+/// when only the receipt is known. A unique `edit` diffs its two fragments;
+/// a `write` and a repeated `edit` diff the before image the result carries.
+fn diff_body(call: &Finished<'_>, args: &Value, width: usize) -> Option<Vec<Line>> {
+    use ego_core::permit::BeforeImage;
+    if !call.ok {
+        return None;
+    }
+    let (old, new) = match call.name {
+        "edit" if args.get("contents").is_some() => {
+            let new = string_arg(args, "contents")?.to_owned();
+            match call.before_image? {
+                BeforeImage::New => (String::new(), new),
+                BeforeImage::Text(before) => (before.clone(), new),
+                BeforeImage::Omitted => return None,
+            }
+        }
+        "edit" if args.get("replace_all").and_then(Value::as_bool) != Some(true) => (
+            string_arg(args, "old_string")?.to_owned(),
+            string_arg(args, "new_string")?.to_owned(),
+        ),
+        "edit" => {
+            let (BeforeImage::Text(before), Some(old), Some(new)) = (
+                call.before_image?,
+                string_arg(args, "old_string"),
+                string_arg(args, "new_string"),
+            ) else {
+                return None;
+            };
+            (before.clone(), before.replace(old, new))
+        }
+        "write" => {
+            let new = string_arg(args, "contents")?.to_owned();
+            match call.before_image? {
+                BeforeImage::New => (String::new(), new),
+                BeforeImage::Text(before) => (before.clone(), new),
+                BeforeImage::Omitted => return None,
+            }
+        }
+        _ => return None,
+    };
+    Some(diff::render(
+        &printable_block(&old),
+        &printable_block(&new),
+        width,
+        &Unhighlighted,
+    ))
+}
+
 /// Everything under the header, for the expanded view: the diff of an edit,
 /// the whole text of any other result.
-fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
-    if call.ok
-        && call.name == "edit"
-        && args.get("replace_all").and_then(Value::as_bool) != Some(true)
-        && let (Some(old), Some(new)) = (
-            string_arg(args, "old_string"),
-            string_arg(args, "new_string"),
-        )
-    {
-        return diff::render(
-            &printable_block(old),
-            &printable_block(new),
-            width,
-            &Unhighlighted,
-        );
-    }
+fn body(call: &Finished<'_>, width: usize) -> Vec<Line> {
     let room = width.saturating_sub(2).max(1);
     // Stream identity comes from evidence provenance, never from marker-like
     // text a process may legitimately print. Without blocks, retain all text.
@@ -545,8 +857,11 @@ fn body(call: &Finished<'_>, args: &Value, width: usize) -> Vec<Line> {
             )
             .model_text()
         });
-    visible
-        .as_deref()
+    let read = (call.name == "read")
+        .then(|| read_body(call.result))
+        .flatten();
+    read.as_deref()
+        .or(visible.as_deref())
         .unwrap_or(call.result)
         .lines()
         .flat_map(|line| Line::plain(printable_output(line)).wrap(room))
@@ -563,6 +878,39 @@ mod tests {
     use super::*;
     use crate::render::line::cells;
 
+    // Catches: absent completed bytes invent zero lines or lose the checkpoint notice.
+    #[test]
+    fn missing_after_image_has_unknown_count_and_visible_notice() {
+        use ego_core::permit::{BeforeImage, FileWriteEvidence};
+        let evidence = [FileWriteEvidence {
+            path: "/ws/a".into(),
+            completed: true,
+            before_image: Some(BeforeImage::Omitted),
+            after_image: None,
+            checkpoint: None,
+            possibly_modified: true,
+            summary: String::new(),
+            notice: Some("checkpoint unavailable\x1b[31m".into()),
+        }];
+        let call = Finished {
+            name: "write",
+            args: "{}",
+            ok: true,
+            result: r#"{"files":[{"path":"a","status":"completed"}]}"#,
+            result_blocks: None,
+            timing: None,
+            before_image: None,
+        };
+        let records = ToolRows::default().record_writes(&call, &evidence, Capabilities::plain());
+        assert!(!records[0].rows.contains("0 lines"), "{}", records[0].rows);
+        assert!(
+            records[0].detail.contains("checkpoint unavailable"),
+            "{}",
+            records[0].detail
+        );
+        assert!(!records[0].detail.contains('\x1b'));
+    }
+
     fn at(width: usize) -> Capabilities {
         Capabilities {
             width,
@@ -577,6 +925,7 @@ mod tests {
             ok,
             result,
             result_blocks: None,
+            before_image: None,
             timing: Some(ego_core::event::domain::ToolTiming {
                 execution_ms: Some(1500),
                 approval_wait_ms: 0,
@@ -586,6 +935,186 @@ mod tests {
 
     fn header_of(record: &ToolRecord) -> &str {
         record.rows.lines().next().expect("a header row")
+    }
+
+    // Catches: structured read errors appear as successful one-line JSON results.
+    #[test]
+    fn multifile_read_row_reports_item_failures_and_decodes_content() {
+        let args = r#"{"files":[{"path":"a"},{"path":"b"}]}"#;
+        let result = r#"{"files":[{"index":0,"path":"a","status":"ok","content":"first\nsecond\n","next_offset":null},{"index":1,"path":"b","status":"error","error":"denied"}]}"#;
+        let rendered = record(&call("read", args, true, result), at(120));
+        assert!(
+            header_of(&rendered).starts_with("✗ read"),
+            "{}",
+            rendered.rows
+        );
+        assert!(rendered.rows.contains("1 failed"), "{}", rendered.rows);
+        assert!(
+            rendered.detail.contains("first") && rendered.detail.contains("denied"),
+            "{}",
+            rendered.detail
+        );
+    }
+
+    #[test]
+    fn semantic_headers_keep_subjects_and_only_hide_verified_defaults() {
+        // Catches: generic JSON crowds out filesystem subjects or hides non-default options.
+        for (name, args, expected) in [
+            (
+                "glob",
+                r#"{"pattern":"**/*session*index*","path":null}"#,
+                "✓ glob **/*session*index* · 1.5s",
+            ),
+            (
+                "glob",
+                r#"{"pattern":"*.rs","path":"src"}"#,
+                "✓ glob *.rs --path \"src\" · 1.5s",
+            ),
+            (
+                "grep",
+                r#"{"query":"ToolCall(Started|Completed)","path":"crates/ego-cli/src"}"#,
+                "✓ grep \"ToolCall(Started|Completed)\" --path \"crates/ego-cli/src\" · 1.5s",
+            ),
+            (
+                "read",
+                r#"{"files":[{"path":"README.md","offset":0}]}"#,
+                "✓ read README.md · 0 lines · 1.5s",
+            ),
+            (
+                "read",
+                r#"{"files":[{"path":"README.md","offset":32768}]}"#,
+                "✓ read README.md offset=32768 · 0 lines · 1.5s",
+            ),
+            (
+                "edit",
+                r#"{"path":"a.rs","replace_all":false}"#,
+                "✓ edit a.rs · 1.5s",
+            ),
+            (
+                "edit",
+                r#"{"path":"a.rs","replace_all":true}"#,
+                "✓ edit a.rs replace_all=true · all occurrences · 1.5s",
+            ),
+        ] {
+            assert_eq!(
+                header_of(&record(&call(name, args, true, ""), at(120))),
+                expected,
+                "{name}: {args}"
+            );
+        }
+    }
+
+    #[test]
+    fn foreign_headers_preserve_values_and_use_existing_syntax_colours() {
+        // Catches: schema-free default filtering drops false/null/empty values from MCP calls.
+        let args = r#"{"query":"tool headers","filter":{"archived":false,"owner":null},"limit":5,"empty":"","zero":0}"#;
+        let expected = "✓ mcp.quill.search query=\"tool headers\" filter={\"archived\":false,\"owner\":null} limit=5 empty=\"\" zero=0 · 1.5s";
+        for depth in [Depth::None, Depth::TrueColor, Depth::Ansi256, Depth::Ansi16] {
+            let result = record(
+                &call("mcp.quill.search", args, true, ""),
+                Capabilities { depth, ..at(160) },
+            );
+            assert_eq!(
+                ego_core::permit::terminal_output_safe(&result.rows),
+                expected
+            );
+            if depth == Depth::TrueColor {
+                for token in [
+                    "\x1b[38;2;155;181;204mmcp.quill.search\x1b[0m",
+                    "\x1b[38;2;217;190;129mquery\x1b[0m",
+                    "\x1b[38;2;150;173;209m=\x1b[0m",
+                    "\x1b[38;2;151;207;167m\"tool headers\"\x1b[0m",
+                    "\x1b[38;2;174;185;213mfalse\x1b[0m",
+                    "\x1b[38;2;174;185;213mnull\x1b[0m",
+                ] {
+                    assert!(
+                        result.rows.contains(token),
+                        "missing {token:?}: {:?}",
+                        result.rows
+                    );
+                }
+            }
+            if depth == Depth::None {
+                assert!(!result.rows.contains('\x1b'));
+            }
+        }
+    }
+
+    #[test]
+    fn argument_fallbacks_and_controls_remain_visible_and_terminal_safe() {
+        // Catches: malformed/non-object calls panic or let argument controls act on the terminal.
+        for (name, args, target) in [
+            ("foreign", "[false,null,0]", "[false,null,0]"),
+            ("foreign", "null", "null"),
+            ("foreign", "broken\n\x1b[2J", "broken\\n\\u{1b}[2J"),
+            ("glob", r#"{"path":"src"}"#, "path=\"src\""),
+            ("grep", r#"{"query":false}"#, "query=false"),
+            (
+                "read",
+                r#"{"files":[{"path":"a\nb\tc\rd\u001b"}]}"#,
+                "a\\nb\\tc\\rd\\u{1b}",
+            ),
+            (
+                "foreign",
+                r#"{"a\nkey":"x\ny\u001b"}"#,
+                "\"a\\nkey\"=\"x\\ny\\u001b\"",
+            ),
+        ] {
+            let result = record(&call(name, args, true, ""), at(200));
+            assert!(
+                header_of(&result).contains(target),
+                "{args:?}: {:?}",
+                result.rows
+            );
+            assert_eq!(result.rows.lines().count(), 1);
+            assert!(!result.rows.contains('\x1b'));
+        }
+    }
+
+    #[test]
+    fn coloured_argument_clipping_preserves_unicode_and_receipt_metadata() {
+        // Catches: ANSI byte budgets or split graphemes hide the duration at narrow widths.
+        let args = serde_json::json!({"text": "界é👩‍💻".repeat(100), "type": "done"}).to_string();
+        for width in [40, 80, 120] {
+            let call = call("progress", &args, true, "");
+            let plain = record(&call, at(width));
+            let coloured = record(
+                &call,
+                Capabilities {
+                    depth: Depth::TrueColor,
+                    ..at(width)
+                },
+            );
+            assert_eq!(
+                ego_core::permit::terminal_output_safe(&coloured.rows),
+                plain.rows
+            );
+            assert!(cells(&plain.rows) <= width);
+            assert!(plain.rows.starts_with("✓ progress text=\""));
+            assert!(plain.rows.ends_with("… · 1.5s"));
+        }
+    }
+
+    #[test]
+    fn progress_header_capture_at_120_columns() {
+        // Catches: the reported progress example regresses to a raw JSON object.
+        let rendered = record(
+            &call(
+                "progress",
+                r#"{"type":"done","text":"Tool headers now use the existing syntax colours."}"#,
+                true,
+                "",
+            ),
+            Capabilities {
+                depth: Depth::TrueColor,
+                ..at(120)
+            },
+        );
+        assert_eq!(
+            ego_core::permit::terminal_output_safe(&rendered.rows),
+            "✓ progress type=\"done\" text=\"Tool headers now use the existing syntax colours.\" · 1.5s"
+        );
+        println!("PROGRESS_CAPTURE_120={}", rendered.rows);
     }
 
     #[test]
@@ -955,7 +1484,16 @@ mod tests {
             let record = record(
                 &Finished {
                     timing: None,
-                    ..call(name, r#"{"name":"child","path":"a.rs"}"#, true, "hello")
+                    ..call(
+                        name,
+                        if name == "read" {
+                            r#"{"files":[{"path":"a.rs"}]}"#
+                        } else {
+                            r#"{"name":"child"}"#
+                        },
+                        true,
+                        "hello",
+                    )
                 },
                 at(80),
             );
@@ -1009,7 +1547,12 @@ mod tests {
     #[test]
     fn collapsed_read_counts_wrapped_rows() {
         let rendered = record(
-            &call("read", r#"{"path":"a.rs"}"#, true, &"界".repeat(80)),
+            &call(
+                "read",
+                r#"{"files":[{"path":"a.rs"}]}"#,
+                true,
+                &"界".repeat(80),
+            ),
             at(42),
         );
         assert_eq!(
@@ -1017,6 +1560,79 @@ mod tests {
             Some("  … 4 more lines · Option+O or /expand")
         );
         println!("read after:\n{}", rendered.rows);
+    }
+
+    // Catches: a whole-file write or repeated substitution shows only its receipt,
+    // or shows a diff when no before image exists.
+    #[test]
+    fn writes_and_repeated_substitutions_diff_their_before_image() {
+        use ego_core::permit::BeforeImage;
+        let with = |name, args, result, image| {
+            record(
+                &Finished {
+                    before_image: Some(image),
+                    ..call(name, args, true, result)
+                },
+                at(80),
+            )
+        };
+        let before = BeforeImage::Text("keep\nold\n".into());
+        let written = with(
+            "write",
+            r#"{"path":"a.txt","contents":"keep\nnew\nmore\n"}"#,
+            "wrote 14 bytes to /w/a.txt (+2 -1 lines)",
+            &before,
+        );
+        assert!(written.rows.contains("+2 -1"), "{}", written.rows);
+        assert!(written.rows.contains(" 2 -old"), "{}", written.rows);
+        assert!(written.rows.contains(" 3 +more"), "{}", written.rows);
+        assert_eq!(written.rows, written.detail);
+
+        let created = with(
+            "write",
+            r#"{"path":"n.txt","contents":"a\nb\n"}"#,
+            "wrote 4 bytes to /w/n.txt (+2 -0 lines)",
+            &BeforeImage::New,
+        );
+        assert!(created.rows.contains("+2 -0"), "{}", created.rows);
+        assert!(created.rows.contains(" 1 +a"), "{}", created.rows);
+        assert!(!created.rows.contains("-a"), "a new file removes nothing");
+
+        let image = BeforeImage::Text("x1\nmid\nx2\n".into());
+        let all = with(
+            "edit",
+            r#"{"path":"a.txt","old_string":"x","new_string":"y","replace_all":true}"#,
+            "replaced 2 occurrences in /w/a.txt (+2 -2 lines)",
+            &image,
+        );
+        assert!(all.rows.contains(" 1 -x1"), "{}", all.rows);
+        assert!(all.rows.contains(" 3 +y2"), "{}", all.rows);
+
+        let long_args = serde_json::json!({"path":"l","contents":"n\n".repeat(30)}).to_string();
+        let long = with(
+            "write",
+            &long_args,
+            "wrote 60 bytes to /w/l (+30 -0 lines)",
+            &BeforeImage::New,
+        );
+        assert!(long.rows.contains("18 more lines"), "{}", long.rows);
+        assert!(
+            long.detail.lines().count() > 30,
+            "expand shows the full diff"
+        );
+
+        let omitted = with(
+            "write",
+            r#"{"path":"b","contents":"z\n"}"#,
+            "wrote 2 bytes to /w/b (diff omitted: the replaced file is over 64 KiB, not text, or protected)",
+            &BeforeImage::Omitted,
+        );
+        assert!(!omitted.detail.contains(" 1 +z"), "{}", omitted.detail);
+        assert!(
+            omitted.detail.contains("diff omitted"),
+            "{}",
+            omitted.detail
+        );
     }
 
     // Catches: successful edits hide every changed row behind Option+O.
@@ -1112,7 +1728,7 @@ mod tests {
         );
         assert_eq!(
             header_of(&rendered),
-            "✓ edit a.rs +1 -1 · all occurrences · 1.5s"
+            "✓ edit a.rs replace_all=true +1 -1 · all occurrences · 1.5s"
         );
         assert!(
             rendered
@@ -1134,10 +1750,47 @@ mod tests {
     #[test]
     fn a_read_row_names_the_file_the_lines_and_the_time() {
         let record = record(
-            &call("read", r#"{"path":"calc.py"}"#, true, "a = 1\nb = 2\n"),
+            &call(
+                "read",
+                r#"{"files":[{"path":"calc.py"}]}"#,
+                true,
+                "a = 1\nb = 2\n",
+            ),
             at(80),
         );
         assert_eq!(header_of(&record), "✓ read calc.py · 2 lines · 1.5s");
+    }
+
+    // Catches: edit counts inherit plain styling or both receive the same colour.
+    #[test]
+    fn an_edit_row_colours_additions_and_deletions_separately() {
+        let args = r#"{"path":"a.rs","old_string":"x\ny\n","new_string":"x\nz\nw\n"}"#;
+        let call = call("edit", args, true, "replaced 1 occurrence in a.rs");
+        let coloured = record(
+            &call,
+            Capabilities {
+                depth: Depth::TrueColor,
+                ..at(80)
+            },
+        );
+        assert!(
+            coloured
+                .rows
+                .contains("\u{1b}[38;2;151;207;167m+2\u{1b}[0m"),
+            "{}",
+            coloured.rows
+        );
+        assert!(
+            coloured
+                .rows
+                .contains("\u{1b}[38;2;216;150;154m-1\u{1b}[0m"),
+            "{}",
+            coloured.rows
+        );
+        assert_eq!(
+            record(&call, at(80)).rows.lines().next(),
+            Some("✓ edit a.rs +2 -1 · 1.5s")
+        );
     }
 
     /// The counts come from a line diff and not from the two strings' lengths:
@@ -1164,7 +1817,10 @@ mod tests {
             ),
             at(100),
         );
-        assert_eq!(header_of(&result), "✓ edit a.rs · all occurrences · 1.5s");
+        assert_eq!(
+            header_of(&result),
+            "✓ edit a.rs replace_all=true · all occurrences · 1.5s"
+        );
         assert!(result.detail.contains("replaced 3 occurrences in a.rs"));
         assert!(!result.rows.contains("+1 -1"));
     }
@@ -1414,7 +2070,10 @@ mod tests {
     #[test]
     fn detail_larger_than_the_limit_is_cut_and_says_so() {
         let huge = "x".repeat(DETAIL_LIMIT * 2);
-        let record = record(&call("read", r#"{"path":"big"}"#, true, &huge), at(80));
+        let record = record(
+            &call("read", r#"{"files":[{"path":"big"}]}"#, true, &huge),
+            at(80),
+        );
         assert!(record.detail.len() < DETAIL_LIMIT + 200);
         assert!(record.detail.ends_with("… output cut at 256 KiB"));
     }

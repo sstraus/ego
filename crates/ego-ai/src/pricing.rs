@@ -337,8 +337,20 @@ impl Table {
     /// only if it *states* that provider, so one provider's bare key cannot
     /// pick up another's prices among the 576 bare keys the file carries.
     pub fn quote(&self, provider: &str, model: &str) -> Result<TableEntry, TableError> {
+        self.quote_in(provider, provider, model)
+    }
+
+    /// [`quote`](Self::quote) for a provider whose prefixed keys do not use
+    /// its namespace name: the table files `vertex_ai-anthropic_models` rows
+    /// as `vertex_ai/<model>`.
+    pub fn quote_in(
+        &self,
+        provider: &str,
+        key_prefix: &str,
+        model: &str,
+    ) -> Result<TableEntry, TableError> {
         let mut found: Vec<TableEntry> = Vec::new();
-        for key in [format!("{provider}/{model}"), model.to_string()] {
+        for key in [format!("{key_prefix}/{model}"), model.to_string()] {
             let Some(raw) = self.entries.get(&key) else {
                 continue;
             };

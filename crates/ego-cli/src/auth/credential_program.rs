@@ -9,7 +9,16 @@ pub async fn run_program(
     current: Option<&AuthEntry>,
 ) -> Result<AuthEntry, AuthError> {
     let commands = OsCredentialCommand;
-    run_program_scoped(program, verb, current, &commands, &CancelToken::new(), None).await
+    run_program_scoped(
+        program,
+        verb,
+        current,
+        &commands,
+        &CancelToken::new(),
+        None,
+        PROGRAM_TIMEOUT,
+    )
+    .await
 }
 
 pub(super) async fn run_configured_command_scoped(
@@ -19,6 +28,7 @@ pub(super) async fn run_configured_command_scoped(
     commands: &dyn CredentialCommandPort,
     cancel: &CancelToken,
     run_deadline: Option<Instant>,
+    timeout: Duration,
 ) -> Result<AuthEntry, AuthError> {
     let mut words = shell_words::split(command).map_err(|err| AuthError::MissingCredential {
         program: command.to_string(),
@@ -41,6 +51,7 @@ pub(super) async fn run_configured_command_scoped(
             commands,
             cancel,
             run_deadline,
+            timeout,
         },
     )
     .await
@@ -53,6 +64,7 @@ pub(super) async fn run_program_scoped(
     commands: &dyn CredentialCommandPort,
     cancel: &CancelToken,
     run_deadline: Option<Instant>,
+    timeout: Duration,
 ) -> Result<AuthEntry, AuthError> {
     run_program_parts(
         program,
@@ -64,6 +76,7 @@ pub(super) async fn run_program_scoped(
             commands,
             cancel,
             run_deadline,
+            timeout,
         },
     )
     .await
@@ -96,16 +109,13 @@ pub(super) async fn run_program_parts(
             stdin,
             cancel: scope.cancel.clone(),
             run_deadline: scope.run_deadline,
+            timeout: scope.timeout,
         })
         .await
         .map_err(|failure| match failure {
-            CredentialCommandFailure::Exit(code) => missing_label(
-                label,
-                code.map_or_else(
-                    || "exited by signal".to_string(),
-                    |code| format!("exited with code {code}"),
-                ),
-            ),
+            failure @ CredentialCommandFailure::Exit { .. } => {
+                missing_label(label, failure.to_string())
+            }
             CredentialCommandFailure::Io(reason) => missing_label(label, reason),
             failure => AuthError::CredentialCommand {
                 program: label.to_string(),

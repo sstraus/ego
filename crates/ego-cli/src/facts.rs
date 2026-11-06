@@ -567,7 +567,9 @@ transport = "sse"
                     "gemini",
                     "github-copilot",
                     "xai-oauth",
-                    "minimax-oauth"
+                    "minimax-oauth",
+                    "bedrock",
+                    "vertex"
                 ]
                 .contains(&slug.provider.as_str()),
                 "`{slug}` names a provider whose resolver does not read this file",

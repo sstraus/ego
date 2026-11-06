@@ -18,6 +18,10 @@ pub struct KimiAnthropic;
 pub const DIALECT: &str = "kimi-anthropic";
 
 impl WireFormat for KimiAnthropic {
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        super::cache::policy(req, true, true)
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,

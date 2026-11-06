@@ -1370,6 +1370,12 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     if args.bare {
         toml.push_str("bare = true\n");
     }
+    if args.memory {
+        toml.push_str("memory = true\n");
+    }
+    if args.no_checkpoints {
+        toml.push_str("checkpoints = false\n");
+    }
     // `--budget` uses ordinary flags-layer resolution. Only the system layer
     // supplies non-relaxable ceilings, so its clamp must see that same value.
     if let Some(cap) = args.max_output_tokens {

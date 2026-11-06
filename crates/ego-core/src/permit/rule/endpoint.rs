@@ -25,6 +25,10 @@ pub enum Host {
     Subdomains(String),
     /// An address literal, normalised to its canonical text.
     Ip(IpAddr),
+    /// `192.168.1.0/24`: every address literal of one family inside the
+    /// block. Stored with the host bits cleared, so two spellings of one
+    /// block are one rule. It never matches a name.
+    Cidr(IpAddr, u8),
 }
 
 /// A canonicalised `net` pattern: a host and an optional port.
@@ -43,6 +47,11 @@ impl Endpoint {
 
     pub fn port(&self) -> Option<u16> {
         self.port
+    }
+
+    /// Names a host, a name pattern or an address block, not every host.
+    pub fn names_hosts(&self) -> bool {
+        !matches!(self.host, Host::Any)
     }
 
     /// Parse the text between `net(` and `)`.
@@ -66,9 +75,6 @@ impl Endpoint {
         }
         if pattern.contains('@') {
             return Err(bad("userinfo is not part of an endpoint"));
-        }
-        if pattern.contains('/') {
-            return Err(bad("a path is not part of an endpoint"));
         }
         if pattern.contains('?') || pattern.contains('#') {
             return Err(bad("a query is not part of an endpoint"));
@@ -107,6 +113,9 @@ impl Endpoint {
         match (&self.host, &target) {
             (Host::Any, _) => true,
             (Host::Ip(pattern), Host::Ip(actual)) => pattern == actual,
+            (Host::Cidr(network, length), Host::Ip(actual)) => {
+                masked(*actual, *length) == Some(*network)
+            }
             (Host::Name(pattern), Host::Name(actual)) => pattern == actual,
             (Host::Subdomains(suffix), Host::Name(actual)) => actual
                 .strip_suffix(suffix.as_str())
@@ -127,6 +136,7 @@ impl Endpoint {
             Host::Name(name) => text(1, name),
             Host::Subdomains(suffix) => text(2, suffix),
             Host::Ip(ip) => text(3, &ip.to_string()),
+            Host::Cidr(network, length) => text(4, &format!("{network}/{length}")),
         }
         match self.port {
             Some(port) => {
@@ -146,6 +156,8 @@ impl fmt::Display for Endpoint {
             Host::Subdomains(suffix) => write!(f, "*.{suffix}")?,
             Host::Ip(IpAddr::V6(ip)) => write!(f, "[{ip}]")?,
             Host::Ip(ip) => write!(f, "{ip}")?,
+            Host::Cidr(IpAddr::V6(network), length) => write!(f, "[{network}]/{length}")?,
+            Host::Cidr(network, length) => write!(f, "{network}/{length}")?,
         }
         if let Some(port) = self.port {
             write!(f, ":{port}")?;
@@ -177,6 +189,13 @@ fn split_port(pattern: &str) -> Option<(&str, Option<u16>)> {
 fn parse_host(host: &str, bad: &dyn Fn(&str) -> RuleParseError) -> Result<Host, RuleParseError> {
     if host == "*" {
         return Ok(Host::Any);
+    }
+    if host.contains('/') {
+        let (address, length) =
+            cidr_parts(host).ok_or_else(|| bad("a path is not part of an endpoint"))?;
+        let network = masked(address, length)
+            .ok_or_else(|| bad("the prefix length is longer than the address"))?;
+        return Ok(Host::Cidr(network, length));
     }
 
     if let Some(inner) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
@@ -224,6 +243,38 @@ fn parse_host(host: &str, bad: &dyn Fn(&str) -> RuleParseError) -> Result<Host, 
     } else {
         Host::Name(ascii)
     })
+}
+
+/// Split `address/length`, the address in its strict form (bracketed or bare
+/// for IPv6). `None` when the text is not that shape, so a path stays a path.
+/// The port is already split off: text after the length is never ignored.
+fn cidr_parts(text: &str) -> Option<(IpAddr, u8)> {
+    let (address, length) = text.split_once('/')?;
+    if length.is_empty() || !length.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let address = address
+        .strip_prefix('[')
+        .and_then(|inner| inner.strip_suffix(']'))
+        .unwrap_or(address);
+    Some((address.parse().ok()?, length.parse().ok()?))
+}
+
+/// `address` with every bit after the first `length` cleared, or `None` when
+/// `length` is longer than the address.
+fn masked(address: IpAddr, length: u8) -> Option<IpAddr> {
+    // `checked_shl` by the full width is `None`: a `/0` block clears every bit.
+    match address {
+        IpAddr::V4(ip) if length <= 32 => {
+            let mask = u32::MAX.checked_shl(32 - u32::from(length)).unwrap_or(0);
+            Some(IpAddr::V4(Ipv4Addr::from(u32::from(ip) & mask)))
+        }
+        IpAddr::V6(ip) if length <= 128 => {
+            let mask = u128::MAX.checked_shl(128 - u32::from(length)).unwrap_or(0);
+            Some(IpAddr::V6(Ipv6Addr::from(u128::from(ip) & mask)))
+        }
+        _ => None,
+    }
 }
 
 /// Would the WHATWG URL parser insist this host be an IPv4 address?

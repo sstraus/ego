@@ -61,7 +61,9 @@ _ego() {
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
+'--no-hooks[Run with every hook off for this invocation; configuration is unchanged]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
+'(--bare --trust-workspace)--trust-development-programs[Trust this workspace and future edits to its current named programs; remember the grant]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--no-context-tool[Disable model-requested context transitions]' \
 '--context-clear[Permit the model to discard conversation history using clear]' \
@@ -72,6 +74,9 @@ _ego() {
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
 '--vim[Use Vim normal/insert editing in the interactive composer]' \
+'--memory[Keep a memory file for this workspace that the model can add to]' \
+'--no-session-compression[Do not compress old sessions in the background during this run]' \
+'--no-checkpoints[Do not save file checkpoints before writes during this run]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '-V[Print version]' \
@@ -133,7 +138,9 @@ _arguments "${_arguments_options[@]}" : \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
+'--no-hooks[Run with every hook off for this invocation; configuration is unchanged]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
+'(--bare --trust-workspace)--trust-development-programs[Trust this workspace and future edits to its current named programs; remember the grant]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--no-context-tool[Disable model-requested context transitions]' \
 '--context-clear[Permit the model to discard conversation history using clear]' \
@@ -143,6 +150,9 @@ _arguments "${_arguments_options[@]}" : \
 '--quiet[Suppress progress and diagnostics on stderr; stdout is unaffected]' \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
+'--memory[Keep a memory file for this workspace that the model can add to]' \
+'--no-session-compression[Do not compress old sessions in the background during this run]' \
+'--no-checkpoints[Do not save file checkpoints before writes during this run]' \
 '--vim[Use Vim normal/insert editing in the interactive composer]' \
 '(-f --file --session --session-id --worktree)--continua[Resume the latest saved session in this workspace without the terminal picker]' \
 '-h[Print help]' \
@@ -153,8 +163,9 @@ _arguments "${_arguments_options[@]}" : \
 (resume)
 _arguments "${_arguments_options[@]}" : \
 '*--answer=[Settle a pending question. Repeat for multiple sibling questions]:QUESTION_ID=JSON:_default' \
-'(--goal-operation --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--name=[Read or change the session title without starting a turn\: show, set=TEXT, clear]:NAME:_default' \
-'(--name --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, extend=N, achieve, block=REASON]:GOAL_OPERATION:_default' \
+'(--name --goal-operation)--title=[Resume the session of this workspace whose title is exactly TITLE]:TITLE:_default' \
+'(--goal-operation --answer --title --queue -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --no-hooks --allow --deny --profile --trust-workspace --trust-development-programs --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --memory --no-session-compression --no-checkpoints --session --session-id --worktree)--name=[Read or change the session title without starting a turn\: show, set=TEXT, clear]:NAME:_default' \
+'(--name --answer --title --queue -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --no-hooks --allow --deny --profile --trust-workspace --trust-development-programs --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --memory --no-session-compression --no-checkpoints --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, extend=N, achieve, block=REASON]:GOAL_OPERATION:_default' \
 '()-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '()--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '()*--var=[Supply one declared agent-file template variable. Requires --file]:KEY=VALUE:_default' \
@@ -197,10 +208,14 @@ _arguments "${_arguments_options[@]}" : \
 '--session=[Named session\: created or attached]:SESSION:_default' \
 '--session-id=[A session id supplied by the caller]:SESSION_ID:_default' \
 '(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
+'(--name --goal-operation)--accept-authority-delta[Accept the authority change shown for this resume, without a question. Applies to this resume only]' \
+'(--answer)--queue[Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout]' \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
+'--no-hooks[Run with every hook off for this invocation; configuration is unchanged]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
+'(--bare --trust-workspace)--trust-development-programs[Trust this workspace and future edits to its current named programs; remember the grant]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--no-context-tool[Disable model-requested context transitions]' \
 '--context-clear[Permit the model to discard conversation history using clear]' \
@@ -211,6 +226,9 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
 '--vim[Use Vim normal/insert editing in the interactive composer]' \
+'--memory[Keep a memory file for this workspace that the model can add to]' \
+'--no-session-compression[Do not compress old sessions in the background during this run]' \
+'--no-checkpoints[Do not save file checkpoints before writes during this run]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::id -- Session UUID; omit it for the terminal picker or headless latest in this workspace:_default' \
@@ -220,8 +238,9 @@ _arguments "${_arguments_options[@]}" : \
 (continue)
 _arguments "${_arguments_options[@]}" : \
 '*--answer=[Settle a pending question. Repeat for multiple sibling questions]:QUESTION_ID=JSON:_default' \
-'(--goal-operation --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--name=[Read or change the session title without starting a turn\: show, set=TEXT, clear]:NAME:_default' \
-'(--name --answer -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --allow --deny --profile --trust-workspace --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, extend=N, achieve, block=REASON]:GOAL_OPERATION:_default' \
+'(--name --goal-operation)--title=[Resume the session of this workspace whose title is exactly TITLE]:TITLE:_default' \
+'(--goal-operation --answer --title --queue -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --no-hooks --allow --deny --profile --trust-workspace --trust-development-programs --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --memory --no-session-compression --no-checkpoints --session --session-id --worktree)--name=[Read or change the session title without starting a turn\: show, set=TEXT, clear]:NAME:_default' \
+'(--name --answer --title --queue -f --file --var --attach -m --model --offline --proxy --proxy-ca --sandbox --thinking --read-only-dir --system --bare --append-system --output-style --instructions --tools --no-tools --no-hooks --allow --deny --profile --trust-workspace --trust-development-programs --ephemeral --artifact-dir --schema --schema-retries --retry --fallback --budget --max-output-tokens --goal --no-context-tool --context-clear --context-interval --goal-turns --goal-check-command --max-turns --timeout --mcp --mode --plan --yolo -c --set -q --quiet --no-color --plain --vim --memory --no-session-compression --no-checkpoints --session --session-id --worktree)--goal-operation=[Read or change goal metadata without starting a turn\: show, set=TEXT, extend=N, achieve, block=REASON]:GOAL_OPERATION:_default' \
 '()-f+[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '()--file=[Read the instruction and its invocation configuration from an agent file]:FILE:_files' \
 '()*--var=[Supply one declared agent-file template variable. Requires --file]:KEY=VALUE:_default' \
@@ -264,10 +283,14 @@ _arguments "${_arguments_options[@]}" : \
 '--session=[Named session\: created or attached]:SESSION:_default' \
 '--session-id=[A session id supplied by the caller]:SESSION_ID:_default' \
 '(--session --session-id)--worktree=[Create a retained managed worktree on this explicitly approved new branch]:BRANCH:_default' \
+'(--name --goal-operation)--accept-authority-delta[Accept the authority change shown for this resume, without a question. Applies to this resume only]' \
+'(--answer)--queue[Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout]' \
 '--offline[No non-loopback egress from ego'\''s own HTTP transport]' \
 '(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
+'--no-hooks[Run with every hook off for this invocation; configuration is unchanged]' \
 '(--bare)--trust-workspace[Trust this launch'\''s workspace without asking; remember the answer]' \
+'(--bare --trust-workspace)--trust-development-programs[Trust this workspace and future edits to its current named programs; remember the grant]' \
 '--ephemeral[Refused\: every run uses a durable session]' \
 '--no-context-tool[Disable model-requested context transitions]' \
 '--context-clear[Permit the model to discard conversation history using clear]' \
@@ -278,6 +301,9 @@ _arguments "${_arguments_options[@]}" : \
 '--no-color[Never emit ANSI colour, whatever the terminal claims to support]' \
 '--plain[Append plain output without terminal styling or live retry updates]' \
 '--vim[Use Vim normal/insert editing in the interactive composer]' \
+'--memory[Keep a memory file for this workspace that the model can add to]' \
+'--no-session-compression[Do not compress old sessions in the background during this run]' \
+'--no-checkpoints[Do not save file checkpoints before writes during this run]' \
 '-h[Print help]' \
 '--help[Print help]' \
 '::id -- Session UUID; omit it for the terminal picker or headless latest in this workspace:_default' \
@@ -287,6 +313,17 @@ _arguments "${_arguments_options[@]}" : \
 (fork)
 _arguments "${_arguments_options[@]}" : \
 '--at=[]:ITEM_ID:_default' \
+'--session-dir=[Override the store location]:SESSION_DIR:_files' \
+'-C+[Run as if started in DIR]:DIR:_files' \
+'--output=[text|json|jsonl]:OUTPUT:(text json jsonl)' \
+'-h[Print help]' \
+'--help[Print help]' \
+':source:_default' \
+&& ret=0
+;;
+(rewind)
+_arguments "${_arguments_options[@]}" : \
+'--at=[A user or assistant message of the turn to return to]:ITEM_ID:_default' \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
 '--output=[text|json|jsonl]:OUTPUT:(text json jsonl)' \
@@ -391,6 +428,8 @@ esac
 (doctor)
 _arguments "${_arguments_options[@]}" : \
 '--json[Emit the exact versioned health snapshot]' \
+'--offline[Skip every provider network probe]' \
+'--probe-network[Probe the network reachability of each configured provider, like \`doctor_network = true\`]' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -464,6 +503,7 @@ _arguments "${_arguments_options[@]}" : \
 '--max-ingress-bytes=[Maximum cumulative bytes read from one listener connection (runtime default\: 134217728 bytes)]:MAX_INGRESS_BYTES:_default' \
 '(--instructions)--bare[No ambient discovery, even in a trusted workspace]' \
 '(--tools)--no-tools[Offer no tools at all]' \
+'--no-hooks[Run with every hook off for this invocation; configuration is unchanged]' \
 '--allow-public-bind[Serve on an address reachable from outside this machine]' \
 '-h[Print help]' \
 '--help[Print help]' \
@@ -541,8 +581,9 @@ _arguments "${_arguments_options[@]}" : \
 '(--http)*--inherit-env=[Environment variable inherited by the stdio child. Repeatable]:NAME:_default' \
 '(--stdio)--profile=[Explicit HTTP wire profile; never selected by fallback]:PROFILE:(current legacy-sse)' \
 '(--stdio)--auth=[HTTP authentication mode]:AUTH:(none oauth)' \
+'(--stdio)*--oauth-host=[Extra OAuth origin that may host this server'\''s authorization, token or registration endpoint when it differs from the issuer'\''s. Repeatable]:URL:_default' \
 '(--http)--stdio[Configure a subprocess transport. Its command follows literal \`--\`]' \
-'(--stdio)--allow-insecure-loopback[Consent to plaintext HTTP for an exact loopback host]' \
+'(--stdio)--allow-insecure-loopback[Consent to plaintext HTTP for this server on loopback or the owner network]' \
 '-h[Print help]' \
 '--help[Print help]' \
 ':name:_default' \
@@ -788,9 +829,12 @@ esac
 _arguments "${_arguments_options[@]}" : \
 '--session-dir=[Override the store location]:SESSION_DIR:_files' \
 '-C+[Run as if started in DIR]:DIR:_files' \
-'--max-concurrent-runs=[]:MAX_CONCURRENT_RUNS:_default' \
-'--retained-requests=[]:RETAINED_REQUESTS:_default' \
-'--max-resource-bytes=[]:MAX_RESOURCE_BYTES:_default' \
+'--max-concurrent-runs=[Runs that may execute at once]:MAX_CONCURRENT_RUNS:_default' \
+'--retained-requests=[Finished requests kept for status and resource reads]:RETAINED_REQUESTS:_default' \
+'--max-resource-bytes=[Largest resource body returned to a client, in bytes]:MAX_RESOURCE_BYTES:_default' \
+'*--allow-root=[Also let clients run in DIR. The directory given with -C (or the current one) is always allowed]:DIR:_files' \
+'*--allow-model=[Also let clients select this model. The configured model is always allowed]:P/M:_default' \
+'*--allow-mode=[Also let clients select this mode. The configured mode is always allowed]:ALLOW_MODE:_default' \
 '-h[Print help]' \
 '--help[Print help]' \
 && ret=0
@@ -839,6 +883,7 @@ _ego_commands() {
 'resume:Continue a stored session.' \
 'continue:Continue a stored session.' \
 'fork:Fork a session at its tip or after the completed turn containing a message.' \
+'rewind:Restore the files a session changed after a completed turn, then fork the conversation there.' \
 'rm:Delete a stored session (history is retained for descendants).' \
 'compact:Compact a session into its deterministic successor.' \
 'export:Export a session locally or as a structurally sanitized bundle.' \
@@ -848,7 +893,7 @@ _ego_commands() {
 'hooks:Inspect the admitted system and user hook catalogue.' \
 'doctor:Report a read-only redacted health snapshot of this installation.' \
 'checkpoint:Preview or selectively restore session-owned Git file checkpoints.' \
-'setup:Configure saved user settings in an interactive terminal.' \
+'setup:Review provider readiness and configure saved user settings in an interactive terminal.' \
 'acp:Serve the Agent Client Protocol on stdio or an endpoint.' \
 'a2a:Serve the Agent2Agent protocol on a local or loopback endpoint.' \
 'auth:Manage subscription credentials.' \
@@ -1065,6 +1110,11 @@ _ego__subcmd__models_commands() {
 _ego__subcmd__resume_commands() {
     local commands; commands=()
     _describe -t commands 'ego resume commands' commands "$@"
+}
+(( $+functions[_ego__subcmd__rewind_commands] )) ||
+_ego__subcmd__rewind_commands() {
+    local commands; commands=()
+    _describe -t commands 'ego rewind commands' commands "$@"
 }
 (( $+functions[_ego__subcmd__rm_commands] )) ||
 _ego__subcmd__rm_commands() {

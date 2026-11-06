@@ -6,6 +6,7 @@
 #
 # Supplied providers enumerate configured rows. Discovery providers obtain their own catalogues.
 # OpenRouter stays dynamic rather than carrying an arbitrary builtin subset.
+# Bedrock and Vertex enumerate supplied rows; their configured models appear here.
 #
 # `BUILTIN_CATALOGUE_REVISION` in `facts.rs` must equal the revision below.
 # revision = 2026-10-15
@@ -17,6 +18,8 @@ openai = "openai/gpt-6.1-sol"
 openai-codex = "openai-codex/gpt-6.1-sol"
 anthropic = "anthropic/claude-opus-5-5"
 gemini = "gemini/gemini-3.8-flash"
+bedrock = "bedrock/anthropic.claude-opus-5-5"
+vertex = "vertex/claude-opus-5-5"
 
 # ---------------------------------------------------------------------------
 # Tombstones.

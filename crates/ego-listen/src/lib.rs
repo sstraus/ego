@@ -242,19 +242,41 @@ async fn bind_local(path: &Path) -> io::Result<Bound> {
         Err(error) => return Err(error),
     }
     let owner = rustix::process::geteuid().as_raw();
-    let metadata = std::fs::symlink_metadata(parent)?;
-    if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o777 != 0o700 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the local endpoint needs a directory owned by the current user with mode 0700; choose a private directory",
-        ));
-    }
     let name = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "the local endpoint needs a socket filename",
         )
     })?;
+    let is_private = |metadata: &std::fs::Metadata| {
+        metadata.is_dir() && metadata.uid() == owner && metadata.mode() & 0o777 == 0o700
+    };
+    // An ordinary parent is never chmod-ed: the socket lives in a private child
+    // directory instead, and `advertised` reports the path it really got.
+    let (parent, path) = if is_private(&std::fs::symlink_metadata(parent)?) {
+        (parent.to_path_buf(), path.to_path_buf())
+    } else {
+        let mut child_name = name.to_os_string();
+        child_name.push(".d");
+        let child = parent.join(child_name);
+        match std::fs::DirBuilder::new().mode(0o700).create(&child) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        if !is_private(&std::fs::symlink_metadata(&child)?) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "the private socket directory {} exists but is not a directory owned by the current user with mode 0700; remove it or choose another path",
+                    child.display()
+                ),
+            ));
+        }
+        let path = child.join(name);
+        (child, path)
+    };
+    let (parent, path) = (parent.as_path(), path.as_path());
     let mut lock_name = name.to_os_string();
     lock_name.push(".lock");
     // Reuse the session store's kernel lease mechanism, without its session

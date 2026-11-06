@@ -84,5 +84,5 @@ contains the root snapshot and compaction-successor export, each with its own
 header. Between these snapshots the test observes a new operator goal through
 follow; the successor therefore derives from that newer goal, not the older goal
 in the root snapshot.
-The capture procedure and assertions are in `crates/ego-cli/tests/transcript.rs`.
+The capture procedure and assertions are in `crates/ego-cli/tests/it/transcript.rs`.
 No paid API or live external service is used.

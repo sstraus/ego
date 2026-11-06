@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use ego_core::event::id::SessionId;
-use ego_core::permit::{CanonPath, Fs, FsError, PathResolver, Scan, ScanRequest};
+use ego_core::permit::{CanonPath, Fs, FsError, FsWriteAttempt, PathResolver, Scan, ScanRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::{OsFs, PreparedReplacement, sync_directory};
@@ -13,6 +13,9 @@ use crate::fs::{OsFs, PreparedReplacement, sync_directory};
 #[derive(Debug)]
 pub struct CheckpointFs {
     session: SessionId,
+    enabled: bool,
+    /// The checkpoint the last write of each path created, for its result.
+    last: std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,6 +59,14 @@ pub struct Preview {
     pub effect: &'static str,
     pub conflict: bool,
     pub already_original: bool,
+}
+
+/// One checkpoint in the session's chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub checkpoint: String,
+    pub path: PathBuf,
+    pub restoration: bool,
 }
 
 struct Repository {
@@ -369,7 +380,19 @@ impl Repository {
 
 impl CheckpointFs {
     pub fn new(session: SessionId) -> Self {
-        Self { session }
+        Self {
+            session,
+            enabled: true,
+            last: std::sync::Mutex::default(),
+        }
+    }
+
+    /// Whether writes save a checkpoint first. Off, a write is a plain atomic write: no
+    /// Git object and no ref is created in the user's repository.
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 
     pub fn preview(directory: &Path, session: SessionId) -> io::Result<Vec<Preview>> {
@@ -385,6 +408,62 @@ impl CheckpointFs {
                 Err(e) => Some(Err(e)),
             })
             .collect()
+    }
+
+    /// Every checkpoint of the session, newest first, with its path and
+    /// whether it records a restore rather than a builtin write.
+    pub fn history(directory: &Path, session: SessionId) -> io::Result<Vec<HistoryEntry>> {
+        let Some(repo) = Repository::discover(directory, session)? else {
+            return Ok(Vec::new());
+        };
+        let mut lock = repo.lock()?;
+        let _guard = lock.write()?;
+        repo.ids()?
+            .into_iter()
+            .map(|id| {
+                let record = repo.record(&id)?;
+                Ok(HistoryEntry {
+                    checkpoint: id,
+                    path: record.path,
+                    restoration: record.restoration,
+                })
+            })
+            .collect()
+    }
+
+    /// The Git blob ids of a checkpoint's pre-image and post-image, so a
+    /// caller can compare successive writes of one file without its bytes.
+    pub fn images(
+        directory: &Path,
+        session: SessionId,
+        checkpoint: &str,
+    ) -> io::Result<(String, String)> {
+        let repo = Repository::discover(directory, session)?
+            .ok_or_else(|| error("no checkpoints outside Git"))?;
+        if !repo.ids()?.iter().any(|id| id == checkpoint) {
+            return Err(error("checkpoint does not belong to this session"));
+        }
+        let blob = |name: &str| {
+            text(git(
+                &repo.root,
+                &["rev-parse", &format!("{checkpoint}:{name}")],
+                &[],
+            )?)
+        };
+        Ok((blob("before")?, blob("after")?))
+    }
+
+    /// The preview of one checkpoint of the session.
+    pub fn preview_one(
+        directory: &Path,
+        session: SessionId,
+        checkpoint: &str,
+    ) -> io::Result<Preview> {
+        let repo = Repository::discover(directory, session)?
+            .ok_or_else(|| error("no checkpoints outside Git"))?;
+        let mut lock = repo.lock()?;
+        let _guard = lock.write()?;
+        repo.preview(checkpoint)
     }
 
     /// Restore exactly one selected file. Resolve conflicts outside this API, then preview again.
@@ -432,6 +511,36 @@ impl PathResolver for CheckpointFs {
 }
 
 impl Fs for CheckpointFs {
+    fn write_attempt(&self, path: &CanonPath, bytes: &[u8]) -> FsWriteAttempt {
+        if !self.enabled {
+            return FsWriteAttempt {
+                result: OsFs.write(path, bytes),
+                checkpoint: None,
+            };
+        }
+        let mut checkpoint = None;
+        let result = (|| -> io::Result<()> {
+            let parent = path
+                .as_path()
+                .parent()
+                .ok_or_else(|| error("missing write parent"))?;
+            if let Some(repo) = Repository::discover(parent, self.session)? {
+                let mut lock = repo.lock()?;
+                let _guard = lock.write()?;
+                let replacement = PreparedReplacement::new(path.as_path(), bytes)?;
+                checkpoint = Some(repo.capture(path.as_path(), bytes, &replacement, false)?);
+                replacement.commit()?;
+            } else {
+                OsFs.write(path, bytes).map_err(error)?;
+            }
+            Ok(())
+        })()
+        .map_err(|e| FsError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        });
+        FsWriteAttempt { result, checkpoint }
+    }
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError> {
         OsFs.read(path)
     }
@@ -442,28 +551,29 @@ impl Fs for CheckpointFs {
         OsFs.scan(request)
     }
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), FsError> {
-        let write = || -> io::Result<()> {
-            let parent = path
-                .as_path()
-                .parent()
-                .ok_or_else(|| error("missing write parent"))?;
-            if let Some(repo) = Repository::discover(parent, self.session)? {
-                let mut lock = repo.lock()?;
-                let _guard = lock.write()?;
-                let replacement = PreparedReplacement::new(path.as_path(), bytes)?;
-                repo.capture(path.as_path(), bytes, &replacement, false)?;
-                replacement.commit()?;
-            } else {
-                OsFs.write(path, bytes).map_err(error)?;
-            }
-            Ok(())
-        };
-        write().map_err(|e| FsError::Io {
-            path: path.clone(),
-            message: e.to_string(),
-        })
+        let attempt = self.write_attempt(path, bytes);
+        if attempt.result.is_ok()
+            && let Some(checkpoint) = attempt.checkpoint
+        {
+            self.last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(path.as_path().to_path_buf(), checkpoint);
+        }
+        attempt.result
     }
+    fn last_checkpoint(&self, path: &CanonPath) -> Option<String> {
+        self.last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path.as_path())
+            .cloned()
+    }
+
     fn write_notice(&self, path: &CanonPath) -> Option<String> {
+        if !self.enabled {
+            return Some("No checkpoint: checkpoints are off.".into());
+        }
         match Repository::discover(path.as_path().parent()?, self.session) {
             Ok(Some(_)) => Some(format!("Git checkpoint saved for session {}", self.session)),
             _ => Some("No checkpoint: this file is outside Git.".into()),

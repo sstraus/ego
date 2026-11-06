@@ -141,6 +141,11 @@ arboard = "3.6.1"
 # writes it.
 tiff = "0.11.3"
 
+[target.'cfg(unix)'.dev-dependencies]
+# Names the termios type `portable-pty` returns, so a PTY test can read the
+# slave's line discipline. Must stay the `nix` that `portable-pty` resolves.
+pty-termios = { package = "nix", version = "0.28.0", default-features = false, features = ["term"] }
+
 [target.'cfg(unix)'.dependencies]
 # `raise(SIGTSTP)` for `Ctrl+Z`; the same version `ego-tools` resolves.
 nix = { version = "0.31.3", features = ["signal"] }

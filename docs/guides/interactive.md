@@ -17,12 +17,26 @@ Reasoning selection refuses unsupported values rather than silently substituting
 | Help and identity | `/help`, `/version`, `/quit` |
 | Model and reasoning | `/model`, `/thinking`, `/fast on\|off`; model-picker shortcuts are shown by `/help` |
 | Policy | `/mode`, `/plan`, `/yolo`, `/permissions` |
-| State and health | `/config`, `/config perimeter`, `/config set KEY TOML_VALUE`, `/doctor`, `/usage`, `/statusline` |
+| State and health | `/config`, `/config perimeter`, `/config roots`, `/config set KEY TOML_VALUE`, `/doctor`, `/usage`, `/statusline` |
 | Conversation | `/sessions`, `/history`, `/new`, `/name`, `/goal`, `/fork [message-id]`, `/compact`, `/refresh` |
+| Side question during a turn | `/side QUESTION` |
 | Tools and extensions | `/tools`, `/expand`, `/mcp`, `/skills`, `/hooks` |
 | Project instructions | `/init`; see [project instructions](memory.md) |
 | Background execution and retry | `/tasks [ID \| cancel ID]`, `/retry` |
 | Local presentation/export | `/clear`, `/export [local\|sanitized] [md\|json\|jsonl]` |
+
+## Recap after an absence
+
+Turn on `recap.enabled` (a row in `ego setup`, or
+`ego config set recap.enabled=true`) to get a short recap when you come back.
+When the last turn completed at least `recap.after_minutes` ago (default 30),
+the first prompt you send shows a recap of the session, at most five lines,
+before that prompt runs. The absence counts across restarts, so a session
+resumed the next day also gets one. The recap is one model call on the
+session's model and context. A usage line follows it and `/usage` counts it.
+It is not added to the history and runs no tool. If it fails, ego says so and
+runs the prompt. It is off by default, and a project or local configuration
+file cannot turn it on.
 
 Some actions require idle state or a registered owner; a disabled action names
 its reason. Exact registered slash commands execute with one Enter. Enter on a
@@ -173,4 +187,4 @@ receipt identifies the successor before input moves to that session.
 Sources: [action registry](../../crates/ego-cli/src/repl/actions.rs),
 [input keys](../../crates/ego-cli/src/repl/keys.rs),
 [interactive driver](../../crates/ego-cli/src/repl/mod.rs), and
-[interactive surface tests](../../crates/ego-cli/tests/surfaces.rs).
+[interactive surface tests](../../crates/ego-cli/tests/it/surfaces.rs).

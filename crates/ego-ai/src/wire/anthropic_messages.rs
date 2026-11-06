@@ -80,6 +80,10 @@ use super::{RequestRefused, RequestTarget, WireFormat};
 pub struct AnthropicMessages;
 
 impl WireFormat for AnthropicMessages {
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        super::cache::policy(req, true, false)
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -779,6 +783,7 @@ enum StartBlock {
     Thinking,
     ToolUse {
         id: String,
+        #[serde(default)]
         name: String,
     },
     /// Server-side tool calls and their results, container uploads, and the

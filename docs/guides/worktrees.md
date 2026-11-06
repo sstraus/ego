@@ -41,4 +41,4 @@ TUICommander owns launch and worktree lifecycle. Otherwise ego uses system git. 
 controls; a hosted receipt is not adopted into ego's local worktree store.
 
 Sources: [worktree lifecycle](../../crates/ego-cli/src/worktree.rs) and
-[worktree tests](../../crates/ego-cli/tests/worktree.rs).
+[worktree tests](../../crates/ego-cli/tests/it/worktree.rs).

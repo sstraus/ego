@@ -500,6 +500,7 @@ impl AdmissionAttempt {
     async fn begin(
         state: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
         key: [u8; 32],
+        explicit_retry: bool,
     ) -> Result<Self, McpSessionAdmissionError> {
         loop {
             let reservation = {
@@ -528,7 +529,7 @@ impl AdmissionAttempt {
                 });
                 if let Some(active) = retry.active.clone() {
                     AdmissionReservation::Wait(active)
-                } else if now < retry.retry_after {
+                } else if !explicit_retry && now < retry.retry_after {
                     return Err(safe_mcp_error(format!(
                         "{}; retry later",
                         retry
@@ -696,7 +697,8 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
             let acp_management = acp_effects
                 .as_ref()
                 .map(|effects| Arc::clone(effects) as Arc<dyn McpAcpEffects>);
-            let attempt = AdmissionAttempt::begin(failed_admissions, key).await?;
+            let attempt =
+                AdmissionAttempt::begin(failed_admissions, key, context.explicit_retry).await?;
             let cleanup_effects = acp_effects.clone();
             let result = async {
                 let refresh = McpRegistryRefresh::new(
@@ -757,6 +759,8 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                         max_sse_event_size,
                         timeout,
                         acp_management,
+                        // DEFERRED (2026-11-05) — MCP Tasks in ACP sessions; v1 serves `ego run` only.
+                        false,
                     )
                     .map_err(|_| safe_mcp_error("ACP MCP runtime could not be created"))?,
                 );
@@ -941,6 +945,12 @@ async fn prepare_listener(args: &AcpArgs) -> Result<Option<AcpListener>, RunTerm
     let bound = ego_listen::bind(&admitted)
         .await
         .map_err(|error| failed(format!("the ACP endpoint could not be opened: {error}")))?;
+    // A local socket in an ordinary directory lives in a private child, so
+    // the endpoint a host must use can differ from the requested one.
+    let advertised = bound
+        .advertised()
+        .map_err(|error| failed(format!("the ACP endpoint has no address: {error}")))?;
+    eprintln!("ego acp: listening on {advertised}");
     Ok(Some(AcpListener {
         admitted,
         bound,
@@ -953,13 +963,8 @@ fn failed(message: String) -> RunTermination {
     RunTermination::Failed { message }
 }
 
-fn confinement_ceiling(
-    args: &AcpArgs,
-    configured: Option<Confinement>,
-    endpoint: Option<&Admitted>,
-) -> Confinement {
-    let selected = args.sandbox.or(configured).unwrap_or_default();
-    endpoint.map_or(selected, |endpoint| endpoint.cap_confinement(selected))
+fn confinement_ceiling(args: &AcpArgs, configured: Option<Confinement>) -> Confinement {
+    args.sandbox.or(configured).unwrap_or_default()
 }
 
 async fn session_catalogue(
@@ -1044,7 +1049,6 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         Ok(listener) => listener,
         Err(termination) => return termination,
     };
-    let admitted = listener.as_ref().map(|listener| &listener.admitted);
     let root = match run::workspace(args.directory.as_ref()) {
         Ok(root) => root,
         Err(error) => {
@@ -1131,7 +1135,7 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
                 // reason the flag exists: the layer an operator would have
                 // reached for is the one an untrusted headless resolution
                 // discards.
-                let ceiling = confinement_ceiling(args, effective.sandbox, admitted);
+                let ceiling = confinement_ceiling(args, effective.sandbox);
                 let rule_target = match permission_rule_target(&effective) {
                     Ok(target) => target,
                     Err(termination) => return termination,
@@ -1344,7 +1348,6 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
 mod confinement_ceiling_tests {
     use super::{confinement_ceiling, map_mcp_servers};
     use crate::cli::{self, AcpArgs, Invocation};
-    use ego_core::endpoint::Admitted;
     use ego_core::permit::Confinement;
 
     fn args(sandbox: Option<Confinement>) -> AcpArgs {
@@ -1359,51 +1362,32 @@ mod confinement_ceiling_tests {
     }
 
     #[test]
-    fn resolves_flag_then_config_then_default_and_caps_only_admitted_public() {
-        let local = Admitted::Local {
-            name: "listener-test.sock".to_owned(),
-        };
-        let loopback = Admitted::Loopback("127.0.0.1:8080".parse().unwrap());
-        let public = Admitted::Public("0.0.0.0:8080".parse().unwrap());
-
+    fn resolves_flag_then_config_then_default_without_an_endpoint_cap() {
         assert_eq!(
-            confinement_ceiling(&args(Some(Confinement::Ro)), Some(Confinement::Off), None),
+            confinement_ceiling(&args(Some(Confinement::Ro)), Some(Confinement::Off)),
             Confinement::Ro,
             "the CLI flag wins over configuration"
         );
+        for configured in Confinement::ALL {
+            assert_eq!(
+                confinement_ceiling(&args(None), Some(configured)),
+                configured,
+                "configuration applies when the CLI does not name a ceiling"
+            );
+            assert_eq!(
+                confinement_ceiling(&args(Some(configured)), Some(Confinement::Off)),
+                configured,
+                "the CLI selects the ceiling"
+            );
+        }
         assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Ro), None),
-            Confinement::Ro,
-            "configuration wins when the CLI does not name a ceiling"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), None, None),
+            confinement_ceiling(&args(None), None),
             if cfg!(target_os = "macos") {
                 Confinement::Adaptive
             } else {
                 Confinement::Workspace
             },
             "the default applies when neither flag nor configuration names a ceiling"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&public)),
-            Confinement::Workspace,
-            "an admitted public endpoint caps unconfined ACP at workspace"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Off), None),
-            Confinement::Off,
-            "stdio has no endpoint cap"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&local)),
-            Confinement::Off,
-            "a local endpoint adds no confinement cap"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&loopback)),
-            Confinement::Off,
-            "a loopback endpoint adds no confinement cap"
         );
     }
 
@@ -1526,6 +1510,7 @@ for line in sys.stdin:
             MCP_DEFAULT_OPERATION_TIMEOUT,
         );
         let context = || McpAdmissionContext {
+            explicit_retry: false,
             session: SessionId::new(),
             root: RunRoot::new(std::env::current_dir().expect("workspace")).expect("root"),
             confinement: None,

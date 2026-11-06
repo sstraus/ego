@@ -29,6 +29,15 @@ use super::{RequestRefused, RequestTarget, WireFormat};
 pub struct OpenAiResponses;
 
 impl WireFormat for OpenAiResponses {
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        ego_core::usage::PromptCachePolicy {
+            ttl_seconds: cache_retention(req).and_then(|_| std::num::NonZeroU64::new(86_400)),
+            // The older-model guide states a maximum retention, not renewal on read.
+            refresh_on_read: false,
+            lock_ttl: false,
+        }
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -303,27 +312,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     let wire = WireRequest {
         max_tool_calls: req.web_search.map(|search| search.max_requests.get()),
         prompt_cache_key: super::cache::routing_key(req, "openai"),
-        prompt_cache_retention: req.cache.as_ref().and_then(|cache| {
-            // Current vendor guide: GPT-5.6+ uses a different TTL contract.
-            // Do not infer support from a model-name prefix.
-            const EXTENDED: &[&str] = &[
-                "gpt-5.5",
-                "gpt-5.5-pro",
-                "gpt-5.4",
-                "gpt-5.2",
-                "gpt-5.1-codex-max",
-                "gpt-5.1",
-                "gpt-5.1-codex",
-                "gpt-5.1-codex-mini",
-                "gpt-5.1-chat-latest",
-                "gpt-5",
-                "gpt-5-codex",
-                "gpt-4.1",
-            ];
-            (cache.retention == ego_core::generator::capabilities::CacheRetention::Long
-                && EXTENDED.contains(&req.model.as_str()))
-            .then_some("24h")
-        }),
+        prompt_cache_retention: cache_retention(req),
         model: &req.model,
         stream: true,
         store: false,
@@ -513,6 +502,10 @@ impl StreamDecoder {
 }
 
 impl super::StreamSink for StreamDecoder {
+    fn usage_incoherent(&self) -> bool {
+        self.usage_incoherent
+    }
+
     fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
         let mut out = Vec::new();
         for frame in self.sse.push(chunk) {
@@ -526,19 +519,7 @@ impl super::StreamSink for StreamDecoder {
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
         }
-        if self.usage_incoherent {
-            out.push(AiEvent::Error {
-                message:
-                    "OpenAI's cached input count exceeded its input total; usage was discarded"
-                        .to_string(),
-                kind: ErrorKind::Unclassified,
-            });
-        }
-        if self.finish_reason != Some(StopReason::Error) {
-            self.flush_calls(&mut out);
-        } else {
-            self.calls.clear();
-        }
+        self.flush_calls(&mut out);
         if let Some(usage) = self.usage.take() {
             out.push(AiEvent::Usage(usage));
         }
@@ -717,13 +698,13 @@ impl StreamDecoder {
                     "incomplete" => self.finish_reason = Some(StopReason::Length),
                     "failed" | "cancelled" => {
                         let error = event.response.and_then(|done| done.error);
-                        let kind = super::classify_stream_code(
+                        let class = super::classify_stream_code(
                             error.as_ref().and_then(|error| error.code.as_deref()),
                         );
                         let message = error
                             .and_then(|error| error.message)
                             .unwrap_or_else(|| format!("OpenAI reported response status {status}"));
-                        out.extend(super::streamed_failure(message, kind));
+                        out.extend(super::streamed_failure(message, class));
                         self.finish_reason = Some(StopReason::Error);
                     }
                     _ if !self.calls.is_empty() => self.finish_reason = Some(StopReason::ToolUse),
@@ -739,7 +720,7 @@ impl StreamDecoder {
                     .as_ref()
                     .and_then(|error| error.code.clone())
                     .or(event.code);
-                let kind = super::classify_stream_code(code.as_deref());
+                let class = super::classify_stream_code(code.as_deref());
                 let message = error
                     .and_then(|error| error.message)
                     .or(event.message)
@@ -747,7 +728,7 @@ impl StreamDecoder {
                         Some(code) => format!("OpenAI reported streamed Responses error {code}"),
                         None => "OpenAI reported a streamed Responses error".to_string(),
                     });
-                out.extend(super::streamed_failure(message, kind));
+                out.extend(super::streamed_failure(message, class));
                 self.finish_reason = Some(StopReason::Error);
             }
             _ => {}
@@ -755,23 +736,10 @@ impl StreamDecoder {
     }
 
     fn flush_calls(&mut self, out: &mut Vec<AiEvent>) {
-        for (index, (_, call)) in std::mem::take(&mut self.calls).into_iter().enumerate() {
-            let Some(id) = call.id.filter(|id| !id.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!(
-                        "OpenAI streamed a function_call at slot {index} with no call_id"
-                    ),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
-            let Some(name) = call.name.filter(|name| !name.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!("OpenAI streamed a function_call {id} with no name"),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
+        // Absent identities pass on empty; the shared stage decides.
+        for (_, call) in std::mem::take(&mut self.calls) {
+            let id = call.id.unwrap_or_default();
+            let name = call.name.unwrap_or_default();
             out.push(AiEvent::ToolCall {
                 call_id: id,
                 name,
@@ -779,4 +747,28 @@ impl StreamDecoder {
             });
         }
     }
+}
+
+fn cache_retention(req: &GenRequest) -> Option<&'static str> {
+    req.cache.as_ref().and_then(|cache| {
+        // Current vendor guide: GPT-5.6+ uses a different TTL contract.
+        // Do not infer support from a model-name prefix.
+        const EXTENDED: &[&str] = &[
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.2",
+            "gpt-5.1-codex-max",
+            "gpt-5.1",
+            "gpt-5.1-codex",
+            "gpt-5.1-codex-mini",
+            "gpt-5.1-chat-latest",
+            "gpt-5",
+            "gpt-5-codex",
+            "gpt-4.1",
+        ];
+        (cache.retention == ego_core::generator::capabilities::CacheRetention::Long
+            && EXTENDED.contains(&req.model.as_str()))
+        .then_some("24h")
+    })
 }

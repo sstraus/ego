@@ -118,9 +118,9 @@ impl Rule {
         }
     }
 
-    /// Allow authority excludes control paths regardless of rule provenance.
+    /// Control paths require an exact path rule carried by the user layer.
     /// Denies use `matches` so the guard never weakens a refusal.
-    pub(crate) fn matches_allow(&self, op: &Op, root: &Path) -> bool {
+    pub(crate) fn matches_allow(&self, op: &Op, root: &Path, user: bool) -> bool {
         let path = match op {
             Op::Read { path } | Op::Write { path, .. } => Some(path.as_path()),
             Op::List { root, .. } | Op::Search { root, .. } => Some(root.as_path()),
@@ -134,10 +134,34 @@ impl Rule {
                             || name.eq_ignore_ascii_case(".ego")
                             || name.eq_ignore_ascii_case(".claude")))
             })
-        }) {
+        }) && (!user || !self.matches_exact_path(op, root))
+        {
             return false;
         }
         self.matches(op, root)
+    }
+
+    /// An owner endpoint grant names hosts: a name, a `*.` name pattern, an
+    /// address or a CIDR block, with or without a port. Bare `net(*)` names
+    /// no host, so it never opens a local or LAN address.
+    pub(crate) fn matches_owner_net(&self, op: &Op) -> bool {
+        matches!(self, Rule::Net(endpoint) if endpoint.names_hosts())
+            && matches!(op, Op::Connect { .. })
+            && self.matches(op, Path::new(""))
+    }
+
+    /// An owner path exception names a literal target, never a subtree pattern.
+    pub(crate) fn matches_exact_path(&self, op: &Op, root: &Path) -> bool {
+        let exact = match self {
+            Rule::Read(pattern)
+            | Rule::Write(pattern)
+            | Rule::List(pattern)
+            | Rule::Search(pattern) => pattern.segments().iter().all(
+                |segment| matches!(segment, Segment::One(glob) if glob.as_literal().is_some()),
+            ),
+            _ => false,
+        };
+        exact && self.matches(op, root)
     }
 
     /// Match per operation. Every operation in a call needs coverage, potentially from

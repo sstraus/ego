@@ -1,5 +1,10 @@
 //! Deterministic usage reporting over the durable session ledger.
 
+mod context_attribution;
+pub use context_attribution::{
+    ContextAttribution, ToolContextCall, ToolContextEstimate, ToolContextResult,
+};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU64;
@@ -17,9 +22,9 @@ use crate::session::SessionLineage;
 use crate::state::{Charge, ChargeAttribution, SessionState, Usage};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
-/// The v4 contract adds observed context capacity and provider limits.
+/// The v5 contract adds observational tool context attribution.
 /// Old report snapshots are not accepted through compatibility defaults.
-pub const USAGE_REPORT_VERSION: u32 = 4;
+pub const USAGE_REPORT_VERSION: u32 = 5;
 
 /// A deterministic workspace or active-session usage report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +60,71 @@ pub struct SessionUsage {
     pub context_capacity: Option<ContextCapacity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_limits: Option<ProviderLimitsObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCacheDeadline>,
+    pub context_attribution: ContextAttribution,
     pub lines: UsageLines,
+}
+
+/// Lifetime selected by the request mapping, or unknown for implicit caching.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCachePolicy {
+    pub ttl_seconds: Option<NonZeroU64>,
+    pub refresh_on_read: bool,
+    pub lock_ttl: bool,
+}
+
+/// Cache policy of one admitted provider request, bound to its exact model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheRequest {
+    pub model: String,
+    #[serde(flatten)]
+    pub policy: PromptCachePolicy,
+}
+
+/// The one session-owned cache deadline. It is an estimate from request policy,
+/// not proof that the provider stored or will reuse a prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheDeadline {
+    pub model: String,
+    pub ttl_seconds: NonZeroU64,
+    pub expires_at: Timestamp,
+}
+
+impl PromptCacheDeadline {
+    pub fn remaining_seconds(&self, now: Timestamp) -> u64 {
+        self.expires_at
+            .as_millis()
+            .saturating_sub(now.as_millis())
+            .div_ceil(1_000)
+    }
+
+    pub(crate) fn observe(
+        previous: Option<&Self>,
+        request: &PromptCacheRequest,
+        now: Timestamp,
+    ) -> Option<Self> {
+        let ttl = request.policy.ttl_seconds?;
+        let live = previous
+            .filter(|previous| previous.model == request.model && previous.expires_at > now);
+        let ttl = if request.policy.lock_ttl {
+            live.map_or(ttl, |previous| previous.ttl_seconds)
+        } else {
+            ttl
+        };
+        if !request.policy.refresh_on_read
+            && let Some(previous) = live.filter(|previous| previous.ttl_seconds == ttl)
+        {
+            return Some(previous.clone());
+        }
+        let millis = ttl.get().checked_mul(1_000)?;
+        let expires_at = Timestamp::from_millis(now.as_millis().checked_add(millis)?);
+        Some(Self {
+            model: request.model.clone(),
+            ttl_seconds: ttl,
+            expires_at,
+        })
+    }
 }
 
 /// The latest complete context-window observation for one session.
@@ -236,10 +305,14 @@ impl<'a> UsageReportService<'a> {
         for meta in metadata {
             let mut state = SessionState::default();
             let mut entries = self.store.read(&meta.id)?;
+            let mut attribution = context_attribution::AttributionBuilder::default();
             let mut context_capacity = None;
             let mut provider_limits = None;
             while let Some(entry) = entries.next().await {
                 if let SessionEntry::Event(event) = entry? {
+                    if event.env.ts <= as_of {
+                        attribution.observe(&event, period.includes(event.env.ts, as_of));
+                    }
                     match &event.kind {
                         crate::event::domain::EventKind::ContextWindowUpdated {
                             window, ..
@@ -305,6 +378,9 @@ impl<'a> UsageReportService<'a> {
                 }),
                 _ => None,
             };
+            let prompt_cache = state
+                .prompt_cache
+                .filter(|cache| meta.model.as_deref() == Some(cache.model.as_str()));
             sessions.push(SessionUsage {
                 session: meta.id,
                 model: meta.model,
@@ -312,6 +388,8 @@ impl<'a> UsageReportService<'a> {
                 context,
                 context_capacity,
                 provider_limits,
+                prompt_cache,
+                context_attribution: attribution.finish(),
                 lines: lines.finish(),
             });
         }

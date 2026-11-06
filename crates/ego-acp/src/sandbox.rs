@@ -4,9 +4,9 @@
 //! The permission seat in [`crate::permission`] answers "may this call run".
 //! This one answers a different question that only exists after a command ran:
 //! the sandbox refused a path, and only a person can say it may be reached. A
-//! session answer lives in memory and ends with the session; an "always"
-//! answer is handed to the binary's [`SandboxGrantStore`] and read back for the
-//! next session in the same workspace.
+//! session answer is journaled by the executing turn before it is applied;
+//! same-ID resume and compaction restore that receipt. An "always" answer
+//! also reaches [`SandboxGrantStore`] for future sessions in the workspace.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -83,7 +83,7 @@ impl AcpSandboxGrants {
         };
         let title = format!(
             "The sandbox refused a command access to {path}.\nAllow it to {action} {path}? \
-             This command will run again:\n{command}",
+             No command will be retried; prior effects may already have occurred:\n{command}",
             path = grant.path
         );
         let tool_call = v1::ToolCallUpdate::new(

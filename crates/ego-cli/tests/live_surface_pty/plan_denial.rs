@@ -70,7 +70,11 @@ fn plan_denial_explains_the_stopped_turn_without_running_the_effect() {
 fn allowed_plan_read_does_not_report_a_permission_denial() {
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(tool_call("read-call", "read", r#"{"path":"AGENTS.md"}"#)),
+            Reply::Sse(tool_call(
+                "read-call",
+                "read",
+                r#"{"files":[{"path":"AGENTS.md"}]}"#,
+            )),
             Reply::Sse(text("PLAN-READ-ANSWER")),
         ],
         ..Plan::default()

@@ -529,7 +529,7 @@ impl<'de> Deserialize<'de> for HookCatalogueEvidence {
     }
 }
 
-/// The twenty-one stable lifecycle points owned by the harness.
+/// The twenty-two stable lifecycle points owned by the harness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum HookLifecycle {
     SessionStart,
@@ -548,6 +548,7 @@ pub enum HookLifecycle {
     SubagentStop,
     Stop,
     StopFailure,
+    Interrupt,
     PreCompact,
     PostCompact,
     Elicitation,
@@ -574,6 +575,7 @@ impl HookLifecycle {
             Self::SubagentStop => "SubagentStop",
             Self::Stop => "Stop",
             Self::StopFailure => "StopFailure",
+            Self::Interrupt => "Interrupt",
             Self::PreCompact => "PreCompact",
             Self::PostCompact => "PostCompact",
             Self::Elicitation => "Elicitation",
@@ -600,6 +602,7 @@ impl HookLifecycle {
             "SubagentStop" => Some(Self::SubagentStop),
             "Stop" => Some(Self::Stop),
             "StopFailure" => Some(Self::StopFailure),
+            "Interrupt" => Some(Self::Interrupt),
             "PreCompact" => Some(Self::PreCompact),
             "PostCompact" => Some(Self::PostCompact),
             "Elicitation" => Some(Self::Elicitation),
@@ -630,6 +633,7 @@ impl HookLifecycle {
             | Self::PostModelSwitch
             | Self::SubagentStart
             | Self::StopFailure
+            | Self::Interrupt
             | Self::PostCompact
             | Self::SessionEnd => HookPhase::Observer,
         }

@@ -22,9 +22,9 @@ const options = parseArgs(process.argv.slice(2));
 const PORT = Number(options.port ?? 7788);
 const DEFAULT_BIN = options.bin ?? path.join(REPO, 'target', 'debug', 'ego');
 const DEFAULT_WORKSPACE =
-  options.workspace ?? path.join(os.homedir(), 'Gits', '.tmp', 'acp-ui-workspace');
+  options.workspace ?? path.join(os.tmpdir(), 'ego-acp-ui-workspace');
 /** The agent's `$EGO_HOME`: a user config layer that is not the real one. */
-const EGO_HOME = options.egoHome ?? path.join(os.homedir(), 'Gits', '.tmp', 'acp-ui-home');
+const EGO_HOME = options.egoHome ?? path.join(os.tmpdir(), 'ego-acp-ui-home');
 
 /** The live agent, or null when nothing is running. */
 let agent = null;

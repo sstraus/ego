@@ -72,7 +72,10 @@ pub trait Approver: fmt::Debug + Send + Sync {
 /// the whole classifier before any permit can be minted.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PermissionDecision {
+    /// Approve this exact action for reuse within the live session.
     Allow,
+    /// Approve only the displayed invocation.
+    AllowOnce,
     Deny,
     /// A refusal that carries the human's words. Unlike [`Self::Deny`], which
     /// ends the run, the call is answered with the instruction and the model

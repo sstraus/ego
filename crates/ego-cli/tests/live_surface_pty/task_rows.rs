@@ -7,7 +7,7 @@ fn child_tool_calls_share_one_task_header_and_keep_output_width() {
     let stub = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call("task1", "task", &serde_json::json!({"name": label, "prompt": "Read calc.py then print three progress lines"}).to_string())),
-            Reply::Sse(tool_call("read1", "read", r#"{"path":"calc.py"}"#)),
+            Reply::Sse(tool_call("read1", "read", r#"{"files":[{"path":"calc.py"}]}"#)),
             Reply::Sse(tool_call("exec1", "exec", r#"{"argv":["printf","TASK-WRE-one\nTASK-WRE-two\nTASK-WRE-three\n"]}"#)),
             Reply::Sse(text("child final")),
             Reply::Sse(text("TASK-WRE-DONE")),
@@ -92,7 +92,11 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
                 "task",
                 r#"{"name":"Inspect ledger","prompt":"Read ledger.txt then respond"}"#,
             )),
-            Reply::Sse(tool_call("read643", "read", r#"{"path":"ledger.txt"}"#)),
+            Reply::Sse(tool_call(
+                "read643",
+                "read",
+                r#"{"files":[{"path":"ledger.txt"}]}"#,
+            )),
             reply,
             Reply::Sse(text("PARENT-EXT-DONE")),
         ],
@@ -112,7 +116,7 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
         ]);
     ego.file("AGENTS.md", "# child activity fixture\n");
     ego.file("ledger.txt", "usage ledger\n");
-    // Native evidence uses a copied binary, never an mbx target while it builds.
+    // Native evidence uses a copied binary, never a shared build target while it builds.
     let program = std::env::var_os("EGO_TASK_BINDING_BIN");
     let command = program.as_ref().map_or_else(
         || ego.pty_command(),
@@ -181,8 +185,19 @@ fn running_child_activity_is_cyan_and_retires_without_corrupting_the_composer() 
     );
     assert!(rows[index - 1].contains("Working"), "{visible}");
     assert_eq!(rows[index + 1].trim(), ">");
+    // `contents().lines()` joins soft-wrapped rows. Locate the physical row
+    // independently before reading its colour cell.
+    let physical_row = screen
+        .screen()
+        .rows(0, screen.screen().size().1)
+        .position(|row| row.contains('○'))
+        .expect("child activity row");
     assert_eq!(
-        screen.screen().cell(index as u16, 0).unwrap().fgcolor(),
+        screen
+            .screen()
+            .cell(physical_row as u16, 0)
+            .unwrap()
+            .fgcolor(),
         vt100::Color::Rgb(0, 255, 255)
     );
     screen.process(&settled[live.len()..]);
@@ -216,7 +231,11 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
         prompt_completions: vec![(
             "BACKGROUND-FSR".into(),
             vec![
-                Reply::Sse(tool_call("read644", "read", r#"{"path":"ledger.txt"}"#)),
+                Reply::Sse(tool_call(
+                    "read644",
+                    "read",
+                    r#"{"files":[{"path":"ledger.txt"}]}"#,
+                )),
                 reply,
             ],
         )],
@@ -271,6 +290,24 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
         if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(100)) {
             output.extend(bytes);
         }
+    }
+    // Idle replaces Working with the status row via an indicator-only paint,
+    // not necessarily a full composer redraw. Inspect the complete screen
+    // after each cursor-restoring paint following the answer.
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    loop {
+        let rows = screen_rows(&output, 24, 100);
+        let complete = output.ends_with(b"\x1b[?25h");
+        if complete
+            && rows.iter().any(|row| row.contains("qwen3 · off · yolo"))
+            && !rows.iter().any(|row| row.contains("Working"))
+            && rows.iter().any(|row| row.trim() == ">")
+        {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let chunk = reader.recv_timeout(remaining).expect("idle status paint");
+        output.extend(chunk);
     }
     // Child progress is deliberately not parent transcript. Probe with editing input
     // to obtain the latest owner-painted frame without depending on provider order.
@@ -330,8 +367,19 @@ fn durable_child_activity_survives_parent_idle_and_retires_in_the_real_pty() {
         !visible.contains("Working"),
         "parent must be idle: {visible}"
     );
+    // `contents().lines()` joins soft-wrapped rows. Locate the physical row
+    // independently before reading its colour cell.
+    let physical_row = screen
+        .screen()
+        .rows(0, screen.screen().size().1)
+        .position(|row| row.contains('○'))
+        .expect("child activity row");
     assert_eq!(
-        screen.screen().cell(index as u16, 0).unwrap().fgcolor(),
+        screen
+            .screen()
+            .cell(physical_row as u16, 0)
+            .unwrap()
+            .fgcolor(),
         vt100::Color::Rgb(0, 255, 255)
     );
     screen.process(&settled[live.len()..]);

@@ -249,7 +249,12 @@ fn pnpm_11_live_dead_selector_lock_matches_unsandboxed_behavior() {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
     let output = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", NAME, "--ignored", "--nocapture"])
+        .args([
+            "--exact",
+            &format!("adaptive_admission::{NAME}"),
+            "--ignored",
+            "--nocapture",
+        ])
         .env("EGO_PNPM_STALE_ROOT", root.path())
         .env("PNPM_HOME", &pnpm)
         .output()

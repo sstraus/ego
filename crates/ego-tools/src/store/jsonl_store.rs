@@ -708,6 +708,10 @@ impl JsonlStore {
         super::HistoryIndex::new(self.root.join("history.sqlite"), Arc::clone(self))
     }
 
+    pub(super) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
     pub(super) fn session_dir(&self, id: &SessionId) -> PathBuf {
         self.root.join(session_dir_name(id))
     }
@@ -1141,6 +1145,17 @@ impl JsonlStore {
             _ => false,
         };
         let trailing = events.get(1..).unwrap_or_default();
+        // Only compaction continues explicit owner sandbox authority. Forks
+        // cannot publish these receipts through their metadata suffix.
+        let owner_count = if matches!(event.kind, EventKind::CompactionSeeded { .. }) {
+            trailing
+                .iter()
+                .take_while(|event| matches!(event.kind, EventKind::SandboxOwnerGranted { .. }))
+                .count()
+        } else {
+            0
+        };
+        let metadata_trailing = &trailing[owner_count..];
         let is_title = |event: &&DomainEvent| {
             matches!(
                 &event.kind,
@@ -1158,14 +1173,14 @@ impl JsonlStore {
         };
         // Context metadata is an ordered suffix of the same atomic seed,
         // never an arbitrary additional conversation record.
-        let (metadata, context) = match trailing.iter().position(|event| {
+        let (metadata, context) = match metadata_trailing.iter().position(|event| {
             matches!(
                 event.kind,
                 EventKind::ContextRequested { .. } | EventKind::ContextCooldown { .. }
             )
         }) {
-            Some(index) => trailing.split_at(index),
-            None => (trailing, &[][..]),
+            Some(index) => metadata_trailing.split_at(index),
+            None => (metadata_trailing, &[][..]),
         };
         let valid_context = match context {
             [] => true,
@@ -2124,7 +2139,8 @@ impl JsonlStore {
         let record_line = encode_record(position, &SessionEntry::Event(ev.clone()))?;
         let is_root_authority = matches!(
             ev.kind,
-            EventKind::SessionRootGranted { .. }
+            EventKind::SandboxOwnerGranted { .. }
+                | EventKind::SessionRootGranted { .. }
                 | EventKind::PermanentRootGrantPending { .. }
                 | EventKind::PermanentRootGranted { .. }
                 | EventKind::RootRevoked { .. }

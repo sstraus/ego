@@ -38,7 +38,7 @@ pub trait Diagnostics: Send + Sync {
     /// diagnostic and the detail is dropped; a terminal surface commits the
     /// rows to the transcript and keeps the detail.
     fn tool_row(&self, rows: &str, _detail: String) {
-        self.note(rows);
+        self.notice_block(rows);
     }
 
     /// A replaceable successful shell row; append-only adapters keep the row.
@@ -75,6 +75,11 @@ pub trait TextOutput: Diagnostics {
     fn finish_plan(&self, _caps: Capabilities) {}
     fn begin_block(&self) {}
     fn settle_shell(&self) {}
+    fn start_tool(&self, _item: ItemId, line: crate::render::Line) {
+        self.note(&line.text());
+    }
+    fn finish_tool(&self, _item: ItemId) {}
+    fn clear_tools(&self) {}
     fn finish(&self) {}
 }
 
@@ -125,6 +130,7 @@ pub struct Stdout {
     /// The first write that failed, kept so the run can report *why* it
     /// stopped rather than merely that it did.
     broken: Mutex<Option<String>>,
+    last_diagnostic: Mutex<Option<String>>,
     cancel: CancelToken,
 }
 
@@ -133,6 +139,7 @@ impl Stdout {
         Stdout {
             inner: Mutex::new(Some(std::io::stdout())),
             broken: Mutex::new(None),
+            last_diagnostic: Mutex::new(None),
             cancel,
         }
     }
@@ -179,6 +186,19 @@ impl Stdout {
         self.cancel.cancel(CancelCause::Host);
     }
 
+    /// Report termination unless the event stream just printed the same cause.
+    pub fn final_note(&self, message: &str) {
+        if self
+            .last_diagnostic
+            .lock()
+            .expect("diagnostic lock")
+            .as_deref()
+            != Some(message)
+        {
+            self.note(message);
+        }
+    }
+
     /// Why stdout stopped accepting writes, if it did.
     pub fn broken(&self) -> Option<String> {
         self.broken
@@ -191,6 +211,7 @@ impl Stdout {
 impl Diagnostics for Stdout {
     fn note(&self, message: &str) {
         note(message);
+        *self.last_diagnostic.lock().expect("diagnostic lock") = Some(message.to_owned());
     }
 
     fn notice_block(&self, message: &str) {
@@ -357,6 +378,27 @@ impl TextOutput for InteractiveOutput {
             .lock()
             .expect("surface output lock")
             .settle_shell();
+    }
+
+    fn start_tool(&self, item: ItemId, line: crate::render::Line) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .start_tool(item, line);
+    }
+
+    fn finish_tool(&self, item: ItemId) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .finish_tool(item);
+    }
+
+    fn clear_tools(&self) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .clear_tools();
     }
 
     fn finish(&self) {
@@ -889,10 +931,15 @@ impl EventSink for TextSink<'_> {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         let provider_notice = self.provider_notices.observe(event);
+        if matches!(event, PublicEvent::TurnCompleted { .. }) {
+            self.out.clear_tools();
+        }
         self.goal_receipts(event, state);
-        if matches!(event, PublicEvent::TurnCompleted { .. }) && !self.quiet {
+        if matches!(event, PublicEvent::TurnCompleted { .. }) {
             self.finish();
-            self.out.finish_plan(self.capabilities.with_current_width());
+            if !self.quiet {
+                self.out.finish_plan(self.capabilities.with_current_width());
+            }
         }
         // Only adjacent completed top-level exec calls share the live row.
         // Prose settles through write_answer/begin_block when it becomes visible;
@@ -938,6 +985,16 @@ impl EventSink for TextSink<'_> {
                 .join("\n");
                 self.out.line(&receipt);
             }
+        }
+        if matches!(
+            event,
+            PublicEvent::TurnStarted { .. }
+                | PublicEvent::ItemCompleted {
+                    kind: ItemKind::AgentMessage,
+                    ..
+                }
+        ) {
+            self.finish();
         }
         match event {
             PublicEvent::TurnStarted { turn } if self.capabilities.on_screen() => {
@@ -1035,8 +1092,16 @@ impl EventSink for TextSink<'_> {
                 text,
                 ..
             } => self.stream(text),
-            // One row per call, drawn when the call finishes: a row needs the
-            // outcome and the duration, and the start event has neither.
+            PublicEvent::ItemStarted {
+                kind: ItemKind::Tool,
+                name,
+                ..
+            } if self.quiet || name.as_deref() == Some(ego_core::question::ASK_QUESTION_TOOL) => {
+                let mut streaming = self.text.lock().expect("streaming output lock");
+                self.finish_text(&mut streaming);
+            }
+            // Show the unresolved request without inventing an outcome; completion
+            // replaces it with the existing compact receipt.
             // `ask_question` gets none: the selector already shows the
             // question as prompt and options, and a row would repeat the call's
             // JSON after the answer.
@@ -1047,6 +1112,22 @@ impl EventSink for TextSink<'_> {
                 text,
                 ..
             } if !self.quiet && name != ego_core::question::ASK_QUESTION_TOOL => {
+                {
+                    let mut streaming = self.text.lock().expect("streaming output lock");
+                    self.finish_text(&mut streaming);
+                }
+                if (self.capabilities.on_screen() || name == "exec")
+                    && tool_row::can_show_request(name, text.as_deref().unwrap_or(""))
+                {
+                    self.out.start_tool(
+                        *item,
+                        tool_row::running(
+                            name,
+                            text.as_deref().unwrap_or(""),
+                            self.capabilities.with_current_width(),
+                        ),
+                    );
+                }
                 self.calls
                     .lock()
                     .expect("a poisoned lock means a writer panicked mid-line")
@@ -1087,29 +1168,62 @@ impl EventSink for TextSink<'_> {
                     .expect("a poisoned lock means a writer panicked mid-line")
                     .remove(item);
                 if let Some(started) = started {
+                    self.out.finish_tool(*item);
                     let mut streaming = self.text.lock().expect("streaming output lock");
                     self.finish_text(&mut streaming);
-                    let record = streaming.tools.record(
-                        &Finished {
+                    let write_result = state
+                        .items
+                        .get(item)
+                        .and_then(|item| item.tool_result.as_ref())
+                        .filter(|_| {
+                            matches!(started.name.rsplit(" › ").next(), Some("write" | "edit"))
+                        });
+                    if let Some(result) = write_result {
+                        let result_text = result.model_text();
+                        let call = Finished {
                             name: &started.name,
                             args: &started.args,
                             ok: *ok,
-                            result: text.as_deref().unwrap_or(""),
-                            result_blocks: state
-                                .items
-                                .get(item)
-                                .and_then(|item| item.tool_result.as_ref())
-                                .map(|result| result.content.as_slice()),
+                            result: &result_text,
+                            result_blocks: Some(&result.content),
                             timing: state.items.get(item).and_then(|item| item.tool_timing),
-                        },
-                        self.capabilities.with_current_width(),
-                    );
-                    if self.capabilities.on_screen()
-                        && let Some(live) = record.shell_progress
-                    {
-                        self.out.shell_row(&record.rows, record.detail, live);
+                            before_image: None,
+                        };
+                        for record in streaming.tools.record_writes(
+                            &call,
+                            result.file_writes(),
+                            self.capabilities.with_current_width(),
+                        ) {
+                            self.out.tool_row(&record.rows, record.detail);
+                        }
                     } else {
-                        self.out.tool_row(&record.rows, record.detail);
+                        let record = streaming.tools.record(
+                            &Finished {
+                                name: &started.name,
+                                args: &started.args,
+                                ok: *ok,
+                                result: text.as_deref().unwrap_or(""),
+                                result_blocks: state
+                                    .items
+                                    .get(item)
+                                    .and_then(|item| item.tool_result.as_ref())
+                                    .map(|result| result.content.as_slice()),
+                                timing: state.items.get(item).and_then(|item| item.tool_timing),
+                                before_image: state
+                                    .items
+                                    .get(item)
+                                    .and_then(|item| item.tool_result.as_ref())
+                                    .and_then(|result| result.before_image()),
+                            },
+                            self.capabilities.with_current_width(),
+                        );
+                        if self.capabilities.on_screen()
+                            && let Some(live) = record.shell_progress
+                        {
+                            self.out.shell_row(&record.rows, record.detail, live);
+                        } else {
+                            self.out.tool_row(&record.rows, record.detail);
+                        }
                     }
                 }
             }
@@ -1154,6 +1268,7 @@ impl EventSink for TextSink<'_> {
                 attempt,
                 limit,
                 delay_ms,
+                capacity,
                 cause,
                 recovery_remaining_ms,
                 ..
@@ -1167,8 +1282,20 @@ impl EventSink for TextSink<'_> {
                 } else {
                     format!("attempt {attempt}/{limit}")
                 };
+                let (problem, at) = if *capacity {
+                    let next = chrono::Local::now()
+                        + chrono::TimeDelta::milliseconds(
+                            i64::try_from(*delay_ms).unwrap_or(i64::MAX / 1_000_000),
+                        );
+                    (
+                        "provider at capacity",
+                        format!(" at {}", next.format("%-I:%M:%S %p")),
+                    )
+                } else {
+                    ("connection problem", String::new())
+                };
                 let message = format!(
-                    "{cause} — connection problem, retrying in {:.1}s ({counter})",
+                    "{cause} — {problem}, retrying in {:.1}s{at} ({counter})",
                     *delay_ms as f64 / 1_000.0
                 );
                 if self.capabilities.on_screen() && self.out.live_retry() {
@@ -1396,6 +1523,61 @@ mod tests {
             text.contains("εgo: raw-one\r\nraw-two\r\n")
                 && text.contains("εgo: raw-block-one\r\nraw-block-two\r\n"),
             "raw diagnostics must use CRLF for every row: {text:?}"
+        );
+    }
+
+    // Catches: ANSI styling bytes make already-laid-out headless tool rows wrap early.
+    #[test]
+    fn headless_tool_rows_keep_painted_line_boundaries() {
+        const CHILD: &str = "EGO_TEST_PAINTED_TOOL_ROWS_CHILD";
+        const ROW: &str = "\x1b[38;2;123;123;123m1234567890\x1b[0m\x1b[38;2;123;123;123m1234567890\x1b[0m\x1b[38;2;123;123;123m1234567890\x1b[0m";
+        if std::env::var_os(CHILD).is_some() {
+            Stderr.tool_row(ROW, String::new());
+            Stdout::new(CancelToken::new()).tool_row(ROW, String::new());
+            return;
+        }
+
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Read;
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("PTY");
+        let mut command = CommandBuilder::new(std::env::current_exe().expect("test executable"));
+        command.args([
+            "--exact",
+            "output::tests::headless_tool_rows_keep_painted_line_boundaries",
+            "--nocapture",
+        ]);
+        command.env(CHILD, "1");
+        let mut child = pair.slave.spawn_command(command).expect("child");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = reader.read_to_end(&mut bytes);
+            let _ = sender.send(bytes);
+        });
+        let bytes = match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("painted tool row child did not finish: {error}");
+            }
+        };
+        assert!(child.wait().expect("child status").success());
+        reading.join().expect("reader thread");
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(
+            text.matches(&format!("εgo: {ROW}\r\n")).count(),
+            2,
+            "painted rows must remain intact: {text:?}"
         );
     }
 
@@ -1681,6 +1863,7 @@ mod tests {
                     limit: 3,
                     delay_ms: 100,
                     kind: ego_core::generator::types::ErrorKind::Transient,
+                    capacity: false,
                     cause: cause.into(),
                     recovery_remaining_ms: None,
                 },
@@ -2286,6 +2469,135 @@ mod tests {
         assert!(quiet_out.notes.lock().unwrap().is_empty());
     }
 
+    #[derive(Default)]
+    struct Visible(Mutex<String>);
+
+    impl Diagnostics for Visible {
+        fn note(&self, text: &str) {
+            self.line(text);
+        }
+    }
+
+    impl TextOutput for Visible {
+        fn write(&self, text: &str) {
+            self.0.lock().unwrap().push_str(text);
+        }
+        fn line(&self, text: &str) {
+            self.write(&format!("{text}\n"));
+        }
+    }
+
+    // Catches: buffered prose and the command appear only after a slow tool finishes.
+    #[test]
+    fn running_tool_snapshot_contains_preceding_prose_and_active_command() {
+        let out = Visible::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+        let state = SessionState::default();
+        sink.stream("Starting the resume now.");
+        let item = ItemId::new();
+        sink.publish(
+            &started(item, "exec", r#"{"argv":["coord-resume.sh"]}"#),
+            &state,
+        );
+        let snapshot = out.0.lock().unwrap().clone();
+        assert!(
+            snapshot.starts_with("Starting the resume now.\n"),
+            "{snapshot:?}"
+        );
+        assert!(snapshot.contains("$ coord-resume.sh"), "{snapshot:?}");
+        assert!(
+            !snapshot.contains("exit 0"),
+            "unfinished command cannot claim success"
+        );
+        sink.publish(&completed(item, true, ""), &state);
+        assert!(out.0.lock().unwrap().contains("exit 0"));
+    }
+
+    // Catches: incomplete or malformed exec arguments invent a command or lose its eventual receipt.
+    #[test]
+    fn unrenderable_exec_request_keeps_completion_without_inventing_command() {
+        for args in [
+            r#"{"argv":["python3","/Users/st"#,
+            r#"{"argv":[]}"#,
+            r#"{"argv":["echo",42]}"#,
+        ] {
+            for quiet in [false, true] {
+                let out = Visible::default();
+                let sink = TextSink::new(&out, quiet, Capabilities::plain(), None);
+                let state = SessionState::default();
+                let item = ItemId::new();
+                sink.publish(&started(item, "exec", args), &state);
+                assert!(out.0.lock().unwrap().is_empty(), "{args}");
+                sink.publish(&completed(item, false, "interrupted: not run"), &state);
+                let snapshot = out.0.lock().unwrap().clone();
+                if quiet {
+                    assert!(snapshot.is_empty(), "{args}: {snapshot:?}");
+                } else {
+                    assert!(
+                        snapshot.contains("interrupted: not run"),
+                        "{args}: {snapshot:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Catches: consecutive assistant messages join when neither supplies a newline,
+    // including results arriving after queued input, failed tools or cancellation.
+    #[test]
+    fn answer_boundaries_close_without_relying_on_the_next_tool_result() {
+        for quiet in [false, true] {
+            for boundary in ["message", "turn", "cancel", "failure", "tool"] {
+                let out = Visible::default();
+                let sink = TextSink::new(&out, quiet, Capabilities::plain(), None);
+                let state = SessionState::default();
+                let turn = TurnId::new();
+                let item = ItemId::new();
+                sink.stream("Previous answer.");
+                let event = match boundary {
+                    "message" => PublicEvent::ItemCompleted {
+                        turn,
+                        item,
+                        kind: ItemKind::AgentMessage,
+                        ok: true,
+                        text: None,
+                    },
+                    "turn" => PublicEvent::TurnStarted { turn },
+                    "cancel" => PublicEvent::TurnCompleted {
+                        turn,
+                        ok: false,
+                        exit_reason: ego_core::event::domain::ExitReason::Cancelled(
+                            CancelCause::User,
+                        ),
+                    },
+                    "failure" => PublicEvent::Error {
+                        turn,
+                        item: None,
+                        message: "tool failed".into(),
+                        kind: ego_core::generator::types::ErrorKind::Invalid,
+                    },
+                    _ => started(item, "read", r#"{"path":"a.rs"}"#),
+                };
+                sink.publish(&event, &state);
+                sink.stream("intent: Next answer.");
+                sink.finish();
+                let snapshot = out.0.lock().unwrap().clone();
+                assert!(
+                    snapshot.starts_with("Previous answer.\n"),
+                    "{boundary}: {snapshot:?}"
+                );
+                assert!(
+                    !snapshot.contains("Previous answer.intent:"),
+                    "{boundary}: {snapshot:?}"
+                );
+                assert!(
+                    snapshot.ends_with("intent: Next answer.\n"),
+                    "{boundary}: {snapshot:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_tool_call_is_drawn_once_when_it_finishes_and_never_as_raw_json() {
         let out = Recorded::default();
@@ -2293,7 +2605,10 @@ mod tests {
         let state = SessionState::default();
         let item = ItemId::new();
 
-        sink.publish(&started(item, "read", r#"{"path":"a.rs"}"#), &state);
+        sink.publish(
+            &started(item, "read", r#"{"files":[{"path":"a.rs"}]}"#),
+            &state,
+        );
         assert!(
             out.rows.lock().unwrap().is_empty(),
             "a row needs an outcome"
@@ -2320,8 +2635,14 @@ mod tests {
         let state = SessionState::default();
         let (first, second) = (ItemId::new(), ItemId::new());
 
-        sink.publish(&started(first, "read", r#"{"path":"first.rs"}"#), &state);
-        sink.publish(&started(second, "read", r#"{"path":"second.rs"}"#), &state);
+        sink.publish(
+            &started(first, "read", r#"{"files":[{"path":"first.rs"}]}"#),
+            &state,
+        );
+        sink.publish(
+            &started(second, "read", r#"{"files":[{"path":"second.rs"}]}"#),
+            &state,
+        );
         sink.publish(&completed(second, true, "x"), &state);
         sink.publish(&completed(first, false, "denied"), &state);
 
@@ -2347,14 +2668,21 @@ mod tests {
         ] {
             let item = ItemId::new();
             sink.publish(
-                &started(item, name, r#"{"path":"a.rs","argv":["printf","one"]}"#),
+                &started(
+                    item,
+                    name,
+                    r#"{"files":[{"path":"a.rs"}],"argv":["printf","one"]}"#,
+                ),
                 &state,
             );
             sink.publish(&completed(item, true, "one\ntwo\nthree"), &state);
         }
         sink.stream("parent prose\n\n");
         let item = ItemId::new();
-        sink.publish(&started(item, "alpha › read", r#"{"path":"b.rs"}"#), &state);
+        sink.publish(
+            &started(item, "alpha › read", r#"{"files":[{"path":"b.rs"}]}"#),
+            &state,
+        );
         sink.publish(&completed(item, true, "hello"), &state);
         let rows = out.rows.lock().unwrap();
         let shown = rows
@@ -2391,7 +2719,10 @@ mod tests {
         let quiet = TextSink::new(&out, true, Capabilities::plain(), None);
         let state = SessionState::default();
         let item = ItemId::new();
-        quiet.publish(&started(item, "read", r#"{"path":"a.rs"}"#), &state);
+        quiet.publish(
+            &started(item, "read", r#"{"files":[{"path":"a.rs"}]}"#),
+            &state,
+        );
         quiet.publish(&completed(item, true, "x"), &state);
 
         let loud = TextSink::new(&out, false, Capabilities::plain(), None);

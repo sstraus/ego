@@ -106,6 +106,7 @@ impl JudgeGeneration<'_, '_, '_> {
             EventKind::GenerationStarted {
                 attempt: reference,
                 role: GenerationRole::Judge,
+                cache: Some(profile.prompt_cache_request(&request)),
                 snapshot: None,
             },
         )?;

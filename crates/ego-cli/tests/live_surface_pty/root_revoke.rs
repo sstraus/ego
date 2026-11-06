@@ -1,6 +1,7 @@
 use super::*;
 
 // Catches: revoke leaves an existing child or a future spawn holding a session root.
+// Catches: treating a TERM trap's completion as required after forced termination.
 #[test]
 fn root_revoke_stops_the_running_child_and_denies_live_and_resumed_exec() {
     let (_outside, target, places) = external_write_grant("revoked.txt", b"2\r");
@@ -19,9 +20,9 @@ fn root_revoke_stops_the_running_child_and_denies_live_and_resumed_exec() {
     let stub = Stub::start(Plan {
         completions: vec![Reply::Sse(tool_call("held-child", "exec", &serde_json::json!({
             "argv": ["/bin/sh", "-c", format!(
-                "trap 'printf STOPPED > stopped; exit 0' TERM; printf CHILD-ACTIVE > '{}'; printf READY > ready; while :; do sleep 0.05; done", target.display())],
+                "trap 'sleep 2; exit 0' TERM; printf CHILD-ACTIVE > '{}'; printf READY > ready; while :; do sleep 0.05; done", target.display())],
             "timeout_ms": 120000
-        }).to_string())), probe("denied-live-exec"), Reply::Sse(text("PROBE-DONE-758"))],
+        }).to_string())), probe("denied-live-exec"), Reply::Sse(text("PROBE-DONE-MARK"))],
         ..Plan::default()
     });
     let ego = places.ego(&stub).subcommand("resume").args([
@@ -47,6 +48,34 @@ fn root_revoke_stops_the_running_child_and_denies_live_and_resumed_exec() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "CHILD-ACTIVE");
+    #[cfg(unix)]
+    let child_pids = {
+        // Observe the host PID: Linux confinement gives the shell its own PID namespace.
+        let processes = std::process::Command::new("ps")
+            .args(["-axo", "pid=,args="])
+            .output()
+            .unwrap();
+        assert!(processes.status.success());
+        String::from_utf8(processes.stdout)
+            .unwrap()
+            .lines()
+            .filter(|line| {
+                line.contains("trap 'sleep 2;") && line.contains(target.to_str().unwrap())
+            })
+            .map(|line| {
+                line.split_whitespace()
+                    .next()
+                    .unwrap()
+                    .parse::<i32>()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    #[cfg(unix)]
+    assert!(
+        !child_pids.is_empty(),
+        "the ready shell must have a host PID"
+    );
     let start = output.len();
     input
         .write_all(format!("/config roots revoke {}\r", target.display()).as_bytes())
@@ -54,10 +83,14 @@ fn root_revoke_stops_the_running_child_and_denies_live_and_resumed_exec() {
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "Root revoked");
     until_prompt_from(&reader, &mut output, start);
-    assert_eq!(
-        std::fs::read_to_string(places.workspace_path().join("stopped")).unwrap(),
-        "STOPPED"
-    );
+    #[cfg(unix)]
+    for child_pid in child_pids {
+        assert_eq!(
+            nix::sys::signal::kill(nix::unistd::Pid::from_raw(child_pid), None),
+            Err(nix::errno::Errno::ESRCH),
+            "revoke receipt must follow child termination: PID {child_pid}"
+        );
+    }
     let start = output.len();
     input.write_all(b"probe after revoke\r").unwrap();
     input.flush().unwrap();
@@ -70,7 +103,7 @@ fn root_revoke_stops_the_running_child_and_denies_live_and_resumed_exec() {
         input.write_all(b"\r").unwrap();
         input.flush().unwrap();
     }
-    until_normalized(&reader, &mut output, start, "PROBE-DONE-758");
+    until_normalized(&reader, &mut output, start, "PROBE-DONE-MARK");
     until_prompt_from(&reader, &mut output, start);
     assert_eq!(std::fs::read_to_string(&target).unwrap(), "CHILD-ACTIVE");
     input.write_all(b"/quit\r").unwrap();
@@ -79,7 +112,7 @@ fn root_revoke_stops_the_running_child_and_denies_live_and_resumed_exec() {
     let resumed = Stub::start(Plan {
         completions: vec![
             probe("denied-resumed-exec"),
-            Reply::Sse(text("RESUME-DENIED-758")),
+            Reply::Sse(text("RESUME-DENIED-MARK")),
         ],
         ..Plan::default()
     });
@@ -125,26 +158,49 @@ fn stale_permanent_receipt_does_not_approve_a_removed_and_readded_root() {
     let (_outside, target, places) = external_write_grant("stale-permanent.txt", b"3\r");
 
     let empty = Stub::start(Plan::default());
-    for operation in ["rm", "add"] {
-        let command = places.ego(&empty).subcommand("roots");
-        let result = if operation == "add" {
-            command
-                .args([operation, "--access", "read-write"])
-                .arg(target.to_str().unwrap())
-                .run()
-        } else {
-            command.arg(operation).arg(target.to_str().unwrap()).run()
-        };
-        assert_eq!(result.code, Some(0), "{}", result.stderr);
-    }
+    let removed = places
+        .ego(&empty)
+        .subcommand("roots")
+        .arg("rm")
+        .arg(target.to_str().unwrap())
+        .run();
+    assert_eq!(removed.code, Some(0), "{}", removed.stderr);
+    // The grant was re-admitted in process, so the session observation holds
+    // the root. A narrower resume records the removal before the re-add.
+    let narrowed = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("NARROWED-MARK"))],
+        ..Plan::default()
+    });
+    let result = places
+        .ego(&narrowed)
+        .subcommand("resume")
+        .args([
+            support::FIXTURE_SESSION_ID,
+            "--model",
+            "ollama/qwen3",
+            "--sandbox",
+            "workspace",
+            "--mode",
+            "yolo",
+        ])
+        .arg("record the narrower perimeter")
+        .run();
+    assert_eq!(result.code, Some(0), "{}", result.stderr);
+    let added = places
+        .ego(&empty)
+        .subcommand("roots")
+        .args(["add", "--access", "read-write"])
+        .arg(target.to_str().unwrap())
+        .run();
+    assert_eq!(added.code, Some(0), "{}", added.stderr);
     let resumed = Stub::start(Plan {
         completions: vec![
             Reply::Sse(tool_call(
                 "stale-write",
                 "write",
-                &serde_json::json!({
+                &serde_json::json!({"files": [{
                     "path": target, "contents": "STALE-CONSENT-USED"
-                })
+                }]})
                 .to_string(),
             )),
             Reply::Sse(text("STALE-PROBE-DONE")),
@@ -194,12 +250,12 @@ fn external_write_grant(
             Reply::Sse(tool_call(
                 "ask-write",
                 "write",
-                &serde_json::json!({
+                &serde_json::json!({"files": [{
                     "path": target, "contents": "UNEXPECTED"
-                })
+                }]})
                 .to_string(),
             )),
-            Reply::Sse(text("GRANT-SAVED-758")),
+            Reply::Sse(text("GRANT-SAVED-MARK")),
         ],
         ..Plan::default()
     });
@@ -225,8 +281,8 @@ fn external_write_grant(
     until_normalized(&reader, &mut output, start, "Permanent");
     input.write_all(choice).unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "GRANT-SAVED-758");
-    until_prompt_from(&reader, &mut output, start);
+    until_normalized(&reader, &mut output, start, "GRANT-SAVED-MARK");
+    super::root_grants::readmit_after_root_grant(&reader, &mut output, &mut input, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
@@ -285,9 +341,9 @@ fn permanent_grant_crash_cut(before_config: bool) {
                 Reply::Sse(tool_call(
                     "crash-write",
                     "write",
-                    &serde_json::json!({
+                    &serde_json::json!({"files": [{
                         "path": target, "contents": "HALF-GRANT-ACTIVATED"
-                    })
+                    }]})
                     .to_string(),
                 )),
                 Reply::Sse(text("CRASH-PROBE-DONE")),

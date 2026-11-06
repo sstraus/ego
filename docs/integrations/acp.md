@@ -125,7 +125,7 @@ still have returned `end_turn`. For a cancelled run, agent → host:
   `audio/wav` with valid base64 WAV bytes, at most four clips and 10 MiB total.
   Mixed audio/image prompts are refused; the selected model must support audio.
   Existing attachment fixtures are in
-  [prompt tests](../../crates/ego-acp/tests/prompt.rs).
+  [prompt tests](../../crates/ego-acp/tests/it/prompt.rs).
 - Keep one prompt in flight per session. Wait for its response before the next
   ordinary prompt; do not treat write completion as turn completion. Dispatch
   cancellation and permission responses independently while a prompt runs.
@@ -149,10 +149,10 @@ still have returned `end_turn`. For a cancelled run, agent → host:
   requests, drain the prompt settlement, then close stdin and reap the process.
   Do not use EOF as a substitute for a correlated cancellation response.
 
-The offline [headless stdio tests](../../crates/ego-cli/tests/acp_headless_stream.rs)
+The offline [headless stdio tests](../../crates/ego-cli/tests/it/acp_headless_stream.rs)
 launch the real `ego acp` process against the existing local provider fixture:
 multiple turns, embedded text, malformed parameters, and EOF. The existing
-[settlement tests](../../crates/ego-cli/tests/acp_settlement.rs) cover permission
+[settlement tests](../../crates/ego-cli/tests/it/acp_settlement.rs) cover permission
 answers, cancellation, and another prompt after a cancelled streaming turn.
 These fixtures use no paid calls and do not prove live host compatibility.
 The CLI's stdio composition uses the SDK `Stdio` transport in
@@ -190,7 +190,7 @@ advertised `_ego/resume` control. Context overflow reports an error with
 Source owners: [prompt dispatch](../../crates/ego-acp/src/prompt_turn.rs),
 [durable settlement mapping](../../crates/ego-acp/src/serve.rs), and
 [ACP stop-reason projection](../../crates/ego-acp/src/project.rs).
-[Packaged stdio tests](../../crates/ego-cli/tests/acp_settlement.rs) cover
+[Packaged stdio tests](../../crates/ego-cli/tests/it/acp_settlement.rs) cover
 cancellation during a permission wait or stream, durable holds after reconnect,
 a known HTTP 400 followed by another prompt, and restart after a killed
 generation. Use live integration checks for host-specific behavior.

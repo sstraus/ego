@@ -181,6 +181,7 @@ pub(crate) struct CliGenerationPolicySource {
     roots: Vec<ProfileRoot>,
     read_perimeter: ego_core::permit::ReadPerimeter,
     human: Option<Arc<dyn HumanApprover>>,
+    session_approvals: ego_core::permit::SessionApprovals,
 }
 
 impl CliGenerationPolicySource {
@@ -195,6 +196,7 @@ impl CliGenerationPolicySource {
             roots: Vec::new(),
             read_perimeter: ego_core::permit::ReadPerimeter::default(),
             human,
+            session_approvals: ego_core::permit::SessionApprovals::default(),
         }
     }
 
@@ -223,6 +225,7 @@ impl CliGenerationPolicySource {
                 ),
                 None => PolicyEngine::new(self.workspace.clone(), snapshot.mode, snapshot.ruleset),
             }
+            .with_session_approvals(self.session_approvals.clone())
             .with_profile_roots(self.roots.clone())
             .with_read_perimeter(self.read_perimeter.clone()),
         )
@@ -249,6 +252,7 @@ impl GenerationPolicySource for CliGenerationPolicySource {
             snapshot.ruleset,
             self.human.clone(),
         )
+        .and_then(|capture| capture.with_session_approvals(self.session_approvals.clone()))
         .and_then(|capture| capture.with_read_perimeter(self.read_perimeter.clone()))
         .map_err(|error| error.to_string())
     }
@@ -258,6 +262,7 @@ impl GenerationPolicySource for CliGenerationPolicySource {
         snapshot: Arc<CapturedGenerationPolicySnapshot>,
     ) -> Result<GenerationPolicyCapture, String> {
         GenerationPolicyCapture::restore(snapshot, self.human.clone())
+            .and_then(|capture| capture.with_session_approvals(self.session_approvals.clone()))
             .map_err(|error| error.to_string())
     }
 }

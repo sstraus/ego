@@ -28,6 +28,8 @@ pub(crate) struct McpRuntimeCandidateAdmission {
     schemas: Arc<dyn McpToolSchemaAdmission>,
     max_sse_event_size: usize,
     timeout: Duration,
+    /// Declare MCP Tasks to HTTP servers (the user's opt-in).
+    tasks: bool,
 }
 
 impl McpRuntimeCandidateAdmission {
@@ -48,7 +50,15 @@ impl McpRuntimeCandidateAdmission {
             schemas,
             max_sse_event_size,
             timeout,
+            tasks: false,
         }
+    }
+
+    /// Declare MCP Tasks to HTTP servers (the user's opt-in).
+    #[must_use]
+    pub(crate) fn with_tasks(mut self, tasks: bool) -> Self {
+        self.tasks = tasks;
+        self
     }
 
     fn options(&self) -> Result<McpClientOptions, McpCandidateError> {
@@ -72,7 +82,7 @@ impl McpRuntimeCandidateAdmission {
                 bootstrap,
                 Arc::clone(&self.schemas),
             )
-            .map(|factory| Arc::new(factory) as Arc<dyn McpOperationFactory>)
+            .map(|factory| Arc::new(factory.with_tasks(self.tasks)) as Arc<dyn McpOperationFactory>)
             .map_err(|error| invalid_candidate(error.to_string())),
             McpServerConfig::Stdio(_) => McpStdioOperationFactory::runtime(
                 Arc::clone(&self.continuations),
@@ -102,6 +112,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
         let schemas = Arc::clone(&self.schemas);
         let max_sse_event_size = self.max_sse_event_size;
         let timeout = self.timeout;
+        let tasks = self.tasks;
         Box::pin(async move {
             let runtime = Self::new(
                 http_management,
@@ -111,7 +122,8 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 max_sse_event_size,
                 timeout,
                 acp_management,
-            );
+            )
+            .with_tasks(tasks);
             let options = runtime.options()?;
             if let McpServerConfig::Stdio(config) = request.config()
                 && let Some(session) = runtime.stdio_management.session_stdio()

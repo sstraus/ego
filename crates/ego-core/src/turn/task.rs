@@ -14,12 +14,35 @@ use crate::run::{RunAppend, RunRevision, RunTransaction};
 use crate::sink::EventSink;
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore};
 
+/// Owner-configured defaults for task children (`[task]`). A field left unset
+/// keeps the parent's value. Precedence, highest first: named agent definition,
+/// this default, parent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildDefaults {
+    pub model: Option<ModelRef>,
+    pub effort: Option<crate::generator::types::ThinkingLevel>,
+}
+
+impl ChildDefaults {
+    /// Apply one higher layer field by field.
+    pub fn merge(&mut self, layer: &ChildDefaults) {
+        if layer.model.is_some() {
+            self.model.clone_from(&layer.model);
+        }
+        if layer.effort.is_some() {
+            self.effort = layer.effort;
+        }
+    }
+}
+
 /// A trusted, immutable task definition. All authority fields are ceilings.
 #[derive(Clone, Debug)]
 pub struct NamedAgent {
     pub name: String,
     pub prompt: String,
     pub model: Option<ModelRef>,
+    pub effort: Option<crate::generator::types::ThinkingLevel>,
     pub tools: Option<BTreeSet<String>>,
     pub mode: Option<Mode>,
     pub deny: Vec<crate::permit::rule::Rule>,
@@ -30,7 +53,8 @@ pub struct NamedAgent {
 
 struct NamedModelSource {
     owner: Arc<dyn GenerationModelSource>,
-    model: ModelRef,
+    model: Option<ModelRef>,
+    effort: Option<crate::generator::types::ThinkingLevel>,
 }
 impl GenerationModelSource for NamedModelSource {
     fn resolve<'a>(
@@ -40,7 +64,15 @@ impl GenerationModelSource for NamedModelSource {
         'a,
         Result<GenerationProfile, crate::generation_model_source::GenerationModelError>,
     > {
-        self.owner.resolve(request.with_model(self.model.clone()))
+        let request = match &self.model {
+            Some(model) => request.with_model(model.clone()),
+            None => request,
+        };
+        let request = match self.effort {
+            Some(effort) => request.with_thinking(effort),
+            None => request,
+        };
+        self.owner.resolve(request)
     }
 }
 
@@ -53,6 +85,8 @@ pub(crate) struct TaskRequest {
     plan_step: Option<String>,
     #[serde(default)]
     background: bool,
+    #[serde(default)]
+    fork: bool,
 }
 
 pub(super) fn descriptor() -> ToolDescriptor {
@@ -62,6 +96,7 @@ pub(super) fn descriptor() -> ToolDescriptor {
         parameters: json!({"type":"object", "additionalProperties":false,
             "required":["name","prompt"], "properties": {
                 "background":{"type":"boolean", "default":false, "description":"Launch a durable child and return its ID without waiting. Parent interruption does not cancel it."},
+                "fork":{"type":"boolean", "default":false, "description":"Start the child from this conversation instead of an empty one, so the prompt only needs the directive. The child reuses the cached conversation prefix, runs one turn, cannot delegate, and returns only its final answer. Not valid with background or agent."},
                 "plan_step":{"type":"string", "description":"Optional foreground-only binding to an existing durable plan step. Omit or leave empty when unbound. Child execution marks a bound step in_progress, then completed or blocked. Background tasks do not accept a plan binding."},
                 "name":{"type":"string", "minLength":1,"maxLength":80},
                 "prompt":{"type":"string", "minLength":1,"maxLength":65536},
@@ -114,7 +149,7 @@ pub trait BackgroundTaskPort: Send + Sync {
 
 /// Task guidance is the same in every host; external coordination uses its own API.
 pub fn delegation_guidance() -> &'static str {
-    "For delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Continue ready, non-overlapping work while the child runs, including independent validation; do not end your turn merely to wait for unrelated research. Wait only when the next action depends on the child's result or no independent work remains. A launch receipt or running lifecycle status is not a completed result; report the child as running until its final result or failure is delivered. Use /tasks to inspect or cancel it."
+    "For delegation, use task by default. Explicit user or applicable workspace instructions may select another available coordination mechanism; follow that mechanism's tool contract and lifecycle, without overriding fundamental constraints. Set background=true for long work with task; the durable child continues independently of parent-turn interruption. Continue ready, non-overlapping work while the child runs, including independent validation; do not end your turn merely to wait for unrelated research. Wait only when the next action depends on the child's result or no independent work remains. A launch receipt or running lifecycle status is not a completed result; report the child as running until its final result or failure is delivered. Use /tasks to inspect or cancel it."
 }
 
 /// Only accounting crosses into the parent's durable log. Conversation and
@@ -132,6 +167,7 @@ impl SessionStore for TaskStore<'_> {
             EventKind::GenerationStarted { attempt, .. } => Some(EventKind::GenerationStarted {
                 attempt: *attempt,
                 role: GenerationRole::Subagent,
+                cache: None,
                 snapshot: None,
             }),
             kind @ (EventKind::UsageUpdated { .. }
@@ -231,6 +267,8 @@ struct TaskSink<'s> {
     name: String,
     item: ItemId,
     child_turn: Mutex<Option<TurnId>>,
+    /// Output tokens already in a forked child's inherited state.
+    inherited_output_tokens: u64,
 }
 
 impl TaskSink<'_> {
@@ -281,7 +319,10 @@ impl EventSink for TaskSink<'_> {
                 turn: self.turn,
                 item: self.item,
                 activity,
-                output_tokens: state.usage.output_tokens,
+                output_tokens: state
+                    .usage
+                    .output_tokens
+                    .saturating_sub(self.inherited_output_tokens),
             })
         {
             tracing::error!(%error, "child activity publication failed");
@@ -395,6 +436,8 @@ struct TaskExecution<'s, 't> {
     runtime: GenerationRuntime,
     tools: Tools<'t>,
     cancel: CancelToken,
+    /// The parent context of a `fork: true` child; `None` for a clean child.
+    fork: Option<Arc<ForkSeed>>,
     judge: Option<JudgeContext>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
@@ -419,17 +462,25 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
                 started,
                 events: Mutex::new(Vec::new()),
             };
+            // The child's own items and usage start after the inherited state.
+            let state = self
+                .fork
+                .as_ref()
+                .map(|seed| seed.state.clone())
+                .unwrap_or_default();
+            let inherited_seq = state.last_seq;
             let sink = TaskSink {
                 parent: self.parent.clone(),
                 turn: self.turn,
                 name: request.name,
                 item,
                 child_turn: Mutex::new(None),
+                inherited_output_tokens: state.usage.output_tokens,
             };
             let mut child = TurnLoop::new(
                 Session {
                     id: self.session,
-                    state: SessionState::default(),
+                    state,
                     store: &store,
                     evidence: self.evidence,
                     clock: self.clock,
@@ -455,6 +506,12 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
             child.analysis_observation = self.analysis_observation;
             child.inherited_effect_tools = self.effect_ceiling;
             child.elicitor = self.elicitor;
+            if let Some(seed) = &self.fork {
+                child.prompt_snapshot = seed.prompt_snapshot.clone();
+                child.lineage_root = seed.lineage_root;
+                child.ancestor = seed.ancestor.clone();
+                child.single_turn = true;
+            }
             let outcome = child.run(&request.prompt).await;
             // Storage/accounting errors can abandon a turn without TurnCompleted.
             // The actual foreground owner still retracts its admitted child once.
@@ -464,7 +521,9 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
             let final_text = state
                 .items
                 .values()
-                .filter(|item| item.kind == crate::state::ItemKind::Assistant)
+                .filter(|item| {
+                    item.kind == crate::state::ItemKind::Assistant && item.seq > inherited_seq
+                })
                 .max_by_key(|item| item.seq)
                 .map(|item| item.text.clone())
                 .unwrap_or_default();
@@ -541,6 +600,36 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     continue;
                 }
             };
+            let refusal = if self.tools.is_task_child() {
+                Some("a task child cannot delegate; answer the directive yourself")
+            } else if request.fork && request.background {
+                Some(
+                    "fork does not accept background; a durable child cannot inherit this conversation",
+                )
+            } else if request.fork && request.agent.is_some() {
+                Some(
+                    "fork does not accept agent; a forked child inherits this conversation and your tools",
+                )
+            } else if request.fork && self.fork_seed.is_none() {
+                Some("fork has no parent request to inherit")
+            } else {
+                None
+            };
+            if let Some(error) = refusal {
+                self.journal.append(
+                    turn,
+                    Some(call.item),
+                    Some(call.started),
+                    EventKind::ToolCallCompleted {
+                        ok: false,
+                        result: self
+                            .tools
+                            .masked_result(ToolResult::builtin(error.to_owned())),
+                    },
+                )?;
+                completed.insert(call.item);
+                continue;
+            }
             let definition = request
                 .agent
                 .as_ref()
@@ -700,15 +789,29 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
             if let Some(definition) = &definition {
                 request.prompt = format!("{}\n\n{}", definition.prompt, request.prompt);
             }
-            let source = match definition
+            // A forked child continues the parent's cached conversation, so it keeps
+            // the parent's model and effort.
+            let defaults = if request.fork {
+                &ChildDefaults::default()
+            } else {
+                &self.tools.child_defaults
+            };
+            let child_model = definition
                 .as_ref()
                 .and_then(|definition| definition.model.clone())
-            {
-                Some(model) => Arc::new(NamedModelSource {
+                .or_else(|| defaults.model.clone());
+            let child_effort = definition
+                .as_ref()
+                .and_then(|definition| definition.effort)
+                .or(defaults.effort);
+            let source = if child_model.is_some() || child_effort.is_some() {
+                Arc::new(NamedModelSource {
                     owner: self.source.clone(),
-                    model,
-                }) as Arc<dyn GenerationModelSource>,
-                None => self.source.clone(),
+                    model: child_model.clone(),
+                    effort: child_effort,
+                }) as Arc<dyn GenerationModelSource>
+            } else {
+                self.source.clone()
             };
             let task = TaskExecution {
                 session: self.session_id,
@@ -727,10 +830,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     gate: self.gate.clone(),
                     config: {
                         let mut config = self.config.clone();
-                        if definition
-                            .as_ref()
-                            .is_some_and(|definition| definition.model.is_some())
-                        {
+                        if child_model.is_some() {
                             config.fallbacks.clear();
                         }
                         config
@@ -748,9 +848,11 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                         definition
                             .as_ref()
                             .and_then(|definition| definition.tools.clone()),
+                        request.fork,
                     )
                     .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?,
                 cancel: self.cancel.clone(),
+                fork: request.fork.then(|| self.fork_seed.clone()).flatten(),
                 judge: self.judge.clone(),
                 analysis_cache: self.analysis_cache.clone(),
                 analysis_observation: self.analysis_observation.clone(),

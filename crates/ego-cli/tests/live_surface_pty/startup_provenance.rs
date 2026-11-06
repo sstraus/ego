@@ -47,11 +47,14 @@ fn startup_displays_effective_mode_and_sandbox_sources() {
     for (name, config, env_profile, flags, expected) in cases {
         let stub = Stub::start(Plan::default());
         let places = support::Places::new();
+        // Adaptive requires its writable temporary root to be disjoint from home and workspace.
+        let temporary = tempfile::tempdir().expect("temporary root");
         places.file("AGENTS.md", "# provenance fixture\n");
         let mut ego = places
             .ego(&stub)
             .conversing()
-            .args(["--model", "ollama/qwen3"]);
+            .args(["--model", "ollama/qwen3"])
+            .env("TMPDIR", temporary.path().to_str().expect("temporary path"));
         if !config.is_empty() {
             ego.home_file("config.toml", config);
         }

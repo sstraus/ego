@@ -24,15 +24,17 @@ Session state is a reduction over an append-only event log.
 ```
 SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested | SessionPaused |
 SessionPauseObserved | SessionResumed | SessionSelectionsSelected | GoalSet | GoalTransitioned |
+ProtocolFilterVariablesSaved |
 ContextRequested | ContextRequestConsumed | ContextCooldown |
 GoalAllowanceInherited | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated |
 PromptQueued | PromptDeliveryExpedited | PromptRetracted | UserPrompt |
-AssistantDelta | AssistantMessage | ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted |
+AssistantDelta | AssistantMessageStarted | AssistantMessage | ReasoningDelta | ReasoningState | ProviderContent |
+ContextCommandStarted |
 ToolCallStarted | ToolCallDelta | ToolCallCompleted | ToolCallMeasured |
-DetachedExecStarted | DetachedExecSettled | QuestionRequested |
+DetachedExecStarted | DetachedExecOutput | DetachedExecSettled | QuestionRequested |
 QuestionSettled | QuestionMemberSettled | PermissionRequested | PermissionAmended |
-PermissionDecided | GenerationStarted | FallbackDecision | ExecutionObserved |
-ExecutionMeasured | JudgeResponse | SandboxResidualDecided | AttemptSettled |
+PermissionDecided | SessionRootGranted | PermanentRootGrantPending | PermanentRootGranted | RootRevoked | GenerationStarted | FallbackDecision | ExecutionObserved |
+ExecutionMeasured | JudgeResponse | SandboxResidualDecided | SandboxOwnerGranted | AttemptSettled |
 CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved | TurnCompleted |
 PinsChanged | CompactionSeeded | Compacted | Forked | HookCatalogueAdmitted |
 HookLifecycleReached | HookInvocationStarted | HookInvocationSettled |
@@ -42,8 +44,11 @@ SkillCatalogueAdmitted | SkillInstructionAdmitted | SkillResourceAdmitted |
 Error
 ```
 
-76 variants in the current schema. The list is checked against `EventKind` in
-`crates/ego-core/src/event/domain.rs`.
+79 variants in the current schema. The list is checked against `EventKind` in
+`crates/ego-core/src/event/domain.rs`. `AssistantDelta` is decode-only: a turn
+publishes text chunks live and writes one assembled `AssistantMessage` per item,
+at its close. When the same generation opens another item first, a text-free
+`AssistantMessageStarted` gives the message item its place in the log.
 
 Events record prompts,
 model output, tool calls and results, permissions, usage, questions, hooks,
@@ -65,6 +70,13 @@ a provider name. Unavailable or unknown capabilities remain explicit.
 Provider adapters own request encoding and response decoding. HTTP and WebSocket
 connections use guarded transports. Continuation state is connection-local where
 required; durable conversation state belongs to the core.
+
+Wire adapters translate; a shared stage decides. A mapping turns its wire's
+bytes into normalized events and states what the wire said. Decisions that do
+not depend on the wire format, such as the handling of incoherent usage or of a
+tool call without an id or a declared name, are made once outside the adapters.
+`crates/ego-ai/src/wire/policy_contract.rs` runs one malformed answer through
+every mapping and requires one outcome.
 
 ## 3. Tool authority
 
@@ -103,3 +115,7 @@ run dispatcher.
 - [Command language](CLI.md)
 - [Protocol integrations](docs/integrations/README.md)
 - [Contribution guide](CONTRIBUTING.md)
+
+## Optional workspace memory
+
+Ego also has one opt-in built-in memory: with `memory = true` in the user configuration, or `--memory` for one run, each workspace has one user-readable Markdown file under `$EGO_HOME/memory/`, limited to 16 KiB, read at session start and at `/refresh` and appended to the system prompt. Only the user and the harness `memory` tool change it; plan mode refuses a write, every other mode applies it without a prompt, and the call is visible in the transcript and in `/context`. `session.started` lists the file (path, digest, size), never its text. Off by default; a project or local configuration file cannot turn it on; with it off, no memory file is read or written.

@@ -73,7 +73,7 @@ Markdown and its links are not rewritten. Code examples remain literal.
 ## Command reference and help snapshots
 
 `reference/cli.md` is generated from the parser. Do not edit it by hand. The
-reference tests in `crates/ego-cli/tests/reference.rs` describe how to regenerate
+reference tests in `crates/ego-cli/tests/it/reference.rs` describe how to regenerate
 it with `EGO_UPDATE_ARTIFACTS=1`; follow the repository's Cargo build policy.
 
 `reference/help.md` is a dated capture from an actual binary, not a second
@@ -92,19 +92,29 @@ date, and SHA-256, and refuses to write if the executable changes during capture
 README is the product entry point, not the complete command manual. Keep its
 version/status, first-run examples, and links consistent with these guides.
 
-## Prepare release documentation
+## Prepare a release
 
 The workspace version is in `[workspace.package]` in `Cargo.toml`. Workspace
 packages inherit it. Let Cargo refresh their lockfile versions; do not edit
-`Cargo.lock` by hand. A release preparation can select a new minor version;
-the `0.4.3` notes describe the upcoming release until it is published.
+`Cargo.lock` by hand. A release preparation can select a new minor version.
 
-Write notes in `release-notes/VERSION.md`, grouped by user-visible features,
-fixes, and breaking changes. Verify the changes against
-Git history and source. Keep dated captures and external dependency versions
-unchanged; they are evidence, not release declarations. Add the notes to
-`SUMMARY.md` and link them from README.
+`CHANGELOG.md` is the only change record. Every change that a user, script, or
+host integration can observe adds an entry under `## [Unreleased]`.
 
-The tag workflow reads that exact notes file and refuses a missing or empty file.
+1. To prepare version `VERSION`, move all `Unreleased` entries to a new
+   `## [VERSION] - YYYY-MM-DD` section below the empty `Unreleased` heading.
+   Group them as Added, Changed, Deprecated, Removed, Fixed, and Security. Mark
+   breaking changes with `**Breaking:**`.
+2. Verify the section against Git history and source.
+3. Run `python3 -B scripts/check-changelog.py release --version VERSION`. It
+   refuses missing, undated, empty, or incomplete sections and leftover
+   `Unreleased` entries.
+
+Keep dated captures and external dependency versions unchanged; they are
+evidence, not release declarations. Do not write new `release-notes/VERSION.md`
+files: the files for `0.3.0` to `0.4.3` remain as an archive.
+
+The tag workflow runs the same check. It publishes the version section of
+`CHANGELOG.md` as the release notes and refuses the release when the check fails.
 Publishing a tag runs the release workflow. Review the version, notes, asset
 checksums, and required repository permissions before publishing.

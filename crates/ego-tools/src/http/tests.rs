@@ -92,7 +92,15 @@ async fn one_hop_with_selected(
     host: &str,
     selected: IpAddr,
 ) -> Result<OneHopResponse, TransportError> {
-    let target = NetworkTarget::new(host, 80).expect("network target");
+    one_hop_with_selected_port(host, selected, 80).await
+}
+
+async fn one_hop_with_selected_port(
+    host: &str,
+    selected: IpAddr,
+    port: u16,
+) -> Result<OneHopResponse, TransportError> {
+    let target = NetworkTarget::new(host, port).expect("network target");
     let route = HttpRoute::new(HttpScheme::Http, target.clone()).expect("HTTP route");
     let request = HttpRequest::get("/").expect("HTTP request");
     let connect = PreparedConnect::new(target, &request);
@@ -567,4 +575,39 @@ async fn connect_failure_keeps_reqwest_source_chain_without_url_secrets() {
     assert!(!detail.contains("private"));
     assert!(!detail.contains("sk-live-secret"));
     assert_eq!(mapped.delivery(), DeliveryCertainty::DefinitelyUnsent);
+}
+
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+async fn connect_detail(selected: IpAddr, port: u16) -> String {
+    let error = one_hop_with_selected_port("localhost", selected, port)
+        .await
+        .expect_err("the local fixture port is closed");
+    let TransportFailure::Connect(detail) = error.failure() else {
+        panic!("expected a connection failure, got {error:?}");
+    };
+    detail.clone()
+}
+
+/// Catches a connect error that drops the dialled address, so an ENETDOWN cannot be attributed.
+#[tokio::test]
+async fn connect_failure_names_the_ipv4_address_family_and_direct_route() {
+    let port = closed_port();
+    let detail = connect_detail(IpAddr::V4(Ipv4Addr::LOCALHOST), port).await;
+    assert!(detail.contains(&format!("127.0.0.1:{port}")), "{detail}");
+    assert!(detail.contains("IPv4"), "{detail}");
+    assert!(detail.contains("proxy: no"), "{detail}");
+}
+
+/// Catches a family label derived from the host name instead of the dialled address.
+#[tokio::test]
+async fn connect_failure_names_the_ipv6_address_and_family() {
+    let port = closed_port();
+    let detail = connect_detail(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), port).await;
+    assert!(detail.contains(&format!("[::1]:{port}")), "{detail}");
+    assert!(detail.contains("IPv6"), "{detail}");
+    assert!(detail.contains("proxy: no"), "{detail}");
 }

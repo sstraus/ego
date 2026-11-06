@@ -73,7 +73,7 @@ mod native {
         let base = std::fs::canonicalize(root.path()).unwrap();
         let home = base.join("home");
         let workspace = base.join("workspace");
-        let names = ["cargo", "rustup", "mbx", "git-common", "tmp"];
+        let names = ["cargo", "rustup", "build-cache", "git-common", "tmp"];
         let writable = names.map(|name| base.join(name));
         for path in writable.iter().chain([&home, &workspace]) {
             std::fs::create_dir(path).unwrap();

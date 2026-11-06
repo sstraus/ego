@@ -144,7 +144,7 @@ fn until_composer_frame(
 // PTY read coalesces a visible draft frame with its subsequent erase.
 #[test]
 fn draft_echo_observer_accepts_completed_frame_before_coalesced_erase() {
-    // Recorded from rb repetition 36 in help-red-100.log; no synthetic terminal bytes.
+    // Recorded from a live PTY run; no synthetic terminal bytes.
     let captured = include_bytes!("../fixtures/help-latency-erased-draft.txt");
     for split in 0..=captured.len() {
         let (sender, receiver) = mpsc::channel();

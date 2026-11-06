@@ -1,0 +1,2321 @@
+//! Strict config schema, precedence resolution and the trust gate.
+//!
+//! Configuration schema and precedence contracts.
+
+use ego_core::ceiling::{Budget, Ceilings};
+use ego_core::config::{
+    AuthProviderLayer, ConfigError, ConfigLayer, Mode, ModelRef, PermCfg, Posture, ProfileLayer,
+    SettingProvenance, Source, Sourced, SourcedRule, Trust, resolve,
+};
+use ego_core::cost::{Amount, CurrencyCode, Money};
+use ego_core::generator::types::ThinkingLevel;
+use ego_core::permit::rule::Rule;
+
+fn layer(source: Source, value: ConfigLayer) -> Sourced<ConfigLayer> {
+    Sourced { source, value }
+}
+
+// Catches: fresh config selects a confinement unsupported by the platform, or loses Adaptive on macOS.
+#[test]
+fn fresh_config_resolves_to_adaptive_instead_of_legacy_workspace() {
+    let effective = resolve(&[], Trust::Trusted, None).unwrap();
+    assert_eq!(
+        effective.sandbox.unwrap_or_default(),
+        if cfg!(target_os = "macos") {
+            ego_core::permit::Confinement::Adaptive
+        } else {
+            ego_core::permit::Confinement::Workspace
+        }
+    );
+    assert_eq!(effective.sandbox_provenance, SettingProvenance::Default);
+}
+
+// Catches: a layer that sets mode is not the one reported, or a profile in a
+// lower layer is credited to the higher layer that only set the other field.
+#[test]
+fn mode_and_sandbox_provenance_name_the_winning_layer_or_profile() {
+    let user = ConfigLayer::parse(
+        Source::User,
+        "mode='plan'\nsandbox='ro'\n[profile.ci]\nmode='yolo'",
+    )
+    .unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "sandbox='off'").unwrap();
+    let effective = ego_core::config::resolve_selected(
+        &[flags, user],
+        Trust::Trusted,
+        Some(("ci", Source::Env)),
+    )
+    .unwrap();
+    assert_eq!(effective.mode, Some(Mode::Yolo));
+    assert_eq!(
+        effective.mode_provenance.to_string(),
+        "user profile ci selected by env"
+    );
+    assert_eq!(effective.sandbox_provenance.to_string(), "flags");
+    let plain = resolve(&[], Trust::Trusted, None).unwrap();
+    assert_eq!(plain.mode_provenance.to_string(), "default");
+}
+
+// Catches: a cloned repository turns on the lsp tool, which starts language
+// server processes, or the tool is on by default.
+#[test]
+fn lsp_is_off_by_default_and_only_the_user_configuration_turns_it_on() {
+    assert!(!resolve(&[], Trust::Trusted, None).unwrap().lsp);
+    let user = ConfigLayer::parse(Source::User, "lsp=true").unwrap();
+    assert!(resolve(&[user], Trust::Trusted, None).unwrap().lsp);
+    for source in [Source::Project, Source::Local, Source::Flags] {
+        assert!(ConfigLayer::parse(source, "lsp=true").is_err(), "{source}");
+    }
+}
+
+// Catches: a cloned repository turns the memory tool on, or memory is on by default.
+#[test]
+fn memory_is_off_by_default_and_only_the_owner_or_the_command_line_turns_it_on() {
+    assert!(!resolve(&[], Trust::Trusted, None).unwrap().memory);
+    let user = ConfigLayer::parse(Source::User, "memory=true").unwrap();
+    assert!(resolve(&[user], Trust::Trusted, None).unwrap().memory);
+    let flags = ConfigLayer::parse(Source::Flags, "memory=true").unwrap();
+    assert!(resolve(&[flags], Trust::Trusted, None).unwrap().memory);
+    for source in [Source::Project, Source::Local] {
+        assert!(
+            ConfigLayer::parse(source, "memory=true").is_err(),
+            "{source}"
+        );
+    }
+}
+
+// Catches: headless compaction or doctor probes are on by default, or a cloned repository turns them on.
+#[test]
+fn headless_compaction_and_doctor_probes_are_opt_in_and_owned_by_the_user() {
+    let off = resolve(&[], Trust::Trusted, None).unwrap();
+    assert!(!off.compaction.headless && !off.doctor_network);
+    let user = ConfigLayer::parse(
+        Source::User,
+        "doctor_network=true\n[compaction]\nheadless=true",
+    )
+    .unwrap();
+    let on = resolve(&[user], Trust::Trusted, None).unwrap();
+    assert!(on.compaction.headless && on.doctor_network);
+    let project = ConfigLayer::parse(Source::Project, "[compaction]\nheadless=true").unwrap();
+    let ignored = resolve(&[project], Trust::Trusted, None).unwrap();
+    assert!(!ignored.compaction.headless);
+    let flags = ConfigLayer::parse(Source::Flags, "[compaction]\nheadless=true").unwrap();
+    let per_run = resolve(&[flags], Trust::Trusted, None).unwrap();
+    assert!(per_run.compaction.headless, "-c compaction.headless=true");
+    for source in [Source::Project, Source::Local, Source::Flags] {
+        let layer = ConfigLayer::parse(source, "doctor_network=true").unwrap();
+        let ignored = resolve(&[layer], Trust::Trusted, None).unwrap();
+        assert!(!ignored.doctor_network, "{source}");
+    }
+}
+
+// Catches: a cloned repository turns checkpoints off, or the default is not on.
+#[test]
+fn checkpoints_are_on_by_default_and_only_the_owner_or_the_command_line_turns_them_off() {
+    assert!(resolve(&[], Trust::Trusted, None).unwrap().checkpoints);
+    let user = ConfigLayer::parse(Source::User, "checkpoints=false").unwrap();
+    assert!(!resolve(&[user], Trust::Trusted, None).unwrap().checkpoints);
+    let flags = ConfigLayer::parse(Source::Flags, "checkpoints=false").unwrap();
+    assert!(!resolve(&[flags], Trust::Trusted, None).unwrap().checkpoints);
+    for source in [Source::Project, Source::Local] {
+        assert!(
+            ConfigLayer::parse(source, "checkpoints=false").is_err(),
+            "{source}"
+        );
+    }
+}
+
+// Catches: a cloned repository narrows or empties the tool list, or the key is ignored.
+#[test]
+fn the_tools_key_is_unset_by_default_and_only_the_owner_or_the_command_line_sets_it() {
+    assert_eq!(resolve(&[], Trust::Trusted, None).unwrap().tools, None);
+    let user = ConfigLayer::parse(Source::User, "tools=[\"read\"]").unwrap();
+    assert_eq!(
+        resolve(&[user], Trust::Trusted, None).unwrap().tools,
+        Some(vec!["read".to_owned()])
+    );
+    let none = ConfigLayer::parse(Source::User, "tools=[]").unwrap();
+    assert_eq!(
+        resolve(&[none], Trust::Trusted, None).unwrap().tools,
+        Some(Vec::new())
+    );
+    for source in [Source::Project, Source::Local] {
+        assert!(
+            ConfigLayer::parse(source, "tools=[\"read\"]").is_err(),
+            "{source}"
+        );
+    }
+}
+
+// Catches: MCP Tasks are on by default, or a cloned repository or the command line turns them on.
+#[test]
+fn mcp_tasks_are_off_by_default_and_only_the_user_turns_them_on() {
+    assert!(!resolve(&[], Trust::Trusted, None).unwrap().mcp_tasks);
+    let user = ConfigLayer::parse(Source::User, "mcp_tasks=true").unwrap();
+    assert!(resolve(&[user], Trust::Trusted, None).unwrap().mcp_tasks);
+    for source in [Source::Project, Source::Local, Source::Flags] {
+        assert!(
+            ConfigLayer::parse(source, "mcp_tasks=true").is_err(),
+            "{source}"
+        );
+    }
+}
+
+// Catches: the adaptive default rewrites explicit values or bypasses profile/system authority.
+#[test]
+fn explicit_sandbox_values_and_profile_system_authority_survive_adaptive_default() {
+    for spelling in ["workspace", "ro", "off", "adaptive"] {
+        let user = ConfigLayer::parse(Source::User, &format!("sandbox='{spelling}'")).unwrap();
+        let effective = resolve(&[user], Trust::Trusted, None).unwrap();
+        assert_eq!(effective.sandbox.unwrap().as_str(), spelling);
+        assert_eq!(
+            effective.sandbox_provenance,
+            SettingProvenance::Layer {
+                source: Source::User
+            }
+        );
+    }
+    let user = ConfigLayer::parse(
+        Source::User,
+        "sandbox='adaptive'\n[profile.strict]\nsandbox='ro'",
+    )
+    .unwrap();
+    let effective = resolve(&[user], Trust::Trusted, Some("strict")).unwrap();
+    assert_eq!(effective.sandbox.unwrap().as_str(), "ro");
+    let system = ConfigLayer::parse(Source::System, "sandbox='workspace'").unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "sandbox='adaptive'").unwrap();
+    assert!(resolve(&[system, flags], Trust::Trusted, None).is_err());
+}
+
+/// A rule these tests build directly, bypassing the TOML they usually arrive
+/// in. `load` and not `parse`, so a test cannot hand `resolve` a rule that a
+/// config file could not have contained.
+fn rule(raw: &str) -> Rule {
+    Rule::load(raw).expect("a rule this build can enforce")
+}
+
+/// Whether `list` carries `raw` at all, ignoring which layers it came from.
+///
+/// Replaces `list.contains(&rule(raw))`, which stopped compiling when the
+/// resolved lists started carrying origins. The tests that only care *whether*
+/// a rule survived resolution say so with this; the ones that care *where it
+/// came from* use `origins` below and say that instead.
+fn carries(list: &[SourcedRule], raw: &str) -> bool {
+    origins(list, raw).is_some()
+}
+
+/// Every layer `list` records as carrying `raw`, or `None` if no entry does.
+///
+/// Collected into a `Vec` so a test can write the expected layers in order.
+/// `OriginSet` iterates most-authoritative-first, so that order is the
+/// authority order and not the order the layers happened to be merged in.
+fn origins(list: &[SourcedRule], raw: &str) -> Option<Vec<Source>> {
+    list.iter()
+        .find(|entry| entry.rule() == &rule(raw))
+        .map(|entry| entry.origins().iter().collect())
+}
+
+fn amount(decimal: &str, currency: &str) -> Option<Money> {
+    Some(Money::new(
+        decimal.parse::<Amount>().expect("a valid test amount"),
+        CurrencyCode::new(currency).expect("a valid test code"),
+    ))
+}
+
+fn money(decimal: &str, currency: &str) -> Budget {
+    Budget::Money(amount(decimal, currency).expect("built just above"))
+}
+
+fn model(name: &str) -> Option<ModelRef> {
+    Some(ModelRef(name.to_string()))
+}
+
+#[test]
+fn config_unknown_top_level_key_names_key_and_source() {
+    let err = ConfigLayer::parse(Source::Project, "bogus = 1\n").unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::UnknownKey {
+            key: "bogus".to_string(),
+            source: Source::Project,
+        }
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("bogus"),
+        "message should name the key: {message}"
+    );
+    assert!(
+        message.contains("project"),
+        "message should name the source: {message}"
+    );
+}
+
+#[test]
+fn config_unknown_key_in_nested_permissions_table_is_named() {
+    let err = ConfigLayer::parse(Source::User, "[permissions]\nbogus = 1\n").unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::UnknownKey {
+            key: "bogus".to_string(),
+            source: Source::User,
+        }
+    );
+}
+
+#[test]
+fn config_unknown_key_in_profile_table_is_named() {
+    let err = ConfigLayer::parse(Source::System, "[profile.ci]\nbogus = 1\n").unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::UnknownKey {
+            key: "bogus".to_string(),
+            source: Source::System,
+        }
+    );
+}
+
+#[test]
+fn config_known_keys_parse_cleanly() {
+    let sourced = ConfigLayer::parse(
+        Source::Flags,
+        "model = \"anthropic/claude-sonnet-5\"\nmode = \"edits\"\n\n[permissions]\nallow = [\"read(src/**)\"]\ndeny = []\n",
+    )
+    .unwrap();
+    assert_eq!(sourced.source, Source::Flags);
+    assert_eq!(sourced.value.model, model("anthropic/claude-sonnet-5"));
+    assert_eq!(sourced.value.mode, Some(Mode::Edits));
+    assert_eq!(
+        sourced.value.permissions,
+        Some(PermCfg {
+            judge: None,
+            allow: vec![rule("read(src/**)")],
+            deny: vec![],
+        })
+    );
+}
+
+#[test]
+fn auth_uses_the_same_strict_layer_parser_as_generation_config() {
+    let sourced = ConfigLayer::parse(
+        Source::User,
+        "model = \"openai/gpt-5\"\n[auth.openai-codex]\ncredential_command = \"mint-codex\"\n[auth.openai-codex.headers]\noriginator = \"operator\"\n",
+    )
+    .unwrap();
+    let effective = resolve(&[sourced], Trust::Untrusted, None).unwrap();
+
+    let auth = effective.auth.get("openai-codex").unwrap();
+    assert_eq!(auth.credential_command.as_deref(), Some("mint-codex"));
+    assert_eq!(
+        auth.headers.get("originator").map(String::as_str),
+        Some("operator")
+    );
+}
+
+#[test]
+fn auth_precedence_merges_command_and_headers_per_field_and_name() {
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                auth: std::collections::HashMap::from([(
+                    "openai-codex".to_string(),
+                    AuthProviderLayer {
+                        protocol_filter: None,
+                        credential_command: Some("system-mint".to_string()),
+                        credential_timeout_secs: None,
+                        headers: std::collections::HashMap::from([
+                            ("Originator".to_string(), "system".to_string()),
+                            ("user-agent".to_string(), "system-agent".to_string()),
+                        ]),
+                    },
+                )]),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::User,
+            ConfigLayer {
+                auth: std::collections::HashMap::from([(
+                    "openai-codex".to_string(),
+                    AuthProviderLayer {
+                        protocol_filter: None,
+                        credential_command: None,
+                        credential_timeout_secs: None,
+                        headers: std::collections::HashMap::from([
+                            ("originator".to_string(), "operator".to_string()),
+                            ("x-client".to_string(), "ego".to_string()),
+                        ]),
+                    },
+                )]),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    let auth = effective.auth.get("openai-codex").unwrap();
+    assert_eq!(auth.credential_command.as_deref(), Some("system-mint"));
+    assert_eq!(auth.headers.len(), 3, "{:#?}", auth.headers);
+    assert_eq!(
+        auth.headers.get("originator").map(String::as_str),
+        Some("operator")
+    );
+    assert_eq!(
+        auth.headers.get("user-agent").map(String::as_str),
+        Some("system-agent")
+    );
+    assert_eq!(
+        auth.headers.get("x-client").map(String::as_str),
+        Some("ego")
+    );
+}
+
+#[test]
+fn config_full_precedence_order_flags_beats_env_beats_local_beats_project_beats_user_beats_system()
+{
+    let all = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                model: model("system"),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::User,
+            ConfigLayer {
+                model: model("user"),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Project,
+            ConfigLayer {
+                model: model("project"),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Local,
+            ConfigLayer {
+                model: model("local"),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Env,
+            ConfigLayer {
+                model: model("env"),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                model: model("flags"),
+                ..Default::default()
+            },
+        ),
+    ];
+
+    assert_eq!(
+        resolve(&all, Trust::Trusted, None).unwrap().model,
+        model("flags")
+    );
+    assert_eq!(
+        resolve(&all[..5], Trust::Trusted, None).unwrap().model,
+        model("env")
+    );
+    assert_eq!(
+        resolve(&all[..4], Trust::Trusted, None).unwrap().model,
+        model("local")
+    );
+    assert_eq!(
+        resolve(&all[..3], Trust::Trusted, None).unwrap().model,
+        model("project")
+    );
+    assert_eq!(
+        resolve(&all[..2], Trust::Trusted, None).unwrap().model,
+        model("user")
+    );
+    assert_eq!(
+        resolve(&all[..1], Trust::Trusted, None).unwrap().model,
+        model("system")
+    );
+}
+
+#[test]
+fn config_precedence_is_independent_of_slice_order() {
+    let scrambled = [
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                model: model("flags"),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::System,
+            ConfigLayer {
+                model: model("system"),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Project,
+            ConfigLayer {
+                model: model("project"),
+                ..Default::default()
+            },
+        ),
+    ];
+    assert_eq!(
+        resolve(&scrambled, Trust::Trusted, None).unwrap().model,
+        model("flags")
+    );
+}
+
+// --- ceilings ---
+
+/// Configuration keys must be accepted by the owning schema, not merely documented.
+#[test]
+fn config_a_budget_key_is_a_known_key_in_every_layer() {
+    let base = ConfigLayer::parse(Source::System, "budget = \"5$\"\n").expect("a known key");
+    assert_eq!(base.value.budget, Some(money("5", "USD")));
+
+    let profiled = ConfigLayer::parse(Source::System, "[profile.ci]\nbudget = \"400k\"\n")
+        .expect("a known key in a profile too");
+    assert_eq!(
+        profiled.value.profile["ci"].budget,
+        Some(Budget::Tokens(400_000))
+    );
+}
+
+/// The same grammar the flag takes, refused the same way. A spelling the flag
+/// accepts and the config key rejects would be a ceiling an administrator
+/// believes they set.
+#[test]
+fn config_a_budget_that_names_no_unit_is_refused_by_the_layer() {
+    let err = ConfigLayer::parse(Source::System, "budget = \"400\"\n").unwrap_err();
+    let said = err.to_string();
+    assert!(said.contains("names no unit"), "{said}");
+}
+
+/// Ordinary precedence for the ordinary case: a higher layer's ceiling
+/// replaces a lower one's, and raising your own limit is yours to do.
+#[test]
+fn config_a_higher_layer_may_raise_its_own_ceiling() {
+    let layers = [
+        layer(
+            Source::User,
+            ConfigLayer {
+                budget: Some(money("1", "USD")),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                budget: Some(money("20", "USD")),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    assert_eq!(effective.ceilings.money, amount("20", "USD"));
+    assert!(!effective.clamped.any(), "nobody capped anything");
+}
+
+/// The construction the deny ceiling already uses, one field over: a `system` ceiling is
+/// gathered outside the ordinary merge and re-applied after, so no higher-precedence
+/// layer can raise it.
+#[test]
+fn config_a_system_ceiling_cannot_be_raised_by_flags() {
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                budget: Some(money("5", "USD")),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                budget: Some(money("20", "USD")),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+
+    assert_eq!(effective.ceilings.money, amount("5", "USD"));
+    assert_eq!(
+        effective.clamped.money,
+        amount("20", "USD"),
+        "report the requested limit as well as the binding clamp"
+    );
+}
+
+/// The two fields clamp independently, which is what stops a user escaping a
+/// money cap by naming a token ceiling instead.
+#[test]
+fn config_naming_a_token_ceiling_does_not_escape_a_system_money_cap() {
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                budget: Some(money("5", "USD")),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                budget: Some(Budget::Tokens(10_000_000)),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+
+    assert_eq!(
+        effective.ceilings.money,
+        amount("5", "USD"),
+        "the cap on the field nobody named is still in force"
+    );
+    assert_eq!(
+        effective.ceilings.tokens,
+        Some(10_000_000),
+        "and the token ceiling the operator did name is untouched, \
+         because no administrator capped it"
+    );
+}
+
+/// And it survives a profile that overrides the layer, the same way the deny
+/// ceiling does: a `[profile.NAME]` that names a larger budget changes what
+/// its own layer contributes, not what the administrator's caps at.
+#[test]
+fn config_a_system_ceiling_survives_a_profile_that_raises_it() {
+    let mut flags = ConfigLayer::default();
+    flags.profile.insert(
+        "ci".to_string(),
+        ProfileLayer {
+            budget: Some(money("50", "USD")),
+            ..Default::default()
+        },
+    );
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                budget: Some(money("5", "USD")),
+                ..Default::default()
+            },
+        ),
+        layer(Source::Flags, flags),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, Some("ci")).unwrap();
+
+    assert_eq!(effective.ceilings.money, amount("5", "USD"));
+    assert_eq!(effective.clamped.money, amount("50", "USD"));
+}
+
+/// A `system` layer's own active profile contributes to the ceiling, so an
+/// administrator can cap a named profile more tightly than the fleet default.
+#[test]
+fn config_a_system_profile_tightens_the_ceiling_it_names() {
+    let mut system = ConfigLayer {
+        budget: Some(money("20", "USD")),
+        ..Default::default()
+    };
+    system.profile.insert(
+        "ci".to_string(),
+        ProfileLayer {
+            budget: Some(money("2", "USD")),
+            ..Default::default()
+        },
+    );
+    let layers = [
+        layer(Source::System, system),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                budget: Some(money("10", "USD")),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, Some("ci")).unwrap();
+
+    assert_eq!(effective.ceilings.money, amount("2", "USD"));
+    assert_eq!(effective.clamped.money, amount("10", "USD"));
+}
+
+/// Nothing imposes a ceiling.
+#[test]
+fn config_no_layer_writing_a_budget_leaves_no_ceiling_at_all() {
+    let layers = [layer(
+        Source::User,
+        ConfigLayer {
+            model: model("anthropic/claude-sonnet-5"),
+            ..Default::default()
+        },
+    )];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+
+    assert_eq!(effective.ceilings, Ceilings::default());
+    assert!(!effective.clamped.any());
+}
+
+/// The ceiling **survives the merge**. It does not decide anything.
+///
+/// Deny/allow precedence is decided per canonical `PreparedCall`, not by
+/// removing equal strings during configuration resolution.
+///
+/// So the property did not lose its test — it changed owner. The owner is
+/// `tests/permit.rs`'s
+/// `permit_step1_a_deny_beats_an_allow_the_old_string_match_would_have_kept`,
+/// which uses an allow *narrower* than the deny: that is the case the retain
+/// let through, and the case a test with equal strings cannot see.
+///
+/// The two together are the whole property, and neither half is it alone.
+/// A green test whose *name* claims a security property nothing checks is how
+/// the next person concludes the property is covered, which is why the name
+/// moved with the property rather than staying here to look reassuring.
+///
+/// What is checked here is real and still worth checking: a `Flags` layer that
+/// sets `deny = []` would otherwise overwrite the system layer's deny outright,
+/// and the ceiling at `resolve.rs:121-147` puts it back.
+#[test]
+fn config_system_deny_survives_a_higher_precedence_layer_that_clears_it() {
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                permissions: Some(PermCfg {
+                    judge: None,
+                    allow: vec![],
+                    deny: vec![rule("list(**)")],
+                }),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                permissions: Some(PermCfg {
+                    judge: None,
+                    allow: vec![rule("list(**)")],
+                    deny: vec![],
+                }),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    assert!(carries(&effective.permissions.deny, "list(**)"));
+    // And the flags layer's allow is still *there*. Resolution's job is to
+    // guarantee the system deny survives the merge, not to decide which of the
+    // two wins: that is decided per call, against a canonical `PreparedCall`,
+    // by the engine.
+    //
+    // A rule merge must retain semantically overlapping patterns even when
+    // their text differs. Per-call policy decides denial precedence.
+    assert!(carries(&effective.permissions.allow, "list(**)"));
+}
+
+#[test]
+fn config_non_system_deny_can_be_relaxed_by_higher_precedence() {
+    let layers = [
+        layer(
+            Source::Project,
+            ConfigLayer {
+                permissions: Some(PermCfg {
+                    judge: None,
+                    allow: vec![],
+                    deny: vec![rule("read(secrets/**)")],
+                }),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                permissions: Some(PermCfg {
+                    judge: None,
+                    allow: vec![rule("read(secrets/**)")],
+                    deny: vec![],
+                }),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    assert!(carries(&effective.permissions.allow, "read(secrets/**)"));
+    assert!(!carries(&effective.permissions.deny, "read(secrets/**)"));
+}
+
+#[test]
+fn config_profile_overrides_apply_only_when_active_and_only_within_their_own_layer() {
+    let toml = "mode = \"default\"\n\n[profile.ci]\nmode = \"yolo\"\n";
+    let project = ConfigLayer::parse(Source::Project, toml).unwrap();
+    let user = layer(
+        Source::User,
+        ConfigLayer {
+            mode: Some(Mode::Auto),
+            ..Default::default()
+        },
+    );
+
+    // No active profile: project's base mode wins over user (project > user).
+    let effective = resolve(&[project.clone(), user.clone()], Trust::Trusted, None).unwrap();
+    assert_eq!(effective.mode, Some(Mode::Default));
+
+    // Active profile "ci": project's profile override wins.
+    let effective = resolve(&[project.clone(), user.clone()], Trust::Trusted, Some("ci")).unwrap();
+    assert_eq!(effective.mode, Some(Mode::Yolo));
+
+    // A higher-precedence layer without the profile still wins over the
+    // lower layer's profile override.
+    let flags = layer(
+        Source::Flags,
+        ConfigLayer {
+            mode: Some(Mode::Plan),
+            ..Default::default()
+        },
+    );
+    let effective = resolve(&[project, user, flags], Trust::Trusted, Some("ci")).unwrap();
+    assert_eq!(effective.mode, Some(Mode::Plan));
+}
+
+#[test]
+fn config_unknown_profile_name_is_a_hard_error() {
+    let toml = "mode = \"default\"\n\n[profile.ci]\nmode = \"yolo\"\n";
+    let project = ConfigLayer::parse(Source::Project, toml).unwrap();
+    let err = resolve(&[project], Trust::Trusted, Some("nope")).unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::UnknownProfile {
+            name: "nope".to_string(),
+        }
+    );
+}
+
+#[test]
+fn config_profile_defined_by_only_one_eligible_layer_still_applies() {
+    let toml = "mode = \"default\"\n\n[profile.ci]\nmode = \"yolo\"\n";
+    let project = ConfigLayer::parse(Source::Project, toml).unwrap();
+    let user = layer(
+        Source::User,
+        ConfigLayer {
+            mode: Some(Mode::Auto),
+            ..Default::default()
+        },
+    );
+    // Only `project` defines "ci" — that's enough for the profile to be
+    // valid, and it still applies within the layer that defines it.
+    let effective = resolve(&[project, user], Trust::Trusted, Some("ci")).unwrap();
+    assert_eq!(effective.mode, Some(Mode::Yolo));
+}
+
+#[test]
+fn config_system_deny_survives_a_profile_override_that_clears_it() {
+    let toml = "[permissions]\ndeny = [\"list(**)\"]\n\n[profile.ci.permissions]\nallow = [\"list(**)\"]\ndeny = []\n";
+    let system = ConfigLayer::parse(Source::System, toml).unwrap();
+    let effective = resolve(&[system], Trust::Trusted, Some("ci")).unwrap();
+    assert!(carries(&effective.permissions.deny, "list(**)"));
+    // Carried, not subtracted — see
+    // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
+    assert!(carries(&effective.permissions.allow, "list(**)"));
+}
+
+#[test]
+fn config_system_deny_unions_across_multiple_system_layers() {
+    let system_a = layer(
+        Source::System,
+        ConfigLayer {
+            permissions: Some(PermCfg {
+                judge: None,
+                allow: vec![],
+                deny: vec![rule("list(**)")],
+            }),
+            ..Default::default()
+        },
+    );
+    let system_b = layer(
+        Source::System,
+        ConfigLayer {
+            permissions: Some(PermCfg {
+                judge: None,
+                allow: vec![rule("list(**)")],
+                deny: vec![rule("read(secrets/**)")],
+            }),
+            ..Default::default()
+        },
+    );
+    let effective = resolve(&[system_a, system_b], Trust::Trusted, None).unwrap();
+    assert!(carries(&effective.permissions.deny, "list(**)"));
+    assert!(carries(&effective.permissions.deny, "read(secrets/**)"));
+    // Carried, not subtracted — see
+    // `config_system_deny_survives_a_higher_precedence_layer_that_clears_it`.
+    assert!(carries(&effective.permissions.allow, "list(**)"));
+}
+
+#[test]
+fn config_untrusted_project_and_local_cannot_affect_resolution() {
+    let layers = [
+        layer(
+            Source::Project,
+            ConfigLayer {
+                model: model("project"),
+                mode: Some(Mode::Yolo),
+                permissions: Some(PermCfg {
+                    judge: None,
+                    allow: vec![rule("list(**)")],
+                    deny: vec![],
+                }),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Local,
+            ConfigLayer {
+                model: model("local"),
+                mode: Some(Mode::Yolo),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    assert_eq!(effective.posture, Posture::Bare);
+    assert_eq!(effective.model, None);
+    assert_eq!(effective.mode, None);
+    assert!(effective.permissions.allow.is_empty());
+}
+
+#[test]
+fn config_untrusted_project_profile_is_not_eligible() {
+    let toml = "[profile.ci]\nmode = \"yolo\"\n";
+    let project = ConfigLayer::parse(Source::Project, toml).unwrap();
+    let err = resolve(&[project], Trust::Untrusted, Some("ci")).unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::UnknownProfile {
+            name: "ci".to_string(),
+        }
+    );
+}
+
+#[test]
+fn config_bare_forced_excludes_project_and_local_even_when_trusted() {
+    let layers = [
+        layer(
+            Source::Flags,
+            ConfigLayer {
+                bare: Some(true),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::Project,
+            ConfigLayer {
+                mode: Some(Mode::Yolo),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    assert_eq!(effective.posture, Posture::Bare);
+    assert_eq!(effective.mode, None);
+}
+
+#[test]
+fn config_unknown_key_containing_backtick_is_named_correctly() {
+    let err = ConfigLayer::parse(Source::User, "\"bad`key\" = 1\n").unwrap_err();
+    assert_eq!(
+        err,
+        ConfigError::UnknownKey {
+            key: "bad`key".to_string(),
+            source: Source::User,
+        }
+    );
+}
+
+#[test]
+fn config_untrusted_workspace_resolves_bare_regardless_of_config() {
+    let layers = [layer(Source::Project, ConfigLayer::default())];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    assert_eq!(effective.posture, Posture::Bare);
+}
+
+#[test]
+fn config_trusted_workspace_allows_ambient() {
+    let layers = [layer(Source::Project, ConfigLayer::default())];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    assert_eq!(effective.posture, Posture::Ambient);
+}
+
+#[test]
+fn config_bare_flag_forces_bare_even_when_trusted() {
+    let layers = [layer(
+        Source::Flags,
+        ConfigLayer {
+            bare: Some(true),
+            ..Default::default()
+        },
+    )];
+    let effective = resolve(&layers, Trust::Trusted, None).unwrap();
+    assert_eq!(effective.posture, Posture::Bare);
+}
+
+// -- Instruction discovery (AGENTS.md) ----------------------------------
+//
+// Pure discovery checks paths and ordering without touching files from
+// an untrusted workspace.
+
+mod instructions {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    use ego_core::config::{
+        Found, Instruction, InstructionIo, InstructionSet, Limits, Posture, Refusal, Selection,
+        SystemPrompt, load, plan, system_prompt,
+    };
+    use ego_core::public::InstructionSource;
+
+    /// An `InstructionIo` that answers from a table and counts every call.
+    ///
+    /// The count is the point: "an untrusted workspace loads nothing" is a
+    /// weaker claim than "an untrusted workspace is never looked at", and only
+    /// the second one keeps a permission dialog off the screen.
+    struct Fake {
+        files: Vec<(PathBuf, Found)>,
+        calls: RefCell<Vec<PathBuf>>,
+    }
+
+    impl Fake {
+        fn new(files: Vec<(&str, Found)>) -> Self {
+            Fake {
+                files: files
+                    .into_iter()
+                    .map(|(p, f)| (PathBuf::from(p), f))
+                    .collect(),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+
+        fn calls(&self) -> Vec<PathBuf> {
+            self.calls.borrow().clone()
+        }
+    }
+
+    impl InstructionIo for Fake {
+        fn load(&self, path: &Path, _max_bytes: u64) -> Found {
+            self.calls.borrow_mut().push(path.to_path_buf());
+            self.files
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, f)| f.clone())
+                .unwrap_or(Found::Absent)
+        }
+    }
+
+    fn read(text: &str) -> Found {
+        Found::Read {
+            bytes: text.as_bytes().to_vec(),
+        }
+    }
+
+    fn texts(loaded: &[Instruction]) -> Vec<&str> {
+        loaded.iter().map(|i| i.text.as_str()).collect()
+    }
+
+    // -- The gate ------------------------------------------------------
+
+    /// The Step 13 mechanism: an untrusted workspace does not merely load
+    /// nothing, it never asks the filesystem anything. No stat, no open — so
+    /// there is nothing for a dialog to be raised about, which is what a
+    /// headless untrusted run depends on.
+    #[test]
+    fn instructions_a_bare_posture_never_touches_the_filesystem() {
+        let io = Fake::new(vec![("/ws/AGENTS.md", read("do the thing"))]);
+        let selection = Selection::of(Posture::Bare, None);
+        assert_eq!(selection, Selection::Disabled);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert!(set.loaded.is_empty());
+        assert!(set.skipped.is_empty());
+        assert_eq!(io.calls(), Vec::<PathBuf>::new(), "the port was called");
+    }
+
+    /// An explicitly named file is *chosen*, not discovered, so the ambient
+    /// gate does not apply to it — which is the whole point of the flag in a
+    /// headless untrusted run.
+    #[test]
+    fn instructions_an_explicit_file_survives_a_bare_posture() {
+        let io = Fake::new(vec![("/elsewhere/rules.md", read("the rules"))]);
+        let selection = Selection::of(Posture::Bare, Some(PathBuf::from("/elsewhere/rules.md")));
+        assert_eq!(
+            selection,
+            Selection::Explicit(PathBuf::from("/elsewhere/rules.md"))
+        );
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["the rules"]);
+    }
+
+    /// An explicit instruction file replaces ambient discovery; no `AGENTS.md`
+    /// is searched for.
+    #[test]
+    fn instructions_an_explicit_file_replaces_the_ambient_set() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("ambient")),
+            ("/elsewhere/rules.md", read("explicit")),
+        ]);
+        let selection = Selection::of(Posture::Ambient, Some(PathBuf::from("/elsewhere/rules.md")));
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["explicit"]);
+        assert_eq!(io.calls(), [PathBuf::from("/elsewhere/rules.md")]);
+    }
+
+    // -- Ordering ------------------------------------------------------
+
+    /// Root first, cwd last, one candidate per directory in between — so a
+    /// later entry is always the nearer one.
+    #[test]
+    fn instructions_are_planned_from_the_root_down_to_the_working_directory() {
+        let paths = plan(
+            Path::new("/ws"),
+            Path::new("/ws/crates/core"),
+            &Selection::Ambient,
+        )
+        .unwrap();
+
+        assert_eq!(
+            paths,
+            [
+                PathBuf::from("/ws/AGENTS.md"),
+                PathBuf::from("/ws/crates/AGENTS.md"),
+                PathBuf::from("/ws/crates/core/AGENTS.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn instructions_at_the_root_itself_plan_exactly_one_candidate() {
+        let paths = plan(Path::new("/ws"), Path::new("/ws"), &Selection::Ambient).unwrap();
+        assert_eq!(paths, [PathBuf::from("/ws/AGENTS.md")]);
+    }
+
+    #[test]
+    fn instructions_load_in_planned_order_skipping_directories_without_one() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("workspace rules")),
+            ("/ws/crates/core/AGENTS.md", read("crate rules")),
+        ]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/crates/core"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["workspace rules", "crate rules"]);
+        assert!(set.skipped.is_empty(), "an absent file is not a refusal");
+    }
+
+    #[test]
+    fn standalone_references_load_relative_to_their_file_before_nearer_rules() {
+        let io = Fake::new(vec![
+            (
+                "/ws/AGENTS.md",
+                read("outer\n@docs/shared.md\n```md\n@secret.md\n```\n"),
+            ),
+            ("/ws/docs/shared.md", read("shared\n@../src/detail.md\n")),
+            ("/ws/src/detail.md", read("detail")),
+            ("/ws/src/AGENTS.md", read("inner")),
+            ("/ws/secret.md", read("must stay unread")),
+        ]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .expect("cwd inside workspace");
+
+        assert_eq!(
+            texts(&set.loaded),
+            [
+                "outer\n@docs/shared.md\n```md\n@secret.md\n```\n",
+                "shared\n@../src/detail.md\n",
+                "detail",
+                "inner",
+            ]
+        );
+        assert!(
+            !io.calls().contains(&PathBuf::from("/ws/secret.md")),
+            "a fenced reference must never reach the I/O port"
+        );
+    }
+
+    #[test]
+    fn a_reference_on_the_first_line_loads_from_a_hidden_fixture_directory() {
+        let root = Path::new("/Users/example/Gits/.scratch/fixture");
+        let io = Fake::new(vec![
+            (
+                "/Users/example/Gits/.scratch/fixture/AGENTS.md",
+                read("@details.md\n"),
+            ),
+            (
+                "/Users/example/Gits/.scratch/fixture/details.md",
+                read("first\n"),
+            ),
+        ]);
+        let set = load(&io, root, root, &Selection::Ambient, Limits::default()).unwrap();
+
+        assert_eq!(texts(&set.loaded), ["@details.md\n", "first\n"]);
+    }
+
+    #[test]
+    fn cyclic_duplicate_and_missing_imports_are_bounded_and_visible() {
+        let io = Fake::new(vec![
+            (
+                "/ws/AGENTS.md",
+                read("@docs/one.md\n@docs/one.md\n@missing.md\n"),
+            ),
+            ("/ws/docs/one.md", read("one\n@../AGENTS.md\n")),
+        ]);
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .expect("workspace root");
+
+        assert_eq!(
+            texts(&set.loaded),
+            [
+                "@docs/one.md\n@docs/one.md\n@missing.md\n",
+                "one\n@../AGENTS.md\n"
+            ]
+        );
+        assert_eq!(
+            io.calls()
+                .iter()
+                .filter(|path| path == &&PathBuf::from("/ws/docs/one.md"))
+                .count(),
+            1
+        );
+        assert!(
+            set.skipped
+                .iter()
+                .any(|skipped| skipped.path == Path::new("/ws/AGENTS.md")
+                    && skipped.reason.to_string().contains("cycle"))
+        );
+        assert!(
+            set.skipped
+                .iter()
+                .any(|skipped| skipped.path == Path::new("/ws/missing.md")
+                    && skipped.reason.to_string().contains("does not exist"))
+        );
+    }
+
+    #[test]
+    fn missing_imports_cannot_exhaust_unbounded_filesystem_lookups() {
+        let io = Fake::new(vec![(
+            "/ws/AGENTS.md",
+            read("@missing-1.md\n@missing-2.md\n@missing-3.md\n@missing-4.md\n"),
+        )]);
+        let limits = Limits {
+            max_files: 2,
+            ..Limits::default()
+        };
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            limits,
+        )
+        .expect("workspace root");
+
+        assert_eq!(io.calls().len(), 3, "root plus two import attempts");
+        assert_eq!(set.loaded.len(), 1);
+        assert!(set.skipped.iter().any(|skipped| {
+            skipped.path == Path::new("/ws/missing-3.md")
+                && skipped.reason == Refusal::TooManyFiles { limit: 2 }
+        }));
+    }
+
+    #[test]
+    fn imports_cannot_leave_their_scope_or_reach_fenced_or_indented_paths() {
+        let io = Fake::new(vec![
+            (
+                "/ws/AGENTS.md",
+                read(
+                    "@../secret.md\n@/etc/passwd\n@\n@two words.md\n~~~~text\n@fenced.md\n~~~~\n    @indented.md\n",
+                ),
+            ),
+            ("/secret.md", read("private")),
+            ("/etc/passwd", read("private")),
+            ("/ws/fenced.md", read("private")),
+            ("/ws/indented.md", read("private")),
+        ]);
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(set.loaded.len(), 1);
+        assert_eq!(io.calls(), [PathBuf::from("/ws/AGENTS.md")]);
+        assert_eq!(
+            set.skipped
+                .iter()
+                .filter(|skipped| skipped.reason.to_string().contains("scope"))
+                .count(),
+            2
+        );
+        assert_eq!(
+            set.skipped
+                .iter()
+                .filter(|skipped| skipped.reason.to_string().contains("malformed"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn explicit_headless_instructions_replace_ambient_rules_and_bound_imports_to_their_directory() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("ambient")),
+            (
+                "/chosen/rules.md",
+                read("chosen\n@details.md\n@../secret.md\n"),
+            ),
+            ("/chosen/details.md", read("details")),
+            ("/secret.md", read("private")),
+        ]);
+        let selection = Selection::of(Posture::Bare, Some(PathBuf::from("/chosen/rules.md")));
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            texts(&set.loaded),
+            ["chosen\n@details.md\n@../secret.md\n", "details"]
+        );
+        assert_eq!(
+            io.calls(),
+            [
+                PathBuf::from("/chosen/rules.md"),
+                PathBuf::from("/chosen/details.md")
+            ]
+        );
+        assert_eq!(set.skipped.len(), 1);
+        assert!(set.skipped[0].reason.to_string().contains("scope"));
+    }
+
+    #[test]
+    fn instructions_refuse_a_working_directory_outside_the_root() {
+        let err = plan(
+            Path::new("/ws"),
+            Path::new("/somewhere/else"),
+            &Selection::Ambient,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.root, PathBuf::from("/ws"));
+        assert_eq!(err.cwd, PathBuf::from("/somewhere/else"));
+    }
+
+    // -- Refusals are reported, never silent ---------------------------
+
+    /// A file that was there and did not contribute has to be nameable, with
+    /// its reason: "your AGENTS.md was ignored" is not something a run may
+    /// keep to itself.
+    #[test]
+    fn instructions_a_refused_file_is_reported_with_its_reason() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("workspace rules")),
+            ("/ws/src/AGENTS.md", Found::Refused(Refusal::Symlink)),
+        ]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["workspace rules"]);
+        assert_eq!(set.skipped.len(), 1);
+        assert_eq!(set.skipped[0].path, PathBuf::from("/ws/src/AGENTS.md"));
+        assert_eq!(set.skipped[0].reason, Refusal::Symlink);
+        assert!(
+            set.skipped[0].reason.to_string().contains("symlink"),
+            "the reason must say what it was: {}",
+            set.skipped[0].reason
+        );
+    }
+
+    #[test]
+    fn instructions_that_are_not_utf8_are_refused_rather_than_mangled() {
+        let io = Fake::new(vec![(
+            "/ws/AGENTS.md",
+            Found::Read {
+                bytes: vec![0xff, 0xfe, 0x00],
+            },
+        )]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert!(set.loaded.is_empty());
+        assert_eq!(set.skipped[0].reason, Refusal::NotText);
+    }
+
+    // -- Limits --------------------------------------------------------
+
+    #[test]
+    fn instructions_stop_at_the_total_byte_limit_and_say_so() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("aaaaaaaa")),
+            ("/ws/src/AGENTS.md", read("bbbbbbbb")),
+        ]);
+        let limits = Limits {
+            max_total_bytes: 12,
+            ..Limits::default()
+        };
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/src"),
+            &Selection::Ambient,
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["aaaaaaaa"]);
+        assert_eq!(
+            set.skipped[0].reason,
+            Refusal::TotalTooLarge { limit: 12 },
+            "the second file must be refused, not truncated"
+        );
+    }
+
+    #[test]
+    fn instructions_stop_at_the_file_count_limit_and_say_so() {
+        let io = Fake::new(vec![
+            ("/ws/AGENTS.md", read("one")),
+            ("/ws/a/AGENTS.md", read("two")),
+            ("/ws/a/b/AGENTS.md", read("three")),
+        ]);
+        let limits = Limits {
+            max_files: 2,
+            ..Limits::default()
+        };
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws/a/b"),
+            &Selection::Ambient,
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(texts(&set.loaded), ["one", "two"]);
+        assert_eq!(set.skipped[0].reason, Refusal::TooManyFiles { limit: 2 });
+        assert!(
+            !io.calls().contains(&PathBuf::from("/ws/a/b/AGENTS.md")),
+            "a file past the count limit must not even be opened"
+        );
+    }
+
+    /// The per-file limit belongs to the port — core must not ask for a file
+    /// and then decide it was too big — so core's job is to pass it through
+    /// unchanged and report what comes back.
+    #[test]
+    fn instructions_pass_the_per_file_limit_to_the_port() {
+        struct Recorder(RefCell<Vec<u64>>);
+        impl InstructionIo for Recorder {
+            fn load(&self, _path: &Path, max_bytes: u64) -> Found {
+                self.0.borrow_mut().push(max_bytes);
+                Found::Refused(Refusal::TooLarge { limit: max_bytes })
+            }
+        }
+
+        let io = Recorder(RefCell::new(Vec::new()));
+        let limits = Limits {
+            max_file_bytes: 4096,
+            ..Limits::default()
+        };
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            limits,
+        )
+        .unwrap();
+
+        assert_eq!(io.0.borrow().as_slice(), [4096]);
+        assert_eq!(set.skipped[0].reason, Refusal::TooLarge { limit: 4096 });
+    }
+
+    // -- Digests -------------------------------------------------------
+
+    /// SHA-256 of the bytes as read. The known vector is checked rather than
+    /// merely "some hex", because a digest that is stable but wrong proves
+    /// nothing about an export.
+    #[test]
+    fn instructions_carry_a_sha256_digest_of_their_bytes() {
+        let io = Fake::new(vec![("/ws/AGENTS.md", read("abc"))]);
+
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            set.loaded[0].digest,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(set.loaded[0].bytes, 3);
+        assert_eq!(set.bytes(), 3);
+    }
+
+    // -- The system prompt ---------------------------------------------
+
+    fn loaded(files: Vec<(&str, &str)>, cwd: &str) -> InstructionSet {
+        let io = Fake::new(
+            files
+                .into_iter()
+                .map(|(path, text)| (path, read(text)))
+                .collect(),
+        );
+        load(
+            &io,
+            Path::new("/ws"),
+            Path::new(cwd),
+            &Selection::Ambient,
+            Limits::default(),
+        )
+        .unwrap()
+    }
+
+    /// The whole reason `SystemPrompt` carries both halves: what the model is
+    /// sent and what the session header publishes are produced in one pass, so
+    /// a descriptor cannot describe a file whose words never went anywhere.
+    #[test]
+    fn a_system_prompt_describes_exactly_the_files_it_quotes() {
+        let set = loaded(
+            vec![
+                ("/ws/AGENTS.md", "run the tests"),
+                ("/ws/crates/AGENTS.md", "and the clippy gate"),
+            ],
+            "/ws/crates",
+        );
+
+        let prompt = system_prompt(&set, Path::new("/ws"), &Selection::Ambient)
+            .expect("two files contributed");
+
+        let quoted: Vec<&Path> = prompt
+            .sources
+            .iter()
+            .map(|descriptor| Path::new(&descriptor.path))
+            .collect();
+        let loaded: Vec<&Path> = set.loaded.iter().map(|file| file.path.as_path()).collect();
+        assert_eq!(quoted, loaded);
+        for (source, instruction) in prompt.sources.iter().zip(&set.loaded) {
+            assert!(
+                prompt.text.contains(&instruction.text),
+                "{} is described but not quoted",
+                source.path
+            );
+            assert_eq!(source.sha256, instruction.digest);
+        }
+    }
+
+    /// Root first, so the file nearest the working directory is the last word
+    /// — and the preamble says that is what being last means. Without the
+    /// framing, "the nearest file wins" is a rule nobody told the model.
+    #[test]
+    fn a_system_prompt_frames_its_files_nearest_last() {
+        let set = loaded(
+            vec![
+                ("/ws/AGENTS.md", "the outer rule"),
+                ("/ws/crates/AGENTS.md", "the inner rule"),
+            ],
+            "/ws/crates",
+        );
+
+        let prompt =
+            system_prompt(&set, Path::new("/ws"), &Selection::Ambient).expect("two files loaded");
+
+        let outer = prompt.text.find("the outer rule").expect("the outer file");
+        let inner = prompt.text.find("the inner rule").expect("the inner file");
+        assert!(outer < inner, "the nearer file must come last");
+        assert!(
+            prompt.text.starts_with("The following instructions"),
+            "the text must say what it is before saying it: {}",
+            prompt.text
+        );
+        assert_eq!(prompt.sources[0].scope, ".");
+        assert_eq!(prompt.sources[1].scope, "crates");
+    }
+
+    /// A workspace that offered nothing is not a workspace that offered the
+    /// empty string. `None` is the difference, and `TurnConfig` carries the
+    /// `Option` so the request has no system message at all.
+    #[test]
+    fn a_workspace_that_loaded_nothing_has_no_system_prompt() {
+        let set = loaded(Vec::new(), "/ws");
+
+        assert!(set.loaded.is_empty());
+        assert_eq!(
+            system_prompt(&set, Path::new("/ws"), &Selection::Ambient),
+            None
+        );
+    }
+
+    /// `--system TEXT` is the user's own words, so it is attributable to no
+    /// file — and says so with an empty `sources` rather than by inventing a
+    /// path. A header built from this publishes no instructions, which is
+    /// exactly right: none were used.
+    #[test]
+    fn a_verbatim_system_prompt_claims_no_file() {
+        let prompt = SystemPrompt::verbatim("answer in French");
+
+        assert_eq!(prompt.text, "answer in French");
+        assert!(prompt.sources.is_empty());
+    }
+
+    /// An explicitly named file is marked `explicit`, because two files at the
+    /// same path mean different things depending on whether the user asked for
+    /// one — one is a claim the workspace made, the other is an instruction
+    /// the operator gave.
+    #[test]
+    fn an_explicitly_named_file_is_published_as_explicit() {
+        let io = Fake::new(vec![("/elsewhere/house-style.md", read("no semicolons"))]);
+        let selection = Selection::Explicit(PathBuf::from("/elsewhere/house-style.md"));
+        let set = load(
+            &io,
+            Path::new("/ws"),
+            Path::new("/ws"),
+            &selection,
+            Limits::default(),
+        )
+        .unwrap();
+
+        let prompt = system_prompt(&set, Path::new("/ws"), &selection).expect("one file loaded");
+
+        assert_eq!(prompt.sources[0].source, InstructionSource::Explicit);
+        // Outside the workspace, so it has no workspace-relative scope and
+        // reports the directory it actually lives in.
+        assert_eq!(prompt.sources[0].scope, "/elsewhere");
+    }
+}
+
+// --- rules are parsed by the layer, not carried as text -----------------
+
+/// A rule reaches `Effective` as a [`Rule`], so whatever consumes it cannot choose its
+/// own parser.
+#[test]
+fn config_permission_rules_arrive_parsed_and_not_as_strings() {
+    let layer = ConfigLayer::parse(
+        Source::Project,
+        "[permissions]\nallow = [\"read( src/** )\"]\ndeny = [\"list(**)\"]\n",
+    )
+    .expect("two well-formed rules");
+    let permissions = layer.value.permissions.expect("the table was written");
+
+    assert_eq!(permissions.allow, vec![rule("read(src/**)")]);
+    assert_eq!(permissions.deny, vec![rule("list(**)")]);
+    assert_eq!(
+        permissions.allow[0].to_string(),
+        "read(src/**)",
+        "the spelling the operator used is not what is stored — the AST is"
+    );
+}
+
+/// The teaching message survives the trip through serde. An operator meets the
+/// grammar here first, and `unknown rule head` with no suggestion would send
+/// them to look for a `bash` tool that is not the problem.
+#[test]
+fn config_a_tool_named_rule_is_refused_with_the_effect_it_should_have_named() {
+    let err = ConfigLayer::parse(
+        Source::Project,
+        "[permissions]\nallow = [\"bash(git *)\"]\n",
+    )
+    .expect_err("`bash` is not a head");
+    let said = err.to_string();
+
+    assert!(said.contains("unknown rule head `bash`"), "{said}");
+    assert!(said.contains("Rules name effects, not tools"), "{said}");
+    assert!(said.contains("exec"), "{said}");
+}
+
+/// A system-layer network deny is parsed into the canonical rule AST and keeps
+/// its source when it reaches the effective configuration.
+#[test]
+fn config_a_system_network_deny_loads_as_a_parsed_rule_with_system_source() {
+    let parsed = ConfigLayer::parse(
+        Source::System,
+        "[permissions]\ndeny = [\"net(api.github.com)\"]\n",
+    )
+    .expect("network deny is enforceable by the foreign HTTP boundary");
+    let permissions = parsed.value.permissions.as_ref().expect("permissions");
+    assert!(matches!(permissions.deny.as_slice(), [Rule::Net(_)]));
+    assert_eq!(permissions.deny, vec![rule("net(api.github.com)")]);
+
+    let effective = resolve(&[parsed], Trust::Untrusted, None).expect("effective config");
+    let entry = &effective.permissions.deny[0];
+    assert_eq!(entry.rule(), &rule("net(api.github.com)"));
+    assert_eq!(entry.rule().to_string(), "net(api.github.com)");
+    assert_eq!(entry.origins().iter().collect::<Vec<_>>(), [Source::System]);
+    assert_eq!(entry.authority(), Source::System);
+}
+
+/// The same parsed network rule shape is retained for a project-layer allow,
+/// including its canonical value and source attribution.
+#[test]
+fn config_a_project_network_allow_loads_as_a_parsed_rule_with_project_source() {
+    let parsed = ConfigLayer::parse(
+        Source::Project,
+        "[permissions]\nallow = [\"net(api.github.com)\"]\n",
+    )
+    .expect("network allow is enforceable by the foreign HTTP boundary");
+    let permissions = parsed.value.permissions.as_ref().expect("permissions");
+    assert!(matches!(permissions.allow.as_slice(), [Rule::Net(_)]));
+    assert_eq!(permissions.allow, vec![rule("net(api.github.com)")]);
+
+    // Project permissions are ambient configuration and therefore require an
+    // explicitly trusted workspace to enter the effective ruleset.
+    let effective = resolve(&[parsed], Trust::Trusted, None).expect("effective config");
+    let entry = &effective.permissions.allow[0];
+    assert_eq!(entry.rule(), &rule("net(api.github.com)"));
+    assert_eq!(entry.rule().to_string(), "net(api.github.com)");
+    assert_eq!(
+        entry.origins().iter().collect::<Vec<_>>(),
+        [Source::Project]
+    );
+    assert_eq!(entry.authority(), Source::Project);
+}
+
+/// Profile rules pass through the shared parser rather than bypassing validation.
+#[test]
+fn config_profile_rules_are_parsed_by_the_same_parser() {
+    let err = ConfigLayer::parse(
+        Source::Project,
+        "[profile.ci.permissions]\nallow = [\"bash(cargo test)\"]\n",
+    )
+    .expect_err("`bash` is not a head in a profile either");
+    assert!(err.to_string().contains("unknown rule head `bash`"));
+}
+
+#[test]
+fn config_a_deny_written_in_two_layers_reports_the_layer_that_can_lift_it() {
+    // The system layer and the user layer deny the same predicate. The merge
+    // loop leaves `deny` holding the *user* copy; the ceiling pass then finds
+    // the system copy already present.
+    //
+    // One rule, one entry — that part is correct for enforcement and has not
+    // changed. What changed is that the entry now records *both* layers, so
+    // the attribution can name the one whose deletion actually lifts the
+    // denial. The old skip kept whichever origin arrived first, which is the
+    // user's: the one line an operator can delete without effect.
+    //
+
+    let overlapping = || PermCfg {
+        judge: None,
+        allow: vec![],
+        deny: vec![rule("read(/etc/**)")],
+    };
+    let layers = [
+        layer(
+            Source::System,
+            ConfigLayer {
+                permissions: Some(overlapping()),
+                ..Default::default()
+            },
+        ),
+        layer(
+            Source::User,
+            ConfigLayer {
+                permissions: Some(overlapping()),
+                ..Default::default()
+            },
+        ),
+    ];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+
+    assert_eq!(
+        effective
+            .permissions
+            .deny
+            .iter()
+            .filter(|entry| entry.origins() != ego_core::config::OriginSet::just(Source::Default))
+            .count(),
+        1,
+        "one explicit rule, one entry"
+    );
+    let entry = &effective.permissions.deny[0];
+    assert_eq!(entry.rule(), &rule("read(/etc/**)"));
+
+    // Both layers are recorded. The user copy is what the merge loop left and
+    // the system copy is what the ceiling pass unioned in, but the set reads
+    // back most-authoritative-first: the order rules arrived in is an
+    // implementation detail and nothing should depend on it.
+    assert_eq!(
+        entry.origins().iter().collect::<Vec<_>>(),
+        [Source::System, Source::User]
+    );
+
+    // And the answer to "can I change this" is the system layer — the *least*
+    // recently added and the *most* authoritative. An attribution that took
+    // the first origin, or the highest merge rank, would say `user` here and
+    // send the operator to delete a line that changes nothing.
+    assert_eq!(entry.authority(), Source::System);
+}
+
+/// The complement, and the reason `authority` is not just "the first origin".
+///
+/// Nothing system-level is involved, so the operator's own layer is both the
+/// only origin and the answer. Without this, a bug that hardcoded
+/// `Source::System` as the authority would pass the test above.
+#[test]
+fn config_a_deny_only_the_operator_wrote_is_attributed_to_them() {
+    let layers = [layer(
+        Source::User,
+        ConfigLayer {
+            permissions: Some(PermCfg {
+                judge: None,
+                allow: vec![],
+                deny: vec![rule("read(/etc/**)")],
+            }),
+            ..Default::default()
+        },
+    )];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    let entry = &effective.permissions.deny[0];
+    assert_eq!(entry.origins().iter().collect::<Vec<_>>(), [Source::User]);
+    assert_eq!(entry.authority(), Source::User);
+}
+
+/// A rule the operator restated does not become theirs to lift, and the order
+/// they arrive in does not decide it.
+///
+/// The test above has the user copy arriving first because that is what the
+/// merge loop produces. This one pins the *rule* rather than that accident:
+/// authority is a property of the layer, and no amount of restating moves it
+/// (decision 1). Two layers above system, so the winner is not simply "the
+/// last one added" either.
+#[test]
+fn config_authority_is_the_layer_not_the_arrival_order() {
+    let mut entry = SourcedRule::new(rule("read(/etc/**)"), Source::Flags);
+    assert_eq!(entry.authority(), Source::Flags);
+    entry.also_carried_by(Source::User);
+    assert_eq!(entry.authority(), Source::User, "user outranks flags");
+    entry.also_carried_by(Source::Project);
+    assert_eq!(
+        entry.authority(),
+        Source::User,
+        "project is above user in merge precedence and below it in authority"
+    );
+    entry.also_carried_by(Source::System);
+    assert_eq!(entry.authority(), Source::System);
+    // Idempotent: restating does not duplicate.
+    entry.also_carried_by(Source::System);
+    assert_eq!(
+        entry.origins().iter().collect::<Vec<_>>(),
+        [Source::System, Source::User, Source::Project, Source::Flags]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_paths_catches_profile_only_configuration_and_absent_vs_empty_precedence() {
+    let user = ConfigLayer::parse(
+        Source::User,
+        "exec_paths = ['/tools']\n[profile.custom]\nexec_paths = ['/profile-tools']",
+    )
+    .unwrap();
+    let effective = resolve(std::slice::from_ref(&user), Trust::Untrusted, None).unwrap();
+    assert_eq!(
+        effective.exec_paths,
+        vec![std::path::PathBuf::from("/tools")]
+    );
+    let profiled = resolve(
+        std::slice::from_ref(&user),
+        Trust::Untrusted,
+        Some("custom"),
+    )
+    .unwrap();
+    assert_eq!(
+        profiled.exec_paths,
+        vec![std::path::PathBuf::from("/profile-tools")]
+    );
+    let empty = ConfigLayer::parse(Source::Flags, "exec_paths = []").unwrap();
+    assert!(
+        resolve(&[user, empty], Trust::Untrusted, None)
+            .unwrap()
+            .exec_paths
+            .is_empty()
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_paths_catches_project_widening_and_relative_root_acceptance() {
+    for source in [Source::Project, Source::Local] {
+        assert!(ConfigLayer::parse(source, "exec_paths = ['/tools']").is_err());
+        assert!(ConfigLayer::parse(source, "[profile.custom]\nexec_paths = ['/tools']").is_err());
+    }
+    assert!(ConfigLayer::parse(Source::User, "exec_paths = ['relative']").is_err());
+}
+
+// Catches: selecting a profile loses lower-layer allowlist names, or invalid
+// environment names pass strict config validation.
+#[test]
+fn child_controls_merge_per_field_and_validate_inactive_profiles() {
+    use ego_core::config::{ExecEnvironment, Network};
+    let user = ConfigLayer::parse(Source::User,
+        "network='off'\n[exec]\nenv='allowlist'\nenv_allowlist=['PATH']\n[profile.dev.exec]\nenv='core'"
+    ).unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "network='on'").unwrap();
+    let effective = resolve(&[user, flags], Trust::Untrusted, Some("dev")).unwrap();
+    assert_eq!(effective.network, Network::On);
+    assert_eq!(effective.exec.env, Some(ExecEnvironment::Core));
+    assert_eq!(effective.exec.env_allowlist, Some(vec!["PATH".into()]));
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            "[profile.inactive.exec]\nenv_allowlist=['BAD=NAME']"
+        )
+        .is_err()
+    );
+}
+
+// Catches: flags widen a system output ceiling or untrusted project caps apply.
+#[test]
+fn output_caps_follow_trust_precedence_and_system_clamping() {
+    let system = ConfigLayer::parse(Source::System, "max_output_tokens = 500").unwrap();
+    let project = ConfigLayer::parse(Source::Project, "max_output_tokens = 100").unwrap();
+    let flags = ConfigLayer::parse(Source::Flags, "max_output_tokens = 1000").unwrap();
+    assert_eq!(
+        resolve(
+            &[system.clone(), project.clone(), flags],
+            Trust::Trusted,
+            None
+        )
+        .unwrap()
+        .max_output_tokens
+        .unwrap()
+        .get(),
+        500
+    );
+    assert_eq!(
+        resolve(&[system.clone(), project.clone()], Trust::Trusted, None)
+            .unwrap()
+            .max_output_tokens
+            .unwrap()
+            .get(),
+        100
+    );
+    assert_eq!(
+        resolve(&[system, project], Trust::Untrusted, None)
+            .unwrap()
+            .max_output_tokens
+            .unwrap()
+            .get(),
+        500
+    );
+    assert!(ConfigLayer::parse(Source::User, "max_output_tokens = 0").is_err());
+}
+
+#[test]
+fn status_providers_are_bounded_and_only_operator_sources_can_install_them() {
+    // Catches: workspace content installing executable providers or widening their resource limits.
+    use ego_core::config::{ConfigLayer, Source, Trust, resolve};
+    let user = ConfigLayer::parse(
+        Source::User,
+        "[ui.statusline.providers.build]\nargv=['operator']\ntimeout_ms=20",
+    )
+    .unwrap();
+    let project = ConfigLayer::parse(
+        Source::Project,
+        "[ui.statusline.providers.build]\nargv=['workspace']",
+    )
+    .unwrap();
+    let config = resolve(&[project, user], Trust::Trusted, None).unwrap();
+    assert_eq!(
+        config.ui.statusline.unwrap().providers.unwrap()["build"].argv,
+        ["operator"]
+    );
+    for input in [
+        "[ui.statusline.providers.bad]\nargv=[]",
+        "[ui.statusline.providers.bad]\nargv=['cmd']\ntimeout_ms=0",
+        "[ui.statusline.providers.bad]\nargv=['cmd']\ntimeout_ms=1001",
+        "[ui.statusline.providers.'bad-name']\nargv=['cmd']",
+    ] {
+        assert!(ConfigLayer::parse(Source::User, input).is_err(), "{input}");
+    }
+    let mut source = String::new();
+    for i in 0..5 {
+        source.push_str(&format!("[ui.statusline.providers.p{i}]\nargv=['cmd']\n"));
+    }
+    assert!(ConfigLayer::parse(Source::User, &source).is_err());
+    let project = ConfigLayer::parse(
+        Source::Project,
+        "[ui.statusline.providers.build]\nargv=['workspace']",
+    )
+    .unwrap();
+    assert!(
+        resolve(&[project], Trust::Trusted, None)
+            .unwrap()
+            .ui
+            .statusline
+            .is_none()
+    );
+}
+
+// Catches: repository configuration can widen instruction discovery beyond its trust boundary.
+#[test]
+fn shared_instruction_paths_are_user_only_and_absolute() {
+    let shared = std::env::temp_dir().join("shared-instructions");
+    let excluded = shared.join("scratch");
+    let text = format!("[instructions]\nshared_root={shared:?}\nexclude_roots=[{excluded:?}]\n");
+    let user = ConfigLayer::parse(Source::User, &text).unwrap();
+    let effective = resolve(&[user], Trust::Untrusted, None).unwrap();
+    assert_eq!(
+        effective.instructions.shared_root.as_deref(),
+        Some(shared.as_path())
+    );
+    assert!(ConfigLayer::parse(Source::Project, &text).is_err());
+    assert!(ConfigLayer::parse(Source::Local, &text).is_err());
+    assert!(ConfigLayer::parse(Source::User, "[instructions]\nshared_root='relative'").is_err());
+    assert!(
+        ConfigLayer::parse(Source::User, "[instructions]\nexclude_roots=['relative']").is_err()
+    );
+}
+
+// Catches: the cold storage switch ignored (the job still runs with
+// `compress = false`), a wrong default threshold, or a repository layer that
+// changes how the user's global session store is compressed.
+#[test]
+fn cold_session_storage_is_user_only_with_seven_day_default_and_off_switch() {
+    const DAY: u64 = 86_400;
+    let resolved = |text: &str| {
+        let user = ConfigLayer::parse(Source::User, text).unwrap();
+        resolve(&[user], Trust::Untrusted, None)
+            .unwrap()
+            .sessions
+            .compress_after()
+    };
+    assert_eq!(resolved(""), Some(std::time::Duration::from_secs(7 * DAY)));
+    assert_eq!(
+        resolved("[sessions]\ncompress_after_days=30"),
+        Some(std::time::Duration::from_secs(30 * DAY))
+    );
+    assert_eq!(
+        resolved("[sessions]\ncompress=false\ncompress_after_days=30"),
+        None
+    );
+    assert!(ConfigLayer::parse(Source::User, "[sessions]\ncompress_after_days=0").is_err());
+    for source in [Source::Project, Source::Local, Source::System] {
+        assert!(ConfigLayer::parse(source, "[sessions]\ncompress=false").is_err());
+    }
+}
+
+// Catches: retired native bridge configuration is silently accepted as active authority.
+#[test]
+fn private_bridge_configuration_is_rejected() {
+    assert!(ConfigLayer::parse(Source::User, "[orchestration]\nmode='active'").is_err());
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            "[profile.coordinator.orchestration]\nmode='active'"
+        )
+        .is_err()
+    );
+}
+
+// Catches: project code gaining execution authority or an allowlist granting auth/routing mutation.
+#[test]
+fn protocol_filter_config_is_strict_user_only_and_identity_only() {
+    let command = if cfg!(windows) {
+        "C:/filters/filter.exe"
+    } else {
+        "/filters/filter"
+    };
+    let valid = format!(
+        "[auth.example.protocol_filter]\ncommand = '{command}'\nidentity_headers = ['user-agent', 'x-request-identity']\n"
+    );
+    let parsed = ConfigLayer::parse(Source::User, &valid).unwrap();
+    let effective = resolve(&[parsed], Trust::Untrusted, None).unwrap();
+    let filter = effective.auth["example"].protocol_filter.as_ref().unwrap();
+    assert!(filter.enabled);
+    assert_eq!(filter.timeout_ms, 1000);
+    for source in [
+        Source::System,
+        Source::Project,
+        Source::Local,
+        Source::Flags,
+        Source::Env,
+    ] {
+        assert!(ConfigLayer::parse(source, &valid).is_err(), "{source:?}");
+    }
+    for forbidden in [
+        "Authorization",
+        "Proxy-Authorization",
+        "X-Api-Key",
+        "x-goog-api-key",
+        "Host",
+        "Content-Length",
+        "Content-Type",
+        "Transfer-Encoding",
+        "Connection",
+        "Accept",
+        "Cookie",
+        "OpenAI-Beta",
+        "anthropic-version",
+        "chatgpt-account-id",
+        "x-forwarded-host",
+        "sec-websocket-key",
+        "x-client-token",
+    ] {
+        let text = valid.replace(
+            "'user-agent', 'x-request-identity'",
+            &format!("'{forbidden}'"),
+        );
+        assert!(
+            ConfigLayer::parse(Source::User, &text).is_err(),
+            "{forbidden}"
+        );
+    }
+    for extra in ["timeout_ms = 0", "timeout_ms = 1001", "unexpected = true"] {
+        assert!(ConfigLayer::parse(Source::User, &format!("{valid}{extra}\n")).is_err());
+    }
+    assert!(ConfigLayer::parse(Source::User, &valid.replace(command, "relative-command")).is_err());
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            &valid.replace("'user-agent', 'x-request-identity'", "'x-id', 'X-ID'")
+        )
+        .is_err()
+    );
+}
+
+// Catches: idle compaction on without opt-in, a project config changing paid compaction,
+// a higher layer erasing an unset lower field, or a zero threshold accepted.
+#[test]
+fn compaction_config_is_opt_in_owner_configured_per_field_and_bounded() {
+    let defaults = resolve(&[], Trust::Trusted, None).unwrap().compaction;
+    assert!(!defaults.idle);
+    assert_eq!(defaults.idle_margin_seconds.get(), 30);
+    assert_eq!(defaults.idle_threshold.get(), 50);
+    assert_eq!(defaults.threshold.get(), 90);
+
+    let parse = |source, raw: &str| ConfigLayer::parse(source, raw).unwrap().value;
+    let system = parse(
+        Source::System,
+        "[compaction]\nidle = true\nidle_margin_seconds = 90\n",
+    );
+    let user = parse(Source::User, "[compaction]\nidle_threshold = 70\n");
+    let owner = resolve(
+        &[
+            layer(Source::System, system.clone()),
+            layer(Source::User, user),
+        ],
+        Trust::Trusted,
+        None,
+    )
+    .unwrap()
+    .compaction;
+    assert!(owner.idle);
+    assert_eq!(owner.idle_margin_seconds.get(), 90);
+    assert_eq!(owner.idle_threshold.get(), 70);
+    let project = resolve(&[layer(Source::Project, system)], Trust::Trusted, None)
+        .unwrap()
+        .compaction;
+    assert_eq!(project, defaults);
+
+    for invalid in [
+        "idle_threshold = 0",
+        "idle_threshold = 100",
+        "threshold = 0",
+        "threshold = 100",
+        "idle_margin_seconds = 0",
+    ] {
+        assert!(
+            ConfigLayer::parse(Source::User, &format!("[compaction]\n{invalid}\n")).is_err(),
+            "{invalid} must be refused"
+        );
+    }
+}
+
+// Catches: a threshold that lets idle compaction wait above the turn threshold,
+// or a project layer lowering the paid turn-time threshold.
+#[test]
+fn compaction_threshold_merges_and_idle_threshold_may_not_exceed_it() {
+    let parse = |source, raw: &str| layer(source, ConfigLayer::parse(source, raw).unwrap().value);
+    let resolved = |layers: &[_]| resolve(layers, Trust::Trusted, None);
+    let user = |raw: &str| parse(Source::User, raw);
+
+    let lowered = resolved(&[user("[compaction]\nthreshold = 80\nidle_threshold = 60\n")]).unwrap();
+    assert_eq!(lowered.compaction.threshold.get(), 80);
+    let equal = resolved(&[user("[compaction]\nthreshold = 60\nidle_threshold = 60\n")]);
+    assert!(equal.is_ok());
+    for raw in [
+        "[compaction]\nthreshold = 40\n",
+        "[compaction]\nthreshold = 60\nidle_threshold = 61\n",
+        "[compaction]\nidle_threshold = 95\n",
+    ] {
+        let error = resolved(&[user(raw)]).unwrap_err().to_string();
+        assert!(error.contains("idle_threshold"), "{raw}: {error}");
+    }
+    // Merged across layers, not per file.
+    assert!(
+        resolved(&[
+            parse(Source::System, "[compaction]\nthreshold = 55\n"),
+            user("[compaction]\nidle_threshold = 70\n"),
+        ])
+        .is_err()
+    );
+    let project = resolved(&[parse(Source::Project, "[compaction]\nthreshold = 10\n")]).unwrap();
+    assert_eq!(project.compaction.threshold.get(), 90);
+}
+
+// Catches: a default child model or effort with no opt-in, a higher layer erasing an unset lower field, or an unknown effort accepted.
+#[test]
+fn child_defaults_are_unset_merged_per_field_and_validated() {
+    let defaults = resolve(&[], Trust::Trusted, None).unwrap().task;
+    assert_eq!(defaults.model, None);
+    assert_eq!(defaults.effort, None);
+
+    let parse = |source, raw: &str| ConfigLayer::parse(source, raw).unwrap().value;
+    let system = parse(
+        Source::System,
+        "[task]\nmodel = \"test/cheap\"\neffort = \"low\"\n",
+    );
+    let user = parse(Source::User, "[task]\neffort = \"high\"\n");
+    let owner = resolve(
+        &[layer(Source::System, system), layer(Source::User, user)],
+        Trust::Trusted,
+        None,
+    )
+    .unwrap()
+    .task;
+    assert_eq!(owner.model, Some(ModelRef("test/cheap".into())));
+    assert_eq!(owner.effort, Some(ThinkingLevel::High));
+
+    assert!(ConfigLayer::parse(Source::User, "[task]\neffort = \"ludicrous\"\n").is_err());
+    assert!(ConfigLayer::parse(Source::User, "[task]\nunknown = 1\n").is_err());
+}
+
+// Catches: the instruction file count staying fixed at eight, or accepting a count
+// that is zero, or letting repository configuration set it.
+#[test]
+fn instruction_file_count_is_user_configured_and_at_least_one() {
+    use ego_core::config::Limits;
+    let user = ConfigLayer::parse(Source::User, "[instructions]\nmax_files = 12\n").unwrap();
+    let effective = resolve(&[user], Trust::Untrusted, None).unwrap();
+    assert_eq!(effective.instructions.limits().max_files, 12);
+    assert_eq!(
+        effective.instructions.limits().max_file_bytes,
+        Limits::default().max_file_bytes
+    );
+    let unset = resolve(&[], Trust::Untrusted, None).unwrap();
+    assert_eq!(unset.instructions.limits(), Limits::default());
+    assert!(
+        ConfigLayer::parse(Source::User, "[instructions]\nmax_files = 0\n").is_err(),
+        "a zero file count must be refused"
+    );
+    assert!(ConfigLayer::parse(Source::Project, "[instructions]\nmax_files = 12\n").is_err());
+}
+
+// Catches: the owner trusts a project but must duplicate its cache preference
+// in user config.
+#[test]
+fn trusted_project_long_cache_is_admitted() {
+    use ego_core::generator::capabilities::CacheRetention;
+    for source in [Source::Project, Source::Local] {
+        let layer = ConfigLayer::parse(source, "cache = \"long\"\n")
+            .expect("a project layer may select long cache retention");
+        let effective = resolve(&[layer], Trust::Trusted, None).expect("resolve");
+        assert_eq!(effective.cache, CacheRetention::Long, "{source:?}");
+    }
+}
+
+// Catches: downloaded content selects longer remote retention without trust
+// disclosure.
+#[test]
+fn untrusted_project_cannot_silently_enable_long_cache() {
+    use ego_core::generator::capabilities::CacheRetention;
+    for source in [Source::Project, Source::Local] {
+        let layer = ConfigLayer::parse(source, "cache = \"long\"\n").expect("parse");
+        let effective = resolve(&[layer], Trust::Untrusted, None).expect("resolve");
+        assert_eq!(effective.cache, CacheRetention::Short, "{source:?}");
+        assert_eq!(effective.discarded.len(), 1, "{source:?}");
+        assert_eq!(effective.discarded[0].settings, vec!["cache"], "{source:?}");
+    }
+}

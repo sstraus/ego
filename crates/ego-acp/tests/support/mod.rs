@@ -548,7 +548,7 @@ impl DurableAcpFixture {
             },
             kind: EventKind::ToolCallStarted {
                 name: "read".to_owned(),
-                args: r#"{"path":"src/main.rs"}"#.to_owned(),
+                args: r#"{"files":[{"path":"src/main.rs"}]}"#.to_owned(),
                 call_id: Some("read-call".to_owned()),
             },
         };
@@ -1431,7 +1431,9 @@ impl RunExecutor for Executor {
                 );
                 let decision = human.decide(ItemId::new(), &request).await;
                 return Ok(match decision {
-                    PermissionDecision::Allow => RunSettlement::completed(),
+                    PermissionDecision::Allow | PermissionDecision::AllowOnce => {
+                        RunSettlement::completed()
+                    }
                     _ => RunSettlement::permission_required(
                         "exec: permission was refused",
                         ego_core::run::DeniedBy::Decided(Authority::Party),

@@ -2,7 +2,7 @@
 //!
 //! Each provider profile owns its fixtures even when mappings are shared.
 //! `tests/conformance.rs` reads the recordings that
-//! `crates/ego-cli/tests/smoke.rs` writes; both must agree on profile identity.
+//! `crates/ego-cli/tests/it/smoke.rs` writes; both must agree on profile identity.
 
 // Each integration test compiles this module separately, so an item only one
 // binary needs is dead code in the other.
@@ -23,6 +23,7 @@ use ego_ai::wire::ollama::Ollama;
 use ego_ai::wire::openai_codex_responses::OpenAiCodexResponses;
 use ego_ai::wire::openai_completions::OpenAiCompletions;
 use ego_ai::wire::openai_responses::OpenAiResponses;
+use ego_ai::wire::partner_messages;
 use ego_ai::wire::xai_responses::XaiResponses;
 use ego_ai::wire::{RequestTarget, WireFormat};
 use ego_core::budget::{Metering, SettlementSource};
@@ -41,7 +42,7 @@ use ego_core::permit::HttpHeader;
 /// stand in for evidence about a live server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Provenance {
-    /// Captured live, by `crates/ego-cli/tests/smoke.rs` under
+    /// Captured live, by `crates/ego-cli/tests/it/smoke.rs` under
     /// `EGO_SMOKE_RECORD=1`.
     Recorded,
     /// Hand-assembled from the published specification. Honest about what it
@@ -141,7 +142,7 @@ pub const OLLAMA: Profile = Profile {
 /// against a live server. The fixtures are assembled from the published
 /// specification and prove what the decoder does with that contract — which is
 /// worth having and is *not* the acceptance check.
-/// `crates/ego-cli/tests/smoke.rs` is where that gap closes, on a machine that
+/// `crates/ego-cli/tests/it/smoke.rs` is where that gap closes, on a machine that
 /// has a key and asks for it by name.
 ///
 /// The public OpenAI row is selectable. Its fixtures exercise the published
@@ -292,6 +293,48 @@ pub const SUBSCRIPTION: &[&Profile] = &[
     &NOUS,
 ];
 
+/// Claude in Amazon Bedrock: schema-derived, on the first-party Messages shape.
+///
+/// No AWS account was available when this profile was added, so its fixtures
+/// restate the Anthropic Messages streaming contract that the Bedrock page
+/// says the endpoint serves unchanged. `EGO_SMOKE=bedrock EGO_SMOKE_RECORD=1`
+/// replaces them with a recording on a machine that holds a Bedrock API key.
+pub const BEDROCK: Profile = Profile {
+    id: "bedrock",
+    thinking: ThinkingLevel::Off,
+    base: "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/",
+    model: "anthropic.claude-opus-5-5",
+    row: ProviderRow::bedrock_default,
+    wire: &partner_messages::BEDROCK,
+    provenance: Provenance::VendorSchemaDerived,
+    source: "Claude in Amazon Bedrock (platform.claude.com), read 2026-11-05",
+    subscription: false,
+    error_message_at: NESTED,
+};
+
+/// Claude Models on Google Cloud (Google managed): schema-derived.
+///
+/// The request is the published `:streamRawPredict` shape; the stream is the
+/// Messages SSE contract the same page says the endpoint returns. The error
+/// fixture is the Google API error envelope (AIP-193), which a Vertex AI
+/// refusal before the model runs carries. `EGO_SMOKE=vertex EGO_SMOKE_RECORD=1`
+/// replaces all of them on a machine with a Google Cloud login.
+pub const VERTEX: Profile = Profile {
+    id: "vertex",
+    thinking: ThinkingLevel::Off,
+    base: ego_ai::provider::VERTEX_BASE,
+    model: "claude-opus-5-5",
+    row: ProviderRow::vertex,
+    wire: &partner_messages::VERTEX,
+    provenance: Provenance::VendorSchemaDerived,
+    source: "Claude Models on Google Cloud, Google managed (platform.claude.com), read 2026-11-05",
+    subscription: false,
+    error_message_at: NESTED,
+};
+
+/// The project the canonical Vertex request names.
+pub const VERTEX_PROJECT: &str = "ego-conformance";
+
 pub const ALL: &[&Profile] = &[
     &OLLAMA,
     &OPENAI,
@@ -303,6 +346,8 @@ pub const ALL: &[&Profile] = &[
     &XAI_OAUTH,
     &MINIMAX_OAUTH,
     &NOUS,
+    &BEDROCK,
+    &VERTEX,
 ];
 
 // --- fixtures ---
@@ -418,6 +463,14 @@ impl Credentials for Configured {
         &self,
         var: &str,
     ) -> Result<ego_ai::provider::Secret, ego_ai::provider::MissingCredential> {
+        // Canonical profiles exercise stored login credentials, not an
+        // externally managed task token. Unknown variables are not tokens.
+        if var == "OPENAI_CODEX_ACCESS_TOKEN" || var == ego_ai::provider::VERTEX_LOCATION_VAR {
+            return Err(ego_ai::provider::MissingCredential { var: var.into() });
+        }
+        if var == ego_ai::provider::VERTEX_PROJECT_VAR {
+            return Ok(VERTEX_PROJECT.into());
+        }
         Ok(match var {
             "oauth:openai-codex" => "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig".into(),
             "oauth:github-copilot" => "token;proxy-ep=proxy.individual.githubcopilot.com".into(),

@@ -416,10 +416,53 @@ impl McpInputMapping {
 pub enum McpManualOutcome<T> {
     Complete(T),
     InputRequired(Box<McpMappedInput>),
+    /// The server made a task of this call (MCP Tasks extension). Only an
+    /// HTTP client that declared the extension accepts it.
+    TaskCreated(Box<rmcp::model::Task>),
+}
+
+/// What one `tasks/get` poll reported, reduced to what ego acts on.
+#[derive(Debug, Clone, PartialEq)]
+pub enum McpTaskState {
+    Working,
+    /// The server needs input. Ego does not answer it in v1: the task is cancelled.
+    InputRequired,
+    /// The final `tools/call` result of the original call.
+    Completed(Box<CallToolResult>),
+    /// The JSON-RPC error that ended the task, as text.
+    Failed(String),
+    Cancelled,
+}
+
+impl McpTaskState {
+    pub(crate) fn from_rmcp(
+        task_id: &str,
+        detailed: rmcp::model::DetailedTask,
+    ) -> Result<Self, McpError> {
+        if detailed.task.task_id != task_id {
+            return Err(protocol("tasks/get answered for another task id"));
+        }
+        use rmcp::model::TaskPayload;
+        Ok(match detailed.payload {
+            TaskPayload::Working => Self::Working,
+            TaskPayload::InputRequired { .. } => Self::InputRequired,
+            TaskPayload::Completed { result } => Self::Completed(Box::new(
+                serde_json::from_value(serde_json::Value::Object(result))
+                    .map_err(|_| protocol("a completed task result is not a tools/call result"))?,
+            )),
+            TaskPayload::Failed { error } => {
+                Self::Failed(serde_json::Value::Object(error).to_string())
+            }
+            TaskPayload::Cancelled => Self::Cancelled,
+            _ => return Err(protocol("unknown task status")),
+        })
+    }
 }
 
 impl McpManualOutcome<CallToolResult> {
-    pub fn from_call(response: CallToolResponse) -> Result<Self, McpError> {
+    /// `tasks_declared` is whether this session declared the Tasks extension: a
+    /// server may answer with a task only then.
+    pub fn from_call(response: CallToolResponse, tasks_declared: bool) -> Result<Self, McpError> {
         match response {
             CallToolResponse::Complete(result) => {
                 require_complete(result.result_type.as_ref(), "tools/call")?;
@@ -428,7 +471,12 @@ impl McpManualOutcome<CallToolResult> {
             CallToolResponse::InputRequired(required) => Ok(Self::InputRequired(Box::new(
                 McpInputMapping::from_rmcp(required)?,
             ))),
-            CallToolResponse::Task(_) => Err(protocol("MCP Tasks are unsupported")),
+            CallToolResponse::Task(created) if tasks_declared => {
+                Ok(Self::TaskCreated(Box::new(created.task)))
+            }
+            CallToolResponse::Task(_) => Err(protocol(
+                "the server answered with a task although this session did not declare MCP Tasks",
+            )),
             _ => Err(protocol("unknown tools/call result type")),
         }
     }

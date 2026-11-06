@@ -283,19 +283,28 @@ impl BlobStore for SessionBlobStore {
         for reference in reachable {
             *reference_counts.entry(reference.id.as_str()).or_default() += 1;
         }
-        let mut removed = 0;
+        // A cold blob is `<id>.blob.zst`; a crash can leave both forms. One
+        // removal of the plain path drops both, so each id counts once.
+        let mut unreachable = std::collections::BTreeSet::new();
         for path in self.io.list_files(&self.directory)? {
-            if path.extension().is_none_or(|extension| extension != "blob") {
-                continue;
-            }
-            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            let Some(stem) = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| {
+                    name.strip_suffix(".blob")
+                        .or_else(|| name.strip_suffix(".blob.zst"))
+                })
+            else {
                 continue;
             };
             if BlobId::parse(stem).is_err() || reference_counts.contains_key(stem) {
                 continue;
             }
+            unreachable.insert(self.directory.join(format!("{stem}.blob")));
+        }
+        let removed = unreachable.len();
+        for path in unreachable {
             self.io.remove_file(&path)?;
-            removed += 1;
         }
         Ok(removed)
     }

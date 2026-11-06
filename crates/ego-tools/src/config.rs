@@ -983,8 +983,38 @@ fn managed_value(
                 .and_then(|exec| exec.env_allowlist.clone())
                 .map(ManagedConfigValue::ExecEnvAllowlist),
             ManagedConfigKey::Network => parsed.network.map(ManagedConfigValue::Network),
+            ManagedConfigKey::WebPrivateNetwork => parsed
+                .web_private_network
+                .map(ManagedConfigValue::WebPrivateNetwork),
             ManagedConfigKey::Budget => parsed.budget.clone().map(ManagedConfigValue::Budget),
             ManagedConfigKey::Bare => parsed.bare.map(ManagedConfigValue::Bare),
+            ManagedConfigKey::Memory => parsed.memory.map(ManagedConfigValue::Memory),
+            ManagedConfigKey::Checkpoints => {
+                parsed.checkpoints.map(ManagedConfigValue::Checkpoints)
+            }
+            ManagedConfigKey::Tools => parsed.tools.clone().map(ManagedConfigValue::Tools),
+            ManagedConfigKey::SessionsCompress => parsed
+                .sessions
+                .as_ref()
+                .and_then(|sessions| sessions.compress)
+                .map(ManagedConfigValue::SessionsCompress),
+            ManagedConfigKey::Cache => parsed.cache.map(ManagedConfigValue::Cache),
+            ManagedConfigKey::CompactionIdleMarginSeconds => parsed
+                .compaction
+                .and_then(|compaction| compaction.idle_margin_seconds)
+                .map(ManagedConfigValue::CompactionIdleMarginSeconds),
+            ManagedConfigKey::CompactionIdleThreshold => parsed
+                .compaction
+                .and_then(|compaction| compaction.idle_threshold)
+                .map(ManagedConfigValue::CompactionIdleThreshold),
+            ManagedConfigKey::InstructionsMaxFiles => parsed
+                .instructions
+                .as_ref()
+                .and_then(|instructions| instructions.max_files)
+                .and_then(std::num::NonZeroUsize::new)
+                .map(ManagedConfigValue::InstructionsMaxFiles),
+            ManagedConfigKey::Lsp => parsed.lsp.map(ManagedConfigValue::Lsp),
+            ManagedConfigKey::McpTasks => parsed.mcp_tasks.map(ManagedConfigValue::McpTasks),
             ManagedConfigKey::Keybindings => parsed
                 .ui
                 .as_ref()
@@ -995,6 +1025,25 @@ fn managed_value(
                 .as_ref()
                 .and_then(|ui| ui.vim)
                 .map(ManagedConfigValue::Vim),
+            ManagedConfigKey::CompactionIdle => parsed
+                .compaction
+                .and_then(|compaction| compaction.idle)
+                .map(ManagedConfigValue::CompactionIdle),
+            ManagedConfigKey::CompactionHeadless => parsed
+                .compaction
+                .and_then(|compaction| compaction.headless)
+                .map(ManagedConfigValue::CompactionHeadless),
+            ManagedConfigKey::DoctorNetwork => {
+                parsed.doctor_network.map(ManagedConfigValue::DoctorNetwork)
+            }
+            ManagedConfigKey::RecapEnabled => parsed
+                .recap
+                .and_then(|recap| recap.enabled)
+                .map(ManagedConfigValue::RecapEnabled),
+            ManagedConfigKey::RecapAfterMinutes => parsed
+                .recap
+                .and_then(|recap| recap.after_minutes)
+                .map(ManagedConfigValue::RecapAfterMinutes),
             ManagedConfigKey::PermissionsJudge => parsed
                 .permissions
                 .as_ref()
@@ -1047,9 +1096,25 @@ fn managed_value(
                     profile.artifact_dir.clone().map(ManagedConfigValue::Path)
                 }
                 ManagedConfigKey::Bare
+                | ManagedConfigKey::WebPrivateNetwork
                 | ManagedConfigKey::StatuslineTemplate
                 | ManagedConfigKey::Keybindings
-                | ManagedConfigKey::Vim => None,
+                | ManagedConfigKey::Vim
+                | ManagedConfigKey::CompactionIdle
+                | ManagedConfigKey::CompactionIdleMarginSeconds
+                | ManagedConfigKey::CompactionIdleThreshold
+                | ManagedConfigKey::Cache
+                | ManagedConfigKey::Tools
+                | ManagedConfigKey::Checkpoints
+                | ManagedConfigKey::SessionsCompress
+                | ManagedConfigKey::InstructionsMaxFiles
+                | ManagedConfigKey::CompactionHeadless
+                | ManagedConfigKey::DoctorNetwork
+                | ManagedConfigKey::RecapEnabled
+                | ManagedConfigKey::RecapAfterMinutes
+                | ManagedConfigKey::Memory
+                | ManagedConfigKey::Lsp
+                | ManagedConfigKey::McpTasks => None,
             }
         }
     }
@@ -1145,12 +1210,28 @@ fn managed_path(key: &ManagedConfigKey) -> Vec<&str> {
         }
         ManagedConfigKey::Roots => vec!["roots"],
         ManagedConfigKey::Network => vec!["network"],
+        ManagedConfigKey::WebPrivateNetwork => vec!["web_private_network"],
         ManagedConfigKey::Budget => vec!["budget"],
         ManagedConfigKey::Bare => vec!["bare"],
+        ManagedConfigKey::Memory => vec!["memory"],
+        ManagedConfigKey::Checkpoints => vec!["checkpoints"],
+        ManagedConfigKey::Lsp => vec!["lsp"],
+        ManagedConfigKey::McpTasks => vec!["mcp_tasks"],
         ManagedConfigKey::PermissionsJudge => vec!["permissions", "judge"],
         ManagedConfigKey::StatuslineTemplate => vec!["ui", "statusline", "template"],
         ManagedConfigKey::Keybindings => vec!["ui", "keybindings"],
         ManagedConfigKey::Vim => vec!["ui", "vim"],
+        ManagedConfigKey::CompactionIdle => vec!["compaction", "idle"],
+        ManagedConfigKey::CompactionIdleMarginSeconds => vec!["compaction", "idle_margin_seconds"],
+        ManagedConfigKey::CompactionIdleThreshold => vec!["compaction", "idle_threshold"],
+        ManagedConfigKey::Tools => vec!["tools"],
+        ManagedConfigKey::SessionsCompress => vec!["sessions", "compress"],
+        ManagedConfigKey::Cache => vec!["cache"],
+        ManagedConfigKey::InstructionsMaxFiles => vec!["instructions", "max_files"],
+        ManagedConfigKey::CompactionHeadless => vec!["compaction", "headless"],
+        ManagedConfigKey::DoctorNetwork => vec!["doctor_network"],
+        ManagedConfigKey::RecapEnabled => vec!["recap", "enabled"],
+        ManagedConfigKey::RecapAfterMinutes => vec!["recap", "after_minutes"],
         ManagedConfigKey::SessionDir => vec!["session_dir"],
         ManagedConfigKey::ArtifactDir => vec!["artifact_dir"],
     }
@@ -1328,6 +1409,14 @@ fn server_table(server: &McpServerConfig) -> Result<Table, UserConfigError> {
             }
             if http.allow_insecure_loopback {
                 table.insert("allow_insecure_loopback", value(true));
+            }
+            if !http.oauth_hosts.is_empty() {
+                let hosts = http
+                    .oauth_hosts
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                table.insert("oauth_hosts", string_array(&hosts));
             }
         }
         McpServerConfig::Acp { .. } => {

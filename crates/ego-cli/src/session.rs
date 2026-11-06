@@ -14,9 +14,9 @@ use ego_core::session::{ReplayContext, ReplayedContext};
 use ego_core::state::SessionState;
 use ego_core::store::session_store::{SessionStore, StoreError};
 use ego_tools::store::SessionEvidenceStore;
-use ego_tools::store::{JsonlStore, LeaseInputs, OpenSession, OsIo};
+use ego_tools::store::{ColdStoragePolicy, JsonlStore, LeaseInputs, OpenSession, OsIo};
 
-use crate::cli::{SessionChoice, UsageError};
+use crate::cli::{ResumeTarget, SessionChoice, UsageError};
 
 /// How long a lease holder may be silent before another process may take it
 /// over, given it also believes the holder is dead.
@@ -77,20 +77,18 @@ pub fn id_for(
                 .map_err(|err| UsageError(format!("a derived session id was not one: {err}")))
         }
         SessionChoice::ResumeLatest => crate::catalogue::resolve(store, workspace, None),
-        SessionChoice::Resume(named) => {
-            let wanted =
-                match named {
-                    // Already checked by `into_resume_args`, which refuses a
-                    // first positional that is not an id when a prompt follows it.
-                    // Re-parsed rather than carried as a `SessionId`, so
-                    // `SessionChoice` stays the shape the argument grammar
-                    // produced and no second party has to keep them in step.
-                    Some(text) => Some(SessionId::from_str(text).map_err(|err| {
-                        UsageError(format!("`{text}` is not a session id: {err}"))
-                    })?),
-                    None => None,
-                };
-            crate::catalogue::resolve(store, workspace, wanted)
+        SessionChoice::Resume(None) => crate::catalogue::resolve(store, workspace, None),
+        // Already checked by `into_resume_args`, which refuses a first
+        // positional that is not an id when a prompt follows it. Re-parsed
+        // rather than carried as a `SessionId`, so `SessionChoice` stays the
+        // shape the argument grammar produced.
+        SessionChoice::Resume(Some(ResumeTarget::Id(text))) => {
+            let wanted = SessionId::from_str(text)
+                .map_err(|err| UsageError(format!("`{text}` is not a session id: {err}")))?;
+            crate::catalogue::resolve(store, workspace, Some(wanted))
+        }
+        SessionChoice::Resume(Some(ResumeTarget::Title(title))) => {
+            crate::catalogue::resolve_title(store, workspace, title)
         }
     }
 }
@@ -105,6 +103,16 @@ pub fn id_for(
 /// the safe answer.
 pub(crate) fn assume_alive(_pid: u32) -> bool {
     true
+}
+
+/// What this process tells a lease about itself.
+pub(crate) fn lease_inputs(clock: &dyn Clock) -> LeaseInputs<'static> {
+    LeaseInputs {
+        pid: std::process::id(),
+        now: clock.now(),
+        stale_after: STALE_AFTER,
+        is_alive: &assume_alive,
+    }
 }
 
 /// Open the durable session: lease, repair, resume — `JsonlStore::open_writer`
@@ -126,16 +134,12 @@ pub(crate) fn open_candidate<'a>(
     id: &SessionId,
     clock: &dyn Clock,
 ) -> Result<OpenSession<'a>, StoreError> {
-    let inputs = LeaseInputs {
-        pid: std::process::id(),
-        now: clock.now(),
-        stale_after: STALE_AFTER,
-        is_alive: &assume_alive,
-    };
-    store.open_candidate(id, inputs).map_err(|err| {
-        // Preserve recovery details in the store failure reported to the caller.
-        StoreError::Io(std::io::Error::other(err.to_string()))
-    })
+    store
+        .open_candidate(id, lease_inputs(clock))
+        .map_err(|err| {
+            // Preserve recovery details in the store failure reported to the caller.
+            StoreError::Io(std::io::Error::other(err.to_string()))
+        })
 }
 
 /// A store on disk at `root`, creating sessions on behalf of `workspace`.
@@ -149,6 +153,59 @@ pub fn jsonl(root: PathBuf, workspace: PathBuf) -> JsonlStore {
         Some(home) => store.with_pid_index(home),
         None => store,
     }
+}
+
+/// The cold storage policy of this run: `--no-session-compression` turns the job off for it.
+pub(crate) fn cold_storage_config(
+    configured: &ego_core::config::SessionStorageConfig,
+    no_compression: bool,
+) -> ego_core::config::SessionStorageConfig {
+    let mut config = configured.clone();
+    if no_compression {
+        config.compress = Some(false);
+    }
+    config
+}
+
+/// Start one background pass of the cold storage job for the
+/// store this process uses, at most once per process. The thread never sits
+/// on the turn path, runs at lowered priority on Linux, rests three times its
+/// work time, and reports only to
+/// the debug log; a pass cut short by process exit leaves plain files intact.
+pub(crate) fn start_cold_storage(
+    store: std::sync::Arc<JsonlStore>,
+    config: &ego_core::config::SessionStorageConfig,
+) {
+    static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let Some(cold_after) = config.compress_after() else {
+        return;
+    };
+    if STARTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let spawned = std::thread::Builder::new()
+        .name("ego-cold-storage".into())
+        .spawn(move || {
+            if let Err(error) = ego_tools::store::lower_job_thread_priority() {
+                tracing::debug!(%error, "cold storage keeps normal thread priority");
+            }
+            let policy = ColdStoragePolicy::new(cold_after);
+            match store.compress_cold_sessions(&policy, std::time::SystemTime::now()) {
+                Ok(report) => tracing::debug!(?report, "cold storage pass finished"),
+                Err(error) => tracing::debug!(%error, "cold storage pass failed"),
+            }
+        });
+    if let Err(error) = spawned {
+        tracing::debug!(%error, "cold storage job did not start");
+    }
+}
+
+/// Whether sessions of this process save file checkpoints; the owner's `checkpoints` key,
+/// set once when the run's settings resolve.
+static CHECKPOINTS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub(crate) fn set_checkpoints(enabled: bool) {
+    CHECKPOINTS.store(enabled, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// The state a durable run starts from, and the writer it owns.
@@ -236,7 +293,8 @@ impl<'a> ActiveSession<'a> {
             .replay(&id)
             .map_err(|error| error.to_string())?;
         Ok(Self {
-            checkpoint_fs: ego_tools::checkpoint::CheckpointFs::new(id),
+            checkpoint_fs: ego_tools::checkpoint::CheckpointFs::new(id)
+                .with_enabled(CHECKPOINTS.load(std::sync::atomic::Ordering::Relaxed)),
             id,
             state,
             opened,
@@ -302,6 +360,28 @@ impl<'a> ActiveSession<'a> {
 /// reads real time is visible.
 pub fn now(clock: &dyn Clock) -> Timestamp {
     clock.now()
+}
+
+#[cfg(test)]
+mod cold_storage_flag {
+    use super::cold_storage_config;
+    use ego_core::config::SessionStorageConfig;
+
+    // Catches: --no-session-compression is parsed but the background pass still runs, or the
+    // flag also rewrites the configured age so a later run without it changes behaviour.
+    #[test]
+    fn the_flag_turns_the_pass_off_for_one_run_and_keeps_the_configured_age() {
+        let configured = SessionStorageConfig::default();
+        assert!(
+            cold_storage_config(&configured, false)
+                .compress_after()
+                .is_some()
+        );
+        let off = cold_storage_config(&configured, true);
+        assert_eq!(off.compress_after(), None);
+        assert_eq!(off.compress_after_days, configured.compress_after_days);
+        assert_eq!(configured.compress, None);
+    }
 }
 
 #[cfg(test)]

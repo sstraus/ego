@@ -257,6 +257,10 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
                 ManagedConfigValue::ExecEnvAllowlist(_)
             )
             | (ManagedConfigKey::Network, ManagedConfigValue::Network(_))
+            | (
+                ManagedConfigKey::WebPrivateNetwork,
+                ManagedConfigValue::WebPrivateNetwork(_)
+            )
             | (ManagedConfigKey::Budget, ManagedConfigValue::Budget(_))
             | (ManagedConfigKey::Bare, ManagedConfigValue::Bare(_))
             | (
@@ -264,6 +268,51 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
                 ManagedConfigValue::Keybindings(_)
             )
             | (ManagedConfigKey::Vim, ManagedConfigValue::Vim(_))
+            | (ManagedConfigKey::Memory, ManagedConfigValue::Memory(_))
+            | (ManagedConfigKey::Tools, ManagedConfigValue::Tools(_))
+            | (
+                ManagedConfigKey::Checkpoints,
+                ManagedConfigValue::Checkpoints(_)
+            )
+            | (
+                ManagedConfigKey::SessionsCompress,
+                ManagedConfigValue::SessionsCompress(_)
+            )
+            | (ManagedConfigKey::Cache, ManagedConfigValue::Cache(_))
+            | (
+                ManagedConfigKey::CompactionIdleMarginSeconds,
+                ManagedConfigValue::CompactionIdleMarginSeconds(_)
+            )
+            | (
+                ManagedConfigKey::CompactionIdleThreshold,
+                ManagedConfigValue::CompactionIdleThreshold(_)
+            )
+            | (
+                ManagedConfigKey::InstructionsMaxFiles,
+                ManagedConfigValue::InstructionsMaxFiles(_)
+            )
+            | (ManagedConfigKey::Lsp, ManagedConfigValue::Lsp(_))
+            | (
+                ManagedConfigKey::CompactionHeadless,
+                ManagedConfigValue::CompactionHeadless(_)
+            )
+            | (
+                ManagedConfigKey::DoctorNetwork,
+                ManagedConfigValue::DoctorNetwork(_)
+            )
+            | (ManagedConfigKey::McpTasks, ManagedConfigValue::McpTasks(_))
+            | (
+                ManagedConfigKey::RecapEnabled,
+                ManagedConfigValue::RecapEnabled(_)
+            )
+            | (
+                ManagedConfigKey::RecapAfterMinutes,
+                ManagedConfigValue::RecapAfterMinutes(_)
+            )
+            | (
+                ManagedConfigKey::CompactionIdle,
+                ManagedConfigValue::CompactionIdle(_)
+            )
             | (
                 ManagedConfigKey::PermissionsJudge,
                 ManagedConfigValue::PermissionsJudge(_)

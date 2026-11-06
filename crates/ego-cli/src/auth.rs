@@ -28,6 +28,7 @@ use ego_core::turn::CancelToken;
 use ego_tools::exec::{SecretChildError, SecretChildRequest, run_secret_child};
 use ego_tools::privacy::{PrivatePathKind, harden_private_path};
 
+/// Default per-call limit; `auth.PROVIDER.credential_timeout_secs` overrides it.
 const PROGRAM_TIMEOUT: Duration = Duration::from_secs(120);
 const PROGRAM_TERMINATION_GRACE: Duration = Duration::from_millis(500);
 const FORBIDDEN_HEADERS: &[&str] = &[
@@ -247,7 +248,11 @@ pub enum CredentialCommandFailure {
     Cancelled,
     RunTimeout,
     CommandTimeout,
-    Exit(Option<i32>),
+    /// `stderr` is the helper's masked, bounded diagnostic; empty when it printed none.
+    Exit {
+        code: Option<i32>,
+        stderr: String,
+    },
     CleanupUncertain {
         cause: Option<Box<CredentialCommandFailure>>,
     },
@@ -260,8 +265,16 @@ impl fmt::Display for CredentialCommandFailure {
             Self::Cancelled => formatter.write_str("cancelled"),
             Self::RunTimeout => formatter.write_str("run deadline expired"),
             Self::CommandTimeout => formatter.write_str("timed out"),
-            Self::Exit(Some(code)) => write!(formatter, "exited with code {code}"),
-            Self::Exit(None) => formatter.write_str("exited by signal"),
+            Self::Exit { code, stderr } => {
+                match code {
+                    Some(code) => write!(formatter, "exited with code {code}")?,
+                    None => formatter.write_str("exited by signal")?,
+                }
+                if !stderr.is_empty() {
+                    write!(formatter, ": {stderr}")?;
+                }
+                Ok(())
+            }
             Self::CleanupUncertain { cause } => {
                 formatter.write_str("process-tree cleanup is uncertain")?;
                 if let Some(cause) = cause {
@@ -279,6 +292,7 @@ pub(crate) struct CredentialCommandRequest {
     stdin: Option<SecretMaterial>,
     cancel: CancelToken,
     run_deadline: Option<Instant>,
+    timeout: Duration,
 }
 
 #[derive(Clone, Copy)]
@@ -286,6 +300,14 @@ struct CredentialCommandScope<'a> {
     commands: &'a dyn CredentialCommandPort,
     cancel: &'a CancelToken,
     run_deadline: Option<Instant>,
+    timeout: Duration,
+}
+
+/// The owner's `credential_timeout_secs` for a provider, else the default.
+fn credential_timeout(config: Option<&ego_core::config::AuthProviderLayer>) -> Duration {
+    config
+        .and_then(|provider| provider.credential_timeout_secs)
+        .map_or(PROGRAM_TIMEOUT, Duration::from_secs)
 }
 
 pub(crate) trait CredentialCommandPort: Send + Sync {
@@ -310,7 +332,7 @@ impl CredentialCommandPort for OsCredentialCommand {
                 stdin: request.stdin,
                 cancel: request.cancel,
                 run_deadline: request.run_deadline,
-                command_timeout: PROGRAM_TIMEOUT,
+                command_timeout: request.timeout,
                 termination_grace: PROGRAM_TERMINATION_GRACE,
             })
             .await
@@ -325,7 +347,7 @@ fn credential_child_failure(error: SecretChildError) -> CredentialCommandFailure
         SecretChildError::Cancelled => CredentialCommandFailure::Cancelled,
         SecretChildError::RunTimeout => CredentialCommandFailure::RunTimeout,
         SecretChildError::CommandTimeout => CredentialCommandFailure::CommandTimeout,
-        SecretChildError::Exit(code) => CredentialCommandFailure::Exit(code),
+        SecretChildError::Exit { code, stderr } => CredentialCommandFailure::Exit { code, stderr },
         SecretChildError::CleanupUncertain { cause } => {
             CredentialCommandFailure::CleanupUncertain {
                 cause: cause.map(|cause| Box::new(credential_child_failure(*cause))),
@@ -654,21 +676,23 @@ async fn login(
             .map(|provider| provider.headers.clone())
             .unwrap_or_default(),
     );
+    let timeout = credential_timeout(config.get(id));
     let plugin = discover_plugin(id, home, None);
     let environment = environment_var(id);
     let source = select_source(
         id,
         command,
         plugin,
-        oauth::built_in(id).is_some(),
+        oauth::built_in(id).is_some() || google_cloud::is_google_cloud(id),
         environment.as_deref(),
     );
     let entry = match source {
         CredentialSource::Command(program) => {
-            run_configured_command_scoped(&program, "login", None, commands, cancel, None).await?
+            run_configured_command_scoped(&program, "login", None, commands, cancel, None, timeout)
+                .await?
         }
         CredentialSource::Plugin(program) => {
-            run_program_scoped(&program, "login", None, commands, cancel, None).await?
+            run_program_scoped(&program, "login", None, commands, cancel, None, timeout).await?
         }
         CredentialSource::BuiltIn(provider) => {
             let scope = crate::provider_http::CommandHttpScope::online(cancel.clone())
@@ -677,14 +701,18 @@ async fn login(
                     program: format!("ego built-in {provider} login"),
                     reason,
                 })?;
-            built_in_login(
-                &provider,
-                std::io::stdin().is_terminal(),
-                device,
-                scope.http().as_ref(),
-                &headers,
-            )
-            .await?
+            if google_cloud::is_google_cloud(&provider) {
+                google_cloud::token_entry(scope.http().as_ref()).await?
+            } else {
+                built_in_login(
+                    &provider,
+                    std::io::stdin().is_terminal(),
+                    device,
+                    scope.http().as_ref(),
+                    &headers,
+                )
+                .await?
+            }
         }
         CredentialSource::Environment(var) => {
             return Err(AuthError::MissingCredential {
@@ -1259,6 +1287,15 @@ async fn request_credentials_at_scoped(
     cancel: &CancelToken,
     run_deadline: Option<Instant>,
 ) -> Result<Arc<dyn Credentials>, AuthError> {
+    if id == "openai-codex"
+        && EnvCredentials
+            .secret(ego_ai::provider::OPENAI_CODEX_ACCESS_TOKEN_ENV)
+            .is_ok()
+    {
+        // External task tokens are read from the connection's process
+        // environment. Do not open the store or run any renewal source.
+        return Ok(Arc::new(EnvCredentials));
+    }
     refresh_for_run_at(home, id, command, http, commands, cancel, run_deadline).await?;
     Ok(match home {
         Some(home) => Arc::new(StoreCredentials::new(home)),
@@ -1277,7 +1314,8 @@ async fn refresh_for_run_at(
     cancel: &CancelToken,
     run_deadline: Option<Instant>,
 ) -> Result<(), AuthError> {
-    if oauth::built_in(id).is_none() && command.is_none() {
+    let google_cloud = google_cloud::is_google_cloud(id);
+    if oauth::built_in(id).is_none() && !google_cloud && command.is_none() {
         return Ok(());
     }
     let Some(home) = home else {
@@ -1304,14 +1342,22 @@ async fn refresh_for_run_at(
     // A refresh talks to the same endpoint the login did, so it needs the same
     // declared identity. Reading it here rather than threading it from the
     // caller keeps the two halves of one credential's life on one table.
+    let provider_config = crate::config::auth().ok();
+    let timeout = credential_timeout(provider_config.as_ref().and_then(|config| config.get(id)));
     let headers = LoginHeaders::new(
-        crate::config::auth()
-            .ok()
+        provider_config
+            .as_ref()
             .and_then(|config| config.get(id).map(|provider| provider.headers.clone()))
             .unwrap_or_default(),
     );
     let plugin = discover_plugin(id, home, None);
-    let source = select_source(id, command, plugin, oauth::built_in(id).is_some(), None);
+    let source = select_source(
+        id,
+        command,
+        plugin,
+        oauth::built_in(id).is_some() || google_cloud,
+        None,
+    );
     let refreshed = match source {
         CredentialSource::Command(program) => {
             run_configured_command_scoped(
@@ -1321,6 +1367,7 @@ async fn refresh_for_run_at(
                 commands,
                 cancel,
                 run_deadline,
+                timeout,
             )
             .await
         }
@@ -1332,9 +1379,11 @@ async fn refresh_for_run_at(
                 commands,
                 cancel,
                 run_deadline,
+                timeout,
             )
             .await
         }
+        CredentialSource::BuiltIn(_) if google_cloud => google_cloud::token_entry(http).await,
         CredentialSource::BuiltIn(_) => refresh_built_in(id, &current, http, &headers).await,
         CredentialSource::Environment(_) | CredentialSource::Missing(_) => {
             return Err(AuthError::MissingCredential {
@@ -1429,6 +1478,18 @@ fn known_and_discovered(home: &Path) -> String {
         .iter()
         .map(|flow| flow.id().to_string())
         .collect();
+    ids.extend(
+        crate::model::rows(&Default::default())
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|row| {
+                matches!(
+                    row.credential,
+                    ego_ai::provider::CredentialStrategy::GoogleCloud { .. }
+                )
+            })
+            .map(|row| row.id().to_string()),
+    );
     let plugin_dir = home.join("plugins/auth");
     if let Ok(entries) = fs::read_dir(plugin_dir) {
         for entry in entries.flatten() {
@@ -1572,6 +1633,7 @@ pub fn discover_plugin(id: &str, home: &Path, path: Option<&Path>) -> Option<Pat
 }
 
 mod credential_program;
+mod google_cloud;
 pub use credential_program::run_program;
 use credential_program::{run_configured_command_scoped, run_program_scoped};
 
@@ -1596,6 +1658,138 @@ mod tests {
         fn begin_call(&self) -> Box<dyn ego_ai::http::HttpCall> {
             panic!("credential tests must not perform an HTTP exchange")
         }
+    }
+
+    // Catches: external task credentials read or refresh the stored login.
+    #[tokio::test]
+    async fn external_token_is_used_and_never_refreshed() {
+        const TOKEN: &str = "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig";
+        if std::env::var_os("EGO_EXTERNAL_TOKEN_TEST_CHILD").is_none() {
+            for token in [TOKEN, "malformed-external-token"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "auth::tests::external_token_is_used_and_never_refreshed",
+                        "--nocapture",
+                    ])
+                    .env("EGO_EXTERNAL_TOKEN_TEST_CHILD", "1")
+                    .env("OPENAI_CODEX_ACCESS_TOKEN", token)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let store = AuthStore::new(root.path());
+        store
+            .put(
+                "openai-codex",
+                AuthEntry::OAuth {
+                    access: StoredSecret::from("expired-stored-access"),
+                    refresh: Some(StoredSecret::from("must-not-refresh")),
+                    expires: Some(1),
+                },
+            )
+            .unwrap();
+        let credentials =
+            request_credentials_at(Some(root.path()), "openai-codex", None, &UnexpectedHttp)
+                .await
+                .unwrap();
+        // A corrupt store makes even a read observable, after preparation.
+        std::fs::write(store.path(), "not JSON").unwrap();
+        // Preparation must not read the corrupt store either, even with a
+        // configured renewal command.
+        request_credentials_at(
+            Some(root.path()),
+            "openai-codex",
+            Some("must-not-run"),
+            &UnexpectedHttp,
+        )
+        .await
+        .unwrap();
+        let resolved = ProviderRow::openai_codex_default()
+            .credential
+            .resolve(credentials.as_ref());
+        if std::env::var("OPENAI_CODEX_ACCESS_TOKEN").unwrap() != TOKEN {
+            let error = resolved.unwrap_err();
+            assert!(!error.to_string().contains("malformed-external-token"));
+            return;
+        }
+        let credential = resolved.unwrap();
+        assert!(
+            credential
+                .headers()
+                .iter()
+                .any(|header| header.name() == "authorization"
+                    && header.value() == format!("Bearer {TOKEN}").as_bytes()
+                    && header.is_secret())
+        );
+        assert!(
+            credential
+                .headers()
+                .iter()
+                .any(|header| header.name() == "chatgpt-account-id" && header.value() == b"acct_1")
+        );
+    }
+
+    // Catches: an absent or blank task token disables a valid stored login.
+    #[tokio::test]
+    async fn external_token_blank_or_unset_preserves_stored_login() {
+        if std::env::var_os("EGO_BLANK_TOKEN_TEST_CHILD").is_none() {
+            for token in [None, Some("  ")] {
+                let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+                command
+                    .args([
+                        "--exact",
+                        "auth::tests::external_token_blank_or_unset_preserves_stored_login",
+                        "--nocapture",
+                    ])
+                    .env("EGO_BLANK_TOKEN_TEST_CHILD", "1")
+                    .env_remove("OPENAI_CODEX_ACCESS_TOKEN");
+                if let Some(token) = token {
+                    command.env("OPENAI_CODEX_ACCESS_TOKEN", token);
+                }
+                let output = command.output().unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        }
+        const TOKEN: &str = "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig";
+        let root = tempfile::tempdir().unwrap();
+        AuthStore::new(root.path())
+            .put(
+                "openai-codex",
+                AuthEntry::OAuth {
+                    access: StoredSecret::from(TOKEN),
+                    refresh: None,
+                    expires: None,
+                },
+            )
+            .unwrap();
+        let credentials =
+            request_credentials_at(Some(root.path()), "openai-codex", None, &UnexpectedHttp)
+                .await
+                .unwrap();
+        let resolved = ProviderRow::openai_codex_default()
+            .credential
+            .resolve(credentials.as_ref())
+            .unwrap();
+        assert!(
+            resolved
+                .headers()
+                .iter()
+                .any(|header| header.name() == "authorization"
+                    && header.value() == format!("Bearer {TOKEN}").as_bytes())
+        );
     }
 
     #[tokio::test]
@@ -1688,7 +1882,7 @@ mod tests {
     /// it leaves behind is a token rather than an identity.
     ///
     /// The Copilot token exchange is the login step that used to carry the
-    /// Copilot Chat / VS Code disguise; `ego-ai/tests/vendor_client_identity.rs`
+    /// Copilot Chat / VS Code disguise; `ego-ai/tests/it/vendor_client_identity.rs`
     /// enforces that the disguise is gone. This is the other half: with only
     /// `accept`, the credential and ego's own `user-agent` on the wire, the
     /// exchange still builds, GitHub's answer still becomes an entry, and

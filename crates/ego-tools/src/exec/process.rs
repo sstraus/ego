@@ -12,14 +12,12 @@ use ego_core::event::domain::CancelCause;
 use ego_core::event::id::DetachedExecId;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::EffectScope;
-use ego_core::permit::residual::{
-    DECISION_DEADLINE, MAX_DECISIONS_PER_CALL, ResidualDecision, ResidualWriteDesk,
-};
+use ego_core::permit::residual::{ResidualDecision, ResidualWriteDesk};
 use ego_core::permit::{
-    CanonPath, CleanupCertainty, DetachedExecOutcome, DetachedExecSnapshot, DuplexEnd,
-    DuplexSession, DuplexSettlement, ExecCaps, ProcessError, RunConfinement, SandboxAccess,
-    SandboxGrant, SandboxGrantPort, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult,
-    TransportError, TransportFailure,
+    CanonPath, CleanupCertainty, DetachedExecLines, DetachedExecMonitor, DetachedExecOutcome,
+    DetachedExecSnapshot, DuplexEnd, DuplexSession, DuplexSettlement, ExecCaps, ProcessError,
+    RunConfinement, SandboxAccess, SandboxGrant, SandboxGrantPort, SpawnSpec, StreamProvenance,
+    ToolContentBlock, ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWriter};
 use ego_core::turn::CancelToken;
@@ -36,11 +34,8 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt as _, TokioAsyncWriteCo
 use super::ExecLimits;
 use super::backend::{Backend, executable, prefixed_command};
 use super::denial;
+use super::monitor::{self, LineMonitor};
 use super::process_tree::ManagedChild;
-
-/// Questions one command may put to the human before its refusal is final.
-/// Each answer can reveal one more path, so the bound is a few paths, not one.
-const MAX_SANDBOX_QUESTIONS: usize = 3;
 
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
@@ -99,6 +94,8 @@ struct ExecutionContext {
 struct LiveOutput {
     stdout: TailBytes,
     stderr: TailBytes,
+    /// The model's subscription and the waker it notifies.
+    monitor: Option<(LineMonitor, Arc<Mutex<Option<BackgroundWake>>>)>,
 }
 
 #[derive(Default)]
@@ -352,6 +349,83 @@ impl RunProcessContext {
         })
     }
 
+    pub(crate) fn monitor_background(
+        &self,
+        id: DetachedExecId,
+        request: DetachedExecMonitor,
+    ) -> Result<(), ProcessError> {
+        let compiled = monitor::compile(&request)?;
+        let entries = self.background.lock().map_err(|_| {
+            ProcessError::Backend("background process registry lock poisoned".into())
+        })?;
+        let entry = entries
+            .get(&id)
+            .filter(|entry| entry.promoted)
+            .ok_or(ProcessError::UnknownBackground { id })?;
+        // The settlement is published under the registry lock, so no line
+        // can arrive for a monitor installed after this check.
+        if entry.outcome.is_some() {
+            return Err(ProcessError::Invariant(format!(
+                "background exec {id} has settled; there is no new output to monitor"
+            )));
+        }
+        let mut output = entry
+            .output
+            .lock()
+            .map_err(|_| ProcessError::Backend("background output lock poisoned".into()))?;
+        let output = &mut *output;
+        match &mut output.monitor {
+            Some((existing, _)) => existing.retarget(compiled),
+            None => {
+                output.monitor = Some((
+                    LineMonitor::new(compiled, &output.stdout.bytes, &output.stderr.bytes),
+                    Arc::clone(&self.background_waker),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Take queued monitor lines. Once the exec has settled this also ends
+    /// its monitor: no further output can arrive.
+    pub(crate) fn take_background_output(
+        &self,
+        id: DetachedExecId,
+    ) -> Result<Option<DetachedExecLines>, ProcessError> {
+        let entries = self.background.lock().map_err(|_| {
+            ProcessError::Backend("background process registry lock poisoned".into())
+        })?;
+        let Some(entry) = entries.get(&id) else {
+            return Ok(None);
+        };
+        let mut output = entry
+            .output
+            .lock()
+            .map_err(|_| ProcessError::Backend("background output lock poisoned".into()))?;
+        let taken = output
+            .monitor
+            .as_mut()
+            .and_then(|(monitor, _)| monitor.take(id));
+        if entry.outcome.is_some() {
+            output.monitor = None;
+        }
+        Ok(taken)
+    }
+
+    pub(crate) fn background_output_ready(&self, id: DetachedExecId) -> bool {
+        let Ok(entries) = self.background.lock() else {
+            return false;
+        };
+        entries.get(&id).is_some_and(|entry| {
+            entry.output.lock().is_ok_and(|output| {
+                output
+                    .monitor
+                    .as_ref()
+                    .is_some_and(|(monitor, _)| monitor.ready())
+            })
+        })
+    }
+
     pub(crate) fn cancel_background(&self, id: DetachedExecId) -> Result<(), ProcessError> {
         let mut entries = self.background.lock().map_err(|_| {
             ProcessError::Backend("background process registry lock poisoned".into())
@@ -469,14 +543,8 @@ impl RunProcessContext {
             .map_err(|error| ProcessError::Backend(format!("process task failed: {error}")))?
     }
 
-    /// Run a command, and when stderr hints at a refused absolute path, ask the
-    /// judge, then the human, whether to open that one path.
-    ///
-    /// A human allowance runs the command again, and only after it has exited
-    /// unsuccessfully, so no process of the first attempt is still alive;
-    /// whatever it did before the refusal is not undone, and the human is told
-    /// which path the retry is for. A judge allowance never runs it again: the
-    /// path stays writable for the session and the model decides.
+    /// Serve one refusal after the child exits. A grant affects only a later
+    /// explicit call: a partially executed command is never replayed here.
     async fn execute_asking(
         &self,
         spec: &SpawnSpec,
@@ -484,104 +552,122 @@ impl RunProcessContext {
         live_output: Option<Arc<Mutex<LiveOutput>>>,
         tracked: Option<TrackedExec<'_>>,
     ) -> Result<ToolResult, ProcessError> {
-        let mut questions = 0;
-        let mut decisions = 0;
-        loop {
-            let grants = self
-                .sandbox_grants
-                .as_deref()
-                .filter(|_| !is_promoted(tracked));
-            let judged = self
-                .residual
-                .as_ref()
-                .map_or_else(Vec::new, |desk| desk.grants());
-            let mut granted = grants.map_or_else(Vec::new, SandboxGrantPort::granted);
-            granted.extend(
-                judged
-                    .iter()
-                    .map(|path| SandboxGrant::new(path.clone(), SandboxAccess::Write)),
-            );
-            let backend = self.backend_under(&granted, &judged)?;
-            let (code, mut result) = match self
-                .spawn_once(
-                    backend,
-                    spec,
-                    None,
-                    background_cancel.clone(),
-                    live_output.clone(),
-                )
-                .await
-            {
-                Err(ProcessError::Exit { code, result }) => (code, result),
-                other => return other,
-            };
-            let Some(found) = denial::analyze(spec, &result, &self.confinement, &granted) else {
-                return Err(ProcessError::Exit { code, result });
-            };
-            let outcome = match &found.request {
-                Some(_) if !self.backend.can_widen() => denial::Outcome::CannotWiden,
-                Some(request) => {
-                    let desk = self.residual.as_ref().filter(|_| {
-                        request.access == SandboxAccess::Write
-                            && self.confinement.adaptive_perimeter().is_some()
-                            && background_cancel.is_none()
-                            && decisions < MAX_DECISIONS_PER_CALL
-                    });
-                    let judged_grant = match desk {
-                        Some(desk) => {
-                            decisions += 1;
-                            let evidence = super::residual::evidence(
-                                &found,
-                                request,
-                                &denial::stderr(&result),
-                                &self.confinement,
-                                &judged,
-                            );
-                            let decided = desk.decide(
-                                spec.clone(),
-                                evidence,
-                                super::residual::admissible(self.confinement.clone()),
-                            );
-                            matches!(
-                                tokio::time::timeout(2 * DECISION_DEADLINE, decided).await,
-                                Ok(ResidualDecision::Granted { .. })
-                            )
-                        }
-                        None => false,
-                    };
-                    match grants.filter(|_| !is_promoted(tracked)) {
-                        _ if judged_grant => denial::Outcome::JudgeGranted,
-                        Some(grants) if questions < MAX_SANDBOX_QUESTIONS => {
-                            questions += 1;
-                            match self
-                                .ask_until_cancelled(
-                                    grants,
-                                    request,
-                                    spec,
-                                    background_cancel.as_ref(),
-                                    tracked,
-                                )
-                                .await
-                            {
-                                Some(true) => continue,
-                                Some(false) if is_promoted(tracked) => denial::Outcome::NobodyToAsk,
-                                Some(false) => denial::Outcome::Declined,
-                                None => return Err(ProcessError::Cancelled),
-                            }
-                        }
-                        Some(_) => denial::Outcome::QuestionLimit,
-                        None => denial::Outcome::NobodyToAsk,
-                    }
+        let grants = self
+            .sandbox_grants
+            .as_deref()
+            .filter(|_| !is_promoted(tracked));
+        let judged = self
+            .residual
+            .as_ref()
+            .map_or_else(Vec::new, |desk| desk.grants());
+        let mut granted = grants.map_or_else(Vec::new, SandboxGrantPort::granted);
+        if let Some(desk) = &self.residual {
+            for grant in desk.owner_grants() {
+                if !granted.contains(&grant) {
+                    granted.push(grant);
                 }
-                None => denial::Outcome::NobodyToAsk,
-            };
-            result.content.push(ToolContentBlock::builtin(denial::note(
-                &found,
-                &self.confinement,
-                outcome,
-            )));
-            return Err(ProcessError::Exit { code, result });
+            }
         }
+        // Saved authority is optional. A changed path loses its capability,
+        // not the session's ability to run unrelated work under base confinement.
+        // Never substitute the replacement canonical target; it needs approval.
+        granted.retain(
+            |grant| match super::denial::readmit(grant, &self.confinement) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "omitting stale owner sandbox grant");
+                    false
+                }
+            },
+        );
+        granted.extend(
+            judged
+                .iter()
+                .map(|path| SandboxGrant::new(path.clone(), SandboxAccess::Write)),
+        );
+        let backend = self.backend_under(&granted, &judged)?;
+        let (code, mut result) = match self
+            .spawn_once(backend, spec, None, background_cancel.clone(), live_output)
+            .await
+        {
+            Err(ProcessError::Exit { code, result }) => (code, result),
+            other => return other,
+        };
+        let Some(found) = denial::analyze(spec, &result, &self.confinement, &granted) else {
+            return Err(ProcessError::Exit { code, result });
+        };
+        let outcome = match &found.request {
+            Some(_) if !self.backend.can_widen() => denial::Outcome::CannotWiden,
+            Some(request) => {
+                let desk = self.residual.as_ref().filter(|_| {
+                    request.access == SandboxAccess::Write
+                        && !super::maintenance::request(request, &self.confinement)
+                        && self.confinement.adaptive_perimeter().is_some()
+                        && background_cancel.is_none()
+                });
+                let judged_grant = match desk {
+                    Some(desk) => {
+                        let evidence = super::residual::evidence(
+                            &found,
+                            request,
+                            &denial::stderr(&result),
+                            &self.confinement,
+                            &judged,
+                        );
+                        let decided = desk.decide(
+                            spec.clone(),
+                            evidence,
+                            super::residual::admissible(self.confinement.clone()),
+                        );
+                        matches!(
+                            tokio::time::timeout(
+                                desk.limits().deadline().saturating_mul(2),
+                                decided
+                            )
+                            .await,
+                            Ok(ResidualDecision::Granted { .. })
+                        )
+                    }
+                    None => false,
+                };
+                match grants.filter(|_| !is_promoted(tracked)) {
+                    _ if judged_grant => denial::Outcome::JudgeGranted,
+                    Some(grants) => match self
+                        .ask_until_cancelled(
+                            grants,
+                            request,
+                            spec,
+                            background_cancel.as_ref(),
+                            tracked,
+                        )
+                        .await
+                    {
+                        Some(true) => {
+                            super::denial::readmit(request, &self.confinement)?;
+                            if let Some(desk) = &self.residual
+                                && !desk.record_owner_grant(request.clone()).await
+                            {
+                                return Err(ProcessError::Backend(
+                                    "owner grant could not be journaled".into(),
+                                ));
+                            }
+                            denial::Outcome::OwnerGranted
+                        }
+                        Some(false) if is_promoted(tracked) => denial::Outcome::NobodyToAsk,
+                        Some(false) => denial::Outcome::Declined,
+                        None => return Err(ProcessError::Cancelled),
+                    },
+                    None => denial::Outcome::NobodyToAsk,
+                }
+            }
+            None => denial::Outcome::NobodyToAsk,
+        };
+        result.content.push(ToolContentBlock::builtin(denial::note(
+            &found,
+            &self.confinement,
+            outcome,
+        )));
+        Err(ProcessError::Exit { code, result })
     }
 
     /// The person's answer, or `None` when the run was cancelled first: a
@@ -995,7 +1081,7 @@ async fn spawn_duplex(
     context: Arc<RunProcessContext>,
     spec: SpawnSpec,
 ) -> Result<Box<dyn DuplexSession>, TransportError> {
-    if !context.confinement.admits_mcp_stdio() {
+    if !context.confinement.admits_mcp() {
         return Err(TransportError::definitely_unsent(TransportFailure::Offline));
     }
     if let Err(missing) = context
@@ -1563,6 +1649,14 @@ fn write_stream(
                         StreamProvenance::Stdout => output.stdout.append(&chunk, preview_bytes),
                         StreamProvenance::Stderr => output.stderr.append(&chunk, preview_bytes),
                     }
+                    let wake = output.monitor.as_mut().and_then(|(monitor, waker)| {
+                        monitor.push(stream, &chunk).then(|| Arc::clone(waker))
+                    });
+                    // Never call host code under the output lock.
+                    drop(output);
+                    if let Some(waker) = wake {
+                        wake_background(&waker);
+                    }
                 }
             }
             WriterMessage::Finish => {
@@ -1932,6 +2026,76 @@ mod sandbox_question_tests {
         }
     }
 
+    // Catches: replacing an old approved output path disables unrelated commands.
+    #[cfg(unix)]
+    #[test]
+    fn stale_owner_path_does_not_block_unrelated_workspace_command() {
+        let mut rig = rig(Arc::new(Widening), false);
+        let approved = std::path::PathBuf::from(&rig.spec.argv()[3]);
+        let replacement = approved.with_file_name("replacement");
+        std::fs::write(&replacement, "replacement").unwrap();
+        let desk = ResidualWriteDesk::new();
+        desk.restore_owner_grants(&[SandboxGrant::new(
+            CanonPath::new(&approved),
+            SandboxAccess::Read,
+        )]);
+        rig.context = rig.context.with_residual_desk(Some(desk));
+        std::fs::remove_file(&approved).unwrap();
+        std::os::unix::fs::symlink(&replacement, &approved).unwrap();
+        let command = SpawnSpec::new(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf ready > unrelated-marker".into(),
+            ],
+            rig.spec.cwd().cloned(),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let outcome = block_on(rig.context.execute(&command));
+        assert!(
+            outcome.is_ok(),
+            "obsolete owner path blocked unrelated command: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(command.cwd().unwrap().as_path().join("unrelated-marker"))
+                .unwrap(),
+            "ready"
+        );
+    }
+
+    // Catches: an owner path approval repeats a mutation that already ran.
+    #[test]
+    fn owner_grant_never_replays_partial_command() {
+        let mut rig = rig(Arc::new(Widening), false);
+        rig.spec = SpawnSpec::new(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf x >> marker; printf '%s: Operation not permitted\\n' \"$0\" >&2; exit 1"
+                    .into(),
+                rig.spec.argv()[3].clone(),
+            ],
+            rig.spec.cwd().cloned(),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let outcome = block_on(rig.context.execute(&rig.spec));
+        assert!(
+            matches!(outcome, Err(ProcessError::Exit { .. })),
+            "{outcome:?}"
+        );
+        let marker = rig.spec.cwd().unwrap().as_path().join("marker");
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "x",
+            "owner approval must not replay a partially executed command"
+        );
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
+    }
+
     // Catches: xcode-select's quoted path and parenthesized errno bypass the
     // production sandbox question flow. Fixture is real R3 stderr, 2026-10-28.
     #[test]
@@ -1959,7 +2123,7 @@ mod sandbox_question_tests {
         );
         assert_eq!(
             rig.seat.asked.load(Ordering::SeqCst),
-            MAX_SANDBOX_QUESTIONS,
+            1,
             "recorded xcode-select EPERM must reach the live question port"
         );
     }

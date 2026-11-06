@@ -129,3 +129,40 @@ fn repaint_contract(case: &str) {
         );
     }
 }
+
+// Catches: growing the PTY strands an old footer above the new live frame.
+#[test]
+fn height_changes_keep_one_live_footer() {
+    let (reply, gate) = gated_paced_line("HEIGHT-HELD\n");
+    let mut session = modal_session_with(vec![reply, Reply::Sse(text("HEIGHT-SECOND-DONE"))]);
+    session.press(b"/help\r");
+    session.wait("Retry a waiting provider now");
+    let mut failures = Vec::new();
+    for (phase, rows) in [("idle shrink", 24), ("idle grow", 40)] {
+        session.resize(rows, 120);
+        session.wait("qwen3");
+        let grid = session.screen().join("\n");
+        println!("HEIGHT {phase}: {grid:?}");
+        if grid.matches("qwen3 · ").count() != 1 {
+            failures.push(format!("{phase}: {grid}"));
+        }
+    }
+    session.press(b"height first\r");
+    session.wait("HEIGHT-HELD");
+    for (phase, rows) in [("working shrink", 24), ("working grow", 40)] {
+        session.resize(rows, 120);
+        session.wait("Working");
+        let grid = session.screen().join("\n");
+        println!("HEIGHT {phase}: {grid:?}");
+        if grid.matches("Working").count() != 1 {
+            failures.push(format!("{phase}: {grid}"));
+        }
+    }
+    session.press(b"height second\r");
+    gate.release();
+    session.wait("HEIGHT-SECOND-DONE");
+    let grid = session.screen().join("\n");
+    println!("HEIGHT completed queued turn: {grid:?}");
+    session.finish();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}

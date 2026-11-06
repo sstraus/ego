@@ -85,6 +85,7 @@ impl StaticRequestProfile {
 /// The resolved model supplies the mapping beside the row, so dynamic model
 /// authorities cannot expose a plausible protocol before resolution.
 pub struct WireGenerator {
+    cache_ttl_seconds: Option<std::num::NonZeroU64>,
     row: ProviderRow,
     service_tier: crate::service_tier::ServiceTier,
     wire: &'static dyn WireFormat,
@@ -123,6 +124,7 @@ impl WireGenerator {
             None => row.http_profile.clone(),
         };
         WireGenerator {
+            cache_ttl_seconds: None,
             row,
             service_tier: crate::service_tier::ServiceTier::Standard,
             wire,
@@ -132,6 +134,12 @@ impl WireGenerator {
             codex_session: Arc::default(),
             protocol_filter: None,
         }
+    }
+
+    /// A user estimate for provider-managed lifetimes; never sent on the wire.
+    pub fn with_cache_ttl_seconds(mut self, ttl: Option<std::num::NonZeroU64>) -> Self {
+        self.cache_ttl_seconds = ttl;
+        self
     }
 
     /// Bind a tier to this generation profile, not mutable process state.
@@ -289,6 +297,25 @@ fn trace_request_tool_names(request: &crate::http::HttpRequest) {
 }
 
 impl Generator for WireGenerator {
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        // A user filter can rewrite cache controls; its output has no declared TTL contract.
+        let mut policy = if self.protocol_filter.is_some() {
+            ego_core::usage::PromptCachePolicy::default()
+        } else {
+            self.wire.prompt_cache_policy(req)
+        };
+        if policy.ttl_seconds.is_none()
+            && req.cache.as_ref().is_some_and(|cache| {
+                cache.retention != ego_core::generator::capabilities::CacheRetention::None
+            })
+        {
+            policy.ttl_seconds = self.cache_ttl_seconds;
+            // An override explicitly selects the user's request-to-request estimate.
+            policy.refresh_on_read = self.cache_ttl_seconds.is_some();
+        }
+        policy
+    }
+
     fn release_idle_connection(&self, session: ego_core::event::id::SessionId) {
         // An active stream owns the lock and its socket, not idle state. Only
         // this session's completed connection may be released here.
@@ -354,6 +381,7 @@ impl Generator for WireGenerator {
         {
             let _ = prepared_prefix.set(prefix);
         }
+        let diagnostic_headers = self.credential.headers();
         let publish_prefix = Arc::clone(&prepared_prefix);
         let filter = self.protocol_filter.clone();
         let attempt_ref = attempt.attempt();
@@ -460,6 +488,32 @@ impl Generator for WireGenerator {
             stream::iter(observation)
                 .chain(wire.decode(response, cost.clone()))
                 .boxed()
+        })
+        .map(move |mut event| {
+            use ego_core::generator::port::AiEvent;
+            // Providers can reflect the credential in a typed error field.
+            // Mask it before either the host or attempt receipt observes it.
+            let diagnostic = match &mut event {
+                AiEvent::Error { message, .. } => Some(message),
+                AiEvent::ProviderFailure { cause, .. } | AiEvent::LocalFailure { cause } => {
+                    Some(cause)
+                }
+                _ => None,
+            };
+            if let Some(diagnostic) = diagnostic {
+                for header in &diagnostic_headers {
+                    if header.is_secret() {
+                        let value = header.value();
+                        let value = value.strip_prefix(b"Bearer ").unwrap_or(value);
+                        if let Ok(value) = std::str::from_utf8(value)
+                            && !value.is_empty()
+                        {
+                            *diagnostic = diagnostic.replace(value, "[REDACTED]");
+                        }
+                    }
+                }
+            }
+            event
         })
         .flat_map(move |event| stream::iter(names.restore(event)))
         .boxed();

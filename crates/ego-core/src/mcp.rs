@@ -15,6 +15,12 @@ use crate::generator::attempt::DeliveryCertainty;
 use crate::permit::{InvocationDigest, ToolResult};
 use crate::store::evidence::EvidenceRef;
 
+use crate::mcp_task::valid_task_id;
+pub use crate::mcp_task::{
+    McpTaskLedger, McpTaskPoll, McpTaskPoller, McpTaskPollerHandle, McpTaskPort, McpTaskSeed,
+    McpTaskStart, McpTaskTicket,
+};
+
 /// Maximum UTF-8 bytes admitted from one server's instructions.
 /// Kept at the same 64 KiB bound as instruction files and skill bodies.
 pub const FOREIGN_VISIBLE_BYTES: usize = 64 * 1024;
@@ -94,9 +100,26 @@ pub enum ContextKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum McpSubject {
-    Tool { server: String, name: String },
-    Resource { server: String, uri: String },
-    Prompt { server: String, name: String },
+    Tool {
+        server: String,
+        name: String,
+    },
+    Resource {
+        server: String,
+        uri: String,
+    },
+    Prompt {
+        server: String,
+        name: String,
+    },
+    /// A server task that this session's own `tools/call` created. `tool` is
+    /// the originating tool, so policy and display name the tool that earned
+    /// the authority.
+    Task {
+        server: String,
+        tool: String,
+        task_id: String,
+    },
 }
 
 impl McpSubject {
@@ -104,13 +127,15 @@ impl McpSubject {
         match self {
             Self::Tool { server, .. }
             | Self::Resource { server, .. }
-            | Self::Prompt { server, .. } => server,
+            | Self::Prompt { server, .. }
+            | Self::Task { server, .. } => server,
         }
     }
 
     pub fn operation_name(&self) -> &str {
         match self {
             Self::Tool { name, .. } | Self::Prompt { name, .. } => name,
+            Self::Task { tool, .. } => tool,
             Self::Resource { uri, .. } => uri,
         }
     }
@@ -119,6 +144,11 @@ impl McpSubject {
         if !valid_identity(self.server())
             || self.operation_name().trim().is_empty()
             || self.operation_name().chars().any(char::is_control)
+        {
+            return Err(McpProjectionError::InvalidIdentity);
+        }
+        if let Self::Task { task_id, .. } = self
+            && !valid_task_id(task_id)
         {
             return Err(McpProjectionError::InvalidIdentity);
         }
@@ -134,6 +164,10 @@ pub enum McpOperationKind {
     CallTool,
     ReadResource,
     GetPrompt,
+    /// `tasks/get`: only for a task id recorded in an [`McpTaskTicket`].
+    GetTask,
+    /// `tasks/cancel`: only for a task id recorded in an [`McpTaskTicket`].
+    CancelTask,
 }
 
 impl McpOperationKind {
@@ -142,6 +176,8 @@ impl McpOperationKind {
             Self::CallTool => "tools/call",
             Self::ReadResource => "resources/read",
             Self::GetPrompt => "prompts/get",
+            Self::GetTask => "tasks/get",
+            Self::CancelTask => "tasks/cancel",
         }
     }
 
@@ -151,6 +187,7 @@ impl McpOperationKind {
             (Self::CallTool, McpSubject::Tool { .. })
                 | (Self::ReadResource, McpSubject::Resource { .. })
                 | (Self::GetPrompt, McpSubject::Prompt { .. })
+                | (Self::GetTask | Self::CancelTask, McpSubject::Task { .. })
         )
     }
 }
@@ -187,11 +224,14 @@ impl ForeignInputRequired {
     }
 }
 
-/// The only two outcomes a foreign tool execution may expose.
+/// The outcomes a foreign tool execution may expose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolExecution {
     Complete(ToolResult),
     InputRequired(ForeignInputRequired),
+    /// The server made a task of the call. The model gets `result` now; the
+    /// settled task reaches it later through the session's [`McpTaskPort`].
+    TaskStarted(McpTaskStart),
 }
 
 /// Consumer-owned boundary for resuming one already-recorded foreign
@@ -546,7 +586,7 @@ fn render_mcp_preview(text: &str, path: Option<&std::path::Path>) -> String {
     let separator = if preview.ends_with('\n') { "" } else { "\n" };
     let saved = match path {
         Some(path) => format!(
-            "Full output written to: {}. Use read(path) to read it.",
+            "Full output written to: {}. Use read with a files array containing this path to read it.",
             path.display()
         ),
         None => "Full output could not be saved.".to_owned(),

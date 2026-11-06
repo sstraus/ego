@@ -1,5 +1,7 @@
 //! `ego usage` and the shared human rendering used by `/usage`.
 
+mod context;
+
 use chrono::{Local, TimeZone};
 use ego_core::cost::Money;
 use ego_core::run::RunTermination;
@@ -187,6 +189,7 @@ where
     } else {
         rows.extend(table);
     }
+    rows.extend(context::lines(report));
     rows.push(String::new());
     rows.join("\n")
 }
@@ -470,6 +473,7 @@ mod text_red {
             let mut lines = report.totals.clone();
             lines.main = line(cost);
             report.sessions.push(ego_core::usage::SessionUsage {
+                prompt_cache: None,
                 session: "00000000-0000-0000-0000-000000000001"
                     .parse()
                     .expect("session id"),
@@ -478,6 +482,7 @@ mod text_red {
                 context: None,
                 context_capacity: None,
                 provider_limits: None,
+                context_attribution: Default::default(),
                 lines,
             });
             let text = render_text(&report, false, None);
@@ -546,7 +551,48 @@ mod text_red {
             serde_json::to_string(&report(1_790_662_411_741, usd(156_247, 8))).expect("serialise");
         assert_eq!(
             json,
-            r#"{"v":4,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}}}}"#
+            r#"{"v":5,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}}}}"#
         );
+    }
+    // Catches: human output swaps request/result estimates or drops duplicate source and provenance.
+    #[test]
+    fn tool_context_text_and_json_preserve_the_same_estimates_and_source_links() {
+        let mut report = report(0, none());
+        let mut value = serde_json::json!({
+            "session": "00000000-0000-0000-0000-000000000001",
+            "model": "fixture",
+            "context_attribution": {
+                "source": "durable_tool_events",
+                "provenance": "utf8_bytes_div_4_ceil",
+                "scope": "local_session_requests_in_report_period",
+                "unmatched_results": 1,
+                "tools": [{
+                    "tool": "read", "request_estimated_tokens": 7,
+                    "result_estimated_tokens": 19, "duplicate_read_estimated_tokens": 26,
+                    "calls": [{
+                        "item": "00000000-0000-0000-0000-000000000002",
+                        "request_seq": 8, "request_bytes": 25, "request_estimated_tokens": 7,
+                        "result": {"seq": 9, "bytes": 73, "estimated_tokens": 19,
+                            "provenance": "builtin", "ok": true, "duplicate_of_request_seq": 3}
+                    }]
+                }]
+            }
+        });
+        value["lines"] = serde_json::to_value(&report.totals).unwrap();
+        report.sessions.push(serde_json::from_value(value).unwrap());
+        let before = serde_json::to_value(&report).unwrap();
+        let text = render_text(&report, false, None);
+        assert!(
+            text.contains("read: request ~7 result ~19 duplicate-read ~26 tokens"),
+            "{text}"
+        );
+        assert!(text.contains("source=durable_tool_events provenance=utf8_bytes_div_4_ceil scope=local_session_requests_in_report_period"), "{text}");
+        assert!(text.contains("request-seq:8 25 bytes ~7 tokens; result-seq:9 73 bytes ~19 tokens provenance=builtin ok=true duplicate-of=request-seq:3"), "{text}");
+        assert!(
+            text.contains("unmatched results: 1 (not attributed)"),
+            "{text}"
+        );
+        assert!(text.contains("Not billing or provider occupancy"), "{text}");
+        assert_eq!(serde_json::to_value(&report).unwrap(), before);
     }
 }

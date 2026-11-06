@@ -72,7 +72,7 @@ fn child_error(error: SecretChildError) -> &'static str {
         SecretChildError::Cancelled => "protocol_filter cancelled",
         SecretChildError::RunTimeout => "protocol_filter run deadline expired",
         SecretChildError::CommandTimeout => "protocol_filter timed out",
-        SecretChildError::Exit(_) => "protocol_filter exited unsuccessfully",
+        SecretChildError::Exit { .. } => "protocol_filter exited unsuccessfully",
         SecretChildError::CleanupUncertain { .. } => {
             "protocol_filter process-tree cleanup uncertain"
         }

@@ -181,8 +181,10 @@ impl Resolver for OneShotHttpTransport {
     }
 }
 
+mod probe;
 mod proxy;
 mod websocket;
+pub use probe::{Layer as ProbeLayer, Reached, Unreached, probe as probe_reachability};
 pub use proxy::ProviderProxy;
 
 impl OneHop for OneShotHttpTransport {
@@ -204,15 +206,10 @@ impl OneHop for OneShotHttpTransport {
     }
 
     fn admit_mcp(&self) -> Result<(), TransportError> {
-        if self.confinement.admits_mcp_http() {
+        if self.confinement.admits_mcp() {
             return Ok(());
         }
-        let failure = if self.confinement.offline() {
-            TransportFailure::Offline
-        } else {
-            TransportFailure::AuthorityMismatch
-        };
-        Err(definitely_unsent(failure))
+        Err(definitely_unsent(TransportFailure::Offline))
     }
 
     fn begin_call(&self) -> Instant {
@@ -344,6 +341,11 @@ async fn execute_one_hop(
     };
     let url = format!("{scheme}://{authority}{}", request.path());
     let selected = SocketAddr::new(connect.selected(), target.port());
+    // The socket the OS dials: the proxy when one is configured, else the provider address.
+    let dialled = DialledRoute {
+        address: proxy.as_ref().map_or(selected, |(_, socket)| *socket),
+        proxied: proxy.is_some(),
+    };
     let builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -376,7 +378,7 @@ async fn execute_one_hop(
     let mut send = Box::pin(outgoing.send());
     let response = loop {
         tokio::select! {
-            result = &mut send => break result.map_err(exchange_error)?,
+            result = &mut send => break result.map_err(|error| exchange_error(error, dialled))?,
             _ = deadline_elapsed(deadline) => {
                 return Err(possibly_sent(TransportFailure::TimedOut));
             }
@@ -474,7 +476,26 @@ fn response_headers(
         .collect()
 }
 
-fn exchange_error(error: reqwest::Error) -> TransportError {
+/// The endpoint a connect attempt dials, kept so a connect failure can be attributed.
+#[derive(Clone, Copy)]
+struct DialledRoute {
+    address: SocketAddr,
+    proxied: bool,
+}
+
+impl std::fmt::Display for DialledRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let family = if self.address.is_ipv6() {
+            "IPv6"
+        } else {
+            "IPv4"
+        };
+        let proxied = if self.proxied { "yes" } else { "no" };
+        write!(f, "{} ({family}, proxy: {proxied})", self.address)
+    }
+}
+
+fn exchange_error(error: reqwest::Error, dialled: DialledRoute) -> TransportError {
     let unsent = error.is_builder() || error.is_connect();
     let connect = error.is_connect();
     // Request URLs can contain query secrets. Only the admitted host is added
@@ -488,7 +509,7 @@ fn exchange_error(error: reqwest::Error) -> TransportError {
         source = cause.source();
     }
     let failure = if connect {
-        TransportFailure::Connect(detail)
+        TransportFailure::Connect(format!("dialling {dialled}: {detail}"))
     } else {
         TransportFailure::Exchange(detail)
     };

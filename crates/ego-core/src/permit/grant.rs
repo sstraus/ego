@@ -62,6 +62,9 @@ struct Sealed(());
 pub struct Permit {
     scope: Scope,
     read_perimeter: super::ReadPerimeter,
+    /// Credential paths whose values the owner explicitly approved: an exact
+    /// user-layer rule for the operation this permit was minted for.
+    disclosed: Vec<CanonPath>,
     call_fingerprint: Option<[u8; 32]>,
     _sealed: Sealed,
 }
@@ -181,13 +184,21 @@ impl Permit {
     }
 
     /// Checks a read against [`Scope::read_paths`].
+    /// An exact protected root passed owner admission; descendants still face
+    /// the perimeter, so approving a scan root cannot disclose its children.
     pub fn allows_read(&self, path: &CanonPath) -> Result<(), PermitDenied> {
-        if self.read_perimeter.refuses(path) {
+        if self.read_perimeter.refuses(path) && !self.scope.read_paths.contains(path) {
             return Err(PermitDenied::Read { path: path.clone() });
         }
         Self::allows(&self.scope.read_paths, path, |path| PermitDenied::Read {
             path,
         })
+    }
+
+    /// Did the owner explicitly approve disclosing the values in `path`?
+    /// Without it a credential file is projected to key names.
+    pub fn discloses(&self, path: &CanonPath) -> bool {
+        self.disclosed.contains(path)
     }
 
     /// Checks an enumeration against [`Scope::list_paths`].
@@ -197,7 +208,7 @@ impl Permit {
     /// be enumerated, and inferring one from the other is how least privilege
     /// quietly stops being enforced.
     pub fn allows_list(&self, path: &CanonPath) -> Result<(), PermitDenied> {
-        if self.read_perimeter.refuses(path) {
+        if self.read_perimeter.refuses(path) && !self.scope.list_paths.contains(path) {
             return Err(PermitDenied::List { path: path.clone() });
         }
         Self::allows(&self.scope.list_paths, path, |path| PermitDenied::List {
@@ -207,7 +218,7 @@ impl Permit {
 
     /// Checks a search against [`Scope::search_paths`].
     pub fn allows_search(&self, path: &CanonPath) -> Result<(), PermitDenied> {
-        if self.read_perimeter.refuses(path) {
+        if self.read_perimeter.refuses(path) && !self.scope.search_paths.contains(path) {
             return Err(PermitDenied::Search { path: path.clone() });
         }
         Self::allows(&self.scope.search_paths, path, |path| {
@@ -293,6 +304,11 @@ impl Permit {
         }
     }
 
+    /// Whether the owner named this exact endpoint, so a non-public address is admitted.
+    pub(crate) fn owner_private_network(&self) -> bool {
+        self.scope.owner_private_network
+    }
+
     pub(crate) fn allows_secret_egress(
         &self,
         authority: &super::SecretEgressAuthority,
@@ -342,6 +358,45 @@ pub struct Authorized {
     by: Authority,
 }
 
+/// What an MCP task ticket keeps of the authorization that let the original
+/// `tools/call` run: its scope, perimeter, disclosures and authority. A poll or
+/// a cancel of that task inherits it without a second classification, so an
+/// original that a human approved is not asked about again at every poll.
+/// Crate-private: only [`crate::mcp::McpTaskTicket`] holds one.
+#[derive(Debug, Clone)]
+pub(crate) struct InheritedGrant {
+    scope: Scope,
+    read_perimeter: super::ReadPerimeter,
+    disclosed: Vec<CanonPath>,
+    by: Authority,
+}
+
+impl InheritedGrant {
+    pub(crate) fn of(permit: &Permit, by: &Authority) -> Self {
+        Self {
+            scope: permit.scope.clone(),
+            read_perimeter: permit.read_perimeter.clone(),
+            disclosed: permit.disclosed.clone(),
+            by: by.clone(),
+        }
+    }
+
+    /// The same grant, answering `call`. The ceiling is the original's scope.
+    pub(crate) fn mint(&self, call: PreparedCall) -> Authorized {
+        Authorized {
+            call,
+            permit: Permit {
+                scope: self.scope.clone(),
+                read_perimeter: self.read_perimeter.clone(),
+                disclosed: self.disclosed.clone(),
+                call_fingerprint: None,
+                _sealed: Sealed(()),
+            },
+            by: self.by.clone(),
+        }
+    }
+}
+
 impl Authorized {
     /// The call this grant answers.
     pub fn call(&self) -> &PreparedCall {
@@ -384,6 +439,7 @@ impl Authorized {
         let permit = Permit {
             scope: scope_of(&call),
             read_perimeter: super::ReadPerimeter::default(),
+            disclosed: Vec::new(),
             call_fingerprint: None,
             _sealed: Sealed(()),
         };
@@ -761,7 +817,11 @@ impl fmt::Display for Escalation {
             Escalation::ModeAsksSubject { mode, op, subject } => {
                 write!(f, "{mode} mode does not approve {op} {subject} on its own")
             }
+        }?;
+        if self.op() == OpName::Spawn {
+            f.write_str("; no exact owner-approved command in this session; process effects may include file changes or network access")?;
         }
+        Ok(())
     }
 }
 
@@ -884,7 +944,7 @@ impl PermissionRequest {
     pub fn sandbox_grant(grant: &super::SandboxGrant, command: &str) -> Self {
         let mut request = Self::new(
             format!(
-                "sandbox {grant} for this session. The command will run again and may repeat prior effects: {command}"
+                "sandbox {grant} for this session. No command will be retried; prior effects may already have occurred: {command}"
             ),
             Vec::new(),
             Escalation::NoRuleCovers {
@@ -971,19 +1031,23 @@ impl fmt::Display for PermissionRequest {
                         )?,
                         Change::Replace {
                             replace_all,
-                            old_string,
-                            new_string,
-                        } => write!(
-                            f,
-                            "\n  replace {} old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
-                            if *replace_all {
-                                "all original non-overlapping occurrences of"
-                            } else {
-                                "exactly one occurrence of"
-                            },
-                            TerminalSafe(old_string),
-                            TerminalSafe(new_string)
-                        )?,
+                            chunks,
+                        } => {
+                            for chunk in chunks {
+                                write!(
+                                    f,
+                                    "\n  replace {} old text: {}\n  with new text: {}",
+                                    if *replace_all {
+                                        "all original non-overlapping occurrences of"
+                                    } else {
+                                        "exactly one occurrence of"
+                                    },
+                                    TerminalSafe(&chunk.old_string),
+                                    TerminalSafe(&chunk.new_string)
+                                )?;
+                            }
+                            write!(f, "\n  final content depends on the file at execution time")?;
+                        }
                     }
                 }
                 Op::Spawn { spec } => {
@@ -1161,6 +1225,9 @@ pub struct PolicyEngine {
     /// The final party, absent in headless runs. It is separate from
     /// `approver` so no caller can replace the mode derived from config.
     human: Option<Arc<dyn HumanApprover>>,
+    session_approvals: super::SessionApprovals,
+    /// The owner turned the web private-address block off (`Ruleset`).
+    web_private_network: bool,
 }
 
 impl fmt::Debug for PolicyEngine {
@@ -1188,7 +1255,19 @@ impl PolicyEngine {
             allow: permissions.allow,
             deny: permissions.deny,
             human: None,
+            session_approvals: super::SessionApprovals::default(),
+            web_private_network: permissions.web_private_network,
         }
+    }
+
+    /// Keep owner-approved commands across captures within one live session.
+    pub fn with_session_approvals(mut self, approvals: super::SessionApprovals) -> Self {
+        self.session_approvals = approvals;
+        self
+    }
+
+    pub(crate) fn session_approvals(&self) -> super::SessionApprovals {
+        self.session_approvals.clone()
     }
 
     /// The same engine with the profile's admitted roots.
@@ -1346,16 +1425,6 @@ impl PolicyEngine {
         Self { approver, ..self }
     }
 
-    /// Decide what a prepared call may do and return its corresponding grant.
-    /// Derive scope from the call and return it inside [`Authorized`], preserving
-    /// the structural permit/call pairing. Classification is pure and synchronous.
-    /// Check boundary, deny and mode floor for every operation before any operation
-    /// may ask an approver. Otherwise an early ordinary question could hide a later
-    /// out-of-boundary operation and approval would authorize the whole call.
-    /// After hard refusals, explicit allows and [`settle`](Self::settle) handle
-    /// unresolved operations. System denies cannot be cleared by higher layers.
-    /// Supporting foreign transport may reuse an already admitted delegation,
-    /// never bypass an independent operation's decision.
     /// A shell command submitted by the terminal owner, not by a model tool.
     /// The editor is the approval party; boundary, deny rules and confinement
     /// remain in force. Only the turn loop may call this for its own `exec`.
@@ -1377,6 +1446,16 @@ impl PolicyEngine {
         }))
     }
 
+    /// Decide what a prepared call may do and return its corresponding grant.
+    /// Derive scope from the call and return it inside [`Authorized`], preserving
+    /// the structural permit/call pairing. Classification is pure and synchronous.
+    /// Check boundary, deny and mode floor for every operation before any operation
+    /// may ask an approver. Otherwise an early ordinary question could hide a later
+    /// out-of-boundary operation and approval would authorize the whole call.
+    /// After hard refusals, explicit allows and [`settle`](Self::settle) handle
+    /// unresolved operations. System denies cannot be cleared by higher layers.
+    /// Supporting foreign transport may reuse an already admitted delegation,
+    /// never bypass an independent operation's decision.
     pub fn classify(&self, call: PreparedCall) -> Classification {
         if matches!(call.ops(), [Op::ReadEvidence { .. }]) {
             let permit = self.mint(scope_of(&call));
@@ -1408,6 +1487,16 @@ impl PolicyEngine {
                 return Classification::Settled(Err(*denied));
             }
         }
+        // Reuse only after every boundary, deny and mode floor has been checked.
+        if self.session_approvals.contains(&call) {
+            let literal = names_address_literal(&call);
+            let permit = self.mint(owner_scope_of(&call, literal));
+            return Classification::Settled(Ok(Authorized {
+                call,
+                permit,
+                by: Authority::Party,
+            }));
+        }
         // Every rule that covered an independent op, not the first one to
         // match. A foreign transport structurally supporting wholly allowed
         // opaque identities contributes no second rule authority. A denial is
@@ -1421,6 +1510,7 @@ impl PolicyEngine {
         });
         let mut rules: Vec<RuleAuthority> = Vec::new();
         let mut yolo_authorized_secret_egress = false;
+        let mut owner_net_rule = false;
         for (index, op) in call.ops().iter().enumerate() {
             if delegated_support == Some(index) {
                 continue;
@@ -1428,16 +1518,15 @@ impl PolicyEngine {
             // A conditional replacement reads the same file it writes. Its
             // matching write allow covers that supporting read, but the first
             // pass still checks read denies and boundaries independently.
-            let supporting_write = match (call.ops(), op) {
+            let supporting_write = match (op, call.ops().get(index + 1)) {
                 (
-                    [
-                        Op::Read { path: read },
+                    Op::Read { path: read },
+                    Some(
                         write @ Op::Write {
                             path,
                             change: Change::Replace { .. } | Change::Notebook(_),
                         },
-                    ],
-                    Op::Read { .. },
+                    ),
                 ) if read == path => Some(write),
                 _ => None,
             };
@@ -1461,6 +1550,7 @@ impl PolicyEngine {
                 };
                 return Classification::Ask(self.pending(call, why));
             };
+            owner_net_rule |= entries.iter().any(|entry| entry.owner_net_allow(op));
             for entry in entries {
                 let authority = RuleAuthority::of(entry);
                 if !rules.contains(&authority) {
@@ -1468,7 +1558,7 @@ impl PolicyEngine {
                 }
             }
         }
-        let permit = self.mint(scope_of(&call));
+        let permit = self.mint(owner_scope_of(&call, owner_net_rule));
         Classification::Settled(Ok(Authorized {
             call,
             permit,
@@ -1573,9 +1663,13 @@ impl PolicyEngine {
         let mut request = pending.request().clone();
         request.child_name = child_name.map(str::to_owned);
         match human.decide(item, &request).await {
-            PermissionDecision::Allow => {
+            decision @ (PermissionDecision::Allow | PermissionDecision::AllowOnce) => {
                 let call = pending.call;
-                let permit = self.mint(scope_of(&call));
+                if decision == PermissionDecision::Allow {
+                    self.session_approvals.record(&call);
+                }
+                let literal = names_address_literal(&call);
+                let permit = self.mint(owner_scope_of(&call, literal));
                 Resolution::HumanSettled {
                     request,
                     result: Ok(Authorized {
@@ -1636,7 +1730,13 @@ impl PolicyEngine {
             && !matches!(op, Op::Spawn { .. })
         {
             let is_read = matches!(op, Op::Read { .. } | Op::List { .. } | Op::Search { .. });
-            if is_read && self.read_perimeter.refuses(path) {
+            if is_read
+                && self.read_perimeter.refuses(path)
+                && !self
+                    .allow
+                    .iter()
+                    .any(|entry| entry.exact_owner_allow(op, self.workspace.as_path()))
+            {
                 return Err(Box::new(PolicyDenied::ProtectedRead {
                     tool: call.tool().to_owned(),
                     op: op.name(),
@@ -1720,9 +1820,13 @@ impl PolicyEngine {
     /// First match wins, in the order the lists were resolved. Matching is
     /// against the canonical operation and never against rendered text.
     fn matching<'r>(&self, rules: &'r [SourcedRule], op: &Op) -> Option<&'r SourcedRule> {
-        rules
-            .iter()
-            .find(|entry| entry.denies(op, self.workspace.as_path(), &self.allow))
+        rules.iter().find(|entry| {
+            // Off removes built-in credential floors, never an operator deny.
+            !(self.read_perimeter.unrestricted()
+                && entry.origins() == OriginSet::just(Source::Default)
+                && matches!(op, Op::Read { path } if Ruleset::is_credential_path(path)))
+                && entry.denies(op, self.workspace.as_path(), &self.allow)
+        })
     }
 
     /// Mint a permit for an explicit scope.
@@ -1735,13 +1839,42 @@ impl PolicyEngine {
     /// `Permit` in the entire program, and `classify` derives the scope from
     /// the call. A loop that chooses its own `Scope` is a loop that is its own
     /// policy, and now it cannot.
-    fn mint(&self, scope: Scope) -> Permit {
+    fn mint(&self, mut scope: Scope) -> Permit {
+        scope.owner_private_network |= self.web_private_network && scope.network.is_some();
+        let disclosed = self.disclosed(&scope);
         Permit {
             scope,
             read_perimeter: self.read_perimeter.clone(),
+            disclosed,
             call_fingerprint: None,
             _sealed: Sealed(()),
         }
+    }
+}
+
+impl PolicyEngine {
+    /// Credential paths of `scope` that an exact user rule covers for the
+    /// operation the scope carries. Project rules, broad patterns, modes and
+    /// session approvals never disclose.
+    fn disclosed(&self, scope: &Scope) -> Vec<CanonPath> {
+        let ops = scope
+            .read_paths
+            .iter()
+            .map(|path| Op::Read { path: path.clone() })
+            .chain(scope.search_paths.iter().map(|path| Op::Search {
+                root: path.clone(),
+                query: String::new(),
+            }));
+        ops.filter_map(|op| {
+            let path = op.subject_path(&self.workspace)?.clone();
+            (Ruleset::is_credential_path(&path)
+                && self
+                    .allow
+                    .iter()
+                    .any(|entry| entry.exact_owner_allow(&op, self.workspace.as_path())))
+            .then_some(path)
+        })
+        .collect()
     }
 }
 
@@ -1933,6 +2066,26 @@ fn scope_of(call: &PreparedCall) -> Scope {
         }
     }
     scope
+}
+
+/// [`scope_of`] for a call the owner approved.
+///
+/// Web admission may dial a non-public address only for a destination the
+/// owner named (`owner_named`): a user `net` rule that names hosts, or an owner
+/// approval of an address literal. An approved *name* is not enough, because a
+/// name resolving to a local service is exactly what a rebinding page
+/// arranges; a project rule or bare `net(*)` names nothing for the owner.
+fn owner_scope_of(call: &PreparedCall, owner_named: bool) -> Scope {
+    let mut scope = scope_of(call);
+    scope.owner_private_network = owner_named && scope.network.is_some();
+    scope
+}
+
+/// Whether the call's network target is an address literal, not a name.
+fn names_address_literal(call: &PreparedCall) -> bool {
+    scope_of(call)
+        .network
+        .is_some_and(|target| target.ip().is_some())
 }
 
 /// Scope mechanics, and the one place `mint` can still be called.
@@ -2279,6 +2432,59 @@ mod tests {
         }
     }
 
+    // Catches implicit read authority leaking across paths or overriding an explicit deny.
+    #[test]
+    fn adjacent_conditional_writes_cover_only_their_own_reads_and_never_denies() {
+        use crate::config::{ConfigLayer, Source};
+        let engine = |deny: &str| {
+            let layer = ConfigLayer::parse(
+                Source::Project,
+                &format!("[permissions]\nallow=[\"write(/ws/**)\"]\ndeny=[{deny}]"),
+            )
+            .unwrap()
+            .value
+            .permissions
+            .unwrap();
+            PolicyEngine::new(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::from_layer(layer, Source::Project),
+            )
+        };
+        let pair = |path: &str| {
+            (
+                Op::Read {
+                    path: CanonPath::new(path),
+                },
+                Op::Write {
+                    path: CanonPath::new(path),
+                    change: Change::Replace {
+                        replace_all: false,
+                        chunks: vec![],
+                    },
+                },
+            )
+        };
+        let (a, aw) = pair("/ws/a");
+        let (b, bw) = pair("/ws/b");
+        let call = PreparedCall::new("edit", a)
+            .with_op(aw)
+            .with_op(b)
+            .with_op(bw);
+        assert!(matches!(
+            engine("").classify(call.clone()),
+            Classification::Settled(Ok(_))
+        ));
+        assert!(matches!(
+            engine("\"read(/ws/b)\"").classify(call.clone()),
+            Classification::Settled(Err(_))
+        ));
+        let stray = call.with_op(Op::Read {
+            path: CanonPath::new("/ws/stray"),
+        });
+        assert!(matches!(engine("").classify(stray), Classification::Ask(_)));
+    }
+
     fn write_call(path: &str) -> PreparedCall {
         PreparedCall::new(
             "edit",
@@ -2338,8 +2544,10 @@ mod tests {
                     path: CanonPath::new("/ws/edit.txt"),
                     change: Change::Replace {
                         replace_all: false,
-                        old_string: "old\n".to_string(),
-                        new_string: "new\t".to_string(),
+                        chunks: vec![crate::permit::ReplaceChunk {
+                            old_string: "old\n".to_string(),
+                            new_string: "new\t".to_string(),
+                        }],
                     },
                 },
             ],
@@ -2365,6 +2573,48 @@ mod tests {
                 "  final content depends on the file at execution time",
             )
         );
+    }
+
+    // Catches: operator text drops, reorders, or mislabels a later replacement chunk.
+    #[test]
+    fn permission_request_displays_ordered_replacement_chunks_and_modes() {
+        for (replace_all, mode) in [
+            (false, "exactly one occurrence of"),
+            (true, "all original non-overlapping occurrences of"),
+        ] {
+            let request = PermissionRequest {
+                tool: "edit".to_string(),
+                ops: vec![Op::Write {
+                    path: CanonPath::new("/ws/edit.txt"),
+                    change: Change::Replace {
+                        replace_all,
+                        chunks: vec![
+                            crate::permit::ReplaceChunk {
+                                old_string: "first old".into(),
+                                new_string: "first new".into(),
+                            },
+                            crate::permit::ReplaceChunk {
+                                old_string: "second old".into(),
+                                new_string: "second new".into(),
+                            },
+                        ],
+                    },
+                }],
+                why: Escalation::NoRuleCovers {
+                    op: OpName::Write,
+                    path: CanonPath::new("/ws/edit.txt"),
+                },
+                presentation: None,
+                child_name: None,
+                explicit_answer: false,
+            };
+            assert_eq!(
+                request.to_string(),
+                format!(
+                    "edit needs permission: no rule covers write /ws/edit.txt\n- write /ws/edit.txt\n  replace {mode} old text: first old\n  with new text: first new\n  replace {mode} old text: second old\n  with new text: second new\n  final content depends on the file at execution time"
+                )
+            );
+        }
     }
 
     #[test]
@@ -2519,8 +2769,9 @@ mod tests {
         let err = block_on(tool.execute(call, &guarded)).unwrap_err();
         assert_eq!(
             err,
-            ToolError::Denied(PermitDenied::Write {
-                path: CanonPath::new("/ws/secret/passwords.txt"),
+            ToolError::Fs(crate::permit::FsError::Io {
+                path: CanonPath::new("/ws/allowed/file.txt"),
+                message: "prepared target changed before use".into(),
             })
         );
         assert!(

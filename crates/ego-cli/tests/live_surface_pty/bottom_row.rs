@@ -6,7 +6,7 @@ fn live_surface_keeps_bottom_row_empty_idle_and_working() {
     let mut failures = Vec::new();
     for (rows, cols) in [(24, 80), (40, 120)] {
         let (reply, gate) = gated_paced_line(&format!(
-            "{}BOTTOM-737-HELD\n",
+            "{}BOTTOM-HELD\n",
             "A real streamed transcript row.\n".repeat(usize::from(rows) * 2)
         ));
         let stub = Stub::start(Plan {
@@ -42,7 +42,7 @@ fn live_surface_keeps_bottom_row_empty_idle_and_working() {
         snapshot(&output, rows, cols, "idle", &mut failures);
         input.write_all(b"exercise the bottom row\r").unwrap();
         input.flush().unwrap();
-        until(&reader, &mut output, b"BOTTOM-737-HELD");
+        until(&reader, &mut output, b"BOTTOM-HELD");
         drain_until_quiet(&reader, &mut output);
         snapshot(&output, rows, cols, "working", &mut failures);
         let mark = output.len();
@@ -74,7 +74,7 @@ fn snapshot(output: &[u8], rows: u16, cols: u16, phase: &str, failures: &mut Vec
         ));
     }
     println!(
-        "BOTTOM-737 {cols}x{rows} {phase}: cursor={cursor:?}; last row={bottom:?}; grid={visible:?}"
+        "BOTTOM-MARK {cols}x{rows} {phase}: cursor={cursor:?}; last row={bottom:?}; grid={visible:?}"
     );
     if let Some(dir) = std::env::var_os("EGO_BOTTOM_ROW_CAPTURE_DIR") {
         let dir = std::path::PathBuf::from(dir);

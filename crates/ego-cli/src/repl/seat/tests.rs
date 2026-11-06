@@ -69,11 +69,22 @@ impl Read for FailingReader {
     }
 }
 
+/// Catches: a failed sequential terminal read ends the interactive session
+/// with its cause discarded, so the exit looks like a silent crash.
 #[test]
 fn sequential_reader_maps_a_read_error_to_ended() {
     let mut input = BufReader::new(FailingReader);
+    let mut reported = Vec::new();
 
-    assert_eq!(read_sequential_line(&mut input), Line::Ended);
+    let line = read_sequential_line_reporting(&mut input, &mut |message| {
+        reported.push(message.to_owned());
+    });
+
+    assert_eq!(line, Line::Ended);
+    assert_eq!(
+        reported,
+        ["terminal input failed: injected sequential read failure".to_owned()]
+    );
 }
 
 #[test]
@@ -839,6 +850,19 @@ fn reading_a_prebuffered_submission_settles_busy_after_idle() {
 
     assert_eq!(seat.read(), Line::Submitted("initial".to_string()));
     assert_eq!(phase.get(), EditPhase::Busy);
+    // Catches: an idle read that never reaches the cache-expiry compaction
+    // point, or a deadline that drops input already buffered.
+    assert_eq!(
+        seat.read_before(Instant::now() + Duration::from_millis(20)),
+        None
+    );
+    input_sender
+        .send(Line::Submitted("buffered".to_string()))
+        .unwrap();
+    assert_eq!(
+        seat.read_before(Instant::now()),
+        Some(Line::Submitted("buffered".to_string()))
+    );
     // Catches: the production seat ignores process wakes or blocks a producer
     // when several processes finish before the coordinator reads.
     seat.wake_background_exec();
@@ -1312,6 +1336,47 @@ fn disconnected_receipt_pump_leaves_an_operator_notice() {
     );
 }
 
+// Catches: a pending request's separator overflowing a narrow Working row.
+#[test]
+fn working_request_separator_fits_reserved_cells() {
+    let (sender, _receiver) = bounded::<String>(20);
+    let mut output = SurfaceOutput::new(sender, CancelToken::new());
+    let status = Arc::new(Mutex::new(SurfaceStatus {
+        activity: true,
+        ..SurfaceStatus::default()
+    }));
+    output.status = Some(Arc::clone(&status));
+    output.start_tool(
+        ItemId::new(),
+        crate::render::tool_row::running(
+            "exec",
+            r#"{"argv":["日本語"]}"#,
+            crate::render::Capabilities::plain(),
+        ),
+    );
+    let waiting = Waiting::new(Arc::clone(&status));
+    for width in 31..=60 {
+        status.lock().unwrap().width = width;
+        let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+        let row = indicator.lines().next().unwrap();
+        let visible = row.replace("\x1b[2m", "").replace("\x1b[22m", "");
+        assert!(
+            crate::render::line::cells(&visible) < width,
+            "width {width}: {visible:?}"
+        );
+        assert!(visible.contains("Working 0s"), "width {width}: {visible:?}");
+        if width >= 33 {
+            assert!(
+                visible.contains("Esc to interrupt"),
+                "width {width}: {visible:?}"
+            );
+        }
+        if width == 60 {
+            assert!(visible.contains("requested: $ '日本語'"), "{visible:?}");
+        }
+    }
+}
+
 // Catches: progress using the startup width after a terminal resize.
 #[test]
 fn working_row_stays_within_live_terminal_width_after_resize() {
@@ -1344,6 +1409,27 @@ fn working_row_stays_within_live_terminal_width_after_resize() {
         );
         assert!(indicator.ends_with("\n> "), "{indicator:?}");
     }
+}
+
+// Catches: the live countdown drops a capacity retry's next attempt time or
+// counter, or stops counting down for the capacity wording.
+#[test]
+fn capacity_retry_row_counts_down_and_keeps_the_next_attempt_time() {
+    let status = SurfaceStatus {
+        retry: Some((
+            "busy — provider at capacity, retrying in 60.0s at 2:03:12 PM (attempt 1/3)".into(),
+            Instant::now() - Duration::from_secs(70),
+            60_000,
+        )),
+        ..SurfaceStatus::default()
+    };
+    let waiting = Waiting::new(Arc::new(Mutex::new(status)));
+    let indicator = waiting.render_prompt_indicator(PromptEditMode::Emacs);
+    assert!(
+        indicator
+            .contains("busy — provider at capacity, retrying in 0.0s at 2:03:12 PM (attempt 1/3)"),
+        "{indicator:?}"
+    );
 }
 
 // Catches: a long retry cause wraps onto the composer, or an elapsed delay underflows.
@@ -1953,4 +2039,35 @@ fn child_activity_rows_keep_identity_counters_width_and_cleanup() {
             .render_prompt_indicator(PromptEditMode::Emacs)
             .contains('○')
     );
+}
+
+// Catches: later admissions take over the displayed request, or unrelated completion clears it.
+#[test]
+fn oldest_unresolved_request_survives_and_promotes() {
+    let (sender, _receiver) = bounded::<String>(20);
+    let mut output = SurfaceOutput::new(sender, CancelToken::new());
+    let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+    output.status = Some(Arc::clone(&status));
+    let a = ego_core::event::id::ItemId::new();
+    let b = ego_core::event::id::ItemId::new();
+    let line =
+        |cmd| crate::render::tool_row::running("exec", cmd, crate::render::Capabilities::plain());
+    let shown = || {
+        status
+            .lock()
+            .unwrap()
+            .shell
+            .as_ref()
+            .map(|s| s.render(crate::render::Capabilities::plain().depth))
+    };
+    output.start_tool(a, line(r#"{"argv":["A"]}"#));
+    output.start_tool(b, line(r#"{"argv":["B"]}"#));
+    assert!(shown().unwrap().contains("requested: $ A"));
+    output.finish_tool(b);
+    assert!(shown().unwrap().contains("requested: $ A"));
+    output.start_tool(b, line(r#"{"argv":["B"]}"#));
+    output.finish_tool(a);
+    assert!(shown().unwrap().contains("requested: $ B"));
+    output.clear_tools();
+    assert!(shown().is_none());
 }

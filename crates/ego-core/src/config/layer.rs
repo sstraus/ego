@@ -139,7 +139,7 @@ pub struct PermCfg {
 /// the effect when the operator wrote a tool, and says what is missing when the
 /// head has no operations — wrapped in serde's location so it arrives with the
 /// file and line attached.
-fn rules<'de, D>(deserializer: D) -> Result<Vec<Rule>, D::Error>
+pub(super) fn rules<'de, D>(deserializer: D) -> Result<Vec<Rule>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -210,6 +210,9 @@ pub enum Network {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileLayer {
+    /// User estimate for provider-managed cache lifetime, in positive seconds.
+    /// This affects the countdown only and is never a provider request field.
+    pub cache_ttl_seconds: Option<std::num::NonZeroU64>,
     pub max_output_tokens: Option<std::num::NonZeroU64>,
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
@@ -547,6 +550,10 @@ pub struct McpHttpConfig {
     pub url: McpHttpUrl,
     pub auth: McpHttpAuth,
     pub allow_insecure_loopback: bool,
+    /// Extra OAuth hosts the owner enrolled for this server: origins that may
+    /// host the authorization, token and registration endpoints when they
+    /// differ from the issuer's origin. Empty means issuer origin only.
+    pub oauth_hosts: Vec<McpHttpUrl>,
 }
 
 impl McpHttpConfig {
@@ -560,9 +567,25 @@ impl McpHttpConfig {
             url: url.into(),
             auth,
             allow_insecure_loopback,
+            oauth_hosts: Vec::new(),
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Enrol OAuth hosts for this server. Each must be a bare origin.
+    pub fn with_oauth_hosts(mut self, hosts: Vec<McpHttpUrl>) -> Result<Self, McpValueError> {
+        self.oauth_hosts = hosts;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Whether the OAuth credential of this server crosses the network
+    /// unencrypted: the owner opted a non-loopback plaintext server into OAuth.
+    pub fn sends_credentials_in_plaintext(&self) -> bool {
+        self.auth == McpHttpAuth::Oauth
+            && self.url.parsed.scheme() == "http"
+            && !is_exact_loopback(&self.url)
     }
 
     pub fn validate(&self) -> Result<(), McpValueError> {
@@ -583,16 +606,34 @@ impl McpHttpConfig {
             ));
         }
 
+        for host in &self.oauth_hosts {
+            let url = &host.parsed;
+            let bare = url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.host().is_some();
+            let secure =
+                url.scheme() == "https" || (url.scheme() == "http" && is_exact_loopback(host));
+            if !bare || !secure {
+                return Err(McpValueError::new(format!(
+                    "OAuth host `{}` must be an https origin (or a loopback http origin) without path, query, fragment or userinfo",
+                    host.text
+                )));
+            }
+        }
+
         match self.url.parsed.scheme() {
             "https" if self.allow_insecure_loopback => Err(McpValueError::new(
                 "allow_insecure_loopback is invalid for HTTPS",
             )),
             "https" => Ok(()),
+            // The per-server opt-in admits any host the owner names: a
+            // plaintext server on the owner network is an intended destination
+            // It never applies to HTTPS, so no downgrade.
             "http" if !self.allow_insecure_loopback => Err(McpValueError::new(
                 "plaintext HTTP requires allow_insecure_loopback = true",
-            )),
-            "http" if !is_exact_loopback(&self.url) => Err(McpValueError::new(
-                "plaintext HTTP requires exact localhost or an IP-literal loopback host",
             )),
             "http" => Ok(()),
             _ => Err(McpValueError::new(
@@ -657,6 +698,8 @@ struct McpHttpWire {
     auth: McpHttpAuth,
     #[serde(default)]
     allow_insecure_loopback: bool,
+    #[serde(default)]
+    oauth_hosts: Vec<McpHttpUrl>,
     #[serde(default = "enabled_by_default")]
     enabled: bool,
 }
@@ -693,6 +736,7 @@ impl McpEntryWire {
             Self::Http(wire) => {
                 let _ = wire.transport;
                 McpHttpConfig::new(wire.url, wire.auth, wire.allow_insecure_loopback)
+                    .and_then(|config| config.with_oauth_hosts(wire.oauth_hosts))
                     .map(|mut config| {
                         config.profile = wire.profile;
                         McpServerConfig::Http(config)
@@ -751,6 +795,7 @@ impl<'de> Deserialize<'de> for McpServerConfig {
 /// row on every launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatusSegmentName {
+    Cache,
     Fast,
     Model,
     Effort,
@@ -793,6 +838,7 @@ impl StatusSegmentName {
         "fast",
         "mode",
         "context",
+        "cache",
         "cost",
         "queue",
         "drafts",
@@ -810,6 +856,7 @@ impl StatusSegmentName {
             "fast" => Some(Self::Fast),
             "mode" => Some(Self::Mode),
             "context" => Some(Self::Context),
+            "cache" => Some(Self::Cache),
             "cost" => Some(Self::Cost),
             "queue" => Some(Self::Queue),
             "drafts" => Some(Self::Drafts),
@@ -829,6 +876,7 @@ impl StatusSegmentName {
             Self::Fast => "fast",
             Self::Mode => "mode",
             Self::Context => "context",
+            Self::Cache => "cache",
             Self::Cost => "cost",
             Self::Queue => "queue",
             Self::Drafts => "drafts",
@@ -908,6 +956,10 @@ pub struct AuthProviderLayer {
     pub protocol_filter: Option<ProtocolFilterConfig>,
     /// Program invoked with `login` or `refresh`; its stdout is the secret.
     pub credential_command: Option<String>,
+    /// Seconds the credential command may run per call; absent keeps the
+    /// 120 s default. A browser login that needs longer raises it.
+    #[serde(default, deserialize_with = "credential_timeout_secs")]
+    pub credential_timeout_secs: Option<u64>,
     /// Profile identity headers. Credential and wire headers are forbidden.
     #[serde(default, deserialize_with = "auth_headers")]
     pub headers: HashMap<String, String>,
@@ -1029,6 +1081,22 @@ pub fn is_forbidden_auth_header(name: &str) -> bool {
         .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
 }
 
+/// Upper bound of `auth.PROVIDER.credential_timeout_secs`: one hour.
+pub const MAX_CREDENTIAL_TIMEOUT_SECS: u64 = 3600;
+
+fn credential_timeout_secs<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let seconds = Option::<u64>::deserialize(deserializer)?;
+    if seconds.is_some_and(|seconds| !(1..=MAX_CREDENTIAL_TIMEOUT_SECS).contains(&seconds)) {
+        return Err(serde::de::Error::custom(format!(
+            "credential_timeout_secs must be 1..={MAX_CREDENTIAL_TIMEOUT_SECS} seconds"
+        )));
+    }
+    Ok(seconds)
+}
+
 fn auth_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1050,10 +1118,20 @@ where
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigLayer {
+    pub residual_limits: Option<crate::permit::residual::ResidualLimits>,
+    /// Owner-only compaction policy, merged field by field.
+    pub compaction: Option<crate::compact::CompactionLayer>,
+    /// Owner-only recap after an absence (`[recap]`), merged field by field.
+    pub recap: Option<crate::recap::RecapLayer>,
+    /// Default model and effort for task children, merged field by field.
+    pub task: Option<crate::turn::ChildDefaults>,
     /// User-owned shared instruction hierarchy. Absence starts at the repository.
     pub instructions: Option<InstructionConfig>,
+    /// User-owned cold session storage (`[sessions]`).
+    pub sessions: Option<SessionStorageConfig>,
     pub max_output_tokens: Option<std::num::NonZeroU64>,
-    /// Prompt caching: short (default), none, or explicit user opt-in long.
+    /// Prompt caching: short (default), none, or long. A project or local layer
+    /// may select long only after the workspace is trusted.
     pub cache: Option<crate::generator::capabilities::CacheRetention>,
     pub model: Option<ModelRef>,
     /// Default reasoning effort. Absence contributes no precedence value.
@@ -1078,6 +1156,28 @@ pub struct ConfigLayer {
     pub budget: Option<Budget>,
     /// Mirrors `--bare`: forces `Posture::Bare` even in a trusted workspace.
     pub bare: Option<bool>,
+    /// User-only: `true` turns the web tool block on loopback, LAN and
+    /// shared-space addresses off. Repository content is not the owner.
+    pub web_private_network: Option<bool>,
+    /// Owner-only opt-in: keep one memory file per workspace under
+    /// `$EGO_HOME/memory/`. Repository content is not the owner.
+    pub memory: Option<bool>,
+    /// Owner-only switch for file checkpoints (private Git objects and refs before every
+    /// `write` and `edit` in a Git worktree). Absent: on. Repository content is not the owner.
+    pub checkpoints: Option<bool>,
+    /// Owner-only persistent tool selection, the same names as `--tools`; an empty
+    /// list is `--no-tools`. The `--tools` flag overrides it for one run.
+    pub tools: Option<Vec<String>>,
+    /// User-only opt-in: `ego doctor` probes provider reachability over the
+    /// network. Repository content is not the owner.
+    pub doctor_network: Option<bool>,
+    /// Owner-only opt-in: let the model ask language servers for
+    /// definitions, references and diagnostics (the `lsp` tool). It starts
+    /// processes, so repository content cannot turn it on.
+    pub lsp: Option<bool>,
+    /// User-only opt-in: declare the MCP Tasks extension to HTTP servers and
+    /// track the tasks they start. Repository content is not the owner.
+    pub mcp_tasks: Option<bool>,
     /// Keyed by profile name.
     #[serde(default)]
     pub profile: HashMap<String, ProfileLayer>,
@@ -1092,6 +1192,9 @@ pub struct ConfigLayer {
     /// Hooks retain declaration order within this authority layer.
     #[serde(default)]
     pub hooks: Vec<HookConfigEntry>,
+    /// Authority a project proposes; applied only when the owner trusts the
+    /// workspace with exactly this text.
+    pub grants: Option<super::grants::ProjectGrants>,
 }
 
 impl ConfigLayer {
@@ -1131,6 +1234,18 @@ impl ConfigLayer {
                 message: "instructions paths require absolute paths in user configuration".into(),
             });
         }
+        if value.sessions.is_some() && source != Source::User {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "`[sessions]` belongs only to user configuration".into(),
+            });
+        }
+        if value.instructions.as_ref().and_then(|i| i.max_files) == Some(0) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "`instructions.max_files` must be at least 1".into(),
+            });
+        }
         if source != Source::System && value.max_mode.is_some() {
             return Err(ConfigError::Invalid {
                 source,
@@ -1138,12 +1253,40 @@ impl ConfigLayer {
                     .into(),
             });
         }
-        if value.cache == Some(crate::generator::capabilities::CacheRetention::Long)
-            && source != Source::User
-        {
+        if value.web_private_network.is_some() && source != Source::User {
             return Err(ConfigError::Invalid {
                 source,
-                message: "cache = long requires explicit user config".to_owned(),
+                message: "web_private_network requires user configuration".to_owned(),
+            });
+        }
+        if value.checkpoints.is_some() && !matches!(source, Source::User | Source::Flags) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "checkpoints requires user configuration or the command line".to_owned(),
+            });
+        }
+        if value.tools.is_some() && !matches!(source, Source::User | Source::Flags) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "tools requires user configuration or the command line".to_owned(),
+            });
+        }
+        if value.mcp_tasks.is_some() && source != Source::User {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "mcp_tasks requires user configuration".to_owned(),
+            });
+        }
+        if value.memory.is_some() && !matches!(source, Source::User | Source::Flags) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "memory requires user configuration or the command line".to_owned(),
+            });
+        }
+        if value.lsp.is_some() && source != Source::User {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "lsp requires user configuration".to_owned(),
             });
         }
         if let Some((name, _)) = value.profile.iter().find(|(name, profile)| {
@@ -1242,6 +1385,9 @@ impl ConfigLayer {
                     .to_string(),
             });
         }
+        if let Some(grants) = &value.grants {
+            grants.validate(source)?;
+        }
         Ok(Sourced { source, value })
     }
 
@@ -1283,6 +1429,32 @@ fn classify_parse_error(source: Source, err: &toml::de::Error) -> ConfigError {
     }
 }
 
+/// User-owned cold session storage: sessions with no write for
+/// `compress_after_days` are stored zstd-compressed. `compress = false` turns
+/// the background job off; compressed sessions stay readable either way.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionStorageConfig {
+    pub compress: Option<bool>,
+    pub compress_after_days: Option<std::num::NonZeroU32>,
+}
+
+impl SessionStorageConfig {
+    /// Seven days unless configured.
+    pub const DEFAULT_COMPRESS_AFTER_DAYS: u32 = 7;
+
+    /// How long a session stays plain, or `None` when compression is off.
+    pub fn compress_after(&self) -> Option<std::time::Duration> {
+        if self.compress == Some(false) {
+            return None;
+        }
+        let days = self
+            .compress_after_days
+            .map_or(Self::DEFAULT_COMPRESS_AFTER_DAYS, std::num::NonZeroU32::get);
+        Some(std::time::Duration::from_secs(u64::from(days) * 86_400))
+    }
+}
+
 /// Optional user-owned instruction hierarchy, independent of sandbox authority.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1290,4 +1462,18 @@ pub struct InstructionConfig {
     pub shared_root: Option<std::path::PathBuf>,
     #[serde(default)]
     pub exclude_roots: Vec<std::path::PathBuf>,
+    /// How many instruction files and import attempts one run may load.
+    /// Absent: [`Limits::default`]. Size limits are not configurable.
+    pub max_files: Option<usize>,
+}
+
+impl InstructionConfig {
+    /// Discovery limits for this configuration.
+    pub fn limits(&self) -> super::Limits {
+        let default = super::Limits::default();
+        super::Limits {
+            max_files: self.max_files.unwrap_or(default.max_files),
+            ..default
+        }
+    }
 }

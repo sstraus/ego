@@ -12,15 +12,17 @@ use futures::future::{self, BoxFuture};
 
 use super::SessionProcessAction;
 use super::foreign::{
-    DuplexHandle, DuplexSpawner, GuardedHttp, HttpRequest, OneHop, OneHopResponse, PreparedConnect,
-    Resolver, TransportError, TransportFailure,
+    DuplexHandle, DuplexSpawner, GuardedHttp, HttpRequest, HttpRoute, OneHop, OneHopResponse,
+    PreparedConnect, Resolver, TransportError, TransportFailure,
 };
 use super::grant::{ForeignClaim, Permit, PermitDenied};
 use super::path::CanonPath;
 use super::prepared_call::{Op, PreparedCall};
 use super::scan::{Entry, EntryKind, Found, LineMatcher, Match, Scan, ScanRequest};
-use super::spawn::{DetachedExecSnapshot, ProcessError, ProcessExecutor, SpawnSpec};
-use super::tool::{ToolError, ToolResult};
+use super::spawn::{
+    DetachedExecMonitor, DetachedExecSnapshot, ProcessError, ProcessExecutor, SpawnSpec,
+};
+use super::tool::{BEFORE_IMAGE_LIMIT, BeforeImage, ToolError, ToolResult};
 use crate::event::id::DetachedExecId;
 use crate::hook::EffectScope;
 use crate::store::evidence::{EvidencePage, EvidenceRead, EvidenceRef, EvidenceStore};
@@ -107,9 +109,36 @@ pub trait PathResolver: Send + Sync {
 }
 
 /// The raw filesystem seam. Unchecked: nothing here consults a `Permit`.
+/// Evidence returned by one exact filesystem write attempt.
+#[derive(Debug)]
+pub struct FsWriteAttempt {
+    pub result: Result<(), FsError>,
+    pub checkpoint: Option<String>,
+}
+
+/// Guarded write evidence, retained even when the filesystem reports failure.
+#[derive(Debug)]
+pub struct GuardedWriteAttempt {
+    pub result: Result<(), IoDenied>,
+    pub before_image: Option<BeforeImage>,
+    pub checkpoint: Option<String>,
+    pub possibly_modified: bool,
+}
+
 pub trait Fs: PathResolver {
+    fn write_attempt(&self, path: &CanonPath, bytes: &[u8]) -> FsWriteAttempt {
+        FsWriteAttempt {
+            result: self.write(path, bytes),
+            checkpoint: None,
+        }
+    }
     /// User-visible receipt for the last successful builtin write.
     fn write_notice(&self, _path: &CanonPath) -> Option<String> {
+        None
+    }
+
+    /// The checkpoint the last successful builtin write of `path` created.
+    fn last_checkpoint(&self, _path: &CanonPath) -> Option<String> {
         None
     }
 
@@ -155,12 +184,33 @@ pub trait Fs: PathResolver {
 /// component swapped between `allows_read` and the open is resolved a second time and is
 /// not re-checked.
 pub trait GuardedIo<'s>: Send + Sync {
+    fn write_attempt(&self, path: &CanonPath, bytes: &[u8]) -> GuardedWriteAttempt {
+        let result = self.write(path, bytes);
+        GuardedWriteAttempt {
+            possibly_modified: true,
+            result,
+            before_image: Some(BeforeImage::Omitted),
+            checkpoint: None,
+        }
+    }
     fn write_notice(&self, _path: &CanonPath) -> Option<String> {
+        None
+    }
+
+    fn last_checkpoint(&self, _path: &CanonPath) -> Option<String> {
         None
     }
 
     /// Atomically and durably replace one permit-checked whole file.
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied>;
+
+    /// [`write`](Self::write), and report what the write replaced for the
+    /// terminal diff. Needs only the write authority: the image never goes to
+    /// the model. A default implementation reports [`BeforeImage::Omitted`].
+    fn write_capturing(&self, path: &CanonPath, bytes: &[u8]) -> Result<BeforeImage, IoDenied> {
+        self.write(path, bytes)?;
+        Ok(BeforeImage::Omitted)
+    }
 
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, IoDenied>;
 
@@ -206,6 +256,16 @@ pub trait GuardedIo<'s>: Send + Sync {
         ))
     }
 
+    fn background_monitor(
+        &self,
+        _id: DetachedExecId,
+        _monitor: DetachedExecMonitor,
+    ) -> Result<(), ProcessError> {
+        Err(ProcessError::Invariant(
+            "guarded I/O has no background process owner".into(),
+        ))
+    }
+
     /// Read the exact bounded evidence request admitted inside this session.
     fn read_evidence<'a>(
         &'a self,
@@ -223,6 +283,20 @@ pub trait GuardedIo<'s>: Send + Sync {
     /// protocol lifecycle to the exact admitted route; its protocol owner
     /// enforces exactly one rendered selected request.
     fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError>;
+
+    /// Follow one same-origin redirect of the admitted native web request.
+    ///
+    /// The seam owns the bound: the hop reuses the exact admitted route (scheme,
+    /// host, port), sends a header-free and body-free GET for `path`, and is
+    /// refused before the first admitted web request and after
+    /// [`MAX_WEB_REDIRECTS`] hops. Network rules match only host and port, so a
+    /// hop inherits no authority the policy did not already grant.
+    fn guarded_web_redirect(
+        &self,
+        _path: &str,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        Box::pin(future::ready(Err(authority_mismatch())))
+    }
 
     fn claim_mcp_acp(&self, _call: PreparedCall) -> Result<McpAcpClaim, TransportError> {
         Err(authority_mismatch())
@@ -370,6 +444,9 @@ pub struct GuardedEffects<'effects, R = GuardedMcpResume<'effects>> {
     http: GuardedHttp,
     duplex: Arc<dyn DuplexSpawner>,
     foreign_spent: AtomicBool,
+    /// The admitted native web route, whether an owner grant admitted its
+    /// private addresses, and the redirect hops it spent.
+    web_redirects: Mutex<Option<(HttpRoute, bool, u8)>>,
     resume: Mutex<Option<R>>,
     cancel: Option<crate::turn::CancelToken>,
 }
@@ -410,6 +487,7 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
             http: GuardedHttp::new(resolver, one_hop),
             duplex,
             foreign_spent: AtomicBool::new(false),
+            web_redirects: Mutex::new(None),
             resume: Mutex::new(resume),
             cancel: None,
         }
@@ -496,8 +574,16 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
             });
             let route = route.clone();
             let matches = expected == &request && call.ops().len() == 1;
+            let owner_endpoint = self.permit.owner_private_network();
             let http = self.http.clone();
             let spent = self.foreign_spent.swap(true, Ordering::AcqRel);
+            if checked.is_ok() && matches && !spent {
+                *self
+                    .web_redirects
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some((route.clone(), owner_endpoint, 0));
+            }
             return Box::pin(async move {
                 checked?;
                 if !matches || spent {
@@ -505,7 +591,7 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
                 }
                 let deadline = http.begin_call();
                 let connect = PreparedConnect::new(route.target().clone(), &request);
-                http.execute_public_admitted(route, connect, request, deadline)
+                http.execute_web_admitted(route, connect, request, deadline, owner_endpoint)
                     .await
             });
         }
@@ -520,6 +606,36 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
                 .ok_or_else(authority_mismatch)?;
             let connect = claim.connect.ok_or_else(authority_mismatch)?;
             http.execute_admitted(route, connect, request, deadline)
+                .await
+        })
+    }
+
+    pub fn guarded_web_redirect(
+        &self,
+        path: &str,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        let admitted = {
+            let mut state = self
+                .web_redirects
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            match state.as_mut() {
+                None => Err(authority_mismatch()),
+                Some((_, _, hops)) if *hops >= MAX_WEB_REDIRECTS => Err(authority_spent()),
+                Some((route, owner_endpoint, hops)) => {
+                    *hops += 1;
+                    HttpRequest::get(path)
+                        .map(|request| (route.clone(), *owner_endpoint, request))
+                        .map_err(|_| authority_mismatch())
+                }
+            }
+        };
+        let http = self.http.clone();
+        Box::pin(async move {
+            let (route, owner_endpoint, request) = admitted?;
+            let deadline = http.begin_call();
+            let connect = PreparedConnect::new(route.target().clone(), &request);
+            http.execute_web_admitted(route, connect, request, deadline, owner_endpoint)
                 .await
         })
     }
@@ -726,6 +842,17 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
         }
     }
 
+    fn exact_target(&self, prepared: &CanonPath, fresh: CanonPath) -> Result<CanonPath, IoDenied> {
+        if &fresh != prepared {
+            return Err(FsError::Io {
+                path: prepared.clone(),
+                message: "prepared target changed before use".into(),
+            }
+            .into());
+        }
+        Ok(fresh)
+    }
+
     /// Check every entry a traversal yielded, and fail the whole operation if
     /// any of them left the authorised subtree.
     ///
@@ -747,8 +874,9 @@ impl<'effects, 'resume> GuardedEffects<'effects, GuardedMcpResume<'resume>> {
 }
 
 /// Project protected assignments before any bytes or matching verdicts reach a tool.
-fn credential_keys(path: &CanonPath, bytes: Vec<u8>) -> Result<Vec<u8>, IoDenied> {
-    if !crate::config::Ruleset::is_credential_path(path) {
+/// An explicit owner disclosure (`Permit::discloses`) returns the file bytes unchanged.
+fn credential_keys(permit: &Permit, path: &CanonPath, bytes: Vec<u8>) -> Result<Vec<u8>, IoDenied> {
+    if !crate::config::Ruleset::is_credential_path(path) || permit.discloses(path) {
         return Ok(bytes);
     }
     let refused = || FsError::Io {
@@ -807,25 +935,83 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
         self.fs.write_notice(path)
     }
 
+    fn last_checkpoint(&self, path: &CanonPath) -> Option<String> {
+        self.fs.last_checkpoint(path)
+    }
+
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), IoDenied> {
         // Re-resolve now, at use time, rather than trusting `path` — see
         // the trait doc comment. `write_target` and not `canonicalize`,
         // because a write's target is allowed not to exist yet.
-        let fresh = self.write_target(path)?;
+        let fresh = self.exact_target(path, self.write_target(path)?)?;
         self.permit.allows_write(&fresh)?;
         Ok(self.fs.write(&fresh, bytes)?)
     }
 
+    fn write_attempt(&self, path: &CanonPath, bytes: &[u8]) -> GuardedWriteAttempt {
+        let fresh = match self.write_target(path).and_then(|fresh| {
+            let fresh = self.exact_target(path, fresh)?;
+            self.permit.allows_write(&fresh)?;
+            Ok(fresh)
+        }) {
+            Ok(fresh) => fresh,
+            Err(error) => {
+                return GuardedWriteAttempt {
+                    result: Err(error),
+                    before_image: None,
+                    checkpoint: None,
+                    possibly_modified: false,
+                };
+            }
+        };
+        let protected =
+            crate::config::Ruleset::is_credential_path(&fresh) && !self.permit.discloses(&fresh);
+        let image = if protected {
+            BeforeImage::Omitted
+        } else {
+            match self.fs.read_bounded(&fresh, BEFORE_IMAGE_LIMIT) {
+                Ok(old) => String::from_utf8(old).map_or(BeforeImage::Omitted, BeforeImage::Text),
+                Err(FsError::NotFound { .. }) => BeforeImage::New,
+                Err(_) => BeforeImage::Omitted,
+            }
+        };
+        let attempt = self.fs.write_attempt(&fresh, bytes);
+        GuardedWriteAttempt {
+            result: attempt.result.map_err(Into::into),
+            before_image: Some(image),
+            checkpoint: attempt.checkpoint,
+            possibly_modified: true,
+        }
+    }
+
+    fn write_capturing(&self, path: &CanonPath, bytes: &[u8]) -> Result<BeforeImage, IoDenied> {
+        let fresh = self.exact_target(path, self.write_target(path)?)?;
+        self.permit.allows_write(&fresh)?;
+        let protected =
+            crate::config::Ruleset::is_credential_path(&fresh) && !self.permit.discloses(&fresh);
+        let image = if protected {
+            BeforeImage::Omitted
+        } else {
+            match self.fs.read_bounded(&fresh, BEFORE_IMAGE_LIMIT) {
+                Ok(old) => String::from_utf8(old).map_or(BeforeImage::Omitted, BeforeImage::Text),
+                Err(FsError::NotFound { .. }) => BeforeImage::New,
+                Err(_) => BeforeImage::Omitted,
+            }
+        };
+        self.fs.write(&fresh, bytes)?;
+        Ok(image)
+    }
+
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, IoDenied> {
-        let fresh = self.fs.canonicalize(path.as_path())?;
+        let fresh = self.exact_target(path, self.fs.canonicalize(path.as_path())?)?;
         self.permit.allows_read(&fresh)?;
-        credential_keys(&fresh, self.fs.read(&fresh)?)
+        credential_keys(&self.permit, &fresh, self.fs.read(&fresh)?)
     }
 
     fn read_bounded(&self, path: &CanonPath, limit: usize) -> Result<Vec<u8>, IoDenied> {
-        let fresh = self.fs.canonicalize(path.as_path())?;
+        let fresh = self.exact_target(path, self.fs.canonicalize(path.as_path())?)?;
         self.permit.allows_read(&fresh)?;
-        credential_keys(&fresh, self.fs.read_bounded(&fresh, limit)?)
+        credential_keys(&self.permit, &fresh, self.fs.read_bounded(&fresh, limit)?)
     }
 
     fn list(&self, req: &ScanRequest) -> Result<Scan, IoDenied> {
@@ -892,7 +1078,7 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
             };
             budget -= bytes.len() as u64;
 
-            let Ok(bytes) = credential_keys(&fresh, bytes) else {
+            let Ok(bytes) = credential_keys(&self.permit, &fresh, bytes) else {
                 // Unsupported credential formats are not searchable as raw bytes.
                 continue;
             };
@@ -950,6 +1136,18 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
         self.process.cancel_background(id)
     }
 
+    fn background_monitor(
+        &self,
+        id: DetachedExecId,
+        monitor: DetachedExecMonitor,
+    ) -> Result<(), ProcessError> {
+        // Watching new lines reads the same output `exec_status` reads.
+        self.permit
+            .allows_session_process(id, SessionProcessAction::Inspect)
+            .map_err(|denied| ProcessError::Invariant(denied.to_string()))?;
+        self.process.monitor_background(id, monitor)
+    }
+
     fn read_evidence<'a>(
         &'a self,
         request: &'a EvidenceRead,
@@ -970,6 +1168,13 @@ impl<'effects, 'resume> GuardedIo<'resume> for GuardedEffects<'effects, GuardedM
 
     fn claim_mcp_http(&self, call: PreparedCall) -> Result<McpHttpClaim, TransportError> {
         GuardedEffects::claim_mcp_http(self, call)
+    }
+
+    fn guarded_web_redirect(
+        &self,
+        path: &str,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        GuardedEffects::guarded_web_redirect(self, path)
     }
 
     fn claim_mcp_acp(&self, call: PreparedCall) -> Result<McpAcpClaim, TransportError> {
@@ -1017,6 +1222,9 @@ enum ForeignKind {
     Acp,
     Duplex,
 }
+
+/// Same-origin redirect hops one admitted `web_fetch` request may follow.
+pub const MAX_WEB_REDIRECTS: u8 = 5;
 
 fn authority_mismatch() -> TransportError {
     TransportError::definitely_unsent(TransportFailure::AuthorityMismatch)

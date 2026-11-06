@@ -76,10 +76,13 @@ impl ProfileRoot {
         self.access
     }
 
-    /// A read root inside writable authority subtracts that subtree. A broad
-    /// read root may still contain a more specific writable root or workspace.
+    /// A read root inside writable authority subtracts that subtree. The
+    /// workspace itself retains its built-in write authority, including when
+    /// an equal read root also lies inside a broader writable profile root.
+    /// A broad read root may contain a more specific writable root or workspace.
     pub fn restricts_writes(&self, workspace: &CanonPath, roots: &[ProfileRoot]) -> bool {
         self.access == RootAccess::Read
+            && self.path != *workspace
             && (self.path.is_or_under(workspace)
                 || roots.iter().any(|root| {
                     root.access == RootAccess::ReadWrite && self.path.is_or_under(&root.path)

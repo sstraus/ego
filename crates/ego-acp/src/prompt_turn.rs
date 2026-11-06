@@ -14,6 +14,7 @@ pub(super) fn prompt_handler<S, E, C, I>(
     confinement: Option<Arc<dyn SessionConfinementAdmission>>,
     trust: Option<Arc<dyn SessionTrustAdmission>>,
     lifecycle: Option<Arc<dyn LifecycleOperations>>,
+    follows_transitions: bool,
 ) -> PromptHandler
 where
     S: SessionStore + 'static,
@@ -37,7 +38,7 @@ where
             Box::pin(async move {
                 let id = request.session_id.clone();
                 let durable_session = match parse_session(&id) {
-                    Ok(id) => id,
+                    Ok(named) => sessions.durable(&id, named),
                     Err(error) => return responder.respond_with_error(error),
                 };
                 if let Err(error) = unadmitted.refuse(durable_session) {
@@ -142,6 +143,17 @@ where
                     correlation.mcp.as_ref(),
                     Arc::clone(&correlation.session_approval),
                 );
+                let mut bindings = bindings;
+                // A client that did not accept the transition update keeps the
+                // typed overflow error and explicit `_ego/compact`.
+                if follows_transitions && capabilities.compacted_available() {
+                    bindings.sink_factory = Arc::new(TransitionSinkFactory {
+                        inner: Arc::clone(&bindings.sink_factory),
+                        sessions: sessions.clone(),
+                        id: id.clone(),
+                        generation: correlation.generation,
+                    });
+                }
                 let (ingress, control) = ego_core::turn::interactive_control();
                 sessions.install_steering(&id, correlation.generation, ingress);
                 let bindings = bindings.with_interactive_control(control);
@@ -161,6 +173,7 @@ where
                 let connection = cx.clone();
                 let generation = correlation.generation;
                 cx.spawn(async move {
+                        let profile_root = correlation.root.clone();
                         let PromptCorrelation {
                             root,
                             request_id,
@@ -371,9 +384,29 @@ where
                             );
                         }
                         let snapshot = subscription.await;
-                        let cancel_requested = sessions.finish(&id, generation, &snapshot);
+                        // An uncertain run stays on the source, where the next
+                        // prompt's guard reads it. The successor inherits the
+                        // source's profile seeds before the next prompt can reach it.
+                        let mut successor = sessions
+                            .take_compaction(&id, generation)
+                            .filter(|_| snapshot.status() != RunStatus::Uncertain);
+                        if let (Some(target), Some(lifecycle)) = (successor, &lifecycle)
+                            && let Err(error) = restore_session_profiles(
+                                controller.as_ref(),
+                                lifecycle.as_ref(),
+                                confinement.as_ref(),
+                                durable_session,
+                                target,
+                                &profile_root,
+                            )
+                            .await
+                        {
+                            tracing::warn!(?error, "the compaction successor did not receive the session profiles; the session id stays on the source");
+                            successor = None;
+                        }
+                        let cancel_requested = sessions.finish(&id, generation, &snapshot, successor);
                         if let Some(lifecycle) = &lifecycle {
-                            match lifecycle.meta(durable_session) {
+                            match lifecycle.meta(successor.unwrap_or(durable_session)) {
                                 Ok(meta) if meta.summary.is_some() => {
                                     if let Err(error) = emit_info(&connection, &id, &meta, Some(lifecycle.as_ref())) {
                                         tracing::warn!(%error, "ACP session info update could not be delivered");
@@ -409,4 +442,67 @@ where
             })
         },
     )
+}
+
+/// Follows an in-process compaction: the client's session id drives the successor.
+struct TransitionSinkFactory {
+    inner: Arc<dyn EventSinkFactory>,
+    sessions: Sessions,
+    id: v1::SessionId,
+    generation: RegistrationGeneration,
+}
+
+impl EventSinkFactory for TransitionSinkFactory {
+    fn create(&self, capabilities: &ModelCapabilities) -> Arc<dyn EventSink> {
+        Arc::new(TransitionSink {
+            inner: self.inner.create(capabilities),
+            sessions: self.sessions.clone(),
+            id: self.id.clone(),
+            generation: self.generation,
+        })
+    }
+
+    fn execution_policy_notice(&self, message: &str) -> Result<(), String> {
+        self.inner.execution_policy_notice(message)
+    }
+
+    fn follows_session_transitions(&self) -> bool {
+        true
+    }
+}
+
+struct TransitionSink {
+    inner: Arc<dyn EventSink>,
+    sessions: Sessions,
+    id: v1::SessionId,
+    generation: RegistrationGeneration,
+}
+
+impl EventSink for TransitionSink {
+    fn context_commands(
+        &self,
+        commands: Vec<ego_core::permit::ToolDescriptor>,
+        state: &ego_core::state::SessionState,
+    ) {
+        self.inner.context_commands(commands, state);
+    }
+
+    fn publish(
+        &self,
+        event: &ego_core::public::PublicEvent,
+        state: &ego_core::state::SessionState,
+    ) {
+        if let ego_core::public::PublicEvent::SessionCompacted { target, .. } = event {
+            self.sessions.compacted(&self.id, self.generation, *target);
+        }
+        self.inner.publish(event, state);
+    }
+
+    fn cache_observed(
+        &self,
+        prefix: &ego_core::generator::attempt::CachePrefix,
+        usage: Option<ego_core::state::Usage>,
+    ) {
+        self.inner.cache_observed(prefix, usage);
+    }
 }

@@ -5,8 +5,8 @@ Timestamp               Ty Process[PID:TID]
 2002-01-01 00:00:14.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /Users/_tmp_20008_a0000002
 2002-01-01 00:00:15.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/_tmp_20008_a0000003
 2002-01-01 00:00:15.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/Gits/_tmp_20008_a0000004
-2002-01-01 00:00:15.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/Gits/.tmp/_tmp_20008_a0000005
-2002-01-01 00:00:16.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/Gits/.tmp/_tmp_20008_a0000006
+2002-01-01 00:00:15.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/scratch/_tmp_20008_a0000005
+2002-01-01 00:00:16.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/scratch/_tmp_20008_a0000006
 2002-01-01 00:00:17.000 E  kernel[0:1000004] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-create /home/example/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock
 2002-01-01 00:00:18.000 E  kernel[0:1000003] (Sandbox) Sandbox: pnpm(20008) deny(1) file-write-mode /private/tmp/pnpm-store-operation-locks-1000
 2002-01-01 00:00:19.000 E  kernel[0:1000005] (Sandbox) Sandbox: pnpm(20009) deny(1) file-write-create /home/example/Library/pnpm/_tmp_20009_a0000007

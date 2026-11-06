@@ -1,0 +1,452 @@
+//! contract for typed MCP configuration and credentials.
+
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use ego_core::config::{
+    ConfigLayer, McpConfigProvenance, McpLayerEntry, McpServerConfig, McpServerName, ProfileName,
+    ResolvedMcpEntry, Source, Sourced, Trust, UserConfigMutation, UserConfigTarget, resolve,
+};
+use ego_core::credentials::{
+    CredentialKey, CredentialRemoval, CredentialStore, CredentialStoreError,
+    CredentialStoreErrorKind, CredentialStoreOperation, CredentialTarget, SecretMaterial,
+};
+
+fn layer(source: Source, body: &str) -> Sourced<ConfigLayer> {
+    ConfigLayer::parse(source, body).expect("strict MCP fixture")
+}
+
+#[test]
+fn strict_decode_asserts_stdio_http_defaults_oauth_and_tombstone() {
+    let config = layer(
+        Source::User,
+        r#"
+[mcp.servers.local]
+transport = "stdio"
+command = "mcp-local"
+args = ["--safe"]
+cwd = "/workspace"
+inherit_env = ["TOKEN", "HOME"]
+
+[mcp.servers.relative]
+transport = "stdio"
+command = "mcp-relative"
+cwd = "."
+
+[mcp.servers.remote]
+transport = "http"
+url = "https://mcp.example.test/v1"
+auth = "oauth"
+
+[mcp.servers.plain]
+transport = "http"
+url = "http://localhost:8787"
+allow_insecure_loopback = true
+
+[mcp.servers.ipv4]
+transport = "http"
+url = "http://127.0.0.1:8787"
+allow_insecure_loopback = true
+
+[mcp.servers.ipv6]
+transport = "http"
+url = "http://[::1]:8787"
+allow_insecure_loopback = true
+
+[mcp.servers.default-auth]
+transport = "http"
+url = "https://mcp.example.test/default"
+
+[mcp.servers.hidden]
+removed = true
+"#,
+    );
+    let local = config
+        .value
+        .mcp
+        .servers
+        .get(&"local".parse().expect("name"));
+    assert!(
+        matches!(local, Some(McpLayerEntry::Server(McpServerConfig::Stdio(s))) if s.command == "mcp-local" && s.args == ["--safe"] && s.cwd.as_deref().map(|p| p.to_string_lossy().into_owned()) == Some("/workspace".into()) && s.inherit_env.iter().map(ToString::to_string).collect::<Vec<_>>() == ["TOKEN", "HOME"])
+    );
+    assert!(matches!(
+        config.value.mcp.servers.get(&"relative".parse().expect("name")),
+        Some(McpLayerEntry::Server(McpServerConfig::Stdio(s)))
+            if s.cwd.as_deref() == Some(std::path::Path::new("."))
+    ));
+    let remote = config
+        .value
+        .mcp
+        .servers
+        .get(&"remote".parse().expect("name"));
+    assert!(
+        matches!(remote, Some(McpLayerEntry::Server(McpServerConfig::Http(h))) if h.url.to_string() == "https://mcp.example.test/v1" && h.auth == ego_core::config::McpHttpAuth::Oauth && !h.allow_insecure_loopback)
+    );
+    let plain = config
+        .value
+        .mcp
+        .servers
+        .get(&"plain".parse().expect("name"));
+    assert!(
+        matches!(plain, Some(McpLayerEntry::Server(McpServerConfig::Http(h))) if h.allow_insecure_loopback)
+    );
+    assert!(matches!(
+        config.value.mcp.servers.get(&"ipv4".parse().expect("name")),
+        Some(McpLayerEntry::Server(McpServerConfig::Http(h))) if h.allow_insecure_loopback
+    ));
+    assert!(matches!(
+        config.value.mcp.servers.get(&"ipv6".parse().expect("name")),
+        Some(McpLayerEntry::Server(McpServerConfig::Http(h))) if h.allow_insecure_loopback
+    ));
+    assert!(matches!(
+        config.value.mcp.servers.get(&"default-auth".parse().expect("name")),
+        Some(McpLayerEntry::Server(McpServerConfig::Http(h))) if h.auth == ego_core::config::McpHttpAuth::None && !h.allow_insecure_loopback
+    ));
+    assert!(matches!(
+        config
+            .value
+            .mcp
+            .servers
+            .get(&"hidden".parse().expect("name")),
+        Some(McpLayerEntry::Tombstone)
+    ));
+}
+
+#[test]
+fn strict_decode_rejects_names_env_duplicates_legacy_mixed_and_url_matrix() {
+    let invalid = [
+        "[mcp.servers.Bad_Name]\ntransport='stdio'\ncommand='x'",
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='x'\ninherit_env=['TOKEN','token']",
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='x'\ninherit_env=['GOOD','bad-name']",
+        "[mcp.servers.x]\ntransport='stdio'\ncommand=''",
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='x'\nurl='https://x'",
+        "[mcp.servers.x]\ntransport='http'\nurl='https://x'\nallow_insecure_loopback=true",
+        "[mcp.servers.x]\ntransport='http'\nurl='http://localhost'\nallow_insecure_loopback=false",
+        "[mcp.servers.x]\ntransport='http'\nurl='http://127.0.0.2'\nallow_insecure_loopback=false",
+        "[mcp.servers.x]\ntransport='ftp'\nurl='ftp://x'",
+        "[mcp.servers.x]\ntransport='http'\nurl='https://u:p@x'",
+        "[mcp.servers.x]\ntransport='http'\nurl='https://x/#fragment'",
+        "[mcp.servers.x]\nsse='https://old'",
+        "[mcp.servers.x]\nremoved=false",
+        "[mcp.servers.x]\nremoved=true\ntransport='stdio'\ncommand='x'",
+        "[mcp.servers.x]\ntransport='http'\nurl='http://localhost'\nallow_insecure_loopback=true\nunknown='field'",
+    ];
+    for text in invalid {
+        assert!(
+            ConfigLayer::parse(Source::User, text).is_err(),
+            "accepted invalid fixture: {text}"
+        );
+    }
+}
+
+/// A plaintext server that the owner names explicitly is an
+/// intended destination on the owner network, not only on loopback.
+#[test]
+fn explicit_lan_http_mcp_selection_connects_with_credential_warning() {
+    let config = layer(
+        Source::User,
+        r#"
+[mcp.servers.lan]
+transport = "http"
+url = "http://192.168.1.20:8080/mcp"
+allow_insecure_loopback = true
+
+[mcp.servers.lan-oauth]
+transport = "http"
+url = "http://nas.lan:8080/mcp"
+auth = "oauth"
+allow_insecure_loopback = true
+
+[mcp.servers.local-oauth]
+transport = "http"
+url = "http://127.0.0.1:8080/mcp"
+auth = "oauth"
+allow_insecure_loopback = true
+
+[mcp.servers.remote-oauth]
+transport = "http"
+url = "https://mcp.example.test/mcp"
+auth = "oauth"
+"#,
+    );
+    let http = |name: &str| match config.value.mcp.servers.get(&name.parse().expect("name")) {
+        Some(McpLayerEntry::Server(McpServerConfig::Http(http))) => http.clone(),
+        other => panic!("{name} is not an enabled HTTP server: {other:?}"),
+    };
+    assert!(!http("lan").sends_credentials_in_plaintext());
+    assert!(http("lan-oauth").sends_credentials_in_plaintext());
+    assert!(!http("local-oauth").sends_credentials_in_plaintext());
+    assert!(!http("remote-oauth").sends_credentials_in_plaintext());
+
+    assert!(
+        ConfigLayer::parse(
+            Source::User,
+            "[mcp.servers.x]\ntransport='http'\nurl='http://192.168.1.20/mcp'"
+        )
+        .is_err(),
+        "accepted a plaintext LAN server without the explicit opt-in"
+    );
+}
+
+#[test]
+fn resolution_is_whole_entry_profile_trust_and_ambient_aware() {
+    let base = layer(
+        Source::User,
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='base'",
+    );
+    let profile_layer = layer(
+        Source::User,
+        "[profile.dev.mcp.servers.x]\ntransport='http'\nurl='https://profile'",
+    );
+    let system = layer(
+        Source::System,
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='system'",
+    );
+    let effective = resolve(
+        &[base, profile_layer, system.clone()],
+        Trust::Trusted,
+        Some("dev"),
+    )
+    .expect("resolution");
+    let name = "x".parse().expect("name");
+    assert!(
+        matches!(effective.mcp.entry(&name), Some(ResolvedMcpEntry::Configured { server: McpServerConfig::Http(h), provenance: McpConfigProvenance::Profile { source: Source::User, name: profile_name }, .. }) if h.url.to_string() == "https://profile" && profile_name == "dev")
+    );
+    assert!(effective.mcp.configured(&name).is_some());
+    let tombstone = layer(Source::User, "[mcp.servers.x]\nremoved=true");
+    let hidden = resolve(&[tombstone, system], Trust::Trusted, None).expect("tombstone resolution");
+    assert!(matches!(
+        hidden.mcp.entry(&name),
+        Some(ResolvedMcpEntry::Tombstone {
+            provenance: McpConfigProvenance::Layer {
+                source: Source::User
+            }
+        })
+    ));
+    assert!(hidden.mcp.configured(&name).is_none());
+    let project = layer(
+        Source::Project,
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='project'",
+    );
+    let ambient = resolve(&[project], Trust::Untrusted, None).expect("untrusted resolution");
+    assert!(ambient.mcp.entry(&name).is_none());
+}
+
+#[test]
+fn user_mutations_encode_exact_slot_expected_entry_and_reveal_semantics() {
+    let name: McpServerName = "remote".parse().expect("name");
+    let server = McpServerConfig::Stdio(ego_core::config::McpStdioConfig {
+        command: "mcp".into(),
+        args: vec![],
+        cwd: None,
+        inherit_env: vec![],
+    });
+    let set = UserConfigMutation::McpSet {
+        target: UserConfigTarget::Profile(ProfileName::parse("dev").unwrap()),
+        name: name.clone(),
+        expected_user_entry: Some(McpLayerEntry::Tombstone),
+        server: server.clone(),
+    };
+    assert!(
+        matches!(set, UserConfigMutation::McpSet { target: UserConfigTarget::Profile(profile), name: n, expected_user_entry: Some(McpLayerEntry::Tombstone), server: McpServerConfig::Stdio(_), .. } if profile.as_str() == "dev" && n == name)
+    );
+    let delete = UserConfigMutation::McpDeleteUserEntry {
+        target: UserConfigTarget::Base,
+        name: name.clone(),
+        expected_entry: McpLayerEntry::Server(server),
+    };
+    assert!(
+        matches!(delete, UserConfigMutation::McpDeleteUserEntry { target: UserConfigTarget::Base, expected_entry: McpLayerEntry::Server(McpServerConfig::Stdio(s)), .. } if s.command == "mcp")
+    );
+    let insert = UserConfigMutation::McpInsertUserTombstone {
+        name: name.clone(),
+        expected_user_entry: None,
+    };
+    assert!(
+        matches!(insert, UserConfigMutation::McpInsertUserTombstone { expected_user_entry: None, name: n } if n == name)
+    );
+}
+
+#[derive(Default)]
+struct FakeStore(Mutex<HashMap<CredentialKey, Vec<u8>>>);
+
+impl CredentialStore for FakeStore {
+    fn get(&self, key: &CredentialKey) -> Result<Option<SecretMaterial>, CredentialStoreError> {
+        Ok(self
+            .0
+            .lock()
+            .expect("fake lock")
+            .get(key)
+            .cloned()
+            .map(SecretMaterial::new))
+    }
+    fn put(&self, key: &CredentialKey, value: SecretMaterial) -> Result<(), CredentialStoreError> {
+        self.0
+            .lock()
+            .expect("fake lock")
+            .insert(key.clone(), value.expose_secret_bytes().to_vec());
+        Ok(())
+    }
+    fn delete(&self, key: &CredentialKey) -> Result<CredentialRemoval, CredentialStoreError> {
+        Ok(if self.0.lock().expect("fake lock").remove(key).is_some() {
+            CredentialRemoval::Removed
+        } else {
+            CredentialRemoval::Absent
+        })
+    }
+}
+
+#[test]
+fn credential_fake_proves_resource_audience_account_identity_and_redaction() {
+    let resource = CredentialKey::new(
+        "https://issuer".into(),
+        CredentialTarget::ProtectedResource("https://same".into()),
+        Some("account-a".into()),
+    )
+    .expect("key");
+    let audience = CredentialKey::new(
+        "https://issuer".into(),
+        CredentialTarget::Audience("https://same".into()),
+        Some("account-a".into()),
+    )
+    .expect("key");
+    let account = CredentialKey::new(
+        "https://issuer".into(),
+        CredentialTarget::ProtectedResource("https://same".into()),
+        Some("account-b".into()),
+    )
+    .expect("key");
+    let store = FakeStore::default();
+    store
+        .put(&resource, SecretMaterial::new(b"secret-a".to_vec()))
+        .expect("put");
+    assert_eq!(
+        store
+            .get(&resource)
+            .expect("get")
+            .expect("present")
+            .expose_secret_bytes(),
+        b"secret-a"
+    );
+    assert!(store.get(&audience).expect("domain isolation").is_none());
+    assert!(store.get(&account).expect("account isolation").is_none());
+    assert_ne!(resource.canonical_bytes(), audience.canonical_bytes());
+    assert_ne!(resource.canonical_bytes(), account.canonical_bytes());
+    assert_eq!(
+        store.delete(&resource).expect("delete"),
+        CredentialRemoval::Removed
+    );
+    assert_eq!(
+        store.delete(&resource).expect("delete absent"),
+        CredentialRemoval::Absent
+    );
+    let debug = format!("{:?}", SecretMaterial::new(b"secret-a".to_vec()));
+    assert!(!debug.contains("secret-a"));
+}
+
+#[test]
+fn credential_store_errors_have_only_fixed_closed_diagnostics() {
+    for kind in [
+        CredentialStoreErrorKind::Unavailable,
+        CredentialStoreErrorKind::Invalid,
+        CredentialStoreErrorKind::Ambiguous,
+        CredentialStoreErrorKind::Corrupt,
+        CredentialStoreErrorKind::Unsupported,
+        CredentialStoreErrorKind::UnsupportedVersion,
+        CredentialStoreErrorKind::Collision,
+    ] {
+        let error = CredentialStoreError::new(CredentialStoreOperation::Get, kind);
+        let repeated = CredentialStoreError::new(CredentialStoreOperation::Get, kind);
+        assert!(!error.diagnostic().is_empty());
+        assert_eq!(error.diagnostic(), repeated.diagnostic());
+        assert!(!format!("{error:?} {error}").contains("opaque"));
+    }
+}
+
+// Catches: `enabled = false` dropped by the decoder, or surviving a higher layer's whole-entry replacement.
+#[test]
+fn enabled_false_marks_the_entry_and_a_whole_entry_replacement_resets_it() {
+    let name: McpServerName = "x".parse().expect("name");
+    let disabled = layer(
+        Source::User,
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='base'\nenabled=false",
+    );
+    assert!(matches!(
+        disabled.value.mcp.servers.get(&name),
+        Some(McpLayerEntry::Disabled(McpServerConfig::Stdio(s))) if s.command == "base"
+    ));
+    let effective =
+        resolve(std::slice::from_ref(&disabled), Trust::Trusted, None).expect("resolution");
+    assert!(matches!(
+        effective.mcp.entry(&name),
+        Some(ResolvedMcpEntry::Configured { enabled: false, .. })
+    ));
+    let replacement = layer(
+        Source::Project,
+        "[mcp.servers.x]\ntransport='stdio'\ncommand='project'",
+    );
+    let effective = resolve(&[disabled, replacement], Trust::Trusted, None).expect("resolution");
+    assert!(matches!(
+        effective.mcp.entry(&name),
+        Some(ResolvedMcpEntry::Configured { enabled: true, server: McpServerConfig::Stdio(s), .. }) if s.command == "project"
+    ));
+}
+
+#[test]
+fn legacy_sse_requires_an_explicit_http_profile_and_rejects_unknown_profiles() {
+    use ego_core::config::McpHttpProfile;
+    for (field, expected) in [
+        ("", McpHttpProfile::Current),
+        ("profile='legacy-sse'", McpHttpProfile::LegacySse),
+    ] {
+        let config = layer(
+            Source::User,
+            &format!(
+                "[mcp.servers.events]\ntransport='http'\nurl='https://example.test/sse'\n{field}"
+            ),
+        );
+        let entry = config
+            .value
+            .mcp
+            .servers
+            .get(&"events".parse().unwrap())
+            .unwrap();
+        let McpLayerEntry::Server(McpServerConfig::Http(http)) = entry else {
+            panic!("HTTP profile lost");
+        };
+        assert_eq!(http.profile, expected);
+    }
+    for field in ["profile='auto'", "profile='websocket'", "profile='legacy'"] {
+        assert!(ConfigLayer::parse(Source::User, &format!("[mcp.servers.events]\ntransport='http'\nurl='https://example.test/sse'\n{field}")).is_err());
+    }
+}
+
+#[test]
+fn oauth_hosts_decode_as_bare_secure_origins_and_reject_paths_and_plaintext() {
+    let config = layer(
+        Source::User,
+        "[mcp.servers.split]\ntransport='http'\nurl='https://mcp.example.test/mcp'\nauth='oauth'\noauth_hosts=['https://login.example.test','https://tokens.example.test:8443']",
+    );
+    let Some(McpLayerEntry::Server(McpServerConfig::Http(http))) =
+        config.value.mcp.servers.get(&"split".parse().unwrap())
+    else {
+        panic!("OAuth host enrollment lost");
+    };
+    assert_eq!(http.oauth_hosts.len(), 2);
+    for host in [
+        "https://login.example.test/path",
+        "https://login.example.test/?q=1",
+        "https://user@login.example.test",
+        "http://login.example.test",
+        "ftp://login.example.test",
+    ] {
+        assert!(
+            ConfigLayer::parse(
+                Source::User,
+                &format!("[mcp.servers.s]\ntransport='http'\nurl='https://mcp.example.test/mcp'\noauth_hosts=['{host}']"),
+            )
+            .is_err(),
+            "{host} must be rejected"
+        );
+    }
+}

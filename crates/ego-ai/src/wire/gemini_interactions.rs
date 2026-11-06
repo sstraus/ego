@@ -624,6 +624,11 @@ impl super::StreamSink for StreamDecoder {
     fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent> {
         StreamDecoder::finish(*self, transport)
     }
+    fn usage_incoherent(&self) -> bool {
+        self.usage
+            .as_ref()
+            .is_some_and(|usage| into_usage(usage).is_none())
+    }
 }
 
 impl StreamDecoder {
@@ -785,8 +790,8 @@ impl StreamDecoder {
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
         }
-        if let Some(usage) = self.usage.take() {
-            out.push(AiEvent::Usage(into_usage(&usage)));
+        if let Some(usage) = self.usage.take().as_ref().and_then(into_usage) {
+            out.push(AiEvent::Usage(usage));
         }
         if let Some((message, kind)) = self.provider_error.take() {
             out.push(AiEvent::Error { message, kind });
@@ -880,13 +885,14 @@ fn classify_error(code: &str) -> ErrorKind {
 ///
 /// `total_thought_tokens` joins the output because it *is* output the caller
 /// paid for, and `total_tool_use_tokens` joins the input because it is prompt
-/// the provider assembled. Neither is subtracted from anything: this API
-/// reports summands, and the only figure it partitions is `total_tokens`.
-fn into_usage(usage: &WireUsage) -> Usage {
-    Usage {
+/// the provider assembled. `total_cached_tokens` is the cached part of
+/// `total_input_tokens`, so a cached count above the input total does not
+/// partition it: `None`, and the shared stage decides what that means.
+fn into_usage(usage: &WireUsage) -> Option<Usage> {
+    Some(Usage {
         uncached_input_tokens: usage
             .total_input_tokens
-            .saturating_sub(usage.total_cached_tokens)
+            .checked_sub(usage.total_cached_tokens)?
             .saturating_add(usage.total_tool_use_tokens),
         cache_read_tokens: usage.total_cached_tokens,
         // This API states no cache-write figure at all, at either retention.
@@ -897,7 +903,7 @@ fn into_usage(usage: &WireUsage) -> Usage {
         output_tokens: usage
             .total_output_tokens
             .saturating_add(usage.total_thought_tokens),
-    }
+    })
 }
 
 /// Decode one Interactions response into the generation's events.

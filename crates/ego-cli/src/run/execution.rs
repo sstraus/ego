@@ -125,7 +125,7 @@ async fn resolve_invocation_phase(
                 diagnostics,
             )
             .map_err(usage)?;
-            restore_session_roots(&mut settings, &session_roots).map_err(usage)?;
+            restore_session_roots(&mut settings, &session_roots, diagnostics).map_err(usage)?;
             admit_windows_unconfined_start(
                 args,
                 &mut settings,
@@ -181,7 +181,7 @@ async fn resolve_invocation_phase(
             )
             .map_err(usage)?;
             if !args.quiet {
-                note_refused_mcp(diagnostics, &attachment.refused);
+                note_mcp_attachment(diagnostics, &attachment);
             }
             let selected_mcp = attachment.attached;
             let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
@@ -209,23 +209,34 @@ async fn resolve_invocation_phase(
 }
 
 /// Re-admit saved authority before either the generation policy or OS guard
-/// is constructed for a fresh process. A changed symlink fails closed.
+/// is constructed for a fresh process. A changed symlink fails closed. A root
+/// removed from disk is dropped: that only narrows the session's reach.
 fn restore_session_roots(
     settings: &mut Settings,
     grants: &[ego_core::permit::ProfileRoot],
+    diagnostics: &dyn Diagnostics,
 ) -> Result<(), UsageError> {
     if grants.is_empty() {
         return Ok(());
     }
+    let mut restored = Vec::with_capacity(grants.len());
     for grant in grants {
-        let actual = std::fs::canonicalize(grant.path().as_path())
-            .map(CanonPath::new)
-            .map_err(|error| {
-                UsageError(format!(
+        let actual = match std::fs::canonicalize(grant.path().as_path()) {
+            Ok(actual) => CanonPath::new(actual),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                diagnostics.note(&format!(
+                    "saved session root {} no longer exists; this session continues without it",
+                    ego_core::permit::terminal_safe(&grant.path().to_string())
+                ));
+                continue;
+            }
+            Err(error) => {
+                return Err(UsageError(format!(
                     "saved session root {} is unavailable: {error}",
                     grant.path()
-                ))
-            })?;
+                )));
+            }
+        };
         if actual != *grant.path() {
             return Err(UsageError(format!(
                 "saved session root {} changed since approval",
@@ -237,11 +248,12 @@ fn restore_session_roots(
             path: actual.as_path().to_path_buf(),
             access: grant.access(),
         });
+        restored.push(grant);
     }
     let admitted =
         super::profile_roots::admit(&settings.effective, settings.confinement.workspace())
             .map_err(UsageError)?;
-    for grant in grants {
+    for grant in restored {
         if !admitted.contains(grant) {
             return Err(UsageError(format!(
                 "saved session root {} was not admitted",
@@ -273,6 +285,7 @@ fn enable_trusted_interactive_auto(settings: &mut Settings, driver: &Driver<'_>)
 
 pub(super) struct ScopedInvocation {
     pub(super) mcp_scope: crate::provider_http::McpProcessScope,
+    pub(super) mcp_task_port: Option<Arc<dyn ego_core::mcp::McpTaskPort>>,
     pub(super) mcp_runtime: Arc<ego_mcp::McpRegistryRuntime>,
     pub(super) mcp_registry: Arc<McpRegistryController>,
     pub(super) artifact_store: Option<JsonlStore>,
@@ -316,6 +329,9 @@ async fn open_scope_phase(
         settings.confinement.clone(),
         cancel.clone(),
         settings.run_deadline,
+        // MCP Tasks need a session that outlives the turn: a human terminal.
+        settings.effective.mcp_tasks
+            && matches!(&host.driver, Driver::Interactive { seat, .. } if seat.has_human()),
     )
     .await
     .map_err(|error| match error {
@@ -326,6 +342,7 @@ async fn open_scope_phase(
             RunTermination::Failed { message }
         }
     })?;
+    let mcp_task_port = mcp_scope.task_port();
     let mcp_runtime = Arc::clone(mcp_scope.runtime());
     let mcp_registry = Arc::clone(mcp_runtime.controller());
     if let Some(ci) = &resolved.ci {
@@ -344,6 +361,7 @@ async fn open_scope_phase(
         .expect("the effect scope consumes the chosen session once");
     Ok(ScopedInvocation {
         mcp_scope,
+        mcp_task_port,
         mcp_runtime,
         mcp_registry,
         artifact_store,
@@ -486,6 +504,7 @@ pub(super) struct MaterializedRun<'store> {
     pub(super) generation: Option<GenerationReady>,
     pub(super) skill_trust: Trust,
     pub(super) skill_profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
+    pub(super) no_hooks: bool,
     pub(super) run_deadline: Option<Instant>,
     pub(super) root: PathBuf,
     pub(super) cwd: PathBuf,
@@ -640,6 +659,7 @@ fn materialize_run_phase<'store>(
         generation,
         skill_trust,
         skill_profile_layers,
+        no_hooks: args.no_hooks,
         run_deadline,
         root,
         cwd,
@@ -991,6 +1011,7 @@ fn activate_session_phase<'store, S: EventSink>(
                 &materialized.registry,
                 materialized.system.is_some(),
                 materialized.compiled.is_some(),
+                materialized.no_hooks,
             ),
             mcp_errors: mcp_errors.clone(),
             hook_errors: Vec::new(),

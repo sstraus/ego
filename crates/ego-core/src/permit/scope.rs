@@ -27,6 +27,9 @@ pub struct Scope {
     pub(super) endpoints: Vec<String>,
     pub(super) network: Option<NetworkTarget>,
     pub(super) http_request_digest: Option<HttpRequestDigest>,
+    /// The owner named this exact endpoint, so web admission may dial a
+    /// loopback, LAN or CGNAT address it resolves to. Never set by a mode.
+    pub(super) owner_private_network: bool,
     pub(super) secret_egress: Option<SecretEgressAuthority>,
     pub(super) foreign_invocations: Vec<(ForeignToolId, InvocationDigest)>,
     pub(super) foreign_transport: Option<ForeignTransportTarget>,

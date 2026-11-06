@@ -86,9 +86,12 @@ what this session offers; `/config perimeter` shows its admitted boundary.
 `Ctrl+D` or `/quit` exits without erasing the durable session.
 
 Interactive startup can select and persist a first-run default when exactly one
-usable provider has a mapped default. Otherwise it opens the model picker.
-Headless startup always needs an explicit or configured model; it does not choose
-or save one on your behalf.
+usable provider has a mapped default. Otherwise it opens the model picker, which
+groups models by provider and names the sign-in remedy above each unavailable
+provider. Headless startup with exactly one usable provider uses
+that provider's default for the run, names it on stderr, and does not save it.
+With no usable provider, several, or no mapped default, headless startup refuses
+and lists the `--model` remedies. `ego setup` shows which providers are ready.
 
 ## Terminal, pipeline, or host
 

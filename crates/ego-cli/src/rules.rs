@@ -805,6 +805,13 @@ fn render_remember_plan_rows(plan: &RememberPlan, effect: ManagedRuleEffect) -> 
             omitted_name(dimension)
         ));
     }
+    for operation in plan.disclosure_rows() {
+        rows.push(format!(
+            "DISCLOSES\t{}\t{}",
+            operation,
+            RememberPlan::DISCLOSURE_NOTICE
+        ));
+    }
     rows
 }
 
@@ -1494,6 +1501,38 @@ mod permission_red {
         let output = RecordedText::default();
         render_remember_plan(&preview.plan, preview.effect, &output);
         assert_eq!(*output.0.lock().unwrap(), expected);
+    }
+
+    /// Catches a `rules remember` preview of a credential read that stays
+    /// silent about the value disclosure the stored rule grants.
+    #[test]
+    fn remember_preview_states_credential_disclosure() {
+        let call = |path: &str| {
+            PreparedCall::new(
+                "read",
+                Op::Read {
+                    path: CanonPath::new(path),
+                },
+            )
+        };
+        let rows = |path: &str| {
+            let plan = RuleManagement::remember(
+                &call(path),
+                ManagedRuleEffect::Allow,
+                Path::new("/workspace"),
+            )
+            .unwrap();
+            render_remember_plan_rows(&plan, ManagedRuleEffect::Allow)
+        };
+        assert!(rows("/workspace/.env").contains(&format!(
+            "DISCLOSES\t0\t{}",
+            RememberPlan::DISCLOSURE_NOTICE
+        )));
+        assert!(
+            !rows("/workspace/src/main.rs")
+                .iter()
+                .any(|row| row.starts_with("DISCLOSES"))
+        );
     }
 
     #[test]

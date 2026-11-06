@@ -24,6 +24,7 @@ impl Invocation {
             && args.answers.is_empty()
             && args.agent_file.is_none()
             && args.profile.as_deref() != Some("ci")
+            && !args.queue
         {
             if args.provider_recovery {
                 args.retry = super::INTERACTIVE_PROVIDER_RETRIES;
@@ -33,7 +34,7 @@ impl Invocation {
             // Only an implicit interactive default enables recovery; an explicit
             // --retry (including zero) already selected its finite allowance.
             if args.provider_recovery {
-                args.retry = 0;
+                args.retry = super::HEADLESS_PROVIDER_RETRIES;
                 args.provider_recovery = false;
             }
             Self::Resume(args)
@@ -120,7 +121,7 @@ mod tests {
                 else {
                     panic!("headless resume: {tokens:?}");
                 };
-                if args.retry != 0 || args.provider_recovery {
+                if args.retry != 3 || args.provider_recovery {
                     failures.push(format!(
                         "{tokens:?}, terminal=({stdin}, {stdout}): retry={}, recovery={}",
                         args.retry, args.provider_recovery

@@ -4,6 +4,7 @@
 //! prompt is what an operator needs to decide; everything the policy engine
 //! knows about the call sits behind the details key.
 
+use ego_core::config::rule_management::RememberPlan;
 use ego_core::permit::analysis::{RiskAssessment, RiskClass, RiskReason};
 use ego_core::permit::shell::{ReadOnlyRefusal, read_only_refusal as read_only_refusal_of};
 use ego_core::permit::{Op, PermissionDecision, PermissionRequest, SessionProcessAction};
@@ -47,6 +48,7 @@ pub(super) fn compact_prompt(request: &PermissionRequest, width: usize) -> Strin
     }
     rows.push(format!("{prefix}Allow {operations}?"));
     rows.extend(headline_rows(request).into_iter().skip(1));
+    rows.extend(disclosure_notice(request));
     rows.push(if let Some(rules) = remembered_rules(request) {
         format!("[y] yes   [a] yes, do not ask again for {}", safe(&rules))
     } else {
@@ -143,6 +145,9 @@ pub(super) fn details_prompt(
                 }
             }
         }
+        if request.tool() == "write" {
+            redact_write_contents(&mut parameters);
+        }
         rows.push(format!(
             "Parameters:\n{}",
             serde_json::to_string_pretty(&parameters).expect("JSON parameters always serialize")
@@ -159,12 +164,26 @@ pub(super) fn details_prompt(
                         "- widening for operation {operation}: omits {dimension:?}"
                     ));
                 }
+                rows.extend(disclosure_notice(request));
             }
             Err(error) => rows.push(format!("Remembering is unavailable: {error}")),
         }
     }
     rows.extend(key_rows(request, false));
     rows.join("\n")
+}
+
+fn redact_write_contents(parameters: &mut serde_json::Value) {
+    if let Some(files) = parameters
+        .get_mut("files")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for file in files {
+            if let Some(contents) = file.get_mut("contents") {
+                *contents = serde_json::Value::String("[shown in bounded diff]".into());
+            }
+        }
+    }
 }
 
 /// The one row a settled approval leaves in the transcript: what was asked,
@@ -184,7 +203,7 @@ pub(super) fn settled_receipt(
         call = format!("child {}: {call}", safe(name));
     }
     let mut row = match decision {
-        PermissionDecision::Allow => format!("Allowed {call}"),
+        PermissionDecision::Allow | PermissionDecision::AllowOnce => format!("Allowed {call}"),
         PermissionDecision::Amend { .. } => format!("Edited {call}"),
         PermissionDecision::Deny => format!("Denied {call}"),
         PermissionDecision::DenyWithInstruction { instruction } => {
@@ -254,6 +273,13 @@ fn key_rows(request: &PermissionRequest, with_details: bool) -> Vec<String> {
     // The trailing space is where the cursor sits.
     no.push(' ');
     vec![yes, no]
+}
+
+/// The warning that `a` would grant value disclosure for a credential file.
+fn disclosure_notice(request: &PermissionRequest) -> Option<String> {
+    let plan = request.presentation()?.suggested_remember_plan().ok()?;
+    plan.discloses_values()
+        .then(|| format!("Warning: {}", RememberPlan::DISCLOSURE_NOTICE))
 }
 
 /// The rules `a` would store, in the words the rule store prints them.
@@ -350,6 +376,279 @@ fn truncate(text: &str, cap: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches: rendered parameters disclose nested whole-file contents when the
+    // details renderer forgets to redact them after policy presentation.
+    #[tokio::test]
+    async fn write_parameters_redact_each_files_contents() {
+        use ego_core::budget::{BudgetGate, SharedBudgetGate};
+        use ego_core::config::{Mode, ModelRef, Ruleset};
+        use ego_core::cost::CurrencyCode;
+        use ego_core::event::id::{ItemId, SessionId};
+        use ego_core::event::time::Clock;
+        use ego_core::evidence::{EvidenceAdmissionService, RunInvocationId};
+        use ego_core::generation_model_source::{
+            GenerationModelError, GenerationModelRequest, GenerationModelSource, GenerationProfile,
+        };
+        use ego_core::generator::capabilities::*;
+        use ego_core::generator::fake::FakeGenerator;
+        use ego_core::generator::port::AiEvent;
+        use ego_core::generator::types::{StopReason, ThinkingLevel};
+        use ego_core::permit::{
+            CanonPath, DuplexHandle, DuplexSpawner, HttpRequest, HumanApprover, OneHop,
+            ProcessError, ProcessExecutor, ResolvedConnect, Resolver, SpawnSpec, ToolResult,
+            TransportError, TransportFailure, Typed,
+        };
+        use ego_core::sink::CollectingSink;
+        use ego_core::state::SessionState;
+        use ego_core::turn::{
+            CancelToken, GenerationRuntime, RetryPause, Session, ToolEffectPorts, Tools,
+            TurnConfig, TurnLoop,
+        };
+        use ego_tools::store::{JsonlStore, LeaseInputs, OsIo, SessionEvidenceStore};
+        use futures::future::BoxFuture;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        #[derive(Debug, Default)]
+        struct Capture(Mutex<Option<PermissionRequest>>);
+        impl HumanApprover for Capture {
+            fn decide<'a>(
+                &'a self,
+                _: ItemId,
+                request: &'a PermissionRequest,
+            ) -> BoxFuture<'a, PermissionDecision> {
+                *self.0.lock().unwrap() = Some(request.clone());
+                Box::pin(async { PermissionDecision::Deny })
+            }
+        }
+        struct Source(Arc<FakeGenerator>);
+        impl GenerationModelSource for Source {
+            fn resolve<'a>(
+                &'a self,
+                _: GenerationModelRequest,
+            ) -> BoxFuture<'a, Result<GenerationProfile, GenerationModelError>> {
+                Box::pin(async move {
+                    Ok(GenerationProfile {
+                        output_limit: None,
+                        identity: ModelRef("test/model".into()),
+                        request_model: "model".into(),
+                        thinking: ThinkingLevel::Off,
+                        generator: self.0.clone(),
+                        capabilities: ModelCapabilities {
+                            schema_version: ModelCapabilities::SCHEMA_VERSION,
+                            audio_input: AudioInputSupport::Unknown,
+                            image_input: ImageInputSupport::Unknown,
+                            max_context_tokens: Some(8192),
+                            max_output_tokens: Some(128),
+                            max_tools: Some(8),
+                            supports_parallel_tool_calls: false,
+                            reasoning_carryover: ReasoningCarryover::Unsupported,
+                            reasoning_efforts: ReasoningEffortSupport::Any,
+                            reasoning_state_dialect: None,
+                            cancel: CancelSemantics::Cooperative,
+                            cache: CacheRetention::Short,
+                            transport: Transport::Sse,
+                            default_reasoning_effort: None,
+                        },
+                        metering: ego_ai::catalogue::unmetered(),
+                        pricing_unavailable: None,
+                        rates: None,
+                    })
+                })
+            }
+        }
+        struct Unused;
+        impl ProcessExecutor for Unused {
+            fn execute<'a>(
+                &'a self,
+                _: &'a SpawnSpec,
+            ) -> BoxFuture<'a, Result<ToolResult, ProcessError>> {
+                Box::pin(async { Err(ProcessError::Invariant("unused".into())) })
+            }
+        }
+        impl Resolver for Unused {
+            fn resolve(
+                &self,
+                _: ego_core::permit::NetworkTarget,
+                _: Instant,
+            ) -> BoxFuture<'static, Result<ego_core::permit::DnsResolution, TransportError>>
+            {
+                Box::pin(async {
+                    Err(TransportError::definitely_unsent(TransportFailure::Offline))
+                })
+            }
+        }
+        impl OneHop for Unused {
+            fn begin_call(&self) -> Instant {
+                Instant::now() + Duration::from_secs(60)
+            }
+            fn execute(
+                &self,
+                _: ResolvedConnect,
+                _: HttpRequest,
+                _: Instant,
+            ) -> BoxFuture<'static, Result<ego_core::permit::OneHopResponse, TransportError>>
+            {
+                Box::pin(async {
+                    Err(TransportError::definitely_unsent(TransportFailure::Offline))
+                })
+            }
+        }
+        impl DuplexSpawner for Unused {
+            fn spawn(
+                &self,
+                _: SpawnSpec,
+            ) -> BoxFuture<'static, Result<DuplexHandle, TransportError>> {
+                Box::pin(async {
+                    Err(TransportError::definitely_unsent(TransportFailure::Offline))
+                })
+            }
+        }
+        impl RetryPause for Unused {
+            fn pause(&self, _: Duration) -> BoxFuture<'static, ()> {
+                Box::pin(async {})
+            }
+        }
+
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let first = (0..50)
+            .map(|i| format!("first-line-{i:02}\n"))
+            .collect::<String>();
+        let second = (0..50)
+            .map(|i| format!("second-line-{i:02}\n"))
+            .collect::<String>();
+        let args = serde_json::json!({"files": [
+            {"path": "first.txt", "contents": first},
+            {"path": "second.txt", "contents": second}
+        ]});
+        let generator = Arc::new(FakeGenerator::new([
+            vec![
+                AiEvent::ToolCall {
+                    call_id: "call-1".into(),
+                    name: "write".into(),
+                    args: args.to_string(),
+                },
+                AiEvent::Stop(StopReason::ToolUse),
+            ],
+            vec![AiEvent::Stop(StopReason::Stop)],
+        ]));
+        let store = JsonlStore::new(root.path().join("sessions"), &workspace, Box::new(OsIo));
+        let clock = ego_tools::clock::SystemClock;
+        let id = SessionId::new();
+        let opened = store
+            .open_writer(
+                &id,
+                LeaseInputs {
+                    pid: std::process::id(),
+                    now: clock.now(),
+                    stale_after: Duration::from_secs(60),
+                    is_alive: &|_| true,
+                },
+            )
+            .unwrap();
+        let evidence = SessionEvidenceStore::open(root.path(), id, 1024 * 1024).unwrap();
+        let sink = CollectingSink::new();
+        let human = Arc::new(Capture::default());
+        let cwd = CanonPath::new(workspace.canonicalize().unwrap());
+        let policy = crate::repl::policy_controls::CliGenerationPolicySource::new(
+            crate::repl::policy_controls::GenerationPolicySelection::new(
+                Mode::Default,
+                Ruleset::default(),
+            ),
+            cwd.clone(),
+            Some(human.clone()),
+        );
+        let admission = Arc::new(EvidenceAdmissionService::new());
+        let invocation = RunInvocationId::new();
+        admission
+            .admit_run_context(
+                &opened.writer,
+                ego_core::evidence::RunContextEvidence::new(
+                    id,
+                    invocation,
+                    ego_core::run::RunId::new(id, invocation.uuid()),
+                    Default::default(),
+                ),
+            )
+            .unwrap();
+        let registry: Vec<Arc<dyn ego_core::permit::Tool>> =
+            vec![Arc::new(Typed(ego_tools::tools::WriteTool))];
+        let effects = ToolEffectPorts::new(
+            &ego_tools::fs::OsFs,
+            &Unused,
+            &evidence,
+            Arc::new(Unused),
+            Arc::new(Unused),
+            Arc::new(Unused),
+        );
+        let mut turn = TurnLoop::new(
+            Session {
+                id,
+                state: SessionState::default(),
+                store: &opened.writer,
+                evidence: &opened.writer,
+                clock: &clock,
+                sink: &sink,
+                cancel: CancelToken::new(),
+            },
+            GenerationRuntime {
+                policy_source: Arc::new(policy),
+                source: Arc::new(Source(generator)),
+                gate: SharedBudgetGate::new(BudgetGate::unlimited(
+                    CurrencyCode::new("USD").unwrap(),
+                )),
+                config: TurnConfig {
+                    cache: CacheRetention::Short,
+                    system: None,
+                    identity: None,
+                    token_ceiling: None,
+                    retry: 0,
+                    fallbacks: vec![],
+                },
+                admission,
+                invocation,
+                retry_pause: Arc::new(Unused),
+            },
+            Tools::new(&registry, effects, cwd),
+        )
+        .unwrap();
+        let outcome = turn.run("write the files").await.unwrap();
+        let request = human.0.lock().unwrap().take().unwrap_or_else(|| {
+            panic!(
+                "real policy requested approval: {outcome:?}; events: {:?}",
+                sink.events()
+            )
+        });
+        assert!(request.presentation().is_some());
+        let rendered = details_prompt(&request, crate::render::Capabilities::plain());
+        let (_, rest) = rendered.split_once("Operations:\n").expect("operations");
+        let (operations, parameters) = rest.split_once("Parameters:\n").expect("parameters");
+        for (path, prefix) in [("first.txt", "first"), ("second.txt", "second")] {
+            assert!(operations.contains(path), "{operations}");
+            assert!(parameters.contains(path), "{parameters}");
+            assert!(
+                operations.contains(&format!("+{prefix}-line-00")),
+                "{operations}"
+            );
+            assert!(
+                !operations.contains(&format!("{prefix}-line-49")),
+                "{operations}"
+            );
+            assert!(
+                !parameters.contains(&format!("{prefix}-line-00")),
+                "{parameters}"
+            );
+            assert!(
+                !parameters.contains(&format!("{prefix}-line-49")),
+                "{parameters}"
+            );
+        }
+        assert_eq!(parameters.matches("[shown in bounded diff]").count(), 2);
+        assert_eq!(operations.matches("diff lines omitted").count(), 2);
+    }
 
     // Catches: fixed character limits hide the target and wrap decision keys.
     #[cfg(unix)]
@@ -573,6 +872,7 @@ mod tests {
                 result: hostile,
                 result_blocks: None,
                 timing: None,
+                before_image: None,
             },
             crate::render::Capabilities::plain(),
         );
@@ -626,8 +926,10 @@ mod permission_modal_diff_tests {
     fn permission_modal_edit_diff_catches_escaped_string_dump() {
         let request = request(Change::Replace {
             replace_all: false,
-            old_string: "def subtract(a, b):\n    return a - b\n".into(),
-            new_string: "def subtract(a, b):\n    return b - a\n".into(),
+            chunks: vec![ego_core::permit::ReplaceChunk {
+                old_string: "def subtract(a, b):\n    return a - b\n".into(),
+                new_string: "def subtract(a, b):\n    return b - a\n".into(),
+            }],
         });
         let out = details_prompt(&request, Capabilities::plain());
         assert!(
@@ -649,8 +951,10 @@ mod permission_modal_diff_tests {
     fn permission_modal_colour_catches_escapes_in_plain_output() {
         let request = request(Change::Replace {
             replace_all: false,
-            old_string: "old\n".into(),
-            new_string: "new\n".into(),
+            chunks: vec![ego_core::permit::ReplaceChunk {
+                old_string: "old\n".into(),
+                new_string: "new\n".into(),
+            }],
         });
         for (tty, no_color, term, flag, coloured) in [
             (true, None, "xterm-256color", false, true),
@@ -712,10 +1016,10 @@ mod permission_modal_diff_tests {
 #[cfg(test)]
 mod sandbox_grant_tests {
     use super::*;
-    // Catches: a sandbox question renders as "Allow ?", hides its path/retry,
+    // Catches: a sandbox question renders as "Allow ?", hides its path/no-replay warning,
     // or offers a persisted permission rule instead of session-only authority.
     #[test]
-    fn sandbox_prompt_names_session_path_and_retry_without_remembering() {
+    fn sandbox_prompt_names_session_path_and_no_replay_without_remembering() {
         let grant = ego_core::permit::SandboxGrant::new(
             ego_core::permit::CanonPath::new("/outside/input"),
             ego_core::permit::SandboxAccess::Read,
@@ -725,7 +1029,7 @@ mod sandbox_grant_tests {
         for text in [
             "read /outside/input",
             "for this session",
-            "will run again",
+            "No command will be retried",
             "/bin/cat",
             "[y] yes",
         ] {

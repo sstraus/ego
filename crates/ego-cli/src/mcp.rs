@@ -97,6 +97,9 @@ async fn login_inner(
             "select --client-id ID, --cimd URL, or --dcr".into(),
         )));
     }
+    if let Some(warning) = plaintext_credential_warning(name, &http) {
+        output(&warning);
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let interaction = ego_tools::mcp::LoopbackOAuthInteraction::bind(*callback_port, deadline)
         .await
@@ -204,6 +207,22 @@ async fn login_inner(
         result.resource()
     ));
     Ok(())
+}
+
+/// The once-per-invocation notice for an OAuth credential that crosses the
+/// network unencrypted. The owner selected the server, so it
+/// is admitted; the notice keeps the cost visible.
+pub(crate) fn plaintext_credential_warning(
+    name: &McpServerName,
+    http: &ego_core::config::McpHttpConfig,
+) -> Option<String> {
+    http.sends_credentials_in_plaintext().then(|| {
+        format!(
+            "MCP server '{name}' sends its OAuth credential over plaintext HTTP to {}; \
+             anyone on that network can read it. Use HTTPS to protect it.",
+            http.url.as_url().host_str().unwrap_or_default()
+        )
+    })
 }
 
 struct SessionOAuthInteraction<'a> {
@@ -956,6 +975,7 @@ enum ConfigurationReport {
         url: String,
         auth: &'static str,
         allow_insecure_loopback: bool,
+        oauth_hosts: Vec<String>,
     },
     Acp {
         server_id: String,
@@ -982,6 +1002,7 @@ impl ConfigurationReport {
                     McpHttpAuth::Oauth => "oauth",
                 },
                 allow_insecure_loopback: http.allow_insecure_loopback,
+                oauth_hosts: http.oauth_hosts.iter().map(ToString::to_string).collect(),
             },
             McpServerConfig::Acp { server_id } => Self::Acp {
                 server_id: server_id.clone(),

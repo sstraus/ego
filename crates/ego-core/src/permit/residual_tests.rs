@@ -71,3 +71,85 @@ fn a_journaled_grant_is_published_even_when_the_executor_stopped_waiting() {
     desk.answer(request, granted("/out/a"));
     assert_eq!(desk.grants(), vec![CanonPath::new("/out/a")]);
 }
+
+// Catches: an owner approval widens effects before its durable journal receipt.
+#[test]
+fn owner_grant_waits_for_receipt_and_never_becomes_a_judge_grant() {
+    use crate::permit::{SandboxAccess, SandboxGrant};
+    let desk = ResidualWriteDesk::new();
+    let grant = SandboxGrant::new(CanonPath::new("/build/helper"), SandboxAccess::Exec);
+    let mut requested = Box::pin(desk.record_owner_grant(grant.clone()));
+    assert!(requested.as_mut().now_or_never().is_none());
+    assert!(desk.owner_grants().is_empty());
+    let request = block_on(desk.next_owner()).unwrap();
+    desk.answer_owner(request);
+    assert!(block_on(requested));
+    assert_eq!(desk.owner_grants(), vec![grant]);
+    assert!(desk.grants().is_empty());
+}
+
+// Catches: a failed owner receipt leaves an executable grant in the desk.
+#[test]
+fn lost_owner_receipt_grants_nothing() {
+    use crate::permit::{SandboxAccess, SandboxGrant};
+    let desk = ResidualWriteDesk::new();
+    let mut requested = Box::pin(desk.record_owner_grant(SandboxGrant::new(
+        CanonPath::new("/build/helper"),
+        SandboxAccess::Exec,
+    )));
+    assert!(requested.as_mut().now_or_never().is_none());
+    drop(block_on(desk.next_owner()).unwrap());
+    assert!(!block_on(requested));
+    assert!(desk.owner_grants().is_empty());
+}
+
+// Catches: configuration changes are ignored by the session decision budget.
+#[test]
+fn configured_session_limit_reaches_the_judge_budget() {
+    let limits = ResidualLimits {
+        decisions_per_session: std::num::NonZeroUsize::new(1).unwrap(),
+        ..Default::default()
+    };
+    let desk = ResidualWriteDesk::with_limits(limits);
+    let request = desk.decide(spec(), evidence("/out/first"), Box::new(|_| Ok(())));
+    let answer = async {
+        let request = desk.next().await.unwrap();
+        desk.answer(request, granted("/out/first"));
+    };
+    block_on(futures::future::join(request, answer));
+    assert!(matches!(
+        block_on(desk.decide(spec(), evidence("/out/second"), Box::new(|_| Ok(())))),
+        ResidualDecision::Unavailable { .. }
+    ));
+}
+
+// Catches: a project config raises paid judge limits, or zero disables a bound.
+#[test]
+fn residual_limits_are_owner_configured_and_nonzero() {
+    use crate::config::{ConfigLayer, Source, Sourced, Trust};
+    let raw =
+        "[residual_limits]\ndecisions_per_call=7\ndecisions_per_session=80\ndeadline_ms=20000\n";
+    let layer = ConfigLayer::parse(Source::User, raw).unwrap().value;
+    let resolved = crate::config::resolve(
+        &[Sourced {
+            source: Source::User,
+            value: layer.clone(),
+        }],
+        Trust::Trusted,
+        None,
+    )
+    .unwrap();
+    assert_eq!(resolved.residual_limits.decisions_per_session.get(), 80);
+    assert_eq!(resolved.residual_limits.deadline(), Duration::from_secs(20));
+    let project = crate::config::resolve(
+        &[Sourced {
+            source: Source::Project,
+            value: layer,
+        }],
+        Trust::Trusted,
+        None,
+    )
+    .unwrap();
+    assert_eq!(project.residual_limits, ResidualLimits::default());
+    assert!(toml::from_str::<ConfigLayer>("[residual_limits]\ndeadline_ms=0").is_err());
+}

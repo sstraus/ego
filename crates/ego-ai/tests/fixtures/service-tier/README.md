@@ -11,12 +11,11 @@ Each fixture retains only the fields read by the service tier regression test:
 response without changes. Other endpoints and metadata are omitted. The hashes
 identify the full response bodies before this projection.
 
-The test compares all seven canonical model slugs and the exact decimal token
+The test compares all six canonical model slugs and the exact decimal token
 rates. It does not require network access or the local evidence directory.
 
 | Fixture | Source URL | Full response SHA-256 |
 | --- | --- | --- |
-| `anthropic-claude-opus-4-8-endpoints.json` | https://openrouter.ai/api/v1/models/anthropic/claude-opus-4.8/endpoints | `2c207a3976612422e12d353749487c041a68b2cbc9fe8f5ea631918cd0b2c079` |
 | `anthropic-claude-opus-5-5-endpoints.json` | https://openrouter.ai/api/v1/models/anthropic/claude-opus-5.5/endpoints | `e133eecd2b5a6aad9f021d0db45b385007502eef062b1c027d53bda48015a47d` |
 | `anthropic-claude-opus-5-endpoints.json` | https://openrouter.ai/api/v1/models/anthropic/claude-opus-5/endpoints | `c7d260a0424cb68432576768968801364c0e6e34169162f1567fe9594cebeac0` |
 | `openai-gpt-6-astra-endpoints.json` | https://openrouter.ai/api/v1/models/openai/gpt-6-astra/endpoints | `3e483b90a5749f5b990d4e9fa1359e13537504c5da9eddce7a8dfa43b1f81e8f` |

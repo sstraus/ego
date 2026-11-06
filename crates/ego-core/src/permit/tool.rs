@@ -59,6 +59,8 @@ pub enum ToolError {
     Process(ProcessError),
     /// Durable MCP continuation authority could not be prepared or recorded.
     Continuation(ContinuationError),
+    /// A builtin failed after producing durable per-file evidence.
+    WriteFailed(Box<ToolResult>),
     /// A foreign effect failed after its delivery certainty was known.
     Foreign {
         message: String,
@@ -76,6 +78,7 @@ impl std::fmt::Display for ToolError {
             ToolError::Process(err) => write!(f, "{err}"),
             ToolError::Continuation(err) => write!(f, "{err}"),
             ToolError::Foreign { message, .. } => f.write_str(message),
+            ToolError::WriteFailed(result) => f.write_str(&result.model_text()),
         }
     }
 }
@@ -98,13 +101,15 @@ impl ToolError {
             | Self::Fs(_)
             | Self::Evidence(_)
             | Self::Process(_)
-            | Self::Continuation(_) => None,
+            | Self::Continuation(_)
+            | Self::WriteFailed(_) => None,
         }
     }
 
     pub fn into_failed_result(self) -> ToolResult {
         match self {
             Self::Process(error) => error.into_failed_result(),
+            Self::WriteFailed(result) => *result,
             error => ToolResult::builtin(bounded_diagnostic(&error.to_string())),
         }
     }
@@ -355,6 +360,46 @@ pub struct ToolResult {
     provenance: ToolResultProvenance,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     line_change: Option<LineChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    before_image: Option<Box<BeforeImage>>,
+    /// The session file checkpoint a builtin write created, so a rewind can
+    /// find exactly the file changes after a turn. Journaled, never sent to
+    /// the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<Box<str>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    file_writes: Vec<FileWriteEvidence>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileWriteEvidence {
+    pub path: String,
+    pub completed: bool,
+    pub before_image: Option<BeforeImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_image: Option<String>,
+    pub checkpoint: Option<String>,
+    pub possibly_modified: bool,
+    pub summary: String,
+    pub notice: Option<String>,
+}
+
+/// Most bytes of a replaced file kept as a before image. A larger file is
+/// recorded as [`BeforeImage::Omitted`] so a journal never carries a second
+/// copy of a large file.
+pub const BEFORE_IMAGE_LIMIT: usize = 64 * 1024;
+
+/// What a file held before a builtin write replaced it. For the terminal
+/// diff only: it is journaled with the result and never sent to the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "text", rename_all = "snake_case")]
+pub enum BeforeImage {
+    /// The file did not exist.
+    New,
+    /// The UTF-8 text the file held, at most [`BEFORE_IMAGE_LIMIT`] bytes.
+    Text(String),
+    /// Too large, not text, or a protected credential file.
+    Omitted,
 }
 
 /// Lines observed in one successful builtin file edit. Missing means unknown.
@@ -377,6 +422,22 @@ impl ToolResult {
         for block in &mut self.content {
             block.text = values.mask(&block.text);
         }
+        if let Some(BeforeImage::Text(text)) = self.before_image.as_deref_mut() {
+            *text = values.mask(text);
+        }
+        for file in &mut self.file_writes {
+            if let Some(BeforeImage::Text(text)) = &mut file.before_image {
+                *text = values.mask(text);
+            }
+            if let Some(text) = &mut file.after_image {
+                *text = values.mask(text);
+            }
+            file.path = values.mask(&file.path);
+            file.summary = values.mask(&file.summary);
+            if let Some(notice) = &mut file.notice {
+                *notice = values.mask(notice);
+            }
+        }
         if let ToolResultProvenance::Foreign { result } = &mut self.provenance {
             result.mask_secrets(values);
         }
@@ -387,7 +448,19 @@ impl ToolResult {
             content: vec![ToolContentBlock::builtin(text)],
             provenance: ToolResultProvenance::Builtin,
             line_change: None,
+            before_image: None,
+            checkpoint: None,
+            file_writes: Vec::new(),
         }
+    }
+
+    pub fn with_file_writes(mut self, files: Vec<FileWriteEvidence>) -> Self {
+        self.file_writes = files;
+        self
+    }
+
+    pub fn file_writes(&self) -> &[FileWriteEvidence] {
+        &self.file_writes
     }
 
     pub fn with_line_change(mut self, change: LineChange) -> Self {
@@ -399,11 +472,32 @@ impl ToolResult {
         self.line_change
     }
 
+    pub fn with_before_image(mut self, image: BeforeImage) -> Self {
+        self.before_image = Some(Box::new(image));
+        self
+    }
+
+    pub fn before_image(&self) -> Option<&BeforeImage> {
+        self.before_image.as_deref()
+    }
+
+    pub fn with_checkpoint(mut self, checkpoint: Option<String>) -> Self {
+        self.checkpoint = checkpoint.map(String::into_boxed_str);
+        self
+    }
+
+    pub fn checkpoint(&self) -> Option<&str> {
+        self.checkpoint.as_deref()
+    }
+
     pub fn new(content: Vec<ToolContentBlock>) -> Self {
         Self {
             content,
             provenance: ToolResultProvenance::Builtin,
             line_change: None,
+            before_image: None,
+            checkpoint: None,
+            file_writes: Vec::new(),
         }
     }
 
@@ -415,6 +509,9 @@ impl ToolResult {
                 result: Box::new(result),
             },
             line_change: None,
+            before_image: None,
+            checkpoint: None,
+            file_writes: Vec::new(),
         }
     }
 
@@ -668,6 +765,47 @@ impl<T: TypedTool> Tool for Typed<T> {
 #[cfg(test)]
 mod line_change_tests {
     use super::*;
+
+    // Catches: file-write images or operator evidence bypass secret masking before journaling.
+    #[test]
+    fn file_write_evidence_masks_secrets_in_journal_and_preserves_context() {
+        let secret = "secret-token-42";
+        let mut result = ToolResult::builtin(format!("output {secret}")).with_file_writes(vec![
+            FileWriteEvidence {
+                path: format!("/workspace/{secret}/file.txt"),
+                completed: true,
+                before_image: Some(BeforeImage::Text(format!("before {secret} retained"))),
+                after_image: Some(format!("after {secret} retained")),
+                checkpoint: None,
+                possibly_modified: false,
+                summary: format!("summary {secret} retained"),
+                notice: Some(format!("notice {secret} retained")),
+            },
+        ]);
+        result.mask_secrets(&crate::secrets::SecretValues::new([secret
+            .as_bytes()
+            .to_vec()]));
+        let journal = serde_json::to_string(&result).unwrap();
+        assert!(!journal.contains(secret), "secret leaked in {journal}");
+        for context in [
+            "/workspace/",
+            "file.txt",
+            "before ",
+            "after ",
+            "summary ",
+            "notice ",
+            "retained",
+            "output ",
+        ] {
+            assert!(
+                journal.contains(context),
+                "missing {context:?} in {journal}"
+            );
+        }
+        let file = &result.file_writes()[0];
+        assert!(!format!("{file:?}").contains(secret));
+        assert!(file.after_image.as_ref().unwrap().contains("retained"));
+    }
 
     #[test]
     fn line_change_survives_journal_json_without_rewriting_older_results() {

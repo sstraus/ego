@@ -25,7 +25,11 @@ fn assert_writes(root: &Path, expectations: &[(PathBuf, bool)]) {
 fn rerun(layout: &str, env: &[(&str, PathBuf)]) {
     let mut command = Command::new(std::env::current_exe().unwrap());
     command
-        .args(["--exact", CASE, "--nocapture"])
+        .args([
+            "--exact",
+            &format!("adaptive_admission::{CASE}"),
+            "--nocapture",
+        ])
         .env("EGO_JS_LAYOUT", layout);
     for (key, value) in env {
         command.env(key, value);

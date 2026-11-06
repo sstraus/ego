@@ -33,9 +33,7 @@ use crate::auth::BEARER;
 use crate::auth::Credential;
 use crate::card::{Served, card};
 use ego_core::endpoint::Admitted;
-use ego_listen::{
-    Bound, ConnectionGate, ConnectionLimits, GuardedAccepted, Peer, serve_connections,
-};
+use ego_listen::{Bound, ConnectionGate, GuardedAccepted, Peer, serve_connections};
 
 /// The discovery path, pinned to the constant the reference server publishes.
 ///
@@ -61,29 +59,11 @@ struct Listener {
     served: Served,
 }
 
-/// Serve until `shutdown` resolves.
+/// Serve on an endpoint the caller already opened.
 ///
-/// The bind happens here rather than in the caller so that the address a card
-/// advertises is the address the socket actually got: passing port 0 is how a
-/// test asks the OS for a free one, and a card built from the requested address
-/// would then advertise port 0 to the world.
-pub async fn serve(
-    admitted: &Admitted,
-    credential: Option<Credential>,
-    shutdown: impl Future<Output = ()> + Send,
-) -> std::io::Result<()> {
-    let bound = ego_listen::bind(admitted).await?;
-    serve_on(
-        bound,
-        admitted,
-        credential,
-        ConnectionGate::new(ConnectionLimits::default()),
-        shutdown,
-    )
-    .await
-}
-
-/// The same, on an endpoint the caller already opened.
+/// The caller binds so that the address a card advertises is the address the
+/// socket actually got: passing port 0 is how a test asks the OS for a free
+/// one, and a local socket in an ordinary directory lives in a private child.
 pub async fn serve_on(
     bound: Bound,
     admitted: &Admitted,

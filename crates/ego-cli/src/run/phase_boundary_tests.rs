@@ -597,12 +597,12 @@ fn background_task_budget_stop_is_delivered_as_failure_data() {
                         r#"{"name":"check","prompt":"Return a short result","background":true}"#,
                     )),
                     Reply::Sse(
-                        tool_call("read-child", "read", r#"{"path":"missing"}"#)
+                        tool_call("read-child", "read", r#"{"files":[{"path":"missing"}]}"#)
                             .replace("\"prompt_tokens\":10", "\"prompt_tokens\":1000")
                             .replace("\"total_tokens\":14", "\"total_tokens\":1004"),
                     ),
                     Reply::Sse(
-                        tool_call("read-child", "read", r#"{"path":"missing"}"#)
+                        tool_call("read-child", "read", r#"{"files":[{"path":"missing"}]}"#)
                             .replace("\"prompt_tokens\":10", "\"prompt_tokens\":1000")
                             .replace("\"total_tokens\":14", "\"total_tokens\":1004"),
                     ),
@@ -648,6 +648,7 @@ fn background_task_budget_stop_is_delivered_as_failure_data() {
 }
 
 #[derive(Debug)]
+#[cfg(unix)]
 struct IdleExecSeat {
     first: std::sync::atomic::AtomicBool,
     wake: crossbeam::channel::Receiver<repl::Line>,
@@ -655,6 +656,7 @@ struct IdleExecSeat {
     idle_marker: Option<std::path::PathBuf>,
 }
 
+#[cfg(unix)]
 impl Reads for IdleExecSeat {
     fn read(&self) -> repl::Line {
         if self.first.swap(false, std::sync::atomic::Ordering::SeqCst) {
@@ -669,6 +671,7 @@ impl Reads for IdleExecSeat {
     }
 }
 
+#[cfg(unix)]
 impl InteractiveSeat for IdleExecSeat {
     fn wake_background_exec(&self) {
         // Catches: a duplicate/stale notification buys a second continuation.

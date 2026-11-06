@@ -40,3 +40,22 @@ pub(super) fn mark_content(content: &mut Value, control: &Value) -> bool {
     }
     false
 }
+
+/// The explicit short/long tiers shared by the documented request controls.
+pub(super) fn policy(
+    req: &GenRequest,
+    long_supported: bool,
+    lock_ttl: bool,
+) -> ego_core::usage::PromptCachePolicy {
+    let seconds = match req.cache.as_ref().map(|cache| cache.retention) {
+        Some(CacheRetention::Short) => 300,
+        Some(CacheRetention::Long) if long_supported => 3_600,
+        Some(CacheRetention::Long) => 300,
+        _ => return ego_core::usage::PromptCachePolicy::default(),
+    };
+    ego_core::usage::PromptCachePolicy {
+        ttl_seconds: std::num::NonZeroU64::new(seconds),
+        refresh_on_read: true,
+        lock_ttl,
+    }
+}

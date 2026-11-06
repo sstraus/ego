@@ -1,10 +1,10 @@
 //! Remembered acknowledgement of the Windows unconfined-execution contract.
 //!
-//! This is a host-risk fact, not project trust. The filesystem transaction and
-//! the human question live in `ego-cli`; only the versioned lookup rule lives
-//! here.
-
-use std::collections::BTreeMap;
+//! This is a host-risk fact, not project trust. The owner learns once per
+//! contract revision that Windows does not confine execution; the limitation
+//! is a property of the platform, not of a workspace, so one answer covers
+//! every workspace of the same user. The filesystem transaction and the human
+//! question live in `ego-cli`; only the versioned lookup rule lives here.
 
 use serde::{Deserialize, Serialize};
 
@@ -13,39 +13,34 @@ pub const UNCONFINED_CONTRACT_REVISION: u32 = 1;
 
 const UNCONFINED_LEDGER_VERSION: u8 = 1;
 
-/// One acknowledgement of the Windows unconfined-execution contract.
+/// The user's acknowledgement of the Windows unconfined-execution contract.
+///
+/// Unknown fields are refused, so a workspace trust document can never be
+/// read as this host acknowledgement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UnconfinedRecord {
-    pub revision: u32,
-}
-
-/// Acknowledgements keyed by canonical workspace root.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct UnconfinedLedger {
     v: u8,
-    workspaces: BTreeMap<String, UnconfinedRecord>,
+    revision: Option<u32>,
 }
 
 impl Default for UnconfinedLedger {
     fn default() -> Self {
         Self {
             v: UNCONFINED_LEDGER_VERSION,
-            workspaces: BTreeMap::new(),
+            revision: None,
         }
     }
 }
 
 impl UnconfinedLedger {
-    /// Whether `root` acknowledged this exact contract revision.
-    pub fn acknowledged(&self, root: &str, revision: u32) -> bool {
-        self.workspaces
-            .get(root)
-            .is_some_and(|record| record.revision == revision)
+    /// Whether the user acknowledged this exact contract revision.
+    pub fn acknowledged(&self, revision: u32) -> bool {
+        self.revision == Some(revision)
     }
 
-    /// Replace the acknowledgement recorded for `root`.
-    pub fn acknowledge(&mut self, root: impl Into<String>, revision: u32) {
-        self.workspaces
-            .insert(root.into(), UnconfinedRecord { revision });
+    /// Replace the user's acknowledgement with `revision`.
+    pub fn acknowledge(&mut self, revision: u32) {
+        self.revision = Some(revision);
     }
 }

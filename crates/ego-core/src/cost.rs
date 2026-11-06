@@ -1,7 +1,7 @@
 //! The accounting contract: exact money, priced generations, and the
 //! cumulative session cost.
 //!
-//! Exact monetary accounting without floating-point domain values.
+//! See `ARCHITECTURE.md` §3.1.
 //!
 //! ## No floating-point money in the domain
 //!
@@ -18,7 +18,7 @@
 //! [`CostDelta`] is an explicit `Known | Unknown` enum rather than
 //! `Option<Money>`. `Option` invites `unwrap_or_default()`, which silently
 //! prices an unpriced generation at zero — the exact bug the public-event
-//! contract already rejected once (mdkb `ego-usage-public-contract`). An
+//! contract already rejected once. An
 //! `Unknown` that carries its reason is auditable; a `None` is not.
 //!
 //! ## History is never repriced

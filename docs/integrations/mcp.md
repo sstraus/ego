@@ -11,12 +11,11 @@ Use `ego mcp add` to store one complete stdio or HTTP server declaration;
 entry. `ego mcp ls` shows configuration and admitted state; `ego mcp reload`
 reconciles current configuration. These operations do not silently log in.
 
-Every enabled effective server attaches at session start, as in Claude Code and
-Codex; no flag is needed. Set `enabled = false` in a server entry to keep it
+Every enabled effective server attaches at session start; no flag is needed. Set `enabled = false` in a server entry to keep it
 configured but detached. `--mcp NAME` selects an effective server explicitly,
 including a disabled one; `--mcp @FILE` adds a strict invocation-scoped JSON
-server. A server that admission refuses (for example an HTTP server outside
-`--sandbox off`) or that fails to start is reported once with its cause and the
+server. A server that admission refuses (for example any server under
+`--offline`) or that fails to start is reported once with its cause and the
 session continues; the same refusal for an explicit `--mcp` is a usage error. A file entry is one complete server, not a
 second configuration hierarchy. See [configuration](../reference/configuration.md)
 for every field/default. HTTP OAuth requires an explicit registration strategy;
@@ -37,6 +36,34 @@ never triggers a legacy GET or initialize handshake. The legacy profile pins
 frame bound, deadline, cancellation, and guarded egress. It does not reconnect
 or retry. Legacy complete results have no reusable cache grant. WebSocket is
 not supported.
+
+### Plaintext HTTP on the owner network
+
+HTTP servers attach in every sandbox mode; only `--offline` refuses MCP. The
+HTTP connection runs in the ego process, like the provider connection, and
+reaches only the configured destination. HTTPS stays the default. A plaintext
+`http://` server needs `allow_insecure_loopback = true` in its own entry, or
+`ego mcp add NAME --http URL --allow-insecure-loopback`. Despite its name, this
+per-server opt-in admits any host that you name: localhost, a LAN address, a
+Tailscale address, or a host name. The owner decided on 2026-11-01 that a
+server you configure explicitly is an intended destination, not a sandbox escape.
+
+Retained protections:
+
+- The opt-in is per server. It is invalid for an `https://` URL, so it never
+  downgrades an HTTPS server.
+- ACP hosts still get plaintext HTTP only for exact loopback URLs.
+- Redirects are never followed, so a server cannot move a request or its
+  credential to another URL.
+- OAuth for an HTTPS server never moves to plaintext HTTP off this machine. For
+  a plaintext server, a plaintext issuer must be on the same host as the server;
+  an HTTPS issuer is always accepted.
+- When a plaintext server off loopback uses `auth = "oauth"`, ego writes one
+  warning per run (not with `--quiet`) and per `ego mcp login`: anyone on that network can read the
+  credential. Move the server to HTTPS to remove the warning.
+
+To withdraw the approval, remove `allow_insecure_loopback` from the entry or set
+it to `false`. Ego then refuses that plaintext server again.
 
 Project declarations load only after workspace trust. A stdio child has a
 session-owned lifetime and an admitted working-directory/environment identity.
@@ -103,6 +130,41 @@ for the loopback callback. `--callback-port PORT` selects a registered port
 port to the machine running ego. The flow validates state, PKCE, issuer, and
 exact protected-resource identity before storing the credential privately.
 
+### Services with separate login and token hosts
+
+By default the authorization, token and registration endpoints must share the
+origin of the issuer that the protected resource names. A service that hosts
+them elsewhere is refused with "OAuth metadata binding mismatch". To accept it,
+enroll the extra origins for that one server with repeatable `--oauth-host`
+options on `ego mcp add NAME --http URL --auth oauth`, or set
+`oauth_hosts = ["https://login.example.com", ...]` on the server entry.
+Each value is a bare `https` origin (loopback `http` is also allowed): no path,
+query, fragment or userinfo.
+
+**Approval scope.** Only configuration enrolls hosts, and only for the server
+it appears on. Discovery metadata never adds a host. A project configuration
+that lists `oauth_hosts` shows them in the trust prompt like any other
+executable surface. The enrolled origins may host the authorization, token and
+registration endpoints; the authorization code, PKCE verifier and registration
+request go to a host only when it is the issuer origin or is enrolled.
+
+**Retained protections.** The issuer must still match the protected-resource
+document; the metadata `issuer`, `resource` and `audience` must still bind to
+the exact resource; PKCE (`S256`) and `state` are still validated; the
+callback `iss` is still checked; and a public client is still required.
+Credentials are stored under the issuer and resource, never under an enrolled
+host, and are sent only to the MCP server URL.
+
+**Recovery.** Remove the origin (edit `oauth_hosts`, or run `ego mcp add`
+again without `--oauth-host`) and run `ego mcp login NAME` again to return to
+issuer-origin-only behavior. Changing the enrolled set changes the server
+fingerprint; apply it to a running session with `ego mcp reload NAME`.
+
+**Verification boundary:** no affected live service was tested. The behavior
+is covered by fixtures with the metadata shape; an owner-selected real service
+must still be enrolled and its metadata recorded before this is called
+live-verified.
+
 Runtime admission uses the stored credential and exact-resource locator.
 Expiry and a 401 can refresh credentials; a selected operation is not replayed
 because it returned 401. Missing or revoked credentials report a login hint.
@@ -118,7 +180,7 @@ Sources: [CLI login and refresh](../../crates/ego-cli/src/mcp.rs),
 [OAuth protocol and runtime](../../crates/ego-mcp/src/oauth.rs),
 [loopback and persistence adapters](../../crates/ego-tools/src/mcp_oauth.rs),
 [recorded public contracts](../../crates/ego-mcp/tests/fixtures/oauth/), and
-[local authorization-server coverage](../../crates/ego-mcp/tests/oauth_local_server.rs).
+[local authorization-server coverage](../../crates/ego-mcp/tests/it/oauth_local_server.rs).
 Use `ego mcp login --help` for the installed binary's exact options.
 
 ## Serve εgo runs
@@ -131,8 +193,9 @@ At least one effective token or money ceiling is mandatory; for example, save
 The server refuses startup without an effective configured model, effort, and budget. Its root
 configuration must also support the requested confinement.
 
-An MCP client launches `ego mcp-server` on stdio with required positive
-`--max-concurrent-runs`, `--retained-requests`, and `--max-resource-bytes` values. It exposes the rooted run tools
+An MCP client launches `ego mcp-server` on stdio. The launch limits are finite and optional:
+`--max-concurrent-runs` (default 1), `--retained-requests` (default 16), and `--max-resource-bytes`
+(default 65536); each must be positive. It exposes the rooted run tools
 `run`, `continue`, `cancel`, `status`, and `compact`, plus bounded run resources.
 It is a controller over scoped εgo work, not a raw arbitrary shell server.
 
@@ -140,9 +203,15 @@ Requests carry stable identities; visibility and expected revisions guard contro
 operations. Compaction returns source/target identities and publication state.
 Application failures use MCP `isError`; published uncertainty is a successful
 non-retryable receipt, not an invitation to send another compact request.
-There are no implicit defaults for those three launch limits.
-For example, a client can pass `--max-concurrent-runs 1 --retained-requests 16
---max-resource-bytes 65536` as its explicit resource policy.
+Owner selection policy: by default a client may select only the deployment root (`-C`, or the
+current directory), the configured model, and the configured mode. The owner adds reviewed
+alternatives at launch with the repeatable `--allow-root DIR`, `--allow-model P/M`, and
+`--allow-mode MODE`. A request outside that set is refused before any run starts; the thinking
+level, budget ceiling, and profile limits are unchanged, and every run still passes normal run
+admission and the concurrency bound. An extra root is resolved at startup and must exist; it runs
+with the same user configuration and ceilings as the deployment root, and project configuration
+stays untrusted. `ego://capabilities` reports the active policy and limits. To recover from a
+too-wide policy, restart the server without the `--allow-*` flags.
 
 Sources: [CLI MCP management](../../crates/ego-cli/src/mcp.rs),
 [inbound composition](../../crates/ego-cli/src/mcp_server.rs),

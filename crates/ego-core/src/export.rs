@@ -258,7 +258,9 @@ pub enum ExportEvent {
         audio: Vec<crate::generator::audio::AudioRef>,
         queued_prompt: Option<QueuedPromptId>,
     },
+    // TODO(2027-03-01): remove legacy AssistantDelta replay support.
     AssistantDelta,
+    AssistantMessageStarted,
     AssistantMessage,
     HostContextAppended,
     ReasoningDelta,
@@ -273,6 +275,11 @@ pub enum ExportEvent {
     },
     DetachedExecStarted {
         id: crate::event::id::DetachedExecId,
+    },
+    DetachedExecOutput {
+        id: crate::event::id::DetachedExecId,
+        lines: usize,
+        omitted: u64,
     },
     DetachedExecSettled {
         id: crate::event::id::DetachedExecId,
@@ -306,6 +313,9 @@ pub enum ExportEvent {
     },
     SessionSelectionsSelected {
         selections: crate::run::RunSelections,
+    },
+    SandboxOwnerGranted {
+        access: crate::permit::SandboxAccess,
     },
     SessionRootGranted {
         access: crate::permit::RootAccess,
@@ -939,10 +949,12 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 queued_prompt: *queued_prompt,
             }
         }
+        // TODO(2027-03-01): remove legacy AssistantDelta replay support.
         EventKind::AssistantDelta { text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::AssistantDelta
         }
+        EventKind::AssistantMessageStarted => ExportEvent::AssistantMessageStarted,
         EventKind::AssistantMessage { text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::AssistantMessage
@@ -985,6 +997,14 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::HostContextAppended
         }
         EventKind::DetachedExecStarted { id } => ExportEvent::DetachedExecStarted { id: *id },
+        EventKind::DetachedExecOutput { output } => {
+            redactions.tool_material += 1;
+            ExportEvent::DetachedExecOutput {
+                id: output.id,
+                lines: output.lines.len(),
+                omitted: output.omitted,
+            }
+        }
         EventKind::DetachedExecSettled { snapshot } => project_detached_exec(snapshot, redactions),
         EventKind::QuestionRequested { request, target } => {
             redactions.opaque_prose += 1 + (request.options.len() as u64 * 2);
@@ -1049,8 +1069,10 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             attempt,
             role,
             snapshot,
+            cache,
         } => {
-            redactions.opaque_prose += u64::from(snapshot.is_some());
+            // Request cache policy contains the operator's exact model spelling.
+            redactions.opaque_prose += u64::from(snapshot.is_some()) + u64::from(cache.is_some());
             if let Some(system) = snapshot.as_ref().and_then(|value| value.system.as_ref()) {
                 redactions.path += system.sources.len() as u64;
             }
@@ -1091,6 +1113,12 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
         EventKind::SessionSelectionsSelected { selections } => {
             ExportEvent::SessionSelectionsSelected {
                 selections: selections.clone(),
+            }
+        }
+        EventKind::SandboxOwnerGranted { grant } => {
+            redactions.path += 1;
+            ExportEvent::SandboxOwnerGranted {
+                access: grant.access,
             }
         }
         EventKind::SessionRootGranted { root } => {

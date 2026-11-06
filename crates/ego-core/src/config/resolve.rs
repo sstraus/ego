@@ -80,7 +80,29 @@ impl ResolvedMcpConfig {
 /// and the trust gate have been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
+    pub cache_ttl_seconds: Option<std::num::NonZeroU64>,
+    pub residual_limits: crate::permit::residual::ResidualLimits,
+    /// Owner-only compaction policy; idle compaction is opt-in.
+    pub compaction: crate::compact::CompactionConfig,
+    /// Owner-only recap after an absence; off by default.
+    pub recap: crate::recap::RecapConfig,
+    /// Owner-only defaults for task children; unset keeps the parent's values.
+    pub task: crate::turn::ChildDefaults,
     pub instructions: super::InstructionConfig,
+    /// Owner opt-in for the workspace memory file; off by default.
+    pub memory: bool,
+    /// File checkpoints before `write` and `edit`; on unless the owner turns them off.
+    pub checkpoints: bool,
+    /// Owner tool selection from the `tools` key; `None` keeps every default tool.
+    pub tools: Option<Vec<String>>,
+    /// Owner opt-in: `ego doctor` probes provider reachability; off by default.
+    pub doctor_network: bool,
+    /// Owner opt-in for the `lsp` tool's language servers; off by default.
+    pub lsp: bool,
+    /// Owner opt-in for MCP Tasks on HTTP servers; off by default.
+    pub mcp_tasks: bool,
+    /// Cold session storage, from the user layer only.
+    pub sessions: super::SessionStorageConfig,
     pub max_output_tokens: Option<std::num::NonZeroU64>,
     /// Fields reduced by an explicitly selected host profile ceiling.
     pub profile_warnings: Vec<String>,
@@ -174,7 +196,12 @@ impl std::fmt::Display for Discarded {
 /// eligibility, so it is never discarded and saying it was would be false.
 fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     let ConfigLayer {
+        residual_limits,
+        compaction,
+        recap,
+        task: _,
         instructions,
+        sessions,
         max_output_tokens,
         cache,
         model,
@@ -189,15 +216,27 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         permissions,
         budget,
         bare: _,
+        web_private_network,
+        memory,
+        checkpoints,
+        tools,
+        doctor_network,
+        lsp,
+        mcp_tasks,
         profile,
         auth,
         ui,
         mcp,
         hooks,
+        grants,
     } = layer;
     let mut settings = Vec::new();
     for (present, name) in [
+        (residual_limits.is_some(), "residual_limits"),
+        (compaction.is_some(), "compaction"),
+        (recap.is_some(), "recap"),
         (instructions.is_some(), "instructions"),
+        (sessions.is_some(), "sessions"),
         (max_output_tokens.is_some(), "max_output_tokens"),
         (cache.is_some(), "cache"),
         (model.is_some(), "model"),
@@ -211,11 +250,19 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (exec_paths.is_some(), "exec_paths"),
         (permissions.is_some(), "permissions"),
         (budget.is_some(), "budget"),
+        (web_private_network.is_some(), "web_private_network"),
+        (memory.is_some(), "memory"),
+        (checkpoints.is_some(), "checkpoints"),
+        (tools.is_some(), "tools"),
+        (doctor_network.is_some(), "doctor_network"),
+        (lsp.is_some(), "lsp"),
+        (mcp_tasks.is_some(), "mcp_tasks"),
         (!profile.is_empty(), "profile tables"),
         (!auth.is_empty(), "auth"),
         (ui.is_some(), "ui"),
         (!mcp.servers.is_empty(), "mcp servers"),
         (!hooks.is_empty(), "hooks"),
+        (grants.is_some(), "grants"),
     ] {
         if present {
             settings.push(name);
@@ -348,6 +395,7 @@ fn resolve_inner(
     let active_profile_name = active_profile;
     let resolved_active_profile =
         resolve_active_profile(&eligible, active_profile_name, selected_by)?;
+    let mut cache_ttl_seconds = None;
     let mut max_output_tokens = None;
     let mut cache = crate::generator::capabilities::CacheRetention::Short;
     let mut model = None;
@@ -361,22 +409,59 @@ fn resolve_inner(
     let mut roots_source = None;
     let mut exec_paths = Vec::new();
     let mut permissions = Ruleset::default();
+    let mut web_private_network = false;
+    let mut memory = false;
+    let mut checkpoints = true;
+    let mut tools: Option<Vec<String>> = None;
+    let mut doctor_network = false;
+    let mut lsp = false;
+    let mut mcp_tasks = false;
     let mut judge = None;
+    let mut residual_limits = crate::permit::residual::ResidualLimits::default();
+    let mut compaction = crate::compact::CompactionConfig::default();
+    let mut recap = crate::recap::RecapConfig::default();
+    let mut task = crate::turn::ChildDefaults::default();
     let mut ceilings = Ceilings::default();
     let mut auth = std::collections::HashMap::new();
     let mut ui = UiLayer::default();
     let mut mcp = ResolvedMcpConfig::default();
     let mut instructions = super::InstructionConfig::default();
+    let mut sessions = super::SessionStorageConfig::default();
     let mut session_dir = None;
     let mut artifact_dir = None;
     let mut roots = Vec::new();
     let mut root_restrictions = Vec::new();
 
     for sourced in &eligible {
+        if let Some(value) = sourced.value.memory {
+            memory = value;
+        }
+        if let Some(value) = sourced.value.checkpoints {
+            checkpoints = value;
+        }
+        if let Some(value) = &sourced.value.tools {
+            tools = Some(value.clone());
+        }
+        if let Some(value) = sourced.value.lsp {
+            lsp = value;
+        }
         if sourced.source == Source::User {
             instructions = sourced.value.instructions.clone().unwrap_or_default();
+            sessions = sourced.value.sessions.clone().unwrap_or_default();
+            if let Some(value) = sourced.value.web_private_network {
+                web_private_network = value;
+            }
+            if let Some(value) = sourced.value.doctor_network {
+                doctor_network = value;
+            }
+            if let Some(value) = sourced.value.mcp_tasks {
+                mcp_tasks = value;
+            }
         }
         let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
+        if let Some(ttl) = profile.and_then(|profile| profile.cache_ttl_seconds) {
+            cache_ttl_seconds = Some(ttl);
+        }
 
         apply_mcp_entries(
             &mut mcp,
@@ -413,6 +498,29 @@ fn resolve_inner(
             &mut sandbox,
             &mut sandbox_provenance,
         );
+        if matches!(sourced.source, Source::User | Source::System)
+            && let Some(limits) = sourced.value.residual_limits
+        {
+            residual_limits = limits;
+        }
+        // Compaction spends paid requests; a project cannot turn it on. The
+        // command line (`-c compaction.headless=true`) is the owner's too.
+        if matches!(
+            sourced.source,
+            Source::User | Source::System | Source::Flags
+        ) && let Some(layer) = &sourced.value.compaction
+        {
+            compaction.merge(layer);
+        }
+        // A recap spends a paid request; only the owner's files turn it on.
+        if matches!(sourced.source, Source::User | Source::System)
+            && let Some(layer) = &sourced.value.recap
+        {
+            recap.merge(layer);
+        }
+        if let Some(layer) = &sourced.value.task {
+            task.merge(layer);
+        }
         merge_exec_controls(&mut exec, sourced, profile);
         if let Some(value) = profile
             .and_then(|profile| profile.network)
@@ -561,6 +669,23 @@ fn resolve_inner(
         )
     });
 
+    // A trusted project's proposals come last and add to what the owner set.
+    // Ceilings are gathered below, so they bind these roots and paths too.
+    for layer in &eligible {
+        if let Some(grants) = &layer.value.grants {
+            apply_grants(
+                layer.source,
+                grants,
+                &mut roots,
+                &mut roots_source,
+                &mut exec_paths,
+            );
+            for rule in &grants.allow {
+                Ruleset::merge(&mut permissions.allow, rule.clone(), layer.source);
+            }
+        }
+    }
+
     // The same construction one field over: a `system` ceiling is gathered outside the
     // ordinary merge and re-applied after it, so no higher-precedence layer and no
     // profile override can raise it.
@@ -613,8 +738,26 @@ fn resolve_inner(
             max_output_tokens = Some(max_output_tokens.map_or(limit, |value| value.min(limit)));
         }
     }
+    compaction
+        .validate()
+        .map_err(|message| ConfigError::Invalid {
+            source: Source::User,
+            message,
+        })?;
     Ok(Effective {
+        cache_ttl_seconds,
+        residual_limits,
+        compaction,
+        recap,
+        task,
         instructions,
+        memory,
+        checkpoints,
+        tools,
+        doctor_network,
+        lsp,
+        mcp_tasks,
+        sessions,
         max_output_tokens,
         profile_warnings,
         cache,
@@ -630,7 +773,10 @@ fn resolve_inner(
         sandbox_provenance,
         roots_source,
         exec_paths,
-        permissions: permissions.with_credential_defaults(),
+        permissions: Ruleset {
+            web_private_network,
+            ..permissions.with_credential_defaults()
+        },
         judge,
         posture,
         active_profile: resolved_active_profile,
@@ -663,6 +809,29 @@ fn system_budget_ceiling(
         }
     }
     system_ceiling
+}
+
+/// Owner-approved project proposals extend, never replace, the owner's values.
+fn apply_grants(
+    source: Source,
+    grants: &super::ProjectGrants,
+    roots: &mut Vec<crate::permit::RootCfg>,
+    roots_source: &mut Option<Source>,
+    exec_paths: &mut Vec<PathBuf>,
+) {
+    for root in &grants.roots {
+        if !roots.contains(root) {
+            roots.push(root.clone());
+        }
+    }
+    if !grants.roots.is_empty() {
+        roots_source.get_or_insert(source);
+    }
+    for path in &grants.exec_paths {
+        if !exec_paths.contains(path) {
+            exec_paths.push(path.clone());
+        }
+    }
 }
 
 fn select_roots(
@@ -718,10 +887,7 @@ fn merge_generation_fields(
     {
         *max_output_tokens = Some(value);
     }
-    if let Some(value) = sourced.value.cache
-        && (value != crate::generator::capabilities::CacheRetention::Long
-            || sourced.source == Source::User)
-    {
+    if let Some(value) = sourced.value.cache {
         *cache = value;
     }
     if let Some(m) = profile
@@ -875,6 +1041,9 @@ fn merge_auth(
         let resolved = auth.entry(id.clone()).or_default();
         if provider.credential_command.is_some() {
             resolved.credential_command = provider.credential_command.clone();
+        }
+        if provider.credential_timeout_secs.is_some() {
+            resolved.credential_timeout_secs = provider.credential_timeout_secs;
         }
         for (name, value) in &provider.headers {
             resolved

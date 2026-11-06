@@ -114,6 +114,7 @@ impl Read for Terminal {
     }
 }
 
+#[cfg(unix)]
 pub(super) fn terminal(
     reader: Box<dyn Read + Send>,
     responder: mpsc::SyncSender<WriteRequest>,
@@ -121,6 +122,7 @@ pub(super) fn terminal(
     terminal_with_support(reader, responder, true)
 }
 
+#[cfg(unix)]
 fn terminal_with_support(
     reader: Box<dyn Read + Send>,
     responder: mpsc::SyncSender<WriteRequest>,
@@ -220,7 +222,7 @@ fn assert_balanced(output: &[u8]) {
 #[test]
 fn kitty_keyboard_suspend_balances_modes_for_composer_busy_and_modal() {
     for phase in ["idle", "busy", "modal"] {
-        let (reply, gate) = gated_paced_line("KITTY-760-RUNNING");
+        let (reply, gate) = gated_paced_line("KITTY-RUNNING");
         let stub = Stub::start(Plan {
             completions: vec![reply],
             ..Plan::default()
@@ -240,8 +242,8 @@ fn kitty_keyboard_suspend_balances_modes_for_composer_busy_and_modal() {
             job.send(b"/mode\r");
             "Enter answers; Esc cancels."
         } else {
-            job.send(b"KITTY-760-DRAFT");
-            "KITTY-760-DRAFT"
+            job.send(b"KITTY-DRAFT");
+            "KITTY-DRAFT"
         };
         until_normalized(&job.reader, &mut job.output, 0, expected);
         job.suspend();
@@ -275,7 +277,7 @@ fn kitty_keyboard_suspend_balances_modes_for_composer_busy_and_modal() {
 #[test]
 fn kitty_keyboard_unsupported_terminal_keeps_plain_enter_fallback() {
     let stub = Stub::start(Plan {
-        completions: vec![Reply::Sse(text("KITTY-760-FALLBACK"))],
+        completions: vec![Reply::Sse(text("KITTY-FALLBACK"))],
         ..Plan::default()
     });
     let ego = job_ego(&stub, "default");
@@ -284,7 +286,7 @@ fn kitty_keyboard_unsupported_terminal_keeps_plain_enter_fallback() {
     until(&reader, &mut output, b"Trust project files");
     input.write_all(b"yes\rfallback prompt\r").unwrap();
     input.flush().unwrap();
-    until(&reader, &mut output, b"KITTY-760-FALLBACK");
+    until(&reader, &mut output, b"KITTY-FALLBACK");
     until_mcp_composer_is_idle(&reader, &mut output);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
@@ -318,7 +320,7 @@ fn kitty_keyboard_unwind_child() {
         editor.read_line(&reedline::DefaultPrompt::default()).ok();
     });
     assert!(result.is_err());
-    println!("KITTY-760-UNWOUND");
+    println!("KITTY-UNWOUND");
 }
 
 // Catches: the active mode survives unwinding because cleanup only runs on the
@@ -337,7 +339,7 @@ fn kitty_keyboard_unwind_pops_active_mode() {
     until(&reader, &mut output, b"\x1b[>1u");
     input.write_all(b"x").unwrap();
     input.flush().unwrap();
-    until(&reader, &mut output, b"KITTY-760-UNWOUND");
+    until(&reader, &mut output, b"KITTY-UNWOUND");
     assert!(session.quit(input).success());
     drain(&reader, &mut output);
     assert_balanced(&output);
@@ -378,7 +380,7 @@ fn kitty_keyboard_startup_refusal_leaves_no_mode_pushed() {
     assert!(stub.generations().is_empty());
 }
 
-// Catches: the query timeout delays a silent terminal's composer past one second.
+// Catches: a silent keyboard query delays the composer by more than one second.
 #[test]
 fn kitty_keyboard_silent_terminal_reaches_composer_within_one_second() {
     bounded_keyboard_query(false);
@@ -400,13 +402,31 @@ fn bounded_keyboard_query(supported: bool) {
     let (mut session, mut input, reader) =
         start_command_with_replies(ego.pty_command(), supported, false);
     let mut output = Vec::new();
-    let deadline = started + Duration::from_secs(1);
+    let spawned = started.elapsed();
+    let mut first_output = None;
+    let mut query_seen = None;
+    // Native profiling found the child still at _dyld_start after one second,
+    // before main or keyboard negotiation. Bound startup separately, then
+    // measure this keyboard regression from its first actual query.
+    let mut deadline = started + PROGRESS_DEADLINE;
     while rendered_prompt_count(&output) == 0 {
+        if Instant::now() >= deadline {
+            break;
+        }
         match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(bytes) => output.extend(bytes),
+            Ok(bytes) => {
+                first_output.get_or_insert(started.elapsed());
+                output.extend(bytes);
+                if query_seen.is_none() && output.windows(4).any(|bytes| bytes == b"\x1b[?u") {
+                    let now = Instant::now();
+                    query_seen = Some(now.duration_since(started));
+                    deadline = now + Duration::from_secs(1);
+                }
+            }
             Err(_) => break,
         }
     }
+    let composer_at = started.elapsed();
     let ready = rendered_prompt_count(&output) > 0;
     if ready {
         input.write_all(b"keyboard fallback prompt\r").unwrap();
@@ -421,8 +441,8 @@ fn bounded_keyboard_query(supported: bool) {
     let status = session.quit(input);
     drain(&reader, &mut output);
     assert!(
-        ready,
-        "keyboard query blocked composer for one second: {:?}",
+        ready && query_seen.is_some_and(|query| composer_at - query < Duration::from_secs(1)),
+        "keyboard query missed one-second composer deadline: spawn={spawned:?} first_output={first_output:?} query={query_seen:?} composer={composer_at:?}; {:?}",
         String::from_utf8_lossy(&output)
     );
     assert!(status.success(), "REPL exit: {status:?}");

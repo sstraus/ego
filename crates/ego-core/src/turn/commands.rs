@@ -31,9 +31,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             "command file reference leaves its scope or exceeds eight files".into(),
                         );
                     }
-                    let (_, call) = self
-                        .tools
-                        .prepare("read", &serde_json::json!({"path":path}).to_string())?;
+                    let (_, call) = self.tools.prepare(
+                        "read",
+                        &serde_json::json!({"files":[{"path":path}]}).to_string(),
+                    )?;
                     let file = call
                         .ops()
                         .iter()

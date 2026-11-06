@@ -20,7 +20,7 @@ use {
         terminal::{self, Clear, ClearType},
         QueueableCommand,
     },
-    std::io::{Result, Write},
+    std::io::{IsTerminal, Result, Write},
     std::ops::RangeInclusive,
     unicode_segmentation::UnicodeSegmentation,
     unicode_width::UnicodeWidthStr,
@@ -356,6 +356,9 @@ pub struct Painter {
     last_required_lines: u16,
     large_buffer: bool,
     just_resized: bool,
+    /// The cursor sits on the origin of a prompt that is not painted yet:
+    /// a host-accepted submission or an erased prompt left it there.
+    fresh_origin: bool,
     after_cursor_lines: Option<String>,
     /// Optional semantic prompt markers for terminal integration (OSC 133/633)
     semantic_markers: Option<Box<dyn SemanticPromptMarkers>>,
@@ -375,6 +378,7 @@ impl Painter {
             last_required_lines: 0,
             large_buffer: false,
             just_resized: false,
+            fresh_origin: false,
             after_cursor_lines: None,
             semantic_markers: None,
             last_layout: None,
@@ -578,6 +582,7 @@ impl Painter {
         self.last_required_lines = 1;
         self.after_cursor_lines = None;
         self.just_resized = false;
+        self.fresh_origin = true;
         Ok(true)
     }
 
@@ -602,7 +607,23 @@ impl Painter {
                 size
             }
         };
-        let prompt_selector = select_prompt_row(suspended_state, cursor::position()?);
+        let (position, suspended_state) = match cursor::position() {
+            Ok(position) => (position, suspended_state),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    && std::io::stdout().is_terminal() =>
+            {
+                // After the query's deadline, establish a position ourselves.
+                // Scrolling a fresh line at the bottom preserves existing text
+                // and gives us a known blank anchor without another CPR query.
+                let row = self.screen_height().saturating_sub(1);
+                self.stdout.queue(MoveTo(0, row))?;
+                self.print_crlf()?;
+                ((0, row), None)
+            }
+            Err(error) => return Err(error),
+        };
+        let prompt_selector = select_prompt_row(suspended_state, position);
         let new_row = match prompt_selector {
             PromptRowSelector::UseExistingPrompt { start_row } => start_row,
             PromptRowSelector::MakeNewPrompt { new_row } => {
@@ -729,6 +750,7 @@ impl Painter {
         }
         // A failed or partial write must never leave a reusable frame.
         self.last_frame = None;
+        self.fresh_origin = false;
         // Reset any ANSI styling that may have been left by external commands
         // This ensures the prompt is not affected by previous output styling
         // Note: Attribute::Reset (SGR 0) resets all attributes including colors
@@ -1428,9 +1450,23 @@ impl Painter {
 
     /// Updates prompt origin and offset to handle a screen resize event
     pub(crate) fn handle_resize(&mut self, width: u16, height: u16) {
+        let old_height = self.terminal_size.1;
         self.terminal_size = (width, height);
 
         self.invalidate_prompt_start_row();
+
+        // Without a cursor report, move the frame with the screen (regression case).
+        // The TUIC grid scrolls every row up by the lost rows on shrink, and
+        // pulls them back from history on grow. A grow with less history than
+        // the added rows (a screen that never scrolled) moves the frame less
+        // than this estimate. The frame must stay inside the new screen: an
+        // origin below it makes the next paint scroll blank rows under the
+        // unerased old frame.
+        if let PromptStartRow::Stale(row) = self.prompt_start_row {
+            let bottom_frame_row = height.saturating_sub(self.last_required_lines.max(1));
+            let moved = (row + height).saturating_sub(old_height);
+            self.prompt_start_row = PromptStartRow::Stale(moved.min(bottom_frame_row));
+        }
 
         // `cursor::position()` is blocking and can time out, but a
         // resize happens infrequently enough that we accept the cost.
@@ -1444,10 +1480,19 @@ impl Painter {
         #[cfg(not(test))]
         {
             if let Ok(position) = cursor::position() {
-                self.prompt_start_row = PromptStartRow::Stale(position.1);
-                self.just_resized = true;
+                self.anchor_resized_cursor(position.1);
             }
         }
+    }
+
+    /// Record the cursor row a resize reported. In a painted frame the cursor
+    /// is inside the frame, and the next paint walks back to its origin. On a
+    /// fresh origin (regression case) the cursor already is the origin, and walking
+    /// back would overwrite the rows above it.
+    #[cfg_attr(test, allow(dead_code))]
+    fn anchor_resized_cursor(&mut self, row: u16) {
+        self.prompt_start_row = PromptStartRow::Stale(row);
+        self.just_resized = !self.fresh_origin;
     }
 
     /// Commit an entire submission receipt, without the editing viewport limit.
@@ -1554,6 +1599,7 @@ impl Painter {
         self.prompt_start_row.mark_verified(next_row);
         self.last_required_lines = 1;
         self.after_cursor_lines = None;
+        self.fresh_origin = true;
         Ok(())
     }
 
@@ -2866,6 +2912,230 @@ mod tests {
             )
             .unwrap();
         assert!(painter.stdout.captured().len() > length);
+    }
+
+    // Catches: a resize right after a host-accepted line treats the cursor of
+    // the unpainted next prompt as a cursor inside a frame and walks the origin
+    // up by the status row, so the repaint erases the last receipt row (story
+    // 814). The cursor report of that resize is the origin itself.
+    #[test]
+    fn resize_after_accept_repaints_at_the_cursor_row() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(10);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        let paint = |painter: &mut Painter| {
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+        };
+        paint(&mut painter);
+        painter.finish_submission().unwrap();
+        let origin = painter.prompt_start_row.last_known_row();
+
+        // Test builds skip the cursor query: this is its answered path.
+        painter.handle_resize(100, 40);
+        painter.anchor_resized_cursor(origin);
+        let mark = painter.stdout.captured().len();
+        paint(&mut painter);
+
+        let repaint = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        let at_origin = format!("\x1b[{};1H\x1b[J", origin + 1);
+        assert!(
+            repaint.contains(&at_origin),
+            "repaint did not start at the accepted prompt's row {origin}: {repaint:?}"
+        );
+    }
+
+    // Catches: the fresh-origin exemption leaks into a painted frame, so a
+    // resize inside an editing frame no longer walks back to its origin.
+    #[test]
+    fn resize_inside_a_painted_frame_still_walks_back_to_the_origin() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(10);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        let paint = |painter: &mut Painter| {
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+        };
+        paint(&mut painter);
+        painter.finish_submission().unwrap();
+        paint(&mut painter);
+        painter.handle_resize(100, 40);
+        // The cursor is on the prompt row, one below the frame origin.
+        painter.anchor_resized_cursor(11);
+        let mark = painter.stdout.captured().len();
+        paint(&mut painter);
+
+        let repaint = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        assert!(
+            repaint.contains("\x1b[11;1H\x1b[J"),
+            "frame origin was not recovered from the cursor row: {repaint:?}"
+        );
+    }
+
+    // Catches: a shrink whose cursor report does not arrive keeps the old
+    // origin below the new bottom row. The repaint then scrolls blank rows
+    // under the unerased old frame and paints a second copy below them
+    // (regression case: native capture painted `CSI 35;1H` in a 24-row PTY).
+    // A terminal that shrinks keeps its cursor on screen by moving the
+    // bottom rows up, so the old three-row frame now starts at row 21.
+    #[test]
+    fn shrink_without_cursor_report_repaints_over_the_bottom_frame() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(37);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        painter
+            .repaint_buffer(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        assert_eq!(painter.last_required_lines, 3);
+        let mark = painter.stdout.captured().len();
+
+        // Test builds skip the resize query: this is its failed path.
+        painter.handle_resize(120, 24);
+        painter
+            .repaint_buffer(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        let repaint = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        let erase = repaint
+            .find("\x1b[22;1H\x1b[J")
+            .unwrap_or_else(|| panic!("old frame at row 21 is not erased: {repaint:?}"));
+        assert!(
+            !repaint[..erase].contains('\n'),
+            "blank rows scrolled above the repaint: {repaint:?}"
+        );
+        for row in 25..=40 {
+            assert!(
+                !repaint.contains(&format!("\x1b[{row};")),
+                "row {row} is outside the 24-row screen: {repaint:?}"
+            );
+        }
+    }
+
+    // Catches: the grow after an unanswered shrink keeps the clamped origin,
+    // so the repaint lands in the middle of the screen, erases the transcript
+    // rows the host restored from history, and leaves a blank gap below the
+    // frame. The TUIC grid (patched alacritty `grow_lines`) pulls the 16 rows
+    // the shrink pushed into history back and moves the cursor down 16 rows;
+    // the native capture confirms it: the late grow replies were `CSI 40;3R`.
+    #[test]
+    fn grow_after_unanswered_shrink_repaints_over_the_restored_bottom_frame() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(37);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        let paint = |painter: &mut Painter| {
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+        };
+        paint(&mut painter);
+
+        // Test builds skip the resize query: both resizes go unanswered.
+        painter.handle_resize(120, 24);
+        paint(&mut painter);
+        let mark = painter.stdout.captured().len();
+        painter.handle_resize(120, 40);
+        paint(&mut painter);
+
+        let repaint = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        assert!(
+            repaint.contains("\x1b[38;1H\x1b[J"),
+            "restored frame at row 37 is not erased in place: {repaint:?}"
+        );
+        assert!(
+            !repaint.contains("\x1b[22;1H"),
+            "repaint landed on the restored transcript at row 21: {repaint:?}"
+        );
+    }
+
+    // Catches: an unanswered resize clamps a frame that is not on the bottom
+    // row instead of moving it with the screen. The TUIC grid scrolls every
+    // row up by the full height change on shrink (live: a frame at row 23 of
+    // 40 replied `CSI 9;3R` after 40->24), so the clamp repaints at row 21,
+    // leaves the old footer at row 7 and erases transcript rows; the grow
+    // brings the frame back to row 23.
+    #[test]
+    fn unanswered_resize_moves_a_mid_screen_frame_with_the_screen() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(23);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        let paint = |painter: &mut Painter| {
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+        };
+        paint(&mut painter);
+
+        // Test builds skip the resize query: both resizes go unanswered.
+        let mark = painter.stdout.captured().len();
+        painter.handle_resize(120, 24);
+        paint(&mut painter);
+        let shrink = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        assert!(
+            shrink.contains("\x1b[8;1H\x1b[J"),
+            "frame moved to row 7 is not erased in place: {shrink:?}"
+        );
+
+        let mark = painter.stdout.captured().len();
+        painter.handle_resize(120, 40);
+        paint(&mut painter);
+        let grow = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        assert!(
+            grow.contains("\x1b[24;1H\x1b[J"),
+            "frame restored to row 23 is not erased in place: {grow:?}"
+        );
     }
 
     // Catches: a timer-only status change erases and redraws the unchanged draft.

@@ -37,6 +37,18 @@ const MAX_HOOK_SCALAR_BYTES: usize = 16 * 1024;
 const MAX_HOOK_COLLECTION_ENTRIES: usize = 256;
 const MAX_HOOK_WIRE_BYTES: usize = 64 * 1024;
 
+/// What a pre-effect hook gate does when its handler fails to start, times out
+/// or crashes. An explicit `block` decision from the handler always applies.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFailurePolicy {
+    /// The guarded action does not run. This is the default.
+    #[default]
+    Block,
+    /// The guarded action continues; the failure stays in the event stream.
+    Allow,
+}
+
 /// One typed declaration shared by TOML and projected skill frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,6 +58,8 @@ pub struct HookConfigEntry {
     matcher: Option<HookMatcher>,
     #[serde(default)]
     once: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    on_failure: Option<HookFailurePolicy>,
     #[serde(default)]
     handler: HookHandlerConfig,
     #[serde(skip)]
@@ -64,6 +78,7 @@ impl HookConfigEntry {
             event,
             matcher,
             once: false,
+            on_failure: None,
             handler,
             source_location: None,
             invocation: None,
@@ -72,6 +87,11 @@ impl HookConfigEntry {
 
     pub fn with_once(mut self, once: bool) -> Self {
         self.once = once;
+        self
+    }
+
+    pub fn with_on_failure(mut self, policy: HookFailurePolicy) -> Self {
+        self.on_failure = Some(policy);
         self
     }
 
@@ -93,6 +113,10 @@ impl HookConfigEntry {
 
     pub fn once(&self) -> bool {
         self.once
+    }
+
+    pub fn on_failure(&self) -> HookFailurePolicy {
+        self.on_failure.unwrap_or_default()
     }
 
     /// Bind a projected skill entry to its invocation-scoped source authority.
@@ -124,6 +148,8 @@ impl HookConfigEntry {
             event: HookLifecycle,
             matcher: &'a Option<HookMatcher>,
             once: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            on_failure: Option<HookFailurePolicy>,
             handler: &'a HookHandlerConfig,
         }
 
@@ -132,6 +158,7 @@ impl HookConfigEntry {
             event: self.event,
             matcher: &self.matcher,
             once: self.once,
+            on_failure: self.on_failure,
             handler: &self.handler,
         })
         .expect("typed hook configuration has a canonical JSON encoding")
@@ -260,6 +287,7 @@ impl HookHandlerConfig {
                 HookLifecycle::UserPromptSubmit
                     | HookLifecycle::PreModelSwitch
                     | HookLifecycle::PostModelSwitch
+                    | HookLifecycle::Interrupt
             ) =>
             {
                 30
@@ -595,6 +623,12 @@ impl HookSpec {
                 "once is valid only for invocation-scoped skill hooks",
             ));
         }
+        if entry.on_failure.is_some() && !entry.event.phase().is_pre_effect() {
+            return Err(HookCatalogueError::invalid(
+                "on_failure",
+                "on_failure is valid only for hooks that gate an effect",
+            ));
+        }
         let location = HookSourceLocation::parse(location)
             .map_err(|error| HookCatalogueError::invalid("location", error.to_string()))?;
         let digest = HookContentDigest::parse(&sha256_hex(source_content))
@@ -670,6 +704,7 @@ impl HookSpec {
                 name,
                 "matcher"
                     | "once"
+                    | "on_failure"
                     | "type"
                     | "command"
                     | "args"
@@ -721,6 +756,9 @@ impl HookSpec {
     }
     pub fn once(&self) -> bool {
         self.entry.once
+    }
+    pub fn on_failure(&self) -> HookFailurePolicy {
+        self.entry.on_failure()
     }
     pub fn skill_invocation(&self) -> Option<SkillInvocationId> {
         self.source.skill_invocation()
@@ -1501,9 +1539,25 @@ pub struct HookCatalogue {
     specs: Vec<HookSpec>,
     sources: Vec<&'static str>,
     generation: String,
+    /// `--no-hooks`: nothing is admitted, and a skill cannot add a hook.
+    off: bool,
 }
 
 impl HookCatalogue {
+    /// The catalogue of an invocation that runs with every hook off.
+    pub fn off() -> Self {
+        Self {
+            off: true,
+            ..Self::publish(
+                HookCatalogueCandidate {
+                    specs: Vec::new(),
+                    sources: Vec::new(),
+                },
+                "off",
+            )
+        }
+    }
+
     pub fn admit_typed(
         layers: &[Sourced<ConfigLayer>],
         skills: &[HookSource],
@@ -1526,6 +1580,7 @@ impl HookCatalogue {
             specs: candidate.specs,
             sources: candidate.sources,
             generation: sha256_hex(format!("{boundary}\n{material}").as_bytes()),
+            off: false,
         }
     }
 
@@ -1535,6 +1590,9 @@ impl HookCatalogue {
         skills: &[HookSource],
         trust: Trust,
     ) -> Result<(), HookCatalogueError> {
+        if self.off {
+            return Ok(());
+        }
         let candidate = HookCatalogueCandidate::from_sources(layers, skills, trust)?;
         let next = Self::publish(candidate, &self.generation);
         *self = next;
@@ -1542,6 +1600,9 @@ impl HookCatalogue {
     }
 
     pub fn with_skill_sources(&self, skills: &[HookSource]) -> Result<Self, HookCatalogueError> {
+        if self.off {
+            return Ok(self.clone());
+        }
         let skill_candidate = HookCatalogueCandidate::from_sources(&[], skills, Trust::Trusted)?;
         let mut specs = self
             .specs
@@ -1580,6 +1641,9 @@ impl HookCatalogue {
 
     pub fn specs(&self) -> &[HookSpec] {
         &self.specs
+    }
+    pub fn is_off(&self) -> bool {
+        self.off
     }
     pub fn evidence(&self) -> HookCatalogueEvidence {
         HookCatalogueEvidence::new(
@@ -1957,6 +2021,7 @@ pub struct HookRunResult {
     decision: HookDecision,
     feedback: Vec<HookFeedback>,
     observer_failure: bool,
+    blocking_failure: bool,
     durable: bool,
     skipped_once: bool,
     started_invocation: bool,
@@ -1981,6 +2046,10 @@ impl HookRunResult {
     }
     pub fn is_blocked(&self) -> bool {
         self.decision.is_blocking()
+    }
+    /// A failed or uncertain gate blocked the effect, rather than only a veto.
+    pub fn is_blocking_failure(&self) -> bool {
+        self.blocking_failure
     }
     pub fn is_observer_failure(&self) -> bool {
         self.observer_failure
@@ -2135,7 +2204,14 @@ impl HookRunner {
                     return Err(error);
                 }
                 self.finish_recovered(&mut reservations, &starts);
-                apply_recovered_settlements(&mut result, phase, &evidence, &starts, &settlements);
+                apply_recovered_settlements(
+                    &mut result,
+                    phase,
+                    &specs,
+                    &evidence,
+                    &starts,
+                    &settlements,
+                );
                 if starts.len() != evidence.plan().len()
                     || settlements.len() != evidence.plan().len()
                 {
@@ -2224,6 +2300,7 @@ impl HookRunner {
                 &reached,
                 Some(started.invocation()),
                 &settled,
+                spec.on_failure(),
             );
         }
         Ok(result)
@@ -2733,17 +2810,24 @@ fn hook_execution_identity(spec: &HookSpec) -> String {
 fn apply_recovered_settlements(
     aggregate: &mut HookRunResult,
     phase: HookPhase,
+    specs: &[&HookSpec],
     reached: &HookReachedEvidence,
     starts: &[HookStartedEvidence],
     settlements: &[HookSettledEvidence],
 ) {
     for (started, settled) in starts.iter().zip(settlements) {
+        // A hook that left the catalogue since the crash keeps the safe default.
+        let policy = specs
+            .iter()
+            .find(|spec| spec.id() == started.hook())
+            .map_or_else(HookFailurePolicy::default, |spec| spec.on_failure());
         apply_result(
             aggregate,
             phase,
             reached,
             Some(started.invocation()),
             settled.result(),
+            policy,
         );
     }
     aggregate.durable = true;
@@ -2763,6 +2847,7 @@ fn apply_result(
     reached: &HookReachedEvidence,
     invocation: Option<HookInvocationId>,
     result: &HookResult,
+    policy: HookFailurePolicy,
 ) {
     if let Some(feedback) = result.feedback() {
         let next = aggregate
@@ -2786,7 +2871,10 @@ fn apply_result(
         {
             aggregate.decision = HookDecision::RequestEscalation;
         }
-        HookResult::Failure { .. } if phase.is_pre_effect() => {
+        HookResult::Failure { .. }
+            if phase.is_pre_effect() && policy == HookFailurePolicy::Block =>
+        {
+            aggregate.blocking_failure = true;
             aggregate.decision = HookDecision::Block;
             aggregate.blocking_occurrence.get_or_insert(reached.event());
             if let Some(invocation) = invocation {
@@ -2806,6 +2894,7 @@ fn record_occurrence_uncertainty(
     started: Option<&HookStartedEvidence>,
 ) {
     if phase.is_pre_effect() {
+        result.blocking_failure = true;
         result.decision = HookDecision::Block;
         result.blocking_occurrence.get_or_insert(evidence.event());
         if let Some(started) = started {
@@ -2821,6 +2910,7 @@ fn record_occurrence_uncertainty(
 
 fn record_absent_failure(result: &mut HookRunResult, phase: HookPhase) {
     if phase.is_pre_effect() {
+        result.blocking_failure = true;
         result.decision = HookDecision::Block;
     } else {
         result.observer_failure = true;
@@ -2832,6 +2922,7 @@ fn empty_result() -> HookRunResult {
         decision: HookDecision::Continue,
         feedback: Vec::new(),
         observer_failure: false,
+        blocking_failure: false,
         durable: false,
         skipped_once: false,
         started_invocation: false,

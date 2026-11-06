@@ -1,4 +1,5 @@
 use super::*;
+use ego_core::compact::{CompactionConfig, ContextPercent};
 use ego_core::event::domain::OccupancyProvenance;
 use ego_core::state::ContextWindow;
 
@@ -88,12 +89,29 @@ fn unknown_and_below_window_context_can_generate() {
 // Catches: an opted-in tool turn sends another request after measured pressure.
 #[test]
 fn automatic_context_pressure_yields_before_next_tool_generation() {
+    let (exit, requests, used) = pressure_run(244_796, 90);
+    assert_eq!(exit, ExitReason::ContextOverflow);
+    assert_eq!(requests, 1);
+    assert_eq!(used, Some(244_800));
+}
+
+// Catches: a configured threshold ignored by the turn loop (still fixed at 90%).
+#[test]
+fn configured_threshold_moves_the_turn_yield_point() {
+    // 136_000 of 272_000 is 50%: it yields at 50 and keeps going at the default.
+    let (exit, requests, _) = pressure_run(135_996, 50);
+    assert_eq!((exit, requests), (ExitReason::ContextOverflow, 1));
+    let (exit, requests, _) = pressure_run(135_996, 90);
+    assert_eq!((exit, requests), (ExitReason::Completed, 2));
+}
+
+fn pressure_run(input: u64, percent: u8) -> (ExitReason, usize, Option<u64>) {
     let trace = GenerationTrace::default();
     let source = Arc::new(ScriptedGenerationSource::new([
         Ok(profile_with_settings(
             "openai/windowed",
             vec![
-                AiEvent::Usage(tokens(244_796, 0, 0, 4)),
+                AiEvent::Usage(tokens(input, 0, 0, 4)),
                 AiEvent::ToolCall {
                     call_id: "pressure-read".into(),
                     name: "read".into(),
@@ -131,12 +149,13 @@ fn automatic_context_pressure_yields_before_next_tool_generation() {
             retry: 0,
             fallbacks: vec![],
         },
-        true,
+        Some(ContextPercent::try_from(percent).unwrap()),
     );
-    assert_eq!(exit, ExitReason::ContextOverflow);
-    assert_eq!(trace.requests.lock().unwrap().len(), 1);
-    assert_eq!(state.context.used_tokens, Some(244_800));
-    assert!(state.live_attempts.is_empty());
+    if exit == ExitReason::ContextOverflow {
+        assert!(state.live_attempts.is_empty());
+    }
+    let requests = trace.requests.lock().unwrap().len();
+    (exit, requests, state.context.used_tokens)
 }
 
 // Catches: rounding, overflow, or unknown occupancy inventing a pressure trigger.
@@ -151,12 +170,35 @@ fn compaction_pressure_uses_only_measured_ninety_percent_boundary() {
         (Some(1), Some(0), false),
     ] {
         assert_eq!(
-            ego_core::turn::compaction_due(ContextWindow {
-                used_tokens: used,
-                window,
-                provenance: None,
-            }),
+            ego_core::turn::compaction_due(
+                ContextWindow {
+                    used_tokens: used,
+                    window,
+                    provenance: None,
+                },
+                CompactionConfig::default().threshold
+            ),
             expected
         );
     }
+}
+
+// Catches: a configured threshold ignored, or its boundary rounded the wrong way.
+#[test]
+fn compaction_pressure_follows_the_configured_threshold() {
+    let at = |percent: u8, used| {
+        ego_core::turn::compaction_due(
+            ContextWindow {
+                used_tokens: Some(used),
+                window: Some(1_000),
+                provenance: None,
+            },
+            ContextPercent::try_from(percent).unwrap(),
+        )
+    };
+    assert!(!at(50, 499));
+    assert!(at(50, 500));
+    assert!(!at(99, 989));
+    assert!(at(99, 990));
+    assert!(at(1, 10));
 }

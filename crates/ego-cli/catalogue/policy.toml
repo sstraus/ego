@@ -16,6 +16,7 @@
 # - `exclude`: a model released on or after the floor that ego must not list, with
 #   the reason. The generator refuses a model whose reasoning controls are not an
 #   effort list, so such a model must be named here.
+# - `id_prefix`: the text a cloud platform puts before the snapshot's model id.
 # - `drop_efforts`: effort levels the provider's backend does not offer although the
 #   snapshot row lists them (a subscription backend served from an API row).
 #
@@ -121,6 +122,78 @@ cache = "long"
 transport = "sse"
 
 [provider.anthropic.wire.image_input]
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# ---------------------------------------------------------------------------
+# bedrock: Claude in Amazon Bedrock, on the bedrock-mantle Messages endpoint.
+# Read 2026-11-05 from https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock:
+# the endpoint serves "the same request body shape as Anthropic's first-party API"
+# with standard SSE, and model ids "carry an `anthropic.` provider prefix"
+# (`id_prefix`). Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 are in its model
+# table, so the anthropic generation applies; limits and efforts are the
+# anthropic snapshot rows of the same models. Wire facts:
+# - prompt caching and thinking are supported; the prompt-caching page lists
+#   Amazon Bedrock among the platforms with the 1-hour duration (`cache = "long"`).
+# - `reasoning_state_dialect = "bedrock-messages"`: no source says a thinking
+#   signature from one platform is accepted by another, so state stays on Bedrock.
+# - images: the first-party formats; URL image sources are unsupported, and ego
+#   sends base64 only.
+[provider.bedrock]
+models_dev = "anthropic"
+floor = "2026-09-01"
+id_prefix = "anthropic."
+
+[provider.bedrock.default_effort]
+"claude-fable-5-1" = "high"
+"claude-opus-5-5" = "medium"
+"claude-sonnet-5-5" = "high"
+
+[provider.bedrock.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "bedrock-messages"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[provider.bedrock.wire.image_input]
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# ---------------------------------------------------------------------------
+# vertex: Claude Models on Google Cloud (Google managed), on Vertex AI.
+# Read 2026-11-05 from
+# https://platform.claude.com/docs/en/build-with-claude/claude-models-on-google-cloud/google-managed:
+# the model ids of the current generation equal the first-party ids, the request
+# is the Messages body with the model in the URL, and the page lists prompt
+# caching, thinking and tool use, and a 1M-token context for these models. The
+# prompt-caching page lists this platform with the 1-hour duration. Dialect: as
+# for bedrock.
+[provider.vertex]
+models_dev = "anthropic"
+floor = "2026-09-01"
+
+[provider.vertex.default_effort]
+"claude-fable-5-1" = "high"
+"claude-opus-5-5" = "medium"
+"claude-sonnet-5-5" = "high"
+
+[provider.vertex.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "vertex-messages"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[provider.vertex.wire.image_input]
 accepted_media_types = ["jpeg", "png", "gif", "webp"]
 max_images = 100
 max_bytes_per_image = 10485760

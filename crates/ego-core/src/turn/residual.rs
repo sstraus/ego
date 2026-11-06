@@ -7,9 +7,7 @@
 use super::*;
 use crate::permit::PreparedCall;
 use crate::permit::judge::{JudgeTaskContext, ResidualVerdict, decode_residual};
-use crate::permit::residual::{
-    DECISION_DEADLINE, ResidualDecision, ResidualWriteDesk, ResidualWriteRequest,
-};
+use crate::permit::residual::{ResidualDecision, ResidualWriteDesk, ResidualWriteRequest};
 
 /// Borrowed session authority for the residual requests of one exec call.
 pub(super) struct ResidualServer<'a, 'session> {
@@ -46,10 +44,27 @@ impl ResidualServer<'_, '_> {
     ) -> Result<F::Output, StoreError> {
         let mut work = Box::pin(work);
         loop {
-            let request = match select(work.as_mut(), Box::pin(desk.next())).await {
+            let requests = select(Box::pin(desk.next()), Box::pin(desk.next_owner()));
+            let request = match select(work.as_mut(), requests).await {
                 Either::Left((output, _)) => return Ok(output),
-                Either::Right((Some(request), _)) => request,
-                Either::Right((None, _)) => return Ok(work.await),
+                Either::Right((Either::Left((Some(request), _)), _)) => request,
+                Either::Right((Either::Right((Some(request), _)), _)) => {
+                    if let Err(failure) = self.journal.append(
+                        self.turn,
+                        Some(ItemId::new()),
+                        Some(self.started),
+                        EventKind::SandboxOwnerGranted {
+                            grant: request.grant.clone(),
+                        },
+                    ) {
+                        drop(request);
+                        let _ = work.await;
+                        return Err(failure.into());
+                    }
+                    desk.answer_owner(request);
+                    continue;
+                }
+                _ => return Ok(work.await),
             };
             if self.judge.is_none() {
                 // Nothing was decided, so nothing is journaled: the executor
@@ -62,7 +77,7 @@ impl ResidualServer<'_, '_> {
                 );
                 continue;
             }
-            match self.journaled(&request).await {
+            match self.journaled(&request, desk.limits().deadline()).await {
                 Ok(decision) => desk.answer(request, decision),
                 Err(failure) => {
                     drop(request);
@@ -76,8 +91,9 @@ impl ResidualServer<'_, '_> {
     async fn journaled(
         &self,
         request: &ResidualWriteRequest,
+        deadline: std::time::Duration,
     ) -> Result<ResidualDecision, StoreError> {
-        let (decision, attempt) = self.decide(request).await?;
+        let (decision, attempt) = self.decide(request, deadline).await?;
         let recommended = match &decision {
             ResidualDecision::Granted { recommended, .. } => Some(*recommended),
             _ => None,
@@ -100,6 +116,7 @@ impl ResidualServer<'_, '_> {
     async fn decide(
         &self,
         request: &ResidualWriteRequest,
+        deadline: std::time::Duration,
     ) -> Result<(ResidualDecision, Option<AttemptRef>), StoreError> {
         let unavailable = |reason: &str| {
             Ok((
@@ -122,7 +139,7 @@ impl ResidualServer<'_, '_> {
         let profile = match select(
             self.source
                 .resolve(GenerationModelRequest::new(GenerationRole::Judge)),
-            self.retry_pause.pause(DECISION_DEADLINE),
+            self.retry_pause.pause(deadline),
         )
         .await
         {
@@ -166,7 +183,7 @@ impl ResidualServer<'_, '_> {
         let mut generation =
             Box::pin(generator.run(self.turn, &profile, &input, &self.context, self.main));
         let ended = select(
-            self.retry_pause.pause(DECISION_DEADLINE),
+            self.retry_pause.pause(deadline),
             Box::pin(self.cancel.0.cancelled.clone()),
         );
         let generated = match select(generation.as_mut(), ended).await {

@@ -103,6 +103,7 @@ impl StatusTemplate {
             compact => compact_text,
             model => clean(&snapshot.model), effort => &snapshot.effort,
             fast => snapshot.fast(), mode => &snapshot.mode,
+            cache => snapshot.cache_display(),
             ctx => minijinja::context! { used => snapshot.used_tokens, window => snapshot.window, percent => percent },
             cost => minijinja::context! { amount => cost_amount, equivalent => snapshot.cost_equivalent },
             cwd => clean(&snapshot.raw_cwd),

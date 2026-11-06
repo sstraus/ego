@@ -103,6 +103,7 @@ Keep the whole workflow in one harness. See [CLI.md](CLI.md) for arguments and o
 - `ego resume` — Reopen a durable session without losing its history.
 - `ego continue` — Pick up an existing session with the resume alias.
 - `ego fork` — Explore another direction without rewriting the original session.
+- `ego rewind` — Restore session-owned file changes and fork after a completed turn.
 - `ego rm` — Remove sessions you no longer need.
 - `ego compact` — Carry the useful context into a compacted successor.
 - `ego export` — Take session history into your own reports and tools.
@@ -112,7 +113,7 @@ Keep the whole workflow in one harness. See [CLI.md](CLI.md) for arguments and o
 - `ego hooks` — Inspect the hooks that extend your workflow.
 - `ego doctor` — Diagnose your installation before starting work.
 - `ego checkpoint` — Inspect recovery points and restore session-owned edits.
-- `ego setup` — Configure saved settings through a staged screen.
+- `ego setup` — Review provider readiness and configure saved settings.
 - `ego acp` — Put the harness behind an ACP client's conversation UI.
 - `ego a2a` — Expose local agent discovery over the A2A protocol.
 - `ego auth` — Manage supported provider logins.
@@ -137,6 +138,28 @@ Keep the complete checkout, including `vendor/`, when building from source.
 Run `ego --version` to identify your installed build and `ego --help` for its
 command set.
 
+## What installation creates
+
+Homebrew, the direct download, and a source install all place only the `ego`
+executable (and, where listed, completion scripts). No installer writes
+configuration. `~/.ego` (or `$EGO_HOME`) and its files appear when ego first
+writes them: `config.toml` when you save a setting, `auth.json` at
+`ego auth login`, `sessions/` at the first session, and the model list cache at
+`ego models --refresh`. A project `.ego/config.toml` is yours to write; it
+applies only after you trust the workspace.
+
+## First setup
+
+1. Make one provider usable: export its API key (for example
+   `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`), run `ego auth login PROVIDER` for a
+   subscription, or start a local Ollama. Ego does not read a `.env` file.
+2. Run `ego setup`. Its `providers` entry shows which providers are ready and
+   what each of the others needs; then save defaults such as the model.
+3. Or run `ego` in a repository. With exactly one usable provider that has a
+   built-in default, ego selects that model and saves it. Otherwise it opens the
+   model picker. A headless `ego run` with exactly one usable provider uses that
+   default for the run without saving it.
+
 ## Documentation
 
 - [User guide](https://sstraus.github.io/ego/) · [guide source](docs/README.md)
@@ -145,7 +168,7 @@ command set.
 - [CLI reference](docs/reference/README.md) and [configuration](docs/reference/configuration.md)
 - [Permissions](docs/guides/permissions.md), [providers](docs/guides/providers.md), and [tools](docs/guides/tools.md)
 - [ACP, MCP, skills, and hooks](docs/integrations/README.md)
-- [Architecture](ARCHITECTURE.md), [contributing](CONTRIBUTING.md), and [release notes](docs/release-notes/0.4.3.md)
+- [Architecture](ARCHITECTURE.md), [contributing](CONTRIBUTING.md), and [changelog](CHANGELOG.md)
 
 ## License
 

@@ -933,9 +933,16 @@ fn fixture_marker(path: &Path) -> Option<String> {
 fn sweep_stale_fixtures(workspace: &CanonPath) -> std::io::Result<()> {
     let entries = match fs::read_dir(workspace.as_path()) {
         Ok(entries) => entries,
-        // A workspace can disappear after policy resolution. No fixture can
-        // remain there; keep the existing empty-capability fallback contract.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // A missing or non-directory workspace cannot contain stale fixtures.
+        // Let measurement retain the actual setup cause in its refusal evidence.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
     for entry in entries.flatten() {
@@ -1550,7 +1557,7 @@ mod tests {
         use ego_core::permit::{ProfileRoot, RootAccess};
 
         let workspace = CanonPath::new("/parent/workspace");
-        for frozen in ["/parent/workspace", "/parent"] {
+        for frozen in ["/parent"] {
             let policy = RunConfinement::new(Confinement::Workspace, false, workspace.clone())
                 .unwrap()
                 .with_roots(vec![
@@ -1585,6 +1592,7 @@ mod tests {
         use ego_core::permit::{ProfileRoot, RootAccess};
 
         for (level, frozen) in [
+            (Confinement::Workspace, "/parent/workspace"),
             (Confinement::Workspace, "/parent/workspace/frozen"),
             (Confinement::Workspace, "/parent"),
             (Confinement::Ro, "/parent/workspace"),

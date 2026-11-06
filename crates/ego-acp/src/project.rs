@@ -241,6 +241,7 @@ pub fn provider_retry_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
         limit,
         delay_ms,
         kind,
+        capacity,
         cause,
         recovery_remaining_ms,
         ..
@@ -267,9 +268,11 @@ pub fn provider_retry_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
         "limit": limit,
         "delayMs": delay_ms,
         "kind": kind,
+        "capacity": capacity,
         "cause": cause,
         "text": format!(
-            "{cause} — connection problem, retrying in {seconds}s ({counter})"
+            "{cause} — {}, retrying in {seconds}s ({counter})",
+            if *capacity { "provider at capacity" } else { "connection problem" }
         ),
     })))
 }
@@ -302,7 +305,7 @@ fn activity_meta() -> v1::Meta {
 /// is what serde calls a newtype, which every serializer — `serde_json`
 /// included — renders exactly as the inner value, here a plain JSON string.
 /// That is already relied on elsewhere in this workspace
-/// (`ego-core/tests/public_golden.rs`'s `id()` helper deserialises a bare UUID
+/// (`ego-core/tests/it/public_golden.rs`'s `id()` helper deserialises a bare UUID
 /// literal straight into these newtypes), so encoding through it rather than
 /// formatting the `Uuid` by hand keeps this file decoupled from `event::id`'s
 /// internal representation.
@@ -334,6 +337,23 @@ fn tool_presentation(
         "glob" | "grep" => v1::ToolKind::Search,
         _ => v1::ToolKind::Other,
     };
+    let paths: Vec<&str> = if matches!(name, "read" | "write" | "edit") {
+        input
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|file| file.get("path").and_then(serde_json::Value::as_str))
+            .filter(|path| !path.is_empty())
+            .collect()
+    } else {
+        input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .into_iter()
+            .collect()
+    };
     let title = if name == "exec" {
         input
             .get("argv")
@@ -347,27 +367,25 @@ fn tool_presentation(
             .map(|argv| argv.join(" "))
             .unwrap_or_else(|| name.to_owned())
     } else {
-        input
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .filter(|path| !path.is_empty())
-            .map(|path| format!("{name} {path}"))
-            .unwrap_or_else(|| name.to_owned())
+        if paths.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name} {}", paths.join(", "))
+        }
     };
     let locations = if matches!(name, "read" | "edit" | "write") {
-        input
-            .get("path")
-            .and_then(serde_json::Value::as_str)
+        paths
+            .into_iter()
             .map(std::path::Path::new)
-            .and_then(|path| {
+            .filter_map(|path| {
                 if path.is_absolute() {
                     Some(path.to_path_buf())
                 } else {
                     root.map(|root| root.join(path))
                 }
             })
-            .map(|path| vec![v1::ToolCallLocation::new(path)])
-            .unwrap_or_default()
+            .map(v1::ToolCallLocation::new)
+            .collect()
     } else {
         Vec::new()
     };
@@ -396,6 +414,7 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         // A cancelled turn is over; a paused turn is waiting. Keeping them distinct
         // lets a host offer resume only when resumption is possible.
         ExitReason::Paused => v2::StopReason::Other("_paused".to_string()),
+        ExitReason::Guard => v2::StopReason::Other("_guard".to_string()),
         ExitReason::Provider => v2::StopReason::Other("_provider".to_string()),
         ExitReason::ContextOverflow => v2::StopReason::Other("_context_overflow".to_string()),
         ExitReason::Internal => v2::StopReason::Other("_internal".to_string()),
@@ -468,6 +487,7 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         )),
         RunTermination::TaskFailed => Err("the turn ran and the task did not succeed".to_string()),
         RunTermination::UsageError { message }
+        | RunTermination::Guard { message }
         | RunTermination::Provider { message }
         | RunTermination::ProviderUncertain { message }
         | RunTermination::ContextOverflow { message }
@@ -565,16 +585,49 @@ pub fn project_acp_v1(
 /// to at most one final update because only the final durable state and the
 /// latest admitted model's durable context window describe the session being
 /// attached now.
+///
+/// `session/load` opens an empty client view, so replay knows what that view
+/// received. Message chunks are not persisted, so a message with no
+/// replayed chunk is sent as one chunk at its last completion.
 pub fn project_replay_v1(
     frames: &[ReplayFrame],
     context_window: Option<u64>,
     root: &std::path::Path,
 ) -> Vec<v1::SessionUpdate> {
-    let mut updates = frames
+    let frames: Vec<&ReplayFrame> = frames
         .iter()
         // Child-only frames were not part of standard replay before the extension.
         // Keep the existing error-card positions stable for ordinary clients.
         .filter(|frame| !matches!(frame.event, PublicEvent::ChildLifecycle { .. }))
+        .collect();
+    // TODO(2027-03-01): remove legacy AssistantDelta replay support.
+    // A log written by an earlier version replays its chunks; its final message
+    // must not repeat them.
+    let streamed: std::collections::HashSet<ItemId> = frames
+        .iter()
+        .filter_map(|frame| match frame.event {
+            PublicEvent::ItemDelta {
+                item,
+                kind: ItemKind::AgentMessage,
+                ..
+            } => Some(item),
+            _ => None,
+        })
+        .collect();
+    let last_completion: std::collections::HashMap<ItemId, usize> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(position, frame)| match frame.event {
+            PublicEvent::ItemCompleted {
+                item,
+                kind: ItemKind::AgentMessage,
+                ..
+            } => Some((item, position)),
+            _ => None,
+        })
+        .collect();
+    let mut updates = frames
+        .iter()
         .enumerate()
         .flat_map(|(position, frame)| {
             // The original prompt RPC carried this failure live. On load
@@ -599,6 +652,19 @@ pub fn project_replay_v1(
                 )]
             } else if matches!(frame.event, PublicEvent::PlanUpdated { .. }) {
                 vec![project_plan_v1(&frame.state.plan)]
+            } else if let PublicEvent::ItemCompleted {
+                item,
+                kind: ItemKind::AgentMessage,
+                text: Some(text),
+                ..
+            } = &frame.event
+                && !streamed.contains(item)
+                && last_completion.get(item) == Some(&position)
+            {
+                vec![v1::SessionUpdate::AgentMessageChunk(
+                    v1::ContentChunk::new(text.clone().into())
+                        .message_id(Some(v1::MessageId::new(item_id_string(*item)))),
+                )]
             } else {
                 project_updates_v1(&frame.event, root)
             };
@@ -805,6 +871,7 @@ fn project_v1_with_root(
         PublicEvent::ChildProgress { .. }
         | PublicEvent::ChildLifecycle { .. }
         | PublicEvent::SessionStarted { .. }
+        | PublicEvent::SessionCompacted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
@@ -1021,6 +1088,7 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         PublicEvent::ChildProgress { .. }
         | PublicEvent::ChildLifecycle { .. }
         | PublicEvent::SessionStarted { .. }
+        | PublicEvent::SessionCompacted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
@@ -1057,6 +1125,30 @@ pub fn child_activity_meta(activity: serde_json::Value) -> v1::SessionUpdate {
             "ego".to_owned(),
             serde_json::json!({"childActivity": activity}),
         )]),
+    ))
+}
+
+/// An in-process compaction: the conversation continues in `targetSessionId`.
+/// Sent on the client's session id, before any update of the continuation.
+pub fn project_compacted_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
+    let PublicEvent::SessionCompacted {
+        source,
+        source_seq,
+        target,
+    } = event
+    else {
+        return None;
+    };
+    Some(v1::SessionUpdate::SessionInfoUpdate(
+        v1::SessionInfoUpdate::new().meta(serde_json::Map::from_iter([(
+            "ego".to_owned(),
+            serde_json::json!({"compacted": {
+                "version": 1,
+                "sourceSessionId": source,
+                "sourceSeq": source_seq,
+                "targetSessionId": target,
+            }}),
+        )])),
     ))
 }
 

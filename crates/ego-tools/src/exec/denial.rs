@@ -8,7 +8,8 @@
 //! checks. The command need not name a program-internal target in argv.
 //! Stderr does not prove an attempted operation: the suggested human capability
 //! below is not residual-write provenance and must never authorize a sentinel.
-//! Broad roots, workspace paths and protected floors cannot become questions.
+//! Broad roots and binding floors cannot become questions. Exact owner file
+//! maintenance can lift instruction/Git write floors, including in the workspace.
 
 use std::path::{Path, PathBuf};
 
@@ -17,6 +18,10 @@ use ego_core::permit::{
     ToolOutputProvenance, ToolResult,
 };
 
+#[cfg(test)]
+#[path = "maintenance_denial_tests.rs"]
+mod maintenance_tests;
+
 /// What a failed confined command said about the sandbox.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct Denial {
@@ -24,7 +29,7 @@ pub(super) struct Denial {
     pub(super) printed: String,
     /// The grant that would let the command reach it, or `None` when the
     /// refusal cannot be answered by a human (already granted, inside the
-    /// workspace, or not resolvable).
+    /// workspace without a maintenance exception, or not resolvable).
     pub(super) request: Option<SandboxGrant>,
 }
 
@@ -53,17 +58,38 @@ pub(super) fn analyze(
                 .is_some_and(|(program, _)| is_shell(Path::new(program)))
                 && !explicit_script_read(spec, Path::new(printed)))
             || exec_target(spec).is_some_and(|target| target == Path::new(printed));
-        if launch_refusal && executable(Path::new(printed)) {
+        // Floors remain binding unless this is a canonical exact file the
+        // owner can maintain. This question never authorizes a directory.
+        let maintenance = canonical(Path::new(printed))
+            .map(|(path, _)| SandboxGrant::new(path, SandboxAccess::Write))
+            .filter(|grant| {
+                super::maintenance::request(grant, confinement)
+                    && readmit(grant, confinement).is_ok()
+            });
+        if let Some(request) = maintenance
+            && !granted.iter().any(|grant| grant == &request)
+        {
             return Some(Denial {
                 printed: printed.to_owned(),
-                request: None,
+                request: Some(request),
             });
         }
         if floor_refusal(printed, confinement) {
             first.get_or_insert(printed);
             continue;
         }
-        let request = request_for(printed, spec, confinement, granted);
+        let request = if launch_refusal && executable(Path::new(printed)) {
+            canonical(Path::new(printed)).and_then(|(path, _)| {
+                let grant = SandboxGrant::new(path.clone(), SandboxAccess::Exec);
+                (readmit(&grant, confinement).is_ok()
+                    && !granted
+                        .iter()
+                        .any(|known| known.covers(&path, SandboxAccess::Exec)))
+                .then_some(grant)
+            })
+        } else {
+            request_for(printed, spec, confinement, granted)
+        };
         if request.is_some() {
             return Some(Denial {
                 printed: printed.to_owned(),
@@ -287,6 +313,26 @@ fn request_for(
     Some(SandboxGrant::new(path, access))
 }
 
+/// Re-admit a saved owner capability against current path identity and floors.
+/// The run's base OS guarantees have already been measured before effects exist.
+pub(super) fn readmit(
+    grant: &SandboxGrant,
+    confinement: &RunConfinement,
+) -> Result<(), ego_core::permit::ProcessError> {
+    let valid = canonical(grant.path.as_path()).is_some_and(|(path, _)| path == grant.path)
+        && renderable(grant.path.as_path())
+        && !too_broad(&grant.path, confinement)
+        && (!floor_refusal(&grant.path.to_string(), confinement)
+            || super::maintenance::request(grant, confinement));
+    if valid {
+        Ok(())
+    } else {
+        Err(ego_core::permit::ProcessError::Backend(format!(
+            "saved owner grant cannot be re-admitted: {grant}; approve the current canonical path again"
+        )))
+    }
+}
+
 /// A grant of `/`, of the home directory, or of a directory above the
 /// workspace would hand the command far more than the one path it was refused.
 pub(super) fn too_broad(path: &CanonPath, confinement: &RunConfinement) -> bool {
@@ -339,9 +385,8 @@ pub(super) use command::command_line;
 pub(super) enum Outcome {
     Declined,
     NobodyToAsk,
-    /// The person answered every question one command may raise, and the
-    /// command was refused again.
-    QuestionLimit,
+    /// The owner approved this capability for a later explicit command.
+    OwnerGranted,
     /// This platform's sandbox cannot open a path after the run was admitted.
     CannotWiden,
     /// The sandbox judge opened the path for writing for the session. The
@@ -394,10 +439,10 @@ pub(super) fn note(denial: &Denial, confinement: &RunConfinement, outcome: Outco
              not complete; run it again if its result is still needed; programs placed there \
              cannot be run"
         ),
-        (Some(request), Outcome::QuestionLimit) => format!(
-            "sandbox denied {request} (confinement {level}); this command already raised the \
-             most sandbox questions one command may ask, so it did not complete; to allow it, \
-             run the command again"
+        (Some(request), Outcome::OwnerGranted) => format!(
+            "sandbox denied {request} (confinement {level}); the owner approved this exact path \
+             and access for the session. No command was retried; prior effects may already \
+             have occurred. Submit a new command only if its result is still needed."
         ),
         (None, _) => format!(
             "{} was blocked by the sandbox (confinement {level}), not by a permission rule, so \

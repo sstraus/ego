@@ -427,6 +427,10 @@ struct StreamDecoder {
     sse: SseDecoder,
     calls: BTreeMap<String, PartialToolCall>,
     finish_reason: Option<StopReason>,
+    /// The stream's one provider failure, reported once at the end. A stream
+    /// can carry several failure frames for one refusal; the first message is
+    /// kept, and a later classified frame replaces an unclassified class.
+    failure: Option<(String, super::FailureClass)>,
     usage: Option<Usage>,
     usage_incoherent: bool,
     cost: Option<Arc<dyn ProviderCost>>,
@@ -439,6 +443,7 @@ impl StreamDecoder {
             sse: SseDecoder::default(),
             calls: BTreeMap::new(),
             finish_reason: None,
+            failure: None,
             usage: None,
             usage_incoherent: false,
             cost,
@@ -448,6 +453,10 @@ impl StreamDecoder {
 }
 
 impl super::StreamSink for StreamDecoder {
+    fn usage_incoherent(&self) -> bool {
+        self.usage_incoherent
+    }
+
     fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
         let mut out = Vec::new();
         for frame in self.sse.push(chunk) {
@@ -461,18 +470,10 @@ impl super::StreamSink for StreamDecoder {
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
         }
-        if self.usage_incoherent {
-            out.push(AiEvent::Error {
-                message: "xAI's cached input count exceeded its input total; usage was discarded"
-                    .to_string(),
-                kind: ErrorKind::Unclassified,
-            });
+        if let Some((message, class)) = self.failure.take() {
+            out.extend(super::streamed_failure(message, class));
         }
-        if self.finish_reason != Some(StopReason::Error) {
-            self.flush_calls(&mut out);
-        } else {
-            self.calls.clear();
-        }
+        self.flush_calls(&mut out);
         if let Some(usage) = self.usage.take() {
             out.push(AiEvent::Usage(usage));
         }
@@ -587,14 +588,13 @@ impl StreamDecoder {
                     "incomplete" => self.finish_reason = Some(StopReason::Length),
                     "failed" | "cancelled" => {
                         let error = event.response.and_then(|done| done.error);
-                        let kind = super::classify_stream_code(
+                        let class = super::classify_stream_code(
                             error.as_ref().and_then(|error| error.code.as_deref()),
                         );
                         let message = error
                             .and_then(|error| error.message)
                             .unwrap_or_else(|| format!("xAI reported response status {status}"));
-                        out.extend(super::streamed_failure(message, kind));
-                        self.finish_reason = Some(StopReason::Error);
+                        self.fail(message, class);
                     }
                     _ if !self.calls.is_empty() => self.finish_reason = Some(StopReason::ToolUse),
                     _ => self.finish_reason = Some(StopReason::Stop),
@@ -609,7 +609,7 @@ impl StreamDecoder {
                     .as_ref()
                     .and_then(|error| error.code.clone())
                     .or(event.code);
-                let kind = super::classify_stream_code(code.as_deref());
+                let class = super::classify_stream_code(code.as_deref());
                 let message = error
                     .and_then(|error| error.message)
                     .or(event.message)
@@ -617,31 +617,26 @@ impl StreamDecoder {
                         Some(code) => format!("xAI reported streamed Responses error {code}"),
                         None => "xAI reported a streamed Responses error".to_string(),
                     });
-                out.extend(super::streamed_failure(message, kind));
-                self.finish_reason = Some(StopReason::Error);
+                self.fail(message, class);
             }
             _ => {}
         }
     }
 
+    fn fail(&mut self, message: String, class: super::FailureClass) {
+        match &mut self.failure {
+            None => self.failure = Some((message, class)),
+            Some((_, first)) if first.kind == ErrorKind::Unclassified => *first = class,
+            Some(_) => {}
+        }
+        self.finish_reason = Some(StopReason::Error);
+    }
+
     fn flush_calls(&mut self, out: &mut Vec<AiEvent>) {
-        for (index, (_, call)) in std::mem::take(&mut self.calls).into_iter().enumerate() {
-            let Some(id) = call.id.filter(|id| !id.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!(
-                        "xAI streamed a function_call at slot {index} with no call_id"
-                    ),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
-            let Some(name) = call.name.filter(|name| !name.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!("xAI streamed a function_call {id} with no name"),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
+        // Absent identities pass on empty; the shared stage decides.
+        for (_, call) in std::mem::take(&mut self.calls) {
+            let id = call.id.unwrap_or_default();
+            let name = call.name.unwrap_or_default();
             out.push(AiEvent::ToolCall {
                 call_id: id,
                 name,

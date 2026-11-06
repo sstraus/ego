@@ -128,7 +128,7 @@ pub(crate) enum PreparedToolCall {
     Plan(crate::plan::PlanUpdate),
     Effect {
         tool: std::sync::Arc<dyn Tool>,
-        call: PreparedCall,
+        call: Box<PreparedCall>,
         presentation: PermissionPresentationInput,
     },
     HumanInput(crate::question::QuestionRequest),
@@ -139,6 +139,14 @@ pub(crate) enum PreparedToolCall {
     Skill {
         operation: crate::skill::SkillOperation,
         catalogue: std::sync::Arc<crate::skill::SkillCatalogue>,
+    },
+    Memory {
+        store: std::sync::Arc<dyn crate::memory::MemoryStore>,
+        request: crate::memory::MemoryRequest,
+    },
+    CodeIntel {
+        service: std::sync::Arc<dyn crate::code_intel::CodeIntel>,
+        request: crate::code_intel::CodeIntelRequest,
     },
 }
 
@@ -165,6 +173,12 @@ pub struct ToolEffectPorts<'a> {
 impl<'a> ToolEffectPorts<'a> {
     pub(crate) fn process(&self) -> &dyn ProcessExecutor {
         self.process
+    }
+
+    /// The run's guarded duplex spawner, for a harness tool that keeps a
+    /// child process across calls (the `lsp` tool's language servers).
+    pub(crate) fn duplex(&self) -> std::sync::Arc<dyn DuplexSpawner> {
+        std::sync::Arc::clone(&self.duplex)
     }
 
     pub(crate) fn detached_status(
@@ -274,6 +288,10 @@ pub struct Tools<'a> {
     resume: Option<std::sync::Arc<ResumeSealer>>,
     task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
     pub(super) named_agents: Vec<super::NamedAgent>,
+    pub(super) child_defaults: super::ChildDefaults,
+    /// A forked child keeps the parent's `task` descriptor for an identical
+    /// tool prefix; the loop refuses any call to it.
+    fork_child: bool,
 
     task_tool_ceiling: Option<std::collections::BTreeSet<String>>,
 }
@@ -302,6 +320,8 @@ impl<'a> Tools<'a> {
             resume: None,
             task_context: None,
             named_agents: Vec::new(),
+            child_defaults: super::ChildDefaults::default(),
+            fork_child: false,
             task_tool_ceiling: None,
         }
     }
@@ -323,6 +343,8 @@ impl<'a> Tools<'a> {
             resume: None,
             task_context: None,
             named_agents: Vec::new(),
+            child_defaults: super::ChildDefaults::default(),
+            fork_child: false,
             task_tool_ceiling: None,
         }
     }
@@ -345,6 +367,8 @@ impl<'a> Tools<'a> {
             resume: None,
             task_context: None,
             named_agents: Vec::new(),
+            child_defaults: super::ChildDefaults::default(),
+            fork_child: false,
             task_tool_ceiling: None,
         })
     }
@@ -352,6 +376,12 @@ impl<'a> Tools<'a> {
     /// Install a read-only catalogue admitted by the host's trust boundary.
     pub fn with_named_agents(mut self, agents: Vec<super::NamedAgent>) -> Self {
         self.named_agents = agents;
+        self
+    }
+
+    /// Install the owner's default model and effort for task children.
+    pub fn with_child_defaults(mut self, defaults: super::ChildDefaults) -> Self {
+        self.child_defaults = defaults;
         self
     }
 
@@ -427,12 +457,13 @@ impl<'a> Tools<'a> {
         serial: std::sync::Arc<futures::lock::Mutex<()>>,
         cancel: super::CancelToken,
         ceiling: Option<std::collections::BTreeSet<String>>,
+        fork: bool,
     ) -> Result<Self, ToolCatalogueError> {
         Ok(Self {
             registry: self
                 .registry
                 .iter()
-                .filter(|entry| !matches!(entry, RegisteredTool::Task))
+                .filter(|entry| fork || !matches!(entry, RegisteredTool::Task))
                 .cloned()
                 .collect(),
             source: std::sync::Arc::new(TaskToolSource {
@@ -445,9 +476,20 @@ impl<'a> Tools<'a> {
             skill_resource_roots: self.skill_resource_roots.clone(),
             resume: self.resume.clone(),
             task_context: Some((name, serial)),
-            named_agents: Vec::new(),
+            named_agents: if fork {
+                self.named_agents.clone()
+            } else {
+                Vec::new()
+            },
+            fork_child: fork,
+            child_defaults: super::ChildDefaults::default(),
             task_tool_ceiling: ceiling,
         })
+    }
+
+    /// Any child of `task`, clean or forked. A child never delegates.
+    pub(crate) fn is_task_child(&self) -> bool {
+        self.task_context.is_some()
     }
 
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
@@ -477,7 +519,9 @@ impl<'a> Tools<'a> {
                 | RegisteredTool::Effect(_)
                 | RegisteredTool::HumanInput(_)
                 | RegisteredTool::Task
-                | RegisteredTool::History { .. } => None,
+                | RegisteredTool::History { .. }
+                | RegisteredTool::Memory(_)
+                | RegisteredTool::CodeIntel(_) => None,
             })
     }
 
@@ -486,7 +530,7 @@ impl<'a> Tools<'a> {
         let mut registry = Vec::with_capacity(self.registry.len() + dynamic.tools().len());
         registry.extend(self.registry.iter().cloned());
         registry.extend(dynamic.tools().iter().cloned());
-        if self.task_context.is_some() {
+        if self.task_context.is_some() && !self.fork_child {
             registry.retain(|tool| !matches!(tool, RegisteredTool::Task));
         }
         if let Some(ceiling) = &self.task_tool_ceiling {
@@ -669,7 +713,7 @@ impl<'a> Tools<'a> {
         match &registered {
             RegisteredTool::Effect(tool) => Ok(PreparedToolCall::Effect {
                 tool: std::sync::Arc::clone(tool),
-                call: self.prepare_params(tool.as_ref(), params.clone())?,
+                call: Box::new(self.prepare_params(tool.as_ref(), params.clone())?),
                 presentation: PermissionPresentationInput::new(params, descriptor.parameters),
             }),
             RegisteredTool::Context => {
@@ -700,6 +744,22 @@ impl<'a> Tools<'a> {
             }),
             RegisteredTool::HumanInput(tool) => {
                 tool.parse(params).map(PreparedToolCall::HumanInput)
+            }
+            RegisteredTool::Memory(store) => {
+                crate::memory::MemoryRequest::parse(params).map(|request| {
+                    PreparedToolCall::Memory {
+                        store: std::sync::Arc::clone(store),
+                        request,
+                    }
+                })
+            }
+            RegisteredTool::CodeIntel(service) => {
+                crate::code_intel::CodeIntelRequest::parse(params).map(|request| {
+                    PreparedToolCall::CodeIntel {
+                        service: std::sync::Arc::clone(service),
+                        request,
+                    }
+                })
             }
             RegisteredTool::Skill(catalogue) => {
                 let operation: crate::skill::SkillOperation = serde_json::from_value(params)
@@ -779,10 +839,15 @@ impl<'a> Tools<'a> {
     pub(crate) fn revalidate_processes(
         &self,
         call: &PreparedCall,
+        fresh_approval: bool,
     ) -> Result<(), crate::permit::ProcessError> {
         for op in call.ops() {
             if let Op::Spawn { spec } = op {
-                self.effects.process.revalidate(spec)?;
+                if fresh_approval {
+                    self.effects.process.revalidate_fresh_approval(spec)?;
+                } else {
+                    self.effects.process.revalidate(spec)?;
+                }
             }
         }
         Ok(())

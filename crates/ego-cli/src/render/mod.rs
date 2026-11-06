@@ -23,6 +23,7 @@
 //! - [`osc`] is the out-of-band half: what ego tells the host that is not
 //!   text on the screen.
 
+pub(crate) mod attachments;
 pub mod caps;
 pub mod diff;
 pub mod line;

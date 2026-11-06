@@ -395,6 +395,7 @@ fn canonical_credential_env(model: &str, requested: &str) -> Option<String> {
         ProviderRow::ollama_default(),
         ProviderRow::openai(),
         ProviderRow::anthropic_default(),
+        ProviderRow::bedrock_default(),
     )
     .into_iter()
     .find(|row| row.id() == slug.provider)?
@@ -939,12 +940,12 @@ fn fixture_permission_response(
             call.title == format!("write {}", target.display()),
             call.raw_input
                 .as_ref()
-                .is_some_and(|raw| raw["path"] == json!(target)),
+                .is_some_and(|raw| raw["files"][0]["path"] == json!(target)),
             call.raw_input
                 .as_ref()
-                .is_some_and(|raw| raw["contents"] == PERMISSION_CONTENTS),
+                .is_some_and(|raw| raw["files"][0]["contents"] == PERMISSION_CONTENTS),
             call.raw_input.as_ref()
-                == Some(&json!({"path": target, "contents": PERMISSION_CONTENTS}))
+                == Some(&json!({"files": [{"path": target, "contents": PERMISSION_CONTENTS}]}))
         );
     }
     if prior
@@ -976,7 +977,7 @@ fn fixture_permission_response(
         || call.tool_call_id != request.tool_call.tool_call_id
         || call.title != format!("write {}", target.display())
         || call.raw_input.as_ref()
-            != Some(&json!({"path": target, "contents": PERMISSION_CONTENTS}))
+            != Some(&json!({"files": [{"path": target, "contents": PERMISSION_CONTENTS}]}))
     {
         return None;
     }
@@ -1229,7 +1230,7 @@ async fn prove_live_provider_turn(
     let fixture = fs::canonicalize(fixture).expect("task fixture has a canonical target");
     let prompt = if permission_fixture {
         format!(
-            "Call the write tool exactly once with these two JSON fields: {{\"path\":{},\"contents\":{}}}. The field name is contents, plural. Do not use any other tool or target. Then reply with one word.",
+            "Call the write tool exactly once with this JSON: {{\"files\":[{{\"path\":{},\"contents\":{}}}]}}. The field name is contents, plural. Do not use any other tool or target. Then reply with one word.",
             serde_json::to_string(&fixture).expect("fixture path"),
             serde_json::to_string(PERMISSION_CONTENTS).expect("fixture contents")
         )
@@ -2482,7 +2483,7 @@ mod live_contract {
         );
         let call = v1::SessionUpdate::ToolCall(
             v1::ToolCall::new(item.to_string(), format!("write {}", target.display()))
-                .raw_input(json!({"path": target, "contents": PERMISSION_CONTENTS})),
+                .raw_input(json!({"files": [{"path": target, "contents": PERMISSION_CONTENTS}]})),
         );
         (
             vec![
@@ -2588,11 +2589,17 @@ mod live_contract {
         let (prior, request) = permission_fixture(target);
         for (pointer, value) in [
             ("/event/update/title", json!("exec")),
-            ("/event/update/rawInput/path", json!("/workspace/other")),
-            ("/event/update/rawInput/contents", json!("different bytes")),
+            (
+                "/event/update/rawInput/files/0/path",
+                json!("/workspace/other"),
+            ),
+            (
+                "/event/update/rawInput/files/0/contents",
+                json!("different bytes"),
+            ),
             (
                 "/event/update/rawInput",
-                json!({"path": target, "contents": PERMISSION_CONTENTS, "extra": true}),
+                json!({"files": [{"path": target, "contents": PERMISSION_CONTENTS, "extra": true}]} ),
             ),
             ("/event/update/toolCallId", json!("another")),
         ] {

@@ -283,7 +283,10 @@ async fn own_session(
             }
             status = child.wait() => {
                 let error = match status {
-                    Ok(status) if !status.success() => SecretChildError::Exit(status.code()),
+                    Ok(status) if !status.success() => SecretChildError::Exit {
+                        code: status.code(),
+                        stderr: String::new(),
+                    },
                     Ok(_) => SecretChildError::InvalidRequest("protocol_filter exited before finish"),
                     Err(error) => SecretChildError::Io(error),
                 };
@@ -331,7 +334,10 @@ async fn own_session(
                     ));
                 }
                 if !status.success() {
-                    return Err(SecretChildError::Exit(status.code()));
+                    return Err(SecretChildError::Exit {
+                        code: status.code(),
+                        stderr: String::new(),
+                    });
                 }
                 Ok(None)
             }

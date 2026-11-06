@@ -1,8 +1,8 @@
 {
   "provenance": {
     "run": "20000101T120000Z-00000002",
-    "evidence_root": "/home/example/Gits/.tmp/example-ledger-live/work/20000101T120000Z-00000002",
-    "observer": "/home/example/Gits/.tmp/results/sample-observation-0100.md",
+    "evidence_root": "/home/example/scratch/example-ledger-live/work/20000101T120000Z-00000002",
+    "observer": "/home/example/scratch/results/sample-observation-0100.md",
     "driver_commit": "0000000000000000000000000000000000000005",
     "integrity_basis": "seed_event_sha256 hashes compact UTF-8 JSON of the synthetic seed_event; original whole-journal hashes are not retained."
   },
@@ -39,10 +39,10 @@
       "seed_answer": "READY",
       "seed_completed": true,
       "system": {
-        "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /home/example/Gits/.tmp/example-ledger-live/work/20000101T120000Z-00000002/001-compaction-1/AGENTS.md\n\nUse only offered tools. Never access credentials or external services.\nStanding constraint REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks.",
+        "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /home/example/scratch/example-ledger-live/work/20000101T120000Z-00000002/001-compaction-1/AGENTS.md\n\nUse only offered tools. Never access credentials or external services.\nStanding constraint REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks.",
         "sources": [
           {
-            "path": "/home/example/Gits/.tmp/example-ledger-live/work/20000101T120000Z-00000002/001-compaction-1/AGENTS.md",
+            "path": "/home/example/scratch/example-ledger-live/work/20000101T120000Z-00000002/001-compaction-1/AGENTS.md",
             "sha256": "298ac7eba811b28bf533fff2198975914ed1a9a3914854adc3387ce5c0649aa0",
             "bytes": 173,
             "scope": ".",
@@ -84,10 +84,10 @@
       "seed_answer": "READY",
       "seed_completed": true,
       "system": {
-        "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /home/example/Gits/.tmp/example-ledger-live/work/20000101T120000Z-00000002/003-compaction-3/AGENTS.md\n\nUse only offered tools. Never access credentials or external services.\nStanding constraint REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks.",
+        "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /home/example/scratch/example-ledger-live/work/20000101T120000Z-00000002/003-compaction-3/AGENTS.md\n\nUse only offered tools. Never access credentials or external services.\nStanding constraint REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks.",
         "sources": [
           {
-            "path": "/home/example/Gits/.tmp/example-ledger-live/work/20000101T120000Z-00000002/003-compaction-3/AGENTS.md",
+            "path": "/home/example/scratch/example-ledger-live/work/20000101T120000Z-00000002/003-compaction-3/AGENTS.md",
             "sha256": "298ac7eba811b28bf533fff2198975914ed1a9a3914854adc3387ce5c0649aa0",
             "bytes": 173,
             "scope": ".",

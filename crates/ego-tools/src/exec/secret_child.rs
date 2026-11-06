@@ -6,7 +6,9 @@ use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use ego_core::credentials::SecretMaterial;
-use ego_core::permit::CanonPath;
+use ego_core::permit::shell::redact_credentials;
+use ego_core::permit::{CanonPath, terminal_safe};
+use ego_core::secrets::SecretValues;
 use ego_core::turn::CancelToken;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::task::JoinHandle;
@@ -49,7 +51,8 @@ impl fmt::Debug for SecretChildOutput {
     }
 }
 
-/// Closed, secret-free failure classification for a child exchange.
+/// Closed failure classification for a child exchange. Any text it carries
+/// has known secrets masked.
 #[derive(Debug)]
 pub enum SecretChildError {
     InvalidRequest(&'static str),
@@ -58,7 +61,11 @@ pub enum SecretChildError {
     Cancelled,
     RunTimeout,
     CommandTimeout,
-    Exit(Option<i32>),
+    /// `stderr` is bounded, terminal-safe and has every known secret masked.
+    Exit {
+        code: Option<i32>,
+        stderr: String,
+    },
     CleanupUncertain {
         cause: Option<Box<SecretChildError>>,
     },
@@ -73,10 +80,16 @@ impl fmt::Display for SecretChildError {
             Self::Cancelled => formatter.write_str("credential command was cancelled"),
             Self::RunTimeout => formatter.write_str("run deadline expired"),
             Self::CommandTimeout => formatter.write_str("credential command timed out"),
-            Self::Exit(Some(code)) => {
-                write!(formatter, "credential command exited with code {code}")
+            Self::Exit { code, stderr } => {
+                match code {
+                    Some(code) => write!(formatter, "credential command exited with code {code}")?,
+                    None => formatter.write_str("credential command exited by signal")?,
+                }
+                if !stderr.is_empty() {
+                    write!(formatter, ": {stderr}")?;
+                }
+                Ok(())
             }
-            Self::Exit(None) => formatter.write_str("credential command exited by signal"),
             Self::CleanupUncertain { cause } => {
                 formatter.write_str("credential command process-tree cleanup is uncertain")?;
                 if let Some(cause) = cause {
@@ -222,7 +235,11 @@ async fn run_child(
             Stdio::inherit()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(if max_stdout.is_none() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     if max_stdout.is_some() {
         command.env_clear();
         #[cfg(unix)]
@@ -245,6 +262,11 @@ async fn run_child(
         ));
     };
     let mut stdout_task = Some(tokio::spawn(read_secret(stdout, max_stdout)));
+    let mut known_secrets = request
+        .stdin
+        .as_ref()
+        .map(request_secrets)
+        .unwrap_or_default();
     let mut stdin_task = match (request.stdin, child.take_stdin()) {
         (Some(secret), Some(stdin)) => Some(tokio::spawn(write_secret(stdin, secret))),
         (Some(_), None) => {
@@ -256,6 +278,9 @@ async fn run_child(
         }
         (None, _) => None,
     };
+    let mut stderr_task = child
+        .take_stderr()
+        .map(|stderr| tokio::spawn(read_stderr(stderr)));
 
     let mut stdout_result = None;
     let settlement = wait_secret_child(
@@ -275,6 +300,7 @@ async fn run_child(
             child.cleanup_after_exit(request.termination_grace).await,
         ),
         Settlement::Failed(error) => {
+            abort_stderr(stderr_task.take());
             let cleanup = child.terminate(request.termination_grace).await;
             let _ = finish_stdin(stdin_task.take(), pipe_grace).await;
             let _ = finish_stdout(stdout_task.take(), pipe_grace).await;
@@ -288,6 +314,12 @@ async fn run_child(
         }
     };
 
+    let failure_stderr = if status.as_ref().is_some_and(ExitStatus::success) {
+        abort_stderr(stderr_task.take());
+        None
+    } else {
+        Some(finish_stderr(stderr_task.take(), request.termination_grace).await)
+    };
     let stdin_result = finish_stdin(stdin_task.take(), pipe_grace).await;
     let pending_stdout = if pipe_grace.is_none() && stdin_result.is_err() {
         // The legacy credential path used to return on this input error.
@@ -305,7 +337,10 @@ async fn run_child(
         return Err(SecretChildError::CleanupUncertain {
             cause: match status.as_ref() {
                 Some(status) if status.success() => None,
-                Some(status) => Some(Box::new(SecretChildError::Exit(status.code()))),
+                Some(status) => Some(Box::new(SecretChildError::Exit {
+                    code: status.code(),
+                    stderr: String::new(),
+                })),
                 None => None,
             },
         });
@@ -316,7 +351,13 @@ async fn run_child(
     }
     let status = status.expect("an exited settlement has a status");
     if !status.success() {
-        return Err(SecretChildError::Exit(status.code()));
+        if let Some(stdout) = &stdout_result {
+            known_secrets.extend(request_secrets(stdout));
+        }
+        return Err(SecretChildError::Exit {
+            code: status.code(),
+            stderr: masked_diagnostic(failure_stderr.unwrap_or_default(), known_secrets),
+        });
     }
     Ok(SecretChildOutput {
         stdout: stdout_result.expect("stdout reaches EOF after child exit"),
@@ -399,6 +440,108 @@ async fn wait_secret_child(
         }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
+}
+
+/// Largest stderr prefix kept for a failure diagnostic.
+const STDERR_CAPTURE_BYTES: usize = 8192;
+/// Largest diagnostic shown to the owner after masking.
+const DIAGNOSTIC_BYTES: usize = 4096;
+
+/// Shortest JSON field value treated as a secret when masking a diagnostic.
+const MIN_FIELD_SECRET_BYTES: usize = 6;
+
+#[derive(Default)]
+struct CapturedStderr {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+/// Keep a bounded prefix and drain the rest so the child never blocks on a full pipe.
+async fn read_stderr(mut stderr: tokio::process::ChildStderr) -> CapturedStderr {
+    let mut bytes = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0_u8; 1024];
+    loop {
+        match stderr.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => {
+                let room = STDERR_CAPTURE_BYTES - bytes.len();
+                bytes.extend_from_slice(&chunk[..count.min(room)]);
+                truncated |= count > room;
+            }
+        }
+    }
+    CapturedStderr { bytes, truncated }
+}
+
+fn abort_stderr(task: Option<JoinHandle<CapturedStderr>>) {
+    if let Some(task) = task {
+        task.abort();
+    }
+}
+
+/// A descendant holding the pipe open must not delay the failure report.
+async fn finish_stderr(
+    task: Option<JoinHandle<CapturedStderr>>,
+    grace: Duration,
+) -> CapturedStderr {
+    let Some(mut task) = task else {
+        return CapturedStderr::default();
+    };
+    match tokio::time::timeout(grace, &mut task).await {
+        Ok(Ok(captured)) => captured,
+        _ => {
+            task.abort();
+            CapturedStderr::default()
+        }
+    }
+}
+
+/// The request or reply bytes plus every JSON string inside them, so a helper
+/// that echoes one field of a credential blob is still masked.
+fn request_secrets(material: &SecretMaterial) -> Vec<Vec<u8>> {
+    let bytes = material.expose_secret_bytes();
+    let mut values = vec![bytes.trim_ascii().to_vec()];
+    if let Ok(json) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        collect_strings(&json, &mut values);
+    }
+    values
+}
+
+fn collect_strings(value: &serde_json::Value, out: &mut Vec<Vec<u8>>) {
+    match value {
+        // Short words would mask ordinary diagnostic text.
+        serde_json::Value::String(text) if text.len() >= MIN_FIELD_SECRET_BYTES => {
+            out.push(text.as_bytes().to_vec());
+        }
+        serde_json::Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
+        serde_json::Value::Object(items) => {
+            items.values().for_each(|item| collect_strings(item, out));
+        }
+        _ => {}
+    }
+}
+
+/// Exact known secrets first, then credential shapes, then terminal escapes.
+/// A capture cut by the byte limit drops its last word, which could be the
+/// start of a secret that the exact match can no longer recognise.
+fn masked_diagnostic(captured: CapturedStderr, secrets: Vec<Vec<u8>>) -> String {
+    let mut text = String::from_utf8_lossy(&captured.bytes).into_owned();
+    if captured.truncated {
+        let kept = text.rfind(char::is_whitespace).unwrap_or(0);
+        text.truncate(kept);
+    }
+    let masked = SecretValues::new(secrets).mask(&text);
+    let mut shown = terminal_safe(&redact_credentials(&masked));
+    if shown.len() > DIAGNOSTIC_BYTES {
+        let mut end = DIAGNOSTIC_BYTES - '…'.len_utf8();
+        while !shown.is_char_boundary(end) {
+            end -= 1;
+        }
+        shown.truncate(end);
+        shown.push('…');
+    }
+    shown
 }
 
 async fn write_secret(

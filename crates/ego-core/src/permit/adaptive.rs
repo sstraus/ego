@@ -27,10 +27,7 @@ impl ReadPerimeter {
                 confinement.level(),
                 super::Confinement::Off | super::Confinement::Adaptive
             ),
-            credential_floor: matches!(
-                confinement.level(),
-                super::Confinement::Off | super::Confinement::Adaptive
-            ),
+            credential_floor: confinement.level() == super::Confinement::Adaptive,
             exclusions: if confinement.level() == super::Confinement::Adaptive {
                 confinement
                     .adaptive_perimeter()
@@ -44,6 +41,10 @@ impl ReadPerimeter {
 
     pub(crate) fn broad(&self) -> bool {
         self.broad
+    }
+
+    pub(crate) fn unrestricted(&self) -> bool {
+        self.broad && !self.credential_floor && self.exclusions.is_empty()
     }
 
     pub(crate) fn refuses(&self, path: &CanonPath) -> bool {

@@ -182,6 +182,7 @@ impl EventSink for AcpSink {
                 updates.push(provider_retry_cleared_v1());
             }
         }
+        updates.extend(crate::project::project_compacted_v1(event));
         updates.extend(project_acp_updates_v1(event, state, &self.caps, &self.root));
         if self.child_activity {
             updates.extend(crate::project::project_child_activity_v1(event));

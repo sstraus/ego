@@ -119,12 +119,27 @@ impl SourcedRule {
         self.origins.insert(origin);
     }
 
+    /// Reuse the exact user rule authority for protected filesystem paths.
+    pub(crate) fn exact_owner_allow(&self, op: &Op, root: &Path) -> bool {
+        self.origins.contains(Source::User) && self.rule.matches_exact_path(op, root)
+    }
+
+    /// A user `net` rule that names hosts is the owner's grant for them.
+    pub(crate) fn owner_net_allow(&self, op: &Op) -> bool {
+        self.origins.contains(Source::User) && self.rule.matches_owner_net(op)
+    }
+
     /// Match a deny, allowing only an effective user grant to lift defaults.
     pub(crate) fn denies(&self, op: &Op, root: &Path, allow: &[SourcedRule]) -> bool {
         let direct = self.rule.matches(op, root)
             && !(self.origins == OriginSet::just(Source::Default)
                 && allow.iter().any(|entry| {
-                    entry.origins.contains(Source::User) && entry.rule.matches_allow(op, root)
+                    entry.origins.contains(Source::User)
+                        && if matches!(op, Op::Read { path } if Ruleset::is_credential_path(path)) {
+                            entry.exact_owner_allow(op, root)
+                        } else {
+                            entry.rule.matches_allow(op, root, true)
+                        }
                 }));
         if direct {
             return true;
@@ -147,10 +162,11 @@ impl SourcedRule {
     /// Every authority needed by an operation, including all literal commands
     /// inside a shell list. Direct shell grants keep their exact semantics.
     pub(crate) fn allowing<'a>(allow: &'a [Self], op: &Op, root: &Path) -> Option<Vec<&'a Self>> {
-        if let Some(entry) = allow
-            .iter()
-            .find(|entry| entry.rule.matches_allow(op, root))
-        {
+        if let Some(entry) = allow.iter().find(|entry| {
+            entry
+                .rule
+                .matches_allow(op, root, entry.origins.contains(Source::User))
+        }) {
             return Some(vec![entry]);
         }
         let Op::Spawn { spec } = op else {
@@ -233,6 +249,10 @@ impl SourcedRule {
 pub struct Ruleset {
     pub allow: Vec<SourcedRule>,
     pub deny: Vec<SourcedRule>,
+    /// The owner's `web_private_network = true`: web admission may dial a
+    /// loopback, LAN or shared-space (Tailscale) address for any admitted
+    /// call. Only the user layer sets it; never a rule or a mode.
+    pub web_private_network: bool,
 }
 
 impl Ruleset {

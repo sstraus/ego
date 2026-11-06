@@ -12,6 +12,7 @@ pub mod fs;
 pub mod hook;
 pub mod http;
 pub mod instructions;
+pub mod lsp;
 pub mod mcp;
 pub mod mcp_continuation;
 mod mcp_oauth;

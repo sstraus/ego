@@ -25,7 +25,7 @@ use url::Url;
 
 use super::{
     EnvironmentPresence, StartupDecision, credential_present, decide_missing_model,
-    discover_ollama, persist_startup_model, persist_startup_selection,
+    discover_ollama, persist_startup_model, persist_startup_selection, provider_readiness,
 };
 
 #[derive(Default)]
@@ -68,7 +68,8 @@ impl EnvironmentPresence for Presence {
 
 #[test]
 fn credential_presence_exhausts_strategies_without_commands_or_secret_values() {
-    let environment = Presence::with_nonblank(&["BEARER", "HEADER", "FALLBACK", "API_KEY"]);
+    let environment =
+        Presence::with_nonblank(&["BEARER", "HEADER", "FALLBACK", "API_KEY", "PROJECT"]);
     let observed = BTreeSet::from(["oauth-provider".to_owned(), "anthropic".to_owned()]);
 
     assert!(credential_present(
@@ -155,10 +156,33 @@ fn credential_presence_exhausts_strategies_without_commands_or_secret_values() {
         &environment,
         &observed
     ));
+    // Catches: Vertex reported ready with a login and no project, which sends
+    // every request to an address that names no project.
+    let google = |provider: &str, project: &str| CredentialStrategy::GoogleCloud {
+        provider: provider.to_owned(),
+        project_var: project.to_owned(),
+        location_var: "LOCATION".to_owned(),
+    };
+    assert!(credential_present(
+        &google("oauth-provider", "PROJECT"),
+        &environment,
+        &observed
+    ));
+    assert!(!credential_present(
+        &google("oauth-provider", "MISSING"),
+        &environment,
+        &observed
+    ));
+    assert!(!credential_present(
+        &google("unobserved", "PROJECT"),
+        &environment,
+        &observed
+    ));
     assert_eq!(
         environment.queried(),
         vec![
             "BEARER", "MISSING", "HEADER", "FALLBACK", "MISSING", "API_KEY", "MISSING", "MISSING",
+            "PROJECT", "MISSING",
         ]
     );
 }
@@ -234,10 +258,34 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
         Some(ThinkingLevel::Medium),
         false,
     );
-    let StartupDecision::Headless(error) = one else {
-        panic!("one provider must still refuse headless startup")
+    let StartupDecision::UseForRun(model) = one else {
+        panic!("one provider with a selectable default must run headless without persisting")
     };
-    assert!(error.to_string().contains("openai/gpt-5.6-sol"));
+    assert_eq!(model, ModelRef("openai/gpt-5.6-sol".to_owned()));
+
+    let headless_multiple = decide_missing_model(
+        Arc::clone(&one_snapshot),
+        &defaults(&[("openai", "openai/gpt-5.6-sol")]),
+        &BTreeSet::from(["anthropic".to_owned(), "openai".to_owned()]),
+        Some(ThinkingLevel::Medium),
+        false,
+    );
+    assert!(
+        matches!(headless_multiple, StartupDecision::Headless(_)),
+        "several usable providers must still refuse headless startup"
+    );
+
+    let headless_missing_default = decide_missing_model(
+        Arc::clone(&one_snapshot),
+        &BTreeMap::new(),
+        &BTreeSet::from(["openai".to_owned()]),
+        Some(ThinkingLevel::Medium),
+        false,
+    );
+    assert!(
+        matches!(headless_missing_default, StartupDecision::Headless(_)),
+        "a sole provider without a default must still refuse headless startup"
+    );
 
     let multiple = decide_missing_model(
         one_snapshot,
@@ -283,6 +331,36 @@ fn missing_model_decisions_cover_zero_one_multiple_and_bad_defaults() {
         panic!("an unavailable default must explain the picker")
     };
     assert!(error.to_string().contains("cannot be selected"));
+}
+
+// Catches: setup reports a provider ready without its credential, or names the
+// wrong variable or login command as the remedy.
+#[test]
+fn provider_readiness_names_the_remedy_for_each_missing_credential() {
+    let rows = crate::model::rows(&Default::default()).expect("built-in provider rows");
+    let environment = Presence::with_nonblank(&["OPENAI_API_KEY"]);
+    let observed = BTreeSet::from(["openai-codex".to_owned()]);
+    let readiness = provider_readiness(&rows, &environment, &observed);
+    let line = |provider: &str| {
+        readiness
+            .iter()
+            .find(|row| row.provider == provider)
+            .unwrap_or_else(|| panic!("no readiness row for {provider}"))
+            .to_string()
+    };
+
+    assert_eq!(line("openai"), "openai: ready");
+    assert_eq!(line("openai-codex"), "openai-codex: ready");
+    assert_eq!(
+        line("anthropic"),
+        "anthropic: not ready — set ANTHROPIC_API_KEY or run 'ego auth login anthropic'"
+    );
+    assert_eq!(line("gemini"), "gemini: not ready — set GEMINI_API_KEY");
+    assert_eq!(
+        line("github-copilot"),
+        "github-copilot: not ready — run 'ego auth login github-copilot'"
+    );
+    assert!(line("ollama").starts_with("ollama: ready — no credential"));
 }
 
 #[test]

@@ -105,6 +105,38 @@ pub fn resolve(
     Ok(meta.id)
 }
 
+/// The one session of `root` whose title is exactly `title`.
+///
+/// Exact and case-sensitive, so a near-miss is a refusal and not a guess.
+/// Titles are not unique; when several sessions carry this one, the refusal
+/// lists them, most recent first, and resumes none: picking the newest would
+/// continue a session the caller may not have meant.
+pub fn resolve_title(
+    store: &ego_tools::store::JsonlStore,
+    root: &Path,
+    title: &str,
+) -> Result<SessionId, UsageError> {
+    let metas = readable_sessions(store, &crate::output::Stderr)
+        .map_err(|err| UsageError(format!("the session store could not be listed: {err}")))?;
+    let matches: Vec<SessionMeta> = in_workspace(metas, root)
+        .into_iter()
+        .filter(|meta| meta.title.as_deref() == Some(title))
+        .collect();
+    match matches.as_slice() {
+        [] => Err(UsageError(format!(
+            "no session titled `{title}` belongs to {}; list its sessions and titles with 'ego ls'",
+            root.display()
+        ))),
+        [meta] => Ok(meta.id),
+        _ => Err(UsageError(format!(
+            "{} sessions in {} are titled `{title}`; resume one by its id:\n{}",
+            matches.len(),
+            root.display(),
+            table(&matches, false).join("\n")
+        ))),
+    }
+}
+
 /// One catalogue row for JSON or JSONL output.
 ///
 /// A shape of its own rather than `SessionMeta` serialised directly: that type

@@ -17,6 +17,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use super::cold_read;
 use crate::privacy::{PrivatePathKind, harden_private_path};
 
 /// Read the first newline-terminated line without visiting the rest of the file.
@@ -25,7 +26,9 @@ fn read_first_line(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
     let file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return first_line_of(cold_read::read_absent(path)?);
+        }
         Err(error) => return Err(error),
     };
     let mut line = Vec::new();
@@ -51,7 +54,9 @@ fn read_last_line(path: &Path) -> io::Result<Option<Vec<u8>>> {
 
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return last_line_of(cold_read::read_absent(path)?);
+        }
         Err(error) => return Err(error),
     };
     let len = file.metadata()?.len();
@@ -99,7 +104,51 @@ fn read_last_line(path: &Path) -> io::Result<Option<Vec<u8>>> {
     Ok(Some(line))
 }
 
-fn open_directory(path: &Path) -> io::Result<fs::File> {
+/// The first complete line of a whole-file read.
+fn first_line_of(bytes: Option<Vec<u8>>) -> io::Result<Option<Vec<u8>>> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') else {
+        if bytes.is_empty() {
+            return Ok(None);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session log starts with an unterminated line",
+        ));
+    };
+    Ok(Some(bytes[..newline].to_vec()))
+}
+
+/// The final complete line of a whole-file read.
+fn last_line_of(bytes: Option<Vec<u8>>) -> io::Result<Option<Vec<u8>>> {
+    let Some(bytes) = bytes else {
+        return Ok(None);
+    };
+    if bytes.is_empty() {
+        return Ok(None);
+    }
+    if !bytes.ends_with(b"\n") {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "session log ends in an unterminated line",
+        ));
+    }
+    let content = &bytes[..bytes.len() - 1];
+    let start = content
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |newline| newline + 1);
+    Ok(Some(content[start..].to_vec()))
+}
+
+/// The bytes of a whole-file read from `offset` on.
+fn suffix_of(bytes: Option<Vec<u8>>, offset: u64) -> Option<Vec<u8>> {
+    bytes.map(|bytes| bytes.get(offset as usize..).unwrap_or_default().to_vec())
+}
+
+pub(super) fn open_directory(path: &Path) -> io::Result<fs::File> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt as _;
@@ -230,9 +279,14 @@ pub trait StoreIo: Send + Sync {
 
     /// Read an appended suffix. Adapters without ranged reads retain the safe fallback.
     fn read_from(&self, path: &Path, offset: u64) -> io::Result<Option<Vec<u8>>> {
-        self.read(path).map(|bytes| {
-            bytes.map(|bytes| bytes.get(offset as usize..).unwrap_or_default().to_vec())
-        })
+        self.read(path).map(|bytes| suffix_of(bytes, offset))
+    }
+
+    /// Return a cold (compressed) session file to its plain form before a
+    /// writer changes it. Adapters that never store compressed files keep
+    /// this no-op.
+    fn restore_plain(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
     }
 
     /// Retain an append descriptor when the adapter supports it. The parent
@@ -322,19 +376,7 @@ pub trait StoreIo: Send + Sync {
     /// absent or empty. The default delegates exclusively to [`StoreIo::read`]
     /// so an adapter remains the sole owner of the path it represents.
     fn read_first_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-        let Some(bytes) = self.read(path)? else {
-            return Ok(None);
-        };
-        let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') else {
-            if bytes.is_empty() {
-                return Ok(None);
-            }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "session log starts with an unterminated line",
-            ));
-        };
-        Ok(Some(bytes[..newline].to_vec()))
+        first_line_of(self.read(path)?)
     }
 
     /// Read only the final complete line at `path`, or `None` when the file
@@ -345,24 +387,7 @@ pub trait StoreIo: Send + Sync {
     /// appends use the efficient [`OsIo`] override to derive the next physical
     /// record position without an O(log size) whole-file read.
     fn read_last_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
-        let Some(bytes) = self.read(path)? else {
-            return Ok(None);
-        };
-        if bytes.is_empty() {
-            return Ok(None);
-        }
-        if !bytes.ends_with(b"\n") {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "session log ends in an unterminated line",
-            ));
-        }
-        let content = &bytes[..bytes.len() - 1];
-        let start = content
-            .iter()
-            .rposition(|byte| *byte == b'\n')
-            .map_or(0, |newline| newline + 1);
-        Ok(Some(content[start..].to_vec()))
+        last_line_of(self.read(path)?)
     }
 
     /// Test path existence without reading whole files into memory.
@@ -534,6 +559,11 @@ fn replace_atomic_publication_with_privacy(
             return Ok(ReplacePublication::PublishedDurabilityUncertain(error));
         }
     }
+    // The new plain file is authoritative. A sibling left by a failed unlink
+    // is harmless (plain wins), so this cannot turn publication into failure.
+    if cold_read::is_compressible(path) {
+        let _ = cold_read::remove_if_present(&cold_read::packed_path(path));
+    }
     Ok(ReplacePublication::PublishedDurably)
 }
 
@@ -548,6 +578,7 @@ fn replace_atomic_with(path: &Path, bytes: &[u8], barrier: Barrier) -> io::Resul
 /// [`StoreIo::truncate`], with `barrier` deciding whether the shortened
 /// length is forced out before returning.
 fn truncate_with(path: &Path, len: u64, barrier: Barrier) -> io::Result<()> {
+    cold_read::restore_before_write(path)?;
     let file = fs::OpenOptions::new()
         .write(true)
         // Declared explicitly: `set_len` below is the only shortening
@@ -583,12 +614,21 @@ fn append_bytes(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 fn visit_file(path: &Path, visitor: &mut dyn FnMut(&[u8]) -> io::Result<()>) -> io::Result<bool> {
     use io::Read as _;
+    const CHUNK: usize = 32 * 1024;
     let mut file = match fs::File::open(path) {
         Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let Some(bytes) = cold_read::read_absent(path)? else {
+                return Ok(false);
+            };
+            for chunk in bytes.chunks(CHUNK) {
+                visitor(chunk)?;
+            }
+            return Ok(true);
+        }
         Err(error) => return Err(error),
     };
-    let mut chunk = [0_u8; 32 * 1024];
+    let mut chunk = [0_u8; CHUNK];
     loop {
         let read = file.read(&mut chunk)?;
         if read == 0 {
@@ -669,18 +709,27 @@ pub struct OsIo;
 
 impl StoreIo for OsIo {
     fn file_revision(&self, path: &Path) -> io::Result<Option<FileRevision>> {
-        match fs::metadata(path) {
-            Ok(metadata) => FileRevision::from_metadata(&metadata).map(Some),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(error),
-        }
+        let metadata = if cold_read::is_compressible(path) {
+            cold_read::metadata(path)
+        } else {
+            match fs::metadata(path) {
+                Ok(metadata) => Ok(Some(metadata)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+        metadata?
+            .map(|metadata| FileRevision::from_metadata(&metadata))
+            .transpose()
     }
 
     fn read_from(&self, path: &Path, offset: u64) -> io::Result<Option<Vec<u8>>> {
         use io::{Read as _, Seek as _, SeekFrom};
         let mut file = match fs::File::open(path) {
             Ok(file) => file,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(suffix_of(cold_read::read_absent(path)?, offset));
+            }
             Err(error) => return Err(error),
         };
         file.seek(SeekFrom::Start(offset))?;
@@ -690,6 +739,7 @@ impl StoreIo for OsIo {
     }
 
     fn open_session_log(&self, path: &Path) -> io::Result<Option<Box<dyn SessionLogWriter>>> {
+        cold_read::restore_before_write(path)?;
         let file = fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -739,6 +789,7 @@ impl StoreIo for OsIo {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        cold_read::restore_before_write(path)?;
         use std::io::Write;
         let mut file = fs::OpenOptions::new()
             .create(true)
@@ -763,9 +814,13 @@ impl StoreIo for OsIo {
     fn read(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
         match fs::read(path) {
             Ok(bytes) => Ok(Some(bytes)),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => cold_read::read_absent(path),
             Err(e) => Err(e),
         }
+    }
+
+    fn restore_plain(&self, path: &Path) -> io::Result<()> {
+        cold_read::restore_plain(path)
     }
 
     fn read_first_line(&self, path: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -781,7 +836,8 @@ impl StoreIo for OsIo {
         // would make an unreadable log look like a brand-new session and
         // re-write a header into a log that already has one. `try_exists()`
         // surfaces that error instead of hiding it.
-        path.try_exists()
+        Ok(path.try_exists()?
+            || (cold_read::is_compressible(path) && cold_read::packed_path(path).try_exists()?))
     }
 
     fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
@@ -808,11 +864,11 @@ impl StoreIo for OsIo {
     }
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(e),
+        // A compressed sibling left behind would resurrect the removed file.
+        if cold_read::is_compressible(path) {
+            cold_read::remove_if_present(&cold_read::packed_path(path))?;
         }
+        cold_read::remove_if_present(path)
     }
 
     fn list_dirs(&self, path: &Path) -> io::Result<Vec<PathBuf>> {
@@ -901,6 +957,10 @@ impl StoreIo for NonDurableOsIo {
 
     fn exists(&self, path: &Path) -> io::Result<bool> {
         OsIo.exists(path)
+    }
+
+    fn restore_plain(&self, path: &Path) -> io::Result<()> {
+        OsIo.restore_plain(path)
     }
 
     fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {

@@ -117,12 +117,10 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           cat dist/*.sha256 > dist/SHA256SUMS
-          NOTES="docs/release-notes/$VERSION.md"
-          if [ ! -f "$NOTES" ] || ! grep -q '[^[:space:]]' "$NOTES"; then
-            echo "$NOTES is missing or empty"
-            exit 1
-          fi
-          cp "$NOTES" notes.md
+          # CHANGELOG.md is mandatory. The public squash snapshot carries no
+          # story IDs, so completeness (--history) is checked before tagging.
+          python3 -B scripts/check-changelog.py release --version "$VERSION"
+          python3 -B scripts/check-changelog.py extract --version "$VERSION" > notes.md
 
       - name: Generate Homebrew formula
         if: ${{ !contains(github.ref_name, '-') }}

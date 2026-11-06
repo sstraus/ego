@@ -24,8 +24,8 @@ cannot show a client-side mistake.
 untrusted run drops the `Project` and `Local` config layers entirely — a
 `sandbox` written into the workspace is read by nobody. The user layer is the
 only one an ACP host can reach, so the harness points `$EGO_HOME` at
-`~/Gits/.tmp/acp-ui-home` and writes `model`, `sandbox` and `mode` there. Your
-real `~/.ego` is never touched.
+`ego-acp-ui-home` in the system temp dir (`$TMPDIR`) and writes `model`,
+`sandbox` and `mode` there. Your real `~/.ego` is never touched.
 
 This is also the finding the harness exists to make visible: **`ego acp` takes
 no `--sandbox`, no `--mode` and no `-m`, and ACP has no negotiated way to set

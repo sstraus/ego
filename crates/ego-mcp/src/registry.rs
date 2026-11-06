@@ -1626,6 +1626,7 @@ impl McpRegistryRuntime {
         clock: Arc<dyn Clock>,
         max_sse_event_size: usize,
         timeout: Duration,
+        tasks: bool,
     ) -> Result<Self, McpRegistryError> {
         Self::new_with_acp(
             registry_journal,
@@ -1638,6 +1639,7 @@ impl McpRegistryRuntime {
             max_sse_event_size,
             timeout,
             None,
+            tasks,
         )
     }
 
@@ -1653,6 +1655,7 @@ impl McpRegistryRuntime {
         max_sse_event_size: usize,
         timeout: Duration,
         acp_management: Option<Arc<dyn crate::McpAcpEffects>>,
+        tasks: bool,
     ) -> Result<Self, McpRegistryError> {
         if max_sse_event_size == 0 || timeout.is_zero() {
             return Err(McpRegistryError::InvalidCandidate(
@@ -1684,8 +1687,8 @@ impl McpRegistryRuntime {
                 Arc::new(ControllerToolSchemaAdmission {
                     controller: controller.clone(),
                 });
-            let admission: Arc<dyn McpCandidateAdmission> =
-                Arc::new(McpRuntimeCandidateAdmission::new(
+            let admission: Arc<dyn McpCandidateAdmission> = Arc::new(
+                McpRuntimeCandidateAdmission::new(
                     Arc::clone(&http_management),
                     Arc::clone(&stdio_management),
                     Arc::clone(&owner),
@@ -1693,7 +1696,9 @@ impl McpRegistryRuntime {
                     max_sse_event_size,
                     timeout,
                     acp_management,
-                ));
+                )
+                .with_tasks(tasks),
+            );
             McpRegistryController {
                 journal: registry_journal,
                 admission,
@@ -2457,6 +2462,9 @@ impl StableCaptureHasher {
                     "allow-insecure-loopback",
                     &[u8::from(config.allow_insecure_loopback)],
                 );
+                for host in &config.oauth_hosts {
+                    self.field("oauth-host", host.to_string().as_bytes());
+                }
                 if let Some(session) = admission.oauth_session() {
                     // OAuth authority is the issuer/resource/account binding,
                     // not a rotating Bearer header or a second static-header path.

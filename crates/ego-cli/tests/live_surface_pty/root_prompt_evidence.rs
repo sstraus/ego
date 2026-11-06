@@ -1,7 +1,7 @@
 use super::*;
 
 fn retain(name: &str, output: &[u8], journal: &str, details: &str) {
-    if let Some(directory) = std::env::var_os("EGO_REGRESSION_CAPTURE_DIR") {
+    if let Some(directory) = std::env::var_os("EGO_ROOT_PROMPT_CAPTURE_DIR") {
         let directory = std::path::PathBuf::from(directory);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join(format!("{name}.ansi")), output).unwrap();
@@ -36,26 +36,23 @@ fn assert_no_grant(places: &support::Places) -> String {
 #[test]
 fn invalid_root_answer_keeps_write_denied_and_shows_complete_native_question() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("invalid-758.txt");
-    std::fs::write(&target, "UNCHANGED-758").unwrap();
+    let target = outside.path().join("invalid-mark.txt");
+    std::fs::write(&target, "UNCHANGED-MARK").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let write = |id: &str| {
         Reply::Sse(tool_call(
             id,
             "write",
-            &serde_json::json!({
-                "path": target, "contents": "WRONG-758"
-            })
+            &serde_json::json!({"files": [{
+                "path": target, "contents": "WRONG-MARK"
+            }]})
             .to_string(),
         ))
     };
     let places = support::Places::new();
     places.file("AGENTS.md", "# Invalid root answer fixture\n");
     let stub = Stub::start(Plan {
-        completions: vec![
-            write("invalid-write"),
-            Reply::Sse(text("INVALID-758-DENIED")),
-        ],
+        completions: vec![write("invalid-write"), Reply::Sse(text("INVALID-DENIED"))],
         ..Plan::default()
     });
     let ego = places.ego(&stub).conversing().args([
@@ -106,12 +103,12 @@ fn invalid_root_answer_keeps_write_denied_and_shows_complete_native_question() {
     // Enter can only accept the unchanged default, Deny.
     input.write_all(b"\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "INVALID-758-DENIED");
+    until_normalized(&reader, &mut output, start, "INVALID-DENIED");
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "UNCHANGED-758");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "UNCHANGED-MARK");
     let saved = assert_no_grant(&places);
     let resumed = Stub::start(Plan {
         completions: vec![
@@ -135,14 +132,14 @@ fn invalid_root_answer_keeps_write_denied_and_shows_complete_native_question() {
         .arg("retry the write")
         .run();
     assert_eq!(result.code, Some(0), "{}", result.stderr);
-    assert_eq!(std::fs::read_to_string(&target).unwrap(), "UNCHANGED-758");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "UNCHANGED-MARK");
     assert_no_grant(&places);
     retain(
         "invalid",
         &output,
         &saved,
         &format!(
-            "RENDERED QUESTION:\n{rendered}\nInvalid 9: modal pending, one provider generation, no grant/config.\nAfter default Deny and fresh resume: external bytes UNCHANGED-758.\nTool results: {}",
+            "RENDERED QUESTION:\n{rendered}\nInvalid 9: modal pending, one provider generation, no grant/config.\nAfter default Deny and fresh resume: external bytes UNCHANGED-MARK.\nTool results: {}",
             resumed.generations()[1]
         ),
     );
@@ -153,8 +150,8 @@ fn invalid_root_answer_keeps_write_denied_and_shows_complete_native_question() {
 #[test]
 fn pending_root_modal_ignores_real_child_tool_output_and_model_choice_text() {
     let outside = tempfile::tempdir().unwrap();
-    let target = outside.path().join("tool-origin-758.txt");
-    std::fs::write(&target, "TOOL-ORIGIN-758-SECRET").unwrap();
+    let target = outside.path().join("tool-origin.txt");
+    std::fs::write(&target, "TOOL-ORIGIN-SECRET").unwrap();
     let target = std::fs::canonicalize(target).unwrap();
     let places = support::Places::new();
     places.file("AGENTS.md", "# Tool origin root fixture\n");
@@ -171,19 +168,19 @@ fn pending_root_modal_ignores_real_child_tool_output_and_model_choice_text() {
         Reply::Sse(tool_call(
             id,
             "read",
-            &serde_json::json!({"path": target}).to_string(),
+            &serde_json::json!({"files":[{"path": target}]}).to_string(),
         ))
     };
-    let marker = "TOOL-758-OUTPUT session permanent 2 3";
+    let marker = "TOOL-OUTPUT session permanent 2 3";
     let stub = Stub::start_concurrent(Plan {
         completions: vec![
             Reply::Sse(tool_call("child", "task", &serde_json::json!({"name":"Emit choice text", "prompt":child_prompt, "background":true}).to_string())),
             read("pending-root"),
-            Reply::Sse(text("REGRESSION-MARKER-DENIED")),
+            Reply::Sse(text("PARENT-DENIED")),
         ],
         prompt_completions: vec![(child_prompt.into(), vec![
             Reply::GatedPaced { head: String::new(), tail: tool_call("choice-output", "exec", &serde_json::json!({"argv":["/usr/bin/printf", format!("{marker}\n")]}).to_string()), gate: Arc::clone(&gate) },
-            Reply::Sse(text("MODEL-758-OUTPUT session permanent 2 3")),
+            Reply::Sse(text("MODEL-OUTPUT session permanent 2 3")),
         ])],
         ..Plan::default()
     });
@@ -244,21 +241,18 @@ fn pending_root_modal_ignores_real_child_tool_output_and_model_choice_text() {
         during.contains("3. Permanent"),
         "tool text closed the modal: {during}"
     );
-    assert!(!normalized(&output[pending..]).contains("REGRESSION-MARKER-DENIED"));
+    assert!(!normalized(&output[pending..]).contains("PARENT-DENIED"));
     assert_no_grant(&places);
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "REGRESSION-MARKER-DENIED");
+    until_normalized(&reader, &mut output, start, "PARENT-DENIED");
     until_prompt_from(&reader, &mut output, start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());
     let saved = assert_no_grant(&places);
     let resumed = Stub::start(Plan {
-        completions: vec![
-            read("still-denied"),
-            Reply::Sse(text("REGRESSION-MARKER-DENIED")),
-        ],
+        completions: vec![read("still-denied"), Reply::Sse(text("RESUMED-DENIED"))],
         ..Plan::default()
     });
     let result = places
@@ -279,7 +273,7 @@ fn pending_root_modal_ignores_real_child_tool_output_and_model_choice_text() {
     assert!(
         !resumed.generations()[1]
             .to_string()
-            .contains("TOOL-ORIGIN-758-SECRET")
+            .contains("TOOL-ORIGIN-SECRET")
     );
     assert_no_grant(&places);
     retain(

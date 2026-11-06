@@ -44,6 +44,18 @@ cat <<'EOF'
     (pkgshare/"completions").install "completions/_ego.ps1", "completions/ego.elv"
   end
 
+  def caveats
+    <<~TEXT
+      ego stores nothing until first use; user state goes to ~/.ego (or $EGO_HOME).
+      First setup:
+        1. Make one provider usable: export its API key (for example
+           ANTHROPIC_API_KEY or OPENAI_API_KEY), run `ego auth login PROVIDER`
+           for a subscription, or start a local Ollama.
+        2. Run `ego setup` to review providers and save defaults, or run `ego`
+           in a repository to choose a model.
+    TEXT
+  end
+
   test do
     assert_match version.to_s, shell_output("#{bin}/ego --version")
   end

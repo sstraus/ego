@@ -1,6 +1,6 @@
 # Print an optspec for argparse to handle cmd's options that are independent of any subcommand.
 function __fish_ego_global_optspecs
-    string join \n continua worktree= f/file= var= attach= m/model= offline proxy= proxy-ca= sandbox= thinking= read-only-dir= system= bare append-system= output-style= instructions= tools= no-tools allow= deny= profile= trust-workspace session= session-id= ephemeral session-dir= C= output= artifact-dir= schema= schema-retries= retry= fallback= budget= max-output-tokens= goal= no-context-tool context-clear context-interval= goal-turns= goal-check-command= max-turns= timeout= mcp= mode= plan yolo c/set= q/quiet no-color plain vim h/help V/version
+    string join \n continua worktree= f/file= var= attach= m/model= offline proxy= proxy-ca= sandbox= thinking= read-only-dir= system= bare append-system= output-style= instructions= tools= no-tools no-hooks allow= deny= profile= trust-workspace trust-development-programs session= session-id= ephemeral session-dir= C= output= artifact-dir= schema= schema-retries= retry= fallback= budget= max-output-tokens= goal= no-context-tool context-clear context-interval= goal-turns= goal-check-command= max-turns= timeout= mcp= mode= plan yolo c/set= q/quiet no-color plain vim memory no-session-compression no-checkpoints h/help V/version
 end
 
 function __fish_ego_needs_command
@@ -69,7 +69,9 @@ complete -c ego -n "__fish_ego_needs_command" -l continua -d 'Resume the latest 
 complete -c ego -n "__fish_ego_needs_command" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_needs_command" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_needs_command" -l no-tools -d 'Offer no tools at all'
+complete -c ego -n "__fish_ego_needs_command" -l no-hooks -d 'Run with every hook off for this invocation; configuration is unchanged'
 complete -c ego -n "__fish_ego_needs_command" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_needs_command" -l trust-development-programs -d 'Trust this workspace and future edits to its current named programs; remember the grant'
 complete -c ego -n "__fish_ego_needs_command" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_needs_command" -l no-context-tool -d 'Disable model-requested context transitions'
 complete -c ego -n "__fish_ego_needs_command" -l context-clear -d 'Permit the model to discard conversation history using clear'
@@ -79,12 +81,16 @@ complete -c ego -n "__fish_ego_needs_command" -s q -l quiet -d 'Suppress progres
 complete -c ego -n "__fish_ego_needs_command" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_needs_command" -l plain -d 'Append plain output without terminal styling or live retry updates'
 complete -c ego -n "__fish_ego_needs_command" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
+complete -c ego -n "__fish_ego_needs_command" -l memory -d 'Keep a memory file for this workspace that the model can add to'
+complete -c ego -n "__fish_ego_needs_command" -l no-session-compression -d 'Do not compress old sessions in the background during this run'
+complete -c ego -n "__fish_ego_needs_command" -l no-checkpoints -d 'Do not save file checkpoints before writes during this run'
 complete -c ego -n "__fish_ego_needs_command" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_needs_command" -s V -l version -d 'Print version'
 complete -c ego -n "__fish_ego_needs_command" -a "run" -d 'Run an agent from a prompt, headless.'
 complete -c ego -n "__fish_ego_needs_command" -a "resume" -d 'Continue a stored session.'
 complete -c ego -n "__fish_ego_needs_command" -a "continue" -d 'Continue a stored session.'
 complete -c ego -n "__fish_ego_needs_command" -a "fork" -d 'Fork a session at its tip or after the completed turn containing a message.'
+complete -c ego -n "__fish_ego_needs_command" -a "rewind" -d 'Restore the files a session changed after a completed turn, then fork the conversation there.'
 complete -c ego -n "__fish_ego_needs_command" -a "rm" -d 'Delete a stored session (history is retained for descendants).'
 complete -c ego -n "__fish_ego_needs_command" -a "compact" -d 'Compact a session into its deterministic successor.'
 complete -c ego -n "__fish_ego_needs_command" -a "export" -d 'Export a session locally or as a structurally sanitized bundle.'
@@ -94,7 +100,7 @@ complete -c ego -n "__fish_ego_needs_command" -a "models" -d 'List the shared mo
 complete -c ego -n "__fish_ego_needs_command" -a "hooks" -d 'Inspect the admitted system and user hook catalogue.'
 complete -c ego -n "__fish_ego_needs_command" -a "doctor" -d 'Report a read-only redacted health snapshot of this installation.'
 complete -c ego -n "__fish_ego_needs_command" -a "checkpoint" -d 'Preview or selectively restore session-owned Git file checkpoints.'
-complete -c ego -n "__fish_ego_needs_command" -a "setup" -d 'Configure saved user settings in an interactive terminal.'
+complete -c ego -n "__fish_ego_needs_command" -a "setup" -d 'Review provider readiness and configure saved user settings in an interactive terminal.'
 complete -c ego -n "__fish_ego_needs_command" -a "acp" -d 'Serve the Agent Client Protocol on stdio or an endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -a "a2a" -d 'Serve the Agent2Agent protocol on a local or loopback endpoint.'
 complete -c ego -n "__fish_ego_needs_command" -a "auth" -d 'Manage subscription credentials.'
@@ -148,7 +154,9 @@ complete -c ego -n "__fish_ego_using_subcommand run" -s c -l set -d 'Dotted-path
 complete -c ego -n "__fish_ego_using_subcommand run" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_using_subcommand run" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand run" -l no-tools -d 'Offer no tools at all'
+complete -c ego -n "__fish_ego_using_subcommand run" -l no-hooks -d 'Run with every hook off for this invocation; configuration is unchanged'
 complete -c ego -n "__fish_ego_using_subcommand run" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_using_subcommand run" -l trust-development-programs -d 'Trust this workspace and future edits to its current named programs; remember the grant'
 complete -c ego -n "__fish_ego_using_subcommand run" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_using_subcommand run" -l no-context-tool -d 'Disable model-requested context transitions'
 complete -c ego -n "__fish_ego_using_subcommand run" -l context-clear -d 'Permit the model to discard conversation history using clear'
@@ -157,10 +165,14 @@ complete -c ego -n "__fish_ego_using_subcommand run" -l yolo -d 'Shorthand for -
 complete -c ego -n "__fish_ego_using_subcommand run" -s q -l quiet -d 'Suppress progress and diagnostics on stderr; stdout is unaffected'
 complete -c ego -n "__fish_ego_using_subcommand run" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand run" -l plain -d 'Append plain output without terminal styling or live retry updates'
+complete -c ego -n "__fish_ego_using_subcommand run" -l memory -d 'Keep a memory file for this workspace that the model can add to'
+complete -c ego -n "__fish_ego_using_subcommand run" -l no-session-compression -d 'Do not compress old sessions in the background during this run'
+complete -c ego -n "__fish_ego_using_subcommand run" -l no-checkpoints -d 'Do not save file checkpoints before writes during this run'
 complete -c ego -n "__fish_ego_using_subcommand run" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
 complete -c ego -n "__fish_ego_using_subcommand run" -l continua -d 'Resume the latest saved session in this workspace without the terminal picker'
 complete -c ego -n "__fish_ego_using_subcommand run" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l title -d 'Resume the session of this workspace whose title is exactly TITLE' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l name -d 'Read or change the session title without starting a turn: show, set=TEXT, clear' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l goal-operation -d 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
@@ -204,10 +216,14 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -s c -l set -d 'Dotted-p
 complete -c ego -n "__fish_ego_using_subcommand resume" -l session -d 'Named session: created or attached' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l session-id -d 'A session id supplied by the caller' -r
 complete -c ego -n "__fish_ego_using_subcommand resume" -l worktree -d 'Create a retained managed worktree on this explicitly approved new branch' -r
+complete -c ego -n "__fish_ego_using_subcommand resume" -l accept-authority-delta -d 'Accept the authority change shown for this resume, without a question. Applies to this resume only'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l queue -d 'Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-tools -d 'Offer no tools at all'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l no-hooks -d 'Run with every hook off for this invocation; configuration is unchanged'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l trust-development-programs -d 'Trust this workspace and future edits to its current named programs; remember the grant'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-context-tool -d 'Disable model-requested context transitions'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l context-clear -d 'Permit the model to discard conversation history using clear'
@@ -217,8 +233,12 @@ complete -c ego -n "__fish_ego_using_subcommand resume" -s q -l quiet -d 'Suppre
 complete -c ego -n "__fish_ego_using_subcommand resume" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l plain -d 'Append plain output without terminal styling or live retry updates'
 complete -c ego -n "__fish_ego_using_subcommand resume" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l memory -d 'Keep a memory file for this workspace that the model can add to'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l no-session-compression -d 'Do not compress old sessions in the background during this run'
+complete -c ego -n "__fish_ego_using_subcommand resume" -l no-checkpoints -d 'Do not save file checkpoints before writes during this run'
 complete -c ego -n "__fish_ego_using_subcommand resume" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l answer -d 'Settle a pending question. Repeat for multiple sibling questions' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l title -d 'Resume the session of this workspace whose title is exactly TITLE' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l name -d 'Read or change the session title without starting a turn: show, set=TEXT, clear' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l goal-operation -d 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -s f -l file -d 'Read the instruction and its invocation configuration from an agent file' -r -F
@@ -262,10 +282,14 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -s c -l set -d 'Dotted
 complete -c ego -n "__fish_ego_using_subcommand continue" -l session -d 'Named session: created or attached' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l session-id -d 'A session id supplied by the caller' -r
 complete -c ego -n "__fish_ego_using_subcommand continue" -l worktree -d 'Create a retained managed worktree on this explicitly approved new branch' -r
+complete -c ego -n "__fish_ego_using_subcommand continue" -l accept-authority-delta -d 'Accept the authority change shown for this resume, without a question. Applies to this resume only'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l queue -d 'Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l offline -d 'No non-loopback egress from ego\'s own HTTP transport'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l no-tools -d 'Offer no tools at all'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l no-hooks -d 'Run with every hook off for this invocation; configuration is unchanged'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l trust-workspace -d 'Trust this launch\'s workspace without asking; remember the answer'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l trust-development-programs -d 'Trust this workspace and future edits to its current named programs; remember the grant'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l ephemeral -d 'Refused: every run uses a durable session'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l no-context-tool -d 'Disable model-requested context transitions'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l context-clear -d 'Permit the model to discard conversation history using clear'
@@ -275,6 +299,9 @@ complete -c ego -n "__fish_ego_using_subcommand continue" -s q -l quiet -d 'Supp
 complete -c ego -n "__fish_ego_using_subcommand continue" -l no-color -d 'Never emit ANSI colour, whatever the terminal claims to support'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l plain -d 'Append plain output without terminal styling or live retry updates'
 complete -c ego -n "__fish_ego_using_subcommand continue" -l vim -d 'Use Vim normal/insert editing in the interactive composer'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l memory -d 'Keep a memory file for this workspace that the model can add to'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l no-session-compression -d 'Do not compress old sessions in the background during this run'
+complete -c ego -n "__fish_ego_using_subcommand continue" -l no-checkpoints -d 'Do not save file checkpoints before writes during this run'
 complete -c ego -n "__fish_ego_using_subcommand continue" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand fork" -l at -r
 complete -c ego -n "__fish_ego_using_subcommand fork" -l session-dir -d 'Override the store location' -r -F
@@ -283,6 +310,13 @@ complete -c ego -n "__fish_ego_using_subcommand fork" -l output -d 'text|json|js
 json\t''
 jsonl\t''"
 complete -c ego -n "__fish_ego_using_subcommand fork" -s h -l help -d 'Print help'
+complete -c ego -n "__fish_ego_using_subcommand rewind" -l at -d 'A user or assistant message of the turn to return to' -r
+complete -c ego -n "__fish_ego_using_subcommand rewind" -l session-dir -d 'Override the store location' -r -F
+complete -c ego -n "__fish_ego_using_subcommand rewind" -s C -d 'Run as if started in DIR' -r -F
+complete -c ego -n "__fish_ego_using_subcommand rewind" -l output -d 'text|json|jsonl' -r -f -a "text\t''
+json\t''
+jsonl\t''"
+complete -c ego -n "__fish_ego_using_subcommand rewind" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand rm" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand rm" -s C -d 'Run as if started in DIR' -r -F
 complete -c ego -n "__fish_ego_using_subcommand rm" -l yes -d 'Supply deletion confirmation without prompting; required without terminal stdin'
@@ -330,6 +364,8 @@ complete -c ego -n "__fish_ego_using_subcommand hooks; and not __fish_seen_subco
 complete -c ego -n "__fish_ego_using_subcommand hooks; and __fish_seen_subcommand_from ls" -l json -d 'Emit the exact versioned hook-listing object'
 complete -c ego -n "__fish_ego_using_subcommand hooks; and __fish_seen_subcommand_from ls" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand doctor" -l json -d 'Emit the exact versioned health snapshot'
+complete -c ego -n "__fish_ego_using_subcommand doctor" -l offline -d 'Skip every provider network probe'
+complete -c ego -n "__fish_ego_using_subcommand doctor" -l probe-network -d 'Probe the network reachability of each configured provider, like `doctor_network = true`'
 complete -c ego -n "__fish_ego_using_subcommand doctor" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand checkpoint; and not __fish_seen_subcommand_from preview restore close" -s C -l directory -r -F
 complete -c ego -n "__fish_ego_using_subcommand checkpoint; and not __fish_seen_subcommand_from preview restore close" -s h -l help -d 'Print help'
@@ -360,6 +396,7 @@ complete -c ego -n "__fish_ego_using_subcommand acp" -l connection-lifetime -d '
 complete -c ego -n "__fish_ego_using_subcommand acp" -l max-ingress-bytes -d 'Maximum cumulative bytes read from one listener connection (runtime default: 134217728 bytes)' -r
 complete -c ego -n "__fish_ego_using_subcommand acp" -l bare -d 'No ambient discovery, even in a trusted workspace'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l no-tools -d 'Offer no tools at all'
+complete -c ego -n "__fish_ego_using_subcommand acp" -l no-hooks -d 'Run with every hook off for this invocation; configuration is unchanged'
 complete -c ego -n "__fish_ego_using_subcommand acp" -l allow-public-bind -d 'Serve on an address reachable from outside this machine'
 complete -c ego -n "__fish_ego_using_subcommand acp" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand a2a" -l session-dir -d 'Override the store location' -r -F
@@ -389,8 +426,9 @@ complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_
 legacy-sse\t''"
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l auth -d 'HTTP authentication mode' -r -f -a "none\t''
 oauth\t''"
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l oauth-host -d 'Extra OAuth origin that may host this server\'s authorization, token or registration endpoint when it differs from the issuer\'s. Repeatable' -r
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l stdio -d 'Configure a subprocess transport. Its command follows literal `--`'
-complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l allow-insecure-loopback -d 'Consent to plaintext HTTP for an exact loopback host'
+complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -l allow-insecure-loopback -d 'Consent to plaintext HTTP for this server on loopback or the owner network'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from add" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from rm" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand mcp; and __fish_seen_subcommand_from ls" -l json -d 'Emit the typed machine-readable projection'
@@ -472,9 +510,12 @@ complete -c ego -n "__fish_ego_using_subcommand rules; and __fish_seen_subcomman
 complete -c ego -n "__fish_ego_using_subcommand rules; and __fish_seen_subcommand_from explain" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l session-dir -d 'Override the store location' -r -F
 complete -c ego -n "__fish_ego_using_subcommand mcp-server" -s C -d 'Run as if started in DIR' -r -F
-complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l max-concurrent-runs -r
-complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l retained-requests -r
-complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l max-resource-bytes -r
+complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l max-concurrent-runs -d 'Runs that may execute at once' -r
+complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l retained-requests -d 'Finished requests kept for status and resource reads' -r
+complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l max-resource-bytes -d 'Largest resource body returned to a client, in bytes' -r
+complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l allow-root -d 'Also let clients run in DIR. The directory given with -C (or the current one) is always allowed' -r -F
+complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l allow-model -d 'Also let clients select this model. The configured model is always allowed' -r
+complete -c ego -n "__fish_ego_using_subcommand mcp-server" -l allow-mode -d 'Also let clients select this mode. The configured mode is always allowed' -r
 complete -c ego -n "__fish_ego_using_subcommand mcp-server" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand worktree; and not __fish_seen_subcommand_from show cleanup" -s h -l help -d 'Print help'
 complete -c ego -n "__fish_ego_using_subcommand worktree; and not __fish_seen_subcommand_from show cleanup" -f -a "show" -d 'Inspect a durable local worktree receipt without starting a model'

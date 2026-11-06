@@ -14,7 +14,7 @@ use crate::cost::{CostDelta, Money, RateSource};
 use crate::event::domain::{
     DomainEvent, EventKind, ExitReason, FallbackDecision, OccupancyProvenance,
 };
-use crate::event::id::{ItemId, SessionId, TurnId};
+use crate::event::id::{ItemId, Seq, SessionId, TurnId};
 use crate::generator::types::ErrorKind;
 use crate::question::{QuestionMode, QuestionOption, QuestionRequest, QuestionTarget};
 use crate::state::Usage;
@@ -49,7 +49,8 @@ use crate::state::Usage;
 // Version 17 adds the durable cost anomaly notice.
 // Version 18 adds the closed pricing-source cause to cost anomalies.
 // Version 19 adds typed child lifecycle identity and outcome.
-pub const PUBLIC_EVENT_VERSION: u32 = 19;
+// Version 20 adds the headless compaction lineage event.
+pub const PUBLIC_EVENT_VERSION: u32 = 20;
 
 /// Shared warning text for terminal and ACP projections of the same notice.
 pub fn cost_anomaly_message(
@@ -125,6 +126,8 @@ pub enum InstructionSource {
     Ambient,
     /// Named outright, with `--instructions FILE`.
     Explicit,
+    /// The opt-in workspace memory file under `$EGO_HOME/memory/`.
+    Memory,
 }
 
 /// One instruction file a run loaded, described but **never quoted**.
@@ -273,6 +276,14 @@ pub enum PublicEvent {
         activity: String,
         output_tokens: u64,
     },
+    /// A headless run compacted `source` at `source_seq` and continues in
+    /// `target`, whose own `SessionStarted` follows. The lineage is the same
+    /// one the target session file records.
+    SessionCompacted {
+        source: SessionId,
+        source_seq: Seq,
+        target: SessionId,
+    },
     /// A turn began.
     TurnStarted { turn: TurnId },
     /// How the generation about to run is metered.
@@ -325,6 +336,9 @@ pub enum PublicEvent {
         recovery_remaining_ms: Option<u64>,
         delay_ms: u64,
         kind: ErrorKind,
+        /// The provider itself reported the failure (a capacity refusal),
+        /// so the wait follows the capacity schedule, not connection backoff.
+        capacity: bool,
         cause: String,
     },
     /// A previously announced provider wait ended and its next request is dispatching.
@@ -555,6 +569,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::GoalSet { .. }
         | EventKind::GoalTransitioned { .. } => None,
         EventKind::DetachedExecStarted { .. }
+        | EventKind::DetachedExecOutput { .. }
         | EventKind::DetachedExecSettled { .. }
         | EventKind::HostContextAppended { .. } => None,
         EventKind::CompactionSeeded { checkpoint, .. } => Some(PublicEvent::ItemCompleted {
@@ -571,12 +586,16 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: true,
             text: Some(text.clone()),
         }),
+        // New turns publish this `ItemDelta` live from the turn loop.
+        // TODO(2027-03-01): remove legacy AssistantDelta replay support.
         EventKind::AssistantDelta { text } => Some(PublicEvent::ItemDelta {
             turn,
             item: item?,
             kind: ItemKind::AgentMessage,
             text: text.clone(),
         }),
+        // Live hosts already saw the item's chunks; the completion follows.
+        EventKind::AssistantMessageStarted => None,
         EventKind::AssistantMessage { text } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
@@ -804,6 +823,7 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::UsageCorrected { .. }
         | EventKind::ProviderLimitsObserved { .. }
         | EventKind::SessionSelectionsSelected { .. }
+        | EventKind::SandboxOwnerGranted { .. }
         | EventKind::SessionRootGranted { .. }
         | EventKind::PermanentRootGrantPending { .. }
         | EventKind::PermanentRootGranted { .. }

@@ -94,7 +94,7 @@ pub(super) fn admit(
         )),
         Admission::RequireAcknowledgement => {
             let seat = human_seat.expect("only a human interactive start requests acknowledgement");
-            let accepted = crate::trust::resolve_unconfined(root, home, diagnostics, || {
+            let accepted = crate::trust::resolve_unconfined(home, diagnostics, || {
                 seat.acknowledge_windows_unconfined(root)
             });
             if accepted {
@@ -378,5 +378,42 @@ mod tests {
         for (name, facts, expected) in cases {
             assert_eq!(decide(*facts), *expected, "{name}");
         }
+    }
+
+    // Catches: a model-selected guarantee is falsely reported as enforced after acknowledgement.
+    #[test]
+    fn windows_ack_cannot_claim_unsupported_confinement_guarantee() {
+        let confined = [
+            Confinement::Workspace,
+            Confinement::Ro,
+            Confinement::Adaptive,
+        ];
+        for level in confined {
+            for (cli, configured) in [(Some(level), None), (None, Some(level))] {
+                assert_eq!(
+                    decide(input(
+                        StartKind::InteractiveHuman,
+                        cli,
+                        configured,
+                        false,
+                        true
+                    )),
+                    Admission::Preserve,
+                    "an acknowledgement turned {level:?} into unconfined execution"
+                );
+            }
+        }
+        for start in [StartKind::Direct, StartKind::InteractiveNoHuman] {
+            assert_eq!(
+                decide(input(start, None, None, false, true)),
+                Admission::RequireExplicitOff,
+                "an acknowledgement replaced the explicit --sandbox off of {start:?}"
+            );
+        }
+        assert_eq!(
+            decide(input(StartKind::InteractiveHuman, None, None, true, true)),
+            Admission::Preserve,
+            "an acknowledgement admitted an offline start Windows cannot confine"
+        );
     }
 }

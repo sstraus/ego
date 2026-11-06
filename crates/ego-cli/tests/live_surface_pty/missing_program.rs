@@ -4,9 +4,12 @@ use super::*;
 // human approved it, and a second approval prompt for the same call.
 #[test]
 fn an_approved_exec_of_an_absent_program_is_refused_as_not_found() {
-    // The directory exists and the file does not, as with the live case
-    // `…/mbx/bin/mbx doctor`.
-    let program = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/mbx");
+    // The directory exists and the file does not, as with a build-tool shim
+    // directory whose binary was removed.
+    let program = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/absent-build-tool"
+    );
     assert!(!Path::new(program).exists(), "{program} must be absent");
     let args = format!(r#"{{"argv":["{program}","doctor"],"timeout_ms":5000}}"#);
     let mut session = modal_session(("exec", &args));

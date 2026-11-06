@@ -27,6 +27,10 @@ pub async fn execute(args: &SetupArgs, _out: &Stdout) -> RunTermination {
             message: "setup workspace unavailable".into(),
         };
     };
+    let providers = match crate::onboarding::current_provider_readiness(&home) {
+        Ok(providers) => providers,
+        Err(message) => return RunTermination::Failed { message },
+    };
     let mut screen = crate::setup_config::TerminalScreen;
     match crate::setup_config::run(
         &mut screen,
@@ -34,6 +38,7 @@ pub async fn execute(args: &SetupArgs, _out: &Stdout) -> RunTermination {
         &home,
         args.profile.as_deref(),
         None,
+        &providers,
     ) {
         Ok(()) => RunTermination::Done,
         Err(message) => RunTermination::Failed { message },

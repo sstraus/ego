@@ -145,6 +145,11 @@ impl Perimeter {
         self
     }
 
+    /// Whether the admitted session forbids non-loopback egress.
+    pub fn offline(&self) -> bool {
+        self.network == "offline"
+    }
+
     /// Completed behavioral guarantees, including an empty measured set.
     pub fn measured_capabilities(&self) -> Option<ExecCaps> {
         match self.capabilities {

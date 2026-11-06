@@ -1,6 +1,6 @@
 use super::*;
 
-// Catches: the previous collapse hides submitted lines or changes model input.
+// Catches: the 551 collapse hides submitted lines or changes model input.
 #[test]
 fn long_prompt_echo_shows_every_line_in_the_live_terminal() {
     submitted_prompt_remains_in_terminal_history(160, false);
@@ -79,7 +79,7 @@ fn pasted_tab_receipt_survives_the_next_composer_without_cursor_replies() {
 fn submitted_prompt_remains_in_terminal_history(rows: u16, withhold_replies: bool) {
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(text("PROMPT-RFK-ANSWER")),
+            Reply::Sse(text("PROMPT-ANSWER")),
             Reply::Sse(text("AFTER-RECEIPT-ANSWER")),
         ],
         ..Plan::default()
@@ -129,7 +129,7 @@ fn submitted_prompt_remains_in_terminal_history(rows: u16, withhold_replies: boo
     input.write_all(prompt.as_bytes()).unwrap();
     input.write_all(b"\x1b[201~\r").unwrap();
     input.flush().unwrap();
-    until_normalized(&reader, &mut output, start, "PROMPT-RFK-ANSWER");
+    until_normalized(&reader, &mut output, start, "PROMPT-ANSWER");
     until_prompt_from(&reader, &mut output, start);
     drain_until_quiet(&reader, &mut output);
     let mut screen = vt100::Parser::new(rows, 120, 1_000);

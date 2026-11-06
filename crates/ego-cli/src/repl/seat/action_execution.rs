@@ -169,6 +169,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 ActionId::Thinking,
                 ActionId::Fast,
                 ActionId::Usage,
+                ActionId::Context,
             ],
         ),
         (
@@ -201,6 +202,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
             &[
                 ActionId::Mcp,
                 ActionId::Tasks,
+                ActionId::Side,
                 ActionId::Tools,
                 ActionId::Skills,
                 ActionId::Hooks,
@@ -434,6 +436,14 @@ fn submit_busy_line(
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
             return Some((Line::HostCommand(HostCommand::Tasks(arguments)), false));
         }
+        Dispatch::Side(question) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((
+                Line::HostCommand(HostCommand::SideQuestion(question)),
+                false,
+            ));
+        }
         Dispatch::UnknownSlash(message) => {
             commit_to_transcript(status, &message);
             return None;
@@ -586,6 +596,12 @@ pub(super) fn surface_line(
         } else {
             signal
         };
+        // Reedline's Ctrl+C cleared the draft before ending the read; the busy
+        // cancel keeps the read suspended, so the host clears it instead.
+        if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == BUSY_CANCEL_COMMAND)
+        {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+        }
         // Hold only the isolated PTY child at the real suspended-read boundary.
         #[cfg(test)]
         if asked_for_image.load(Ordering::Relaxed)
@@ -639,6 +655,7 @@ pub(super) fn surface_line(
                     Dispatch::Action(action) => Some(HostCommand::Action(action)),
                     Dispatch::Config(arguments) => Some(HostCommand::Config(arguments)),
                     Dispatch::Tasks(arguments) => Some(HostCommand::Tasks(arguments)),
+                    Dispatch::Side(question) => Some(HostCommand::SideQuestion(question)),
                     Dispatch::Pins(command) => Some(HostCommand::Pins(command)),
                     Dispatch::Refused { reason } => {
                         commit_to_transcript(status, reason);
@@ -731,6 +748,12 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Tasks(arguments) => {
                     return (Line::HostCommand(HostCommand::Tasks(arguments)), failed);
+                }
+                Dispatch::Side(question) => {
+                    return (
+                        Line::HostCommand(HostCommand::SideQuestion(question)),
+                        failed,
+                    );
                 }
                 Dispatch::McpContext(command) => {
                     return (Line::HostCommand(HostCommand::McpContext(command)), failed);
@@ -1217,6 +1240,9 @@ pub(super) fn apply_surface_effect(
         SurfaceActionEffect::Usage => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Usage)));
         }
+        SurfaceActionEffect::Context => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Context)));
+        }
         SurfaceActionEffect::New => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::New)));
         }
@@ -1299,7 +1325,7 @@ pub(super) fn apply_surface_effect(
                         repaint_status(status);
                         return None;
                     }
-                    Confirmation::Propagate(line) => return Some(line),
+                    Confirmation::Propagate(line) => return Some(*line),
                 }
             }
             editor.run_edit_commands(&[EditCommand::Clear]);
@@ -1349,6 +1375,9 @@ pub(super) fn apply_surface_effect(
         }
         SurfaceActionEffect::Tasks => {
             return Some(Line::HostCommand(HostCommand::Tasks(String::new())));
+        }
+        SurfaceActionEffect::Side => {
+            return Some(Line::Refused(crate::repl::actions::SIDE_GRAMMAR));
         }
         SurfaceActionEffect::Tools if !busy => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Tools)));
@@ -1443,7 +1472,7 @@ pub(super) fn apply_surface_effect(
                         repaint_status(status);
                         return None;
                     }
-                    Confirmation::Propagate(line) => return Some(line),
+                    Confirmation::Propagate(line) => return Some(*line),
                 }
             }
             return Some(Line::Ended);

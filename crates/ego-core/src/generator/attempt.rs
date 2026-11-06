@@ -533,7 +533,8 @@ impl AttemptStream {
             | AiEvent::TextDelta { .. }
             | AiEvent::ReasoningDelta { .. }
             | AiEvent::ReasoningState(_)
-            | AiEvent::ToolCall { .. } => {}
+            | AiEvent::ToolCall { .. }
+            | AiEvent::ToolCallRejected { .. } => {}
 
             // Deliberately not treated as proof of arrival: an `Error` can
             // be the provider answering *or* the transport failing locally,
