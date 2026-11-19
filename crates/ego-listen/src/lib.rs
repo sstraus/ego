@@ -1,0 +1,560 @@
+//! The one inbound listener: bind, accept, and establish who connected.
+//!
+//! [`ego_core::endpoint`] defines endpoint kinds and authentication. This
+//! crate binds streams and establishes peer identity without owning a
+//! protocol. A2A and ACP consume the admitted streams instead of binding them.
+//!
+//! **The local endpoint is authenticated by the operating system.** On Unix,
+//! the socket lives in a directory the current user alone may enter and every
+//! accepted peer's uid is compared with the owner captured at bind time. On
+//! Windows, a protected named-pipe DACL grants access only to the process
+//! `TokenUser` SID. Authentication never consults mutable pathname metadata or
+//! falls back to a bearer credential.
+
+use std::io;
+use std::path::Path;
+#[cfg(unix)]
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use ego_core::endpoint::{Admitted, Authentication};
+#[cfg(windows)]
+use interprocess::os::windows::named_pipe::{
+    PipeListenerOptions, pipe_mode,
+    tokio::{DuplexPipeStream, PipeListener},
+};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::net::{TcpListener, TcpStream};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+
+mod limits;
+mod serve;
+
+pub use limits::{
+    ConnectionGate, ConnectionGateError, ConnectionLimits, ConnectionLimitsError, GuardedStream,
+};
+pub use serve::{GuardedAccepted, serve_connections};
+
+/// Who connected, as far as the transport can prove it.
+///
+/// Not a uid or a `SocketAddr`: what a protocol above needs to decide is
+/// whether the transport already answered the authentication question, and
+/// those two spellings would invite it to make that judgement itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Peer {
+    /// The operating system vouched for this peer: it holds the identity that
+    /// owns the endpoint. Nothing further is required before routing.
+    CurrentUser,
+    /// The transport proves nothing about who this is. A credential is
+    /// required before routing, and [`Admitted::authentication`] said so
+    /// before the socket existed.
+    Unauthenticated { address: std::net::SocketAddr },
+}
+
+/// A connection that has already been through whatever the transport enforces.
+pub struct Accepted {
+    pub stream: Stream,
+    pub peer: Peer,
+}
+
+/// The byte stream a protocol serves over, whichever transport produced it.
+///
+/// An enum rather than `Box<dyn AsyncRead + AsyncWrite>` because both consumers
+/// need the concrete `AsyncRead + AsyncWrite + Unpin` bound — `hyper`'s
+/// `TokioIo` and `ByteStreams` each take it by value — and a trait object would
+/// buy dynamism no caller wants at the cost of an allocation per connection.
+pub enum Stream {
+    #[cfg(unix)]
+    Unix(UnixStream),
+    #[cfg(windows)]
+    Pipe(DuplexPipeStream<pipe_mode::Bytes>),
+    Tcp(TcpStream),
+}
+
+macro_rules! delegate {
+    ($self:ident, $stream:ident => $call:expr) => {
+        match $self.get_mut() {
+            #[cfg(unix)]
+            Stream::Unix($stream) => $call,
+            #[cfg(windows)]
+            Stream::Pipe($stream) => $call,
+            Stream::Tcp($stream) => $call,
+        }
+    };
+}
+
+impl AsyncRead for Stream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        delegate!(self, stream => Pin::new(stream).poll_read(cx, buf))
+    }
+}
+
+impl AsyncWrite for Stream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        delegate!(self, stream => Pin::new(stream).poll_write(cx, buf))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        delegate!(self, stream => Pin::new(stream).poll_flush(cx))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        delegate!(self, stream => Pin::new(stream).poll_shutdown(cx))
+    }
+}
+
+/// An endpoint that is open.
+pub enum Bound {
+    #[cfg(unix)]
+    Local {
+        listener: UnixListener,
+        path: PathBuf,
+        owner: u32,
+        _lease: fd_lock::RwLock<std::fs::File>,
+    },
+    #[cfg(windows)]
+    Local {
+        listener: PipeListener<pipe_mode::Bytes, pipe_mode::Bytes>,
+        name: String,
+    },
+    Tcp(TcpListener),
+}
+
+impl Bound {
+    /// How this endpoint should be named to a caller that has to reach it —
+    /// the address the socket actually got, not the one that was requested.
+    ///
+    /// Port 0 is how a test asks the operating system for a free port, and a
+    /// card or a log line built from the requested address would then advertise
+    /// port 0 to the world.
+    pub fn advertised(&self) -> io::Result<String> {
+        match self {
+            #[cfg(unix)]
+            Self::Local { path, .. } => Ok(path.display().to_string()),
+            #[cfg(windows)]
+            Self::Local { name, .. } => Ok(name.clone()),
+            Self::Tcp(listener) => Ok(listener.local_addr()?.to_string()),
+        }
+    }
+
+    /// Accept one connection, refusing any peer the transport cannot vouch for
+    /// on an endpoint whose whole authentication *is* the transport.
+    ///
+    /// A refused local peer returns `Ok(None)` rather than an error: a caller
+    /// looping on `accept` must treat one rejected peer as a connection that
+    /// did not happen, not as a reason to stop serving the peers that are
+    /// entitled to be here.
+    pub async fn accept(&self) -> io::Result<Option<Accepted>> {
+        match self {
+            #[cfg(unix)]
+            Self::Local {
+                listener,
+                path,
+                owner,
+                ..
+            } => {
+                let (stream, _) = listener.accept().await?;
+                if stream.peer_cred()?.uid() != *owner {
+                    tracing::info!(
+                        target: "ego::listen",
+                        endpoint = %path.display(),
+                        "a local connection was refused: its peer is not the endpoint's owner"
+                    );
+                    return Ok(None);
+                }
+                Ok(Some(Accepted {
+                    stream: Stream::Unix(stream),
+                    peer: Peer::CurrentUser,
+                }))
+            }
+            #[cfg(windows)]
+            Self::Local { listener, name } => {
+                let stream = listener.accept().await.map_err(|error| {
+                    io::Error::new(
+                        error.kind(),
+                        format!(
+                            "failed to accept a local named-pipe connection on {name}: {error}"
+                        ),
+                    )
+                })?;
+                Ok(Some(Accepted {
+                    stream: Stream::Pipe(stream),
+                    peer: Peer::CurrentUser,
+                }))
+            }
+            Self::Tcp(listener) => {
+                let (stream, address) = listener.accept().await?;
+                Ok(Some(Accepted {
+                    stream: Stream::Tcp(stream),
+                    peer: Peer::Unauthenticated { address },
+                }))
+            }
+        }
+    }
+}
+
+/// Open `admitted`.
+///
+/// The admission decision is the caller's and is already made: this function
+/// takes the endpoint policy selected by the composition root.
+pub async fn bind(admitted: &Admitted) -> io::Result<Bound> {
+    match admitted {
+        Admitted::Local { name } => bind_local(Path::new(name)).await,
+        Admitted::Loopback(address) | Admitted::Public(address) => {
+            Ok(Bound::Tcp(TcpListener::bind(address).await?))
+        }
+    }
+}
+
+#[cfg(unix)]
+async fn bind_local(path: &Path) -> io::Result<Bound> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::{DirBuilderExt as _, FileTypeExt as _, MetadataExt as _};
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    match std::fs::symlink_metadata(parent) {
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the local endpoint parent must be a directory, not a symlink or file",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(parent)?;
+        }
+        Err(error) => return Err(error),
+    }
+    let owner = rustix::process::geteuid().as_raw();
+    let metadata = std::fs::symlink_metadata(parent)?;
+    if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o777 != 0o700 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the local endpoint needs a directory owned by the current user with mode 0700; choose a private directory",
+        ));
+    }
+    let name = path.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the local endpoint needs a socket filename",
+        )
+    })?;
+    let mut lock_name = name.to_os_string();
+    lock_name.push(".lock");
+    // Reuse the session store's kernel lease mechanism, without its session
+    // persistence semantics or an inward dependency on ego-tools.
+    let file = std::fs::File::from(rustix::fs::open(
+        parent.join(lock_name),
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?);
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.uid() != owner
+        || metadata.mode() & 0o777 != 0o600
+        || metadata.nlink() != 1
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the local endpoint lease must be a private regular file owned by the current user",
+        ));
+    }
+    let mut lease = fd_lock::RwLock::new(file);
+    match lease.try_write() {
+        // As in the session-store lease, closing the owned descriptor releases
+        // the lock. The stable lock file stays in place for the next owner.
+        Ok(guard) => std::mem::forget(guard),
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                "another listener owns this local endpoint",
+            ));
+        }
+        Err(error) => return Err(error),
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() && metadata.uid() == owner => {
+            match tokio::time::timeout(std::time::Duration::from_secs(1), UnixStream::connect(path))
+                .await
+            {
+                Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(path)?;
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        "the local endpoint is active or its owner could not be determined",
+                    ));
+                }
+            }
+        }
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "the local endpoint path exists and is not an owned socket; choose another path",
+            ));
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(Bound::Local {
+        listener: UnixListener::bind(path)?,
+        path: path.to_path_buf(),
+        owner,
+        _lease: lease,
+    })
+}
+
+#[cfg(windows)]
+async fn bind_local(path: &Path) -> io::Result<Bound> {
+    use interprocess::os::windows::{ToWtf16 as _, security_descriptor::SecurityDescriptor};
+    use windows_permissions::utilities::current_process_sid;
+
+    const LOCAL_PIPE_PREFIX: &str = r"\\.\pipe\";
+
+    let name = path.to_str().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "the local named-pipe endpoint is not valid Unicode: {}",
+                path.display()
+            ),
+        )
+    })?;
+    let prefix = name.get(..LOCAL_PIPE_PREFIX.len());
+    let leaf = name.get(LOCAL_PIPE_PREFIX.len()..);
+    if !prefix.is_some_and(|prefix| prefix.eq_ignore_ascii_case(LOCAL_PIPE_PREFIX))
+        || leaf.is_none_or(|leaf| leaf.is_empty() || leaf.contains('\\'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "invalid local named-pipe endpoint {name}: expected \\\\.\\pipe\\ followed by one non-empty pipe name"
+            ),
+        ));
+    }
+
+    let encoded_name = name.to_wtf_16().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("invalid local named-pipe endpoint {name}: {error}"),
+        )
+    })?;
+    let sid = current_process_sid().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "failed to obtain the current TokenUser SID for local named-pipe endpoint {name}: {error}"
+            ),
+        )
+    })?;
+    let sddl = format!("D:P(A;;GA;;;{sid})");
+    let encoded_sddl = sddl.to_wtf_16().map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to encode the owner-only security descriptor for local named-pipe endpoint {name}: {error}"
+            ),
+        )
+    })?;
+    let descriptor = SecurityDescriptor::deserialize(encoded_sddl.as_ref()).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "failed to build the owner-only security descriptor for local named-pipe endpoint {name}: {error}"
+            ),
+        )
+    })?;
+
+    let mut options = PipeListenerOptions::new()
+        .mode(interprocess::os::windows::named_pipe::PipeMode::Bytes)
+        .accept_remote(false)
+        .security_descriptor(Some(descriptor));
+    // Assign the already-validated encoding directly: the builder's path
+    // convenience method treats an encoding error as a panic.
+    options.path = encoded_name;
+    let listener = options
+        .create_tokio_duplex::<pipe_mode::Bytes>()
+        .map_err(|error| {
+            io::Error::new(
+                error.kind(),
+                format!(
+                    "failed to create the first local named-pipe instance for endpoint {name}: {error}"
+                ),
+            )
+        })?;
+
+    Ok(Bound::Local {
+        listener,
+        name: name.to_owned(),
+    })
+}
+
+/// Refuse rather than silently substituting TCP on unsupported platforms.
+#[cfg(not(any(unix, windows)))]
+async fn bind_local(path: &Path) -> io::Result<Bound> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!(
+            "a local endpoint ({}) is not supported on this platform",
+            path.display()
+        ),
+    ))
+}
+
+/// Whether a bound endpoint still owes a credential check before routing.
+///
+/// The one question a protocol above asks. It is answered from the admission
+/// decision rather than from the accepted peer, so a protocol cannot be handed
+/// a connection and infer its own answer from what the transport happened to
+/// provide.
+pub fn credential_required(admitted: &Admitted) -> bool {
+    admitted.authentication() == Authentication::BearerCredential
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use ego_core::endpoint::{PublicBind, Requested, admit};
+    use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    fn scratch(root: &Path) -> PathBuf {
+        let mut path = root.to_path_buf();
+        path.push("endpoint");
+        path.push("ego.sock");
+        path
+    }
+
+    fn local() -> (TempDir, Admitted, PathBuf) {
+        let root = tempfile::tempdir().expect("fixture root");
+        let path = scratch(root.path());
+        let admitted = admit(
+            Requested::Local {
+                name: path.display().to_string(),
+            },
+            PublicBind::Refused,
+        )
+        .expect("a local endpoint is admitted");
+        (root, admitted, path)
+    }
+
+    #[tokio::test]
+    async fn a_local_endpoint_serves_its_owner_and_says_the_transport_authenticated_them() {
+        let (_root, admitted, path) = local();
+        let bound = bind(&admitted).await.expect("bind");
+        assert_eq!(
+            bound.advertised().expect("advertised"),
+            path.display().to_string()
+        );
+        assert!(!credential_required(&admitted));
+
+        let client_path = path.clone();
+        let client = tokio::spawn(async move {
+            let mut stream = UnixStream::connect(client_path).await.expect("connect");
+            stream.write_all(b"ping").await.expect("write");
+            let mut read = [0u8; 4];
+            stream.read_exact(&mut read).await.expect("read");
+            read
+        });
+
+        let accepted = bound
+            .accept()
+            .await
+            .expect("accept")
+            .expect("the owner is not refused");
+        assert_eq!(accepted.peer, Peer::CurrentUser);
+        let mut stream = accepted.stream;
+        let mut read = [0u8; 4];
+        stream.read_exact(&mut read).await.expect("read");
+        assert_eq!(&read, b"ping");
+        stream.write_all(b"pong").await.expect("write");
+        assert_eq!(&client.await.expect("client"), b"pong");
+    }
+
+    /// The directory is the enforcement, so it is the thing asserted. A socket
+    /// in a world-traversable directory is reachable by every local process,
+    /// which is the property this endpoint exists not to have.
+    #[tokio::test]
+    async fn the_directory_holding_a_local_endpoint_admits_nobody_else() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let (_root, admitted, path) = local();
+        let _bound = bind(&admitted).await.expect("bind");
+        let parent = path.parent().expect("the socket has a parent");
+        let mode = std::fs::metadata(parent)
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "the endpoint's directory is {mode:o}");
+    }
+
+    /// Binding twice is the ordinary case after a crash, not an exotic one.
+    #[tokio::test]
+    async fn a_socket_left_by_a_previous_process_does_not_block_the_next_one() {
+        let (_root, admitted, _) = local();
+        let first = bind(&admitted).await.expect("first bind");
+        drop(first);
+        let _second = bind(&admitted)
+            .await
+            .expect("a stale socket must not be fatal");
+    }
+
+    #[tokio::test]
+    async fn a_loopback_endpoint_advertises_the_port_it_got_and_still_owes_a_credential() {
+        let admitted = admit(
+            Requested::Tcp("127.0.0.1:0".parse().expect("address")),
+            PublicBind::Refused,
+        )
+        .expect("loopback is admitted");
+        let bound = bind(&admitted).await.expect("bind");
+        let advertised = bound.advertised().expect("advertised");
+        assert!(advertised.starts_with("127.0.0.1:"), "{advertised}");
+        assert!(
+            !advertised.ends_with(":0"),
+            "port 0 was advertised: {advertised}"
+        );
+        assert!(
+            credential_required(&admitted),
+            "a loopback endpoint must not serve without a credential"
+        );
+    }
+
+    /// The transport vouches for nobody on TCP, and the type says so rather
+    /// than leaving a protocol above to decide what an address means.
+    #[tokio::test]
+    async fn a_loopback_peer_is_reported_unauthenticated() {
+        let admitted = admit(
+            Requested::Tcp("127.0.0.1:0".parse().expect("address")),
+            PublicBind::Refused,
+        )
+        .expect("loopback is admitted");
+        let bound = bind(&admitted).await.expect("bind");
+        let address = bound.advertised().expect("advertised");
+        let client =
+            tokio::spawn(async move { TcpStream::connect(address).await.expect("connect") });
+        let accepted = bound
+            .accept()
+            .await
+            .expect("accept")
+            .expect("tcp accepts everyone");
+        assert!(matches!(accepted.peer, Peer::Unauthenticated { .. }));
+        drop(client.await.expect("client"));
+    }
+}

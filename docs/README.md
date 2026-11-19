@@ -1,0 +1,32 @@
+# εgo documentation
+
+εgo supplies the operational layer between a model and work on your machine.
+These guides explain how to use ego. Start with
+what you want to do; each guide explains the feature before its controls.
+
+Use [the guide summary](SUMMARY.md) for chapter navigation: user tasks first,
+then integrations and reference. The Markdown guide can be read directly in
+this repository; no documentation tools or hosted site are required.
+
+| Your task | Guide |
+| --- | --- |
+| Install, choose a model, and send a first prompt | [Getting started](getting-started/README.md) |
+| Understand the units of work and uncertainty | [Concepts](concepts/README.md) |
+| Work in a terminal, steer, and use slash commands | [Interactive use](guides/interactive.md) |
+| Run in scripts, validate JSON, retry safely, and use agent files | [Automation](guides/automation.md) |
+| Find a command, option, default, or output contract | [CLI reference](reference/README.md) |
+| Configure a model, profile, perimeter, environment, or extension | [Configuration reference](reference/configuration.md) |
+| Use local, API-key, or subscription models | [Providers and login](guides/providers.md) |
+| Understand the model's tool surface | [Tools](guides/tools.md) |
+| Set authority and confinement | [Permissions and confinement](guides/permissions.md) |
+| Resume, branch, compact, inspect usage, and export | [Sessions and history](guides/sessions.md) |
+| Isolate work in a retained Git checkout | [Git worktrees](guides/worktrees.md) |
+| Initialize project instructions | [Project instructions](guides/memory.md) |
+| Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
+| Implement an ACP client for ego's wire extensions | [ACP extensions](integrations/acp-extensions.md) |
+| Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
+| Understand crate responsibilities and design | [Architecture](architecture.md) |
+
+The [generated command reference](reference/cli.md) remains at its generator-owned
+path. [Configuration](reference/configuration.md) identifies the source schemas.
+[CLI.md](../CLI.md) describes command conventions. Use the source-backed guides and current binary help for invocation details.

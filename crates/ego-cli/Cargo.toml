@@ -1,0 +1,123 @@
+[package]
+name = "ego-cli"
+default-run = "ego"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The crate is `ego-cli` and the binary is `ego`: the command a person types
+# is not a package name, and `cargo run -p ego-cli` still finds it.
+[[bin]]
+name = "ego"
+path = "src/main.rs"
+
+# Test-only process composition. Release builds cannot install its backend.
+[features]
+test-support = ["ego-tools/test-support"]
+
+[dependencies]
+base64 = "0.22.1"
+minijinja.workspace = true
+ego-a2a = { path = "../ego-a2a" }
+ego-acp = { path = "../ego-acp" }
+ego-ai = { path = "../ego-ai" }
+ego-core.workspace = true
+# The shared inbound seam, for the endpoint kind `--listen` names.
+ego-listen.workspace = true
+ego-mcp = { path = "../ego-mcp" }
+ego-tools = { path = "../ego-tools" }
+agent-client-protocol = { version = "2.0.0", features = ["unstable_mcp_over_acp", "unstable_protocol_v2"] }
+agent-client-protocol-schema = { version = "=1.5.0", features = ["unstable_mcp_over_acp", "unstable_protocol_v2", "unstable_session_fork"] }
+# Local time for `usage`: the timestamp the report is as of is read by a person
+# in their own zone. `clock` is the part that finds the zone; nothing else is
+# wanted, and the lockfile already resolved it for another dependency.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+clap = { version = "4.6.6", features = ["derive"] }
+# The reference and the completions are generated from the same clap
+# definitions argv is parsed with, so a documented flag that no longer parses
+# cannot survive: it disappears from both at once. Without this they were a
+# second, hand-maintained description of the grammar.
+clap_complete = "4.5"
+# Only to name `Event` in the one `EditMode` that intercepts a key before the
+# editor's keymap sees it. reedline re-exports `KeyCode` and `KeyModifiers`
+# but not `Event`, so this cannot be avoided by re-export. The version must
+# stay the one reedline resolves, so cargo unifies them into a single crate
+# and the types match; if reedline bumps its major, this fails to compile —
+# loudly, which is the point of pinning it here rather than guessing.
+crossterm = "0.29.0"
+# The live surface retains only this sender half of Reedline's bounded external
+# printer. Naming the direct dependency is deliberate: keeping an
+# `ExternalPrinter` clone would also keep a receiver alive and hide disconnect.
+crossbeam = "0.8.2"
+futures = "0.3.34"
+fd-lock = "4.0.4"
+jsonschema = "0.49.9"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10.9"
+shell-words = "1.1.1"
+tree-sitter = "0.25.10"
+tree-sitter-bash = "0.25"
+# `signal` handles SIGINT/SIGTERM, `time` handles deadlines, and `sync` supports ACP turn
+# serialization. The multi-thread runtime lets generations and signal handling progress
+# independently.
+tokio = { version = "1", features = [
+    "macros",
+    "rt-multi-thread",
+    "signal",
+    "sync",
+    "time",
+    "process",
+    "io-std",
+    "io-util",
+    "net",
+] }
+tokio-util = { version = "0.7", features = ["compat"] }
+toml = "1.1.4"
+tracing = "0.1.44"
+# The consumer for the `tracing` seven crates already emit into. It is a
+# dependency of `ego-cli` alone: the composition root decides where events go,
+# and no library crate learns that they go anywhere. `env-filter` is the
+# feature the whole design rests on — `ego::body=off` underneath the operator's
+# own directives is what keeps a response body out of an ordinary level. `ansi`
+# is dropped because `render::caps` owns the colour decision and a subscriber
+# is not entitled to reach around it.
+tracing-subscriber = { version = "0.3.20", default-features = false, features = [
+    "std",
+    "fmt",
+    "env-filter",
+] }
+url = "2.5.8"
+# `v5`: a named session's id is derived from the workspace and name. `v4`:
+# OAuth PKCE verifiers and state must be unpredictable. Session ids this build
+# mints remain `SessionId::new`'s v7.
+uuid = { version = "1.24.1", features = ["v4", "v5"] }
+yaml-rust2.workspace = true
+# Disable the default `helix` keymap because this build uses Emacs keys.
+# `system_clipboard` is not a default, so plain `Ctrl+V` is initially unbound.
+reedline = { path = "../../vendor/reedline", version = "0.51.0", default-features = false, features = ["external_printer", "idle_callback"] }
+unicode-width = "0.2.2"
+unicode-segmentation = "1.13.3"
+terminal_size = "0.4.4"
+pulldown-cmark = { version = "0.13.4", default-features = false }
+similar = { version = "3.2.0", default-features = false, features = ["text", "inline", "unicode"] }
+tempfile = "3.27.0"
+png = "0.18.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSData", "NSString", "NSArray", "NSEnumerator"] }
+arboard = "3.6.1"
+
+[target.'cfg(unix)'.dependencies]
+# `raise(SIGTSTP)` for `Ctrl+Z`; the same version `ego-tools` resolves.
+nix = { version = "0.31.3", features = ["signal"] }
+
+[target.'cfg(windows)'.dependencies]
+arboard = "3.6.1"
+clipboard-win = { version = "5.4.1", features = ["std"] }
+
+[lints]
+workspace = true

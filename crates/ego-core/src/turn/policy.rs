@@ -1,0 +1,592 @@
+//! Immutable generation policy paired with its confidential canonical form.
+
+use std::fmt;
+use std::sync::Arc;
+
+use serde::{Deserialize, Serialize};
+
+use crate::config::{Mode, OriginSet, Ruleset, Source, SourcedRule};
+use crate::credentials::SecretMaterial;
+use crate::digest::{is_lower_sha256, sha256_hex};
+use crate::permit::rule::Rule;
+use crate::permit::{CanonPath, HumanApprover, PolicyEngine, ProfileRoot};
+
+const WIRE_VERSION: u32 = 1;
+const DIGEST_DOMAIN: &[u8] = b"ego:generation-policy-capture:v1\0";
+const MAX_GENERATION_POLICY_SNAPSHOT_BYTES: usize = 1024 * 1024;
+
+/// The non-secret, domain-separated identity of one canonical policy snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct GenerationPolicyDigest(String);
+
+impl TryFrom<String> for GenerationPolicyDigest {
+    type Error = GenerationPolicyCaptureError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if is_lower_sha256(&value) {
+            Ok(Self(value))
+        } else {
+            Err(GenerationPolicyCaptureError::InvalidDigest)
+        }
+    }
+}
+
+impl From<GenerationPolicyDigest> for String {
+    fn from(value: GenerationPolicyDigest) -> Self {
+        value.0
+    }
+}
+
+/// Confidential canonical policy semantics retained across a process boundary.
+pub struct GenerationPolicySnapshot {
+    workspace: CanonPath,
+    roots: Vec<ProfileRoot>,
+    read_perimeter: crate::permit::ReadPerimeter,
+    mode: Mode,
+    ruleset: Ruleset,
+    canonical: SecretMaterial,
+    digest: GenerationPolicyDigest,
+}
+
+impl GenerationPolicySnapshot {
+    pub fn digest(&self) -> GenerationPolicyDigest {
+        self.digest.clone()
+    }
+
+    /// Cache identity excludes only the session-owned read-only MCP output pin.
+    /// Execution and continuation authority retain the complete snapshot digest.
+    pub fn analysis_cache_digest(
+        &self,
+        session_read_root: Option<&CanonPath>,
+    ) -> Result<GenerationPolicyDigest, GenerationPolicyCaptureError> {
+        let Some(root) = session_read_root else {
+            return Ok(self.digest());
+        };
+        let roots: Vec<_> = self
+            .roots
+            .iter()
+            .filter(|entry| {
+                entry.path() != root || entry.access() != crate::permit::RootAccess::Read
+            })
+            .cloned()
+            .collect();
+        if roots.len() == self.roots.len() {
+            return Ok(self.digest());
+        }
+        Ok(Self::from_semantics(
+            self.workspace.clone(),
+            roots,
+            self.mode,
+            self.ruleset.clone(),
+            self.read_perimeter.clone(),
+        )?
+        .digest())
+    }
+
+    pub fn workspace(&self) -> &CanonPath {
+        &self.workspace
+    }
+
+    pub fn mode(&self) -> Mode {
+        self.mode
+    }
+
+    pub(crate) fn validate_task_roots(
+        &self,
+        roots: Option<&[CanonPath]>,
+    ) -> Result<(), &'static str> {
+        if let Some(roots) = roots {
+            if roots.len() != 1 || roots[0] != self.workspace {
+                return Err(
+                    "named agent roots must retain exactly the parent workspace; conflicting roots are not admitted",
+                );
+            }
+            if !self.roots.is_empty() {
+                return Err(
+                    "named agent roots cannot narrow inherited process confinement; extra parent roots require a new executor",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Copy the canonical bytes into a fresh zeroizing owner for storage.
+    pub fn encode_confidential(&self) -> SecretMaterial {
+        SecretMaterial::new(self.canonical.expose_secret_bytes().to_vec())
+    }
+
+    /// Decode only the canonical v1 representation of a policy snapshot.
+    pub fn decode_confidential(
+        encoded: &SecretMaterial,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let encoded = encoded.expose_secret_bytes();
+        if encoded.len() > MAX_GENERATION_POLICY_SNAPSHOT_BYTES {
+            return Err(GenerationPolicyCaptureError::InvalidSnapshot);
+        }
+        let PolicyWire {
+            version,
+            workspace,
+            roots,
+            read_perimeter,
+            mode,
+            allow,
+            deny,
+        } = serde_json::from_slice(encoded)
+            .map_err(|_| GenerationPolicyCaptureError::InvalidSnapshot)?;
+        if version != WIRE_VERSION {
+            return Err(GenerationPolicyCaptureError::UnsupportedVersion);
+        }
+
+        let ruleset = Ruleset {
+            allow: decode_rules(allow)?,
+            deny: decode_rules(deny)?,
+        };
+        let snapshot = Self::from_semantics(workspace, roots, mode, ruleset, read_perimeter)?;
+        if snapshot.canonical.expose_secret_bytes() != encoded {
+            return Err(GenerationPolicyCaptureError::NonCanonicalSnapshot);
+        }
+        Ok(snapshot)
+    }
+
+    fn from_semantics(
+        workspace: CanonPath,
+        roots: Vec<ProfileRoot>,
+        mode: Mode,
+        ruleset: Ruleset,
+        read_perimeter: crate::permit::ReadPerimeter,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let wire = PolicyWire::from_semantics(&workspace, &roots, mode, &ruleset, &read_perimeter);
+        let canonical =
+            serde_json::to_vec(&wire).map_err(|_| GenerationPolicyCaptureError::EncodingFailed)?;
+        if canonical.len() > MAX_GENERATION_POLICY_SNAPSHOT_BYTES {
+            return Err(GenerationPolicyCaptureError::InvalidSnapshot);
+        }
+        let digest = digest(&canonical)?;
+        Ok(Self {
+            workspace,
+            roots,
+            read_perimeter,
+            mode,
+            ruleset,
+            canonical: SecretMaterial::new(canonical),
+            digest,
+        })
+    }
+}
+
+impl fmt::Debug for GenerationPolicySnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerationPolicySnapshot")
+            .field("mode", &self.mode)
+            .field("digest", &self.digest)
+            .field("policy", &"<redacted>")
+            .finish()
+    }
+}
+
+/// One immutable engine and the canonical semantics from which it was built.
+pub struct GenerationPolicyCapture {
+    policy: Arc<PolicyEngine>,
+    snapshot: Arc<GenerationPolicySnapshot>,
+    human: Option<Arc<dyn HumanApprover>>,
+}
+
+impl GenerationPolicyCapture {
+    pub fn new(
+        workspace: CanonPath,
+        mode: Mode,
+        ruleset: Ruleset,
+        human: Option<Arc<dyn HumanApprover>>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        Self::with_profile_roots(workspace, Vec::new(), mode, ruleset, human)
+    }
+
+    /// A capture that also pins the profile's admitted roots.
+    pub fn with_profile_roots(
+        workspace: CanonPath,
+        roots: Vec<ProfileRoot>,
+        mode: Mode,
+        ruleset: Ruleset,
+        human: Option<Arc<dyn HumanApprover>>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        Self::restore(
+            Arc::new(GenerationPolicySnapshot::from_semantics(
+                workspace,
+                roots,
+                mode,
+                ruleset,
+                crate::permit::ReadPerimeter::default(),
+            )?),
+            human,
+        )
+    }
+
+    pub fn restore(
+        snapshot: Arc<GenerationPolicySnapshot>,
+        human: Option<Arc<dyn HumanApprover>>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let policy = match human.clone() {
+            Some(human) => PolicyEngine::with_human(
+                snapshot.workspace.clone(),
+                snapshot.mode,
+                snapshot.ruleset.clone(),
+                human,
+            ),
+            None => PolicyEngine::new(
+                snapshot.workspace.clone(),
+                snapshot.mode,
+                snapshot.ruleset.clone(),
+            ),
+        }
+        .with_profile_roots(snapshot.roots.clone())
+        .with_read_perimeter(snapshot.read_perimeter.clone());
+        Ok(Self {
+            policy: Arc::new(policy),
+            snapshot,
+            human,
+        })
+    }
+
+    /// Pin the admitted sandbox read authority in both engine and snapshot.
+    pub fn with_read_perimeter(
+        self,
+        read_perimeter: crate::permit::ReadPerimeter,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let snapshot = GenerationPolicySnapshot::from_semantics(
+            self.snapshot.workspace.clone(),
+            self.snapshot.roots.clone(),
+            self.snapshot.mode,
+            self.snapshot.ruleset.clone(),
+            read_perimeter,
+        )?;
+        Self::restore(Arc::new(snapshot), self.human)
+    }
+
+    /// Pin the session's public MCP output directory with read-only authority.
+    pub fn with_session_read_root(
+        self,
+        root: CanonPath,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let mut roots = self.snapshot.roots.clone();
+        if roots.iter().any(|existing| {
+            existing.path() == &root && existing.access() == crate::permit::RootAccess::Read
+        }) {
+            return Ok(self);
+        }
+        roots.retain(|existing| existing.path() != &root);
+        roots.push(ProfileRoot::new(root, crate::permit::RootAccess::Read));
+        let snapshot = GenerationPolicySnapshot::from_semantics(
+            self.snapshot.workspace.clone(),
+            roots,
+            self.snapshot.mode,
+            self.snapshot.ruleset.clone(),
+            self.snapshot.read_perimeter.clone(),
+        )?;
+        Self::restore(Arc::new(snapshot), self.human)
+    }
+
+    pub fn policy(&self) -> Arc<PolicyEngine> {
+        Arc::clone(&self.policy)
+    }
+
+    /// Narrow a task without changing parent roots, deny rules or human authority.
+    pub(crate) fn task_ceiling(
+        self,
+        mode: Option<Mode>,
+        deny: &[Rule],
+        roots: Option<&[CanonPath]>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        self.snapshot
+            .validate_task_roots(roots)
+            .map_err(|_| GenerationPolicyCaptureError::InvalidSnapshot)?;
+        let mode = mode
+            .filter(|mode| mode.within(self.snapshot.mode))
+            .unwrap_or(self.snapshot.mode);
+        let mut ruleset = self.snapshot.ruleset.clone();
+        for rule in deny {
+            if let Some(existing) = ruleset.deny.iter_mut().find(|entry| entry.rule() == rule) {
+                existing.also_carried_by(Source::AgentFile);
+            } else {
+                ruleset
+                    .deny
+                    .push(SourcedRule::new(rule.clone(), Source::AgentFile));
+            }
+        }
+        let roots = self.snapshot.roots.clone();
+        let snapshot = GenerationPolicySnapshot::from_semantics(
+            self.snapshot.workspace.clone(),
+            roots,
+            mode,
+            ruleset,
+            self.snapshot.read_perimeter.clone(),
+        )?;
+        Self::restore(Arc::new(snapshot), self.human)
+    }
+
+    pub fn snapshot(&self) -> Arc<GenerationPolicySnapshot> {
+        Arc::clone(&self.snapshot)
+    }
+}
+
+impl fmt::Debug for GenerationPolicyCapture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("GenerationPolicyCapture")
+            .field("snapshot", &self.snapshot)
+            .field("policy", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Confidential storage for one generation policy keyed by continuation id and digest.
+pub trait GenerationPolicyCaptureStore: Send + Sync {
+    fn store(
+        &self,
+        id: &str,
+        snapshot: Arc<GenerationPolicySnapshot>,
+    ) -> Result<(), GenerationPolicyCaptureStoreError>;
+
+    fn load(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<Arc<GenerationPolicySnapshot>, GenerationPolicyCaptureStoreError>;
+
+    fn delete(
+        &self,
+        id: &str,
+        expected: &GenerationPolicyDigest,
+    ) -> Result<(), GenerationPolicyCaptureStoreError>;
+}
+
+/// Capture-store operation that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationPolicyCaptureStoreOperation {
+    Store,
+    Load,
+    Delete,
+}
+
+impl fmt::Display for GenerationPolicyCaptureStoreOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Store => "store",
+            Self::Load => "load",
+            Self::Delete => "delete",
+        })
+    }
+}
+
+/// Closed, non-secret capture-store failure classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationPolicyCaptureStoreErrorKind {
+    Unavailable,
+    Missing,
+    CapacityExceeded,
+    Corrupt,
+    DigestMismatch,
+}
+
+impl fmt::Display for GenerationPolicyCaptureStoreErrorKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Unavailable => "unavailable",
+            Self::Missing => "missing",
+            Self::CapacityExceeded => "capacity exceeded",
+            Self::Corrupt => "corrupt",
+            Self::DigestMismatch => "digest mismatch",
+        })
+    }
+}
+
+/// Redacted failure at the generation-policy capture-store boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GenerationPolicyCaptureStoreError {
+    operation: GenerationPolicyCaptureStoreOperation,
+    kind: GenerationPolicyCaptureStoreErrorKind,
+}
+
+impl GenerationPolicyCaptureStoreError {
+    pub fn new(
+        operation: GenerationPolicyCaptureStoreOperation,
+        kind: GenerationPolicyCaptureStoreErrorKind,
+    ) -> Self {
+        Self { operation, kind }
+    }
+
+    pub fn operation(&self) -> GenerationPolicyCaptureStoreOperation {
+        self.operation
+    }
+
+    pub fn kind(&self) -> GenerationPolicyCaptureStoreErrorKind {
+        self.kind
+    }
+
+    pub fn diagnostic(&self) -> &'static str {
+        match self.kind {
+            GenerationPolicyCaptureStoreErrorKind::Unavailable => {
+                "generation policy capture store is unavailable"
+            }
+            GenerationPolicyCaptureStoreErrorKind::Missing => {
+                "generation policy capture is missing"
+            }
+            GenerationPolicyCaptureStoreErrorKind::CapacityExceeded => {
+                "generation policy capture exceeds storage capacity"
+            }
+            GenerationPolicyCaptureStoreErrorKind::Corrupt => {
+                "stored generation policy capture is corrupt"
+            }
+            GenerationPolicyCaptureStoreErrorKind::DigestMismatch => {
+                "stored generation policy capture digest does not match"
+            }
+        }
+    }
+}
+
+impl fmt::Display for GenerationPolicyCaptureStoreError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "generation policy capture {operation} operation failed ({kind}): {diagnostic}",
+            operation = self.operation,
+            kind = self.kind,
+            diagnostic = self.diagnostic(),
+        )
+    }
+}
+
+impl std::error::Error for GenerationPolicyCaptureStoreError {}
+
+/// Closed failures that never retain or render confidential policy material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GenerationPolicyCaptureError {
+    EncodingFailed,
+    InvalidDigest,
+    InvalidSnapshot,
+    NonCanonicalSnapshot,
+    UnsupportedVersion,
+}
+
+impl fmt::Display for GenerationPolicyCaptureError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::EncodingFailed => "generation policy capture encoding failed",
+            Self::InvalidDigest => "generation policy capture digest is invalid",
+            Self::InvalidSnapshot => "generation policy capture is invalid",
+            Self::NonCanonicalSnapshot => "generation policy capture is not canonical",
+            Self::UnsupportedVersion => "generation policy capture version is unsupported",
+        })
+    }
+}
+
+impl std::error::Error for GenerationPolicyCaptureError {}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyWire {
+    version: u32,
+    workspace: CanonPath,
+    /// Absent when empty, so a policy without profile roots keeps its digest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    roots: Vec<ProfileRoot>,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::permit::ReadPerimeter::is_default"
+    )]
+    read_perimeter: crate::permit::ReadPerimeter,
+    // Snapshot v1 is a content-addressed authority format, not public UI grammar.
+    // Keep its original spelling so old edits sessions retain the exact digest.
+    #[serde(serialize_with = "snapshot_mode")]
+    mode: Mode,
+    allow: Vec<RuleWire>,
+    deny: Vec<RuleWire>,
+}
+
+fn snapshot_mode<S: serde::Serializer>(mode: &Mode, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(if *mode == Mode::Edits {
+        "edits"
+    } else {
+        mode.as_str()
+    })
+}
+
+impl PolicyWire {
+    fn from_semantics(
+        workspace: &CanonPath,
+        roots: &[ProfileRoot],
+        mode: Mode,
+        ruleset: &Ruleset,
+        read_perimeter: &crate::permit::ReadPerimeter,
+    ) -> Self {
+        Self {
+            version: WIRE_VERSION,
+            workspace: workspace.clone(),
+            roots: roots.to_vec(),
+            read_perimeter: read_perimeter.clone(),
+            mode,
+            allow: encode_rules(&ruleset.allow),
+            deny: encode_rules(&ruleset.deny),
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuleWire {
+    rule: String,
+    origins: Vec<Source>,
+}
+
+fn encode_rules(rules: &[SourcedRule]) -> Vec<RuleWire> {
+    rules
+        .iter()
+        .map(|entry| RuleWire {
+            rule: entry.rule().to_string(),
+            origins: entry.origins().iter().collect(),
+        })
+        .collect()
+}
+
+fn decode_rules(wire: Vec<RuleWire>) -> Result<Vec<SourcedRule>, GenerationPolicyCaptureError> {
+    let mut decoded: Vec<SourcedRule> = Vec::with_capacity(wire.len());
+    for RuleWire { rule, origins } in wire {
+        let parsed =
+            Rule::load(&rule).map_err(|_| GenerationPolicyCaptureError::InvalidSnapshot)?;
+        if parsed.to_string() != rule || decoded.iter().any(|entry| entry.rule() == &parsed) {
+            return Err(GenerationPolicyCaptureError::InvalidSnapshot);
+        }
+
+        let origin_set = OriginSet::from(origins.clone());
+        if origins.is_empty()
+            || origin_set.len() != origins.len()
+            || origin_set.iter().collect::<Vec<_>>() != origins
+        {
+            return Err(GenerationPolicyCaptureError::InvalidSnapshot);
+        }
+
+        let mut origins = origins.into_iter();
+        let first = origins
+            .next()
+            .ok_or(GenerationPolicyCaptureError::InvalidSnapshot)?;
+        let mut sourced = SourcedRule::new(parsed, first);
+        for origin in origins {
+            sourced.also_carried_by(origin);
+        }
+        decoded.push(sourced);
+    }
+    Ok(decoded)
+}
+
+fn digest(bytes: &[u8]) -> Result<GenerationPolicyDigest, GenerationPolicyCaptureError> {
+    let length = u64::try_from(bytes.len())
+        .map_err(|_| GenerationPolicyCaptureError::EncodingFailed)?
+        .to_be_bytes();
+    let mut framed = SecretMaterial::new(DIGEST_DOMAIN.to_vec());
+    framed.extend_from_slice(&length);
+    framed.extend_from_slice(bytes);
+    Ok(GenerationPolicyDigest(sha256_hex(
+        framed.expose_secret_bytes(),
+    )))
+}

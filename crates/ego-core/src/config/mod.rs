@@ -1,0 +1,55 @@
+//! Strict configuration and the trust gate.
+//!
+//! Pure configuration resolution over injected sources; core performs no file I/O.
+
+mod discovery;
+mod error;
+mod layer;
+mod mutation;
+mod provenance;
+mod resolve;
+pub mod rule_management;
+mod ruleset;
+mod session_prompt;
+mod source;
+mod vocabulary;
+mod windows_unconfined;
+mod workspace_trust;
+
+pub use discovery::{
+    CwdOutsideRoot, Found, INSTRUCTIONS_FILE, Instruction, InstructionIo, InstructionSet, Limits,
+    Refusal, Selection, Skipped, SystemPrompt, instruction_references, load, load_with_home, plan,
+    system_prompt,
+};
+pub use error::ConfigError;
+pub use layer::{
+    AuthProviderLayer, ConfigLayer, ExecEnvironment, ExecLayer, FORBIDDEN_AUTH_HEADER_NAMES,
+    InstructionConfig, McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpProfile, McpHttpUrl,
+    McpLayer, McpLayerEntry, McpServerConfig, McpServerName, McpStdioConfig, McpValueError, Mode,
+    ModelRef, Network, PermCfg, ProfileLayer, ProtocolFilterConfig, StatusProvider,
+    StatusSegmentName, StatuslineLayer, UiLayer, is_forbidden_auth_header,
+    is_protocol_filter_identity_header,
+};
+pub use mutation::{
+    ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigBatch,
+    UserConfigEditHandle, UserConfigEditResult, UserConfigError, UserConfigMutation,
+    UserConfigMutationFacts, UserConfigMutationResult, UserConfigPublication, UserConfigSnapshot,
+    UserConfigStore,
+};
+pub use provenance::SettingProvenance;
+pub use resolve::{
+    ActiveProfileProvenance, Effective, McpConfigProvenance, Posture, ResolvedMcpConfig,
+    ResolvedMcpEntry, resolve, resolve_selected, resolve_with_profile_ceiling,
+};
+pub use ruleset::{OriginSet, Ruleset, SourcedRule};
+pub use source::{Source, Sourced, Trust};
+pub use vocabulary::{ManagedConfigKey, ManagedConfigValue, ProfileName, UserConfigTarget};
+pub use windows_unconfined::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger, UnconfinedRecord};
+pub use workspace_trust::{
+    ExecutableDeclaration, ExecutableSurface, ProgramEvidence, TRUST_DIGEST_MAX_BYTES,
+    TrustInventory, TrustLedger, TrustRecord, TrustedContent,
+};
+
+pub use session_prompt::{
+    SessionPromptOptions, SessionSystemPrompt, SystemPromptMode, validate_prompt_options,
+};

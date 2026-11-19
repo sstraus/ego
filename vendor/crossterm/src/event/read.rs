@@ -1,0 +1,645 @@
+use std::{collections::vec_deque::VecDeque, io, time::Duration};
+
+#[cfg(unix)]
+use crate::event::source::unix::UnixInternalEventSource;
+#[cfg(windows)]
+use crate::event::source::windows::WindowsEventSource;
+#[cfg(feature = "event-stream")]
+use crate::event::sys::Waker;
+use crate::event::{filter::Filter, source::EventSource, timeout::PollTimeout, InternalEvent};
+
+/// Can be used to read `InternalEvent`s.
+pub(crate) struct InternalEventReader {
+    events: VecDeque<InternalEvent>,
+    source: Option<Box<dyn EventSource>>,
+    skipped_events: Vec<InternalEvent>,
+}
+
+impl Default for InternalEventReader {
+    fn default() -> Self {
+        #[cfg(windows)]
+        let source = WindowsEventSource::new();
+        #[cfg(unix)]
+        let source = UnixInternalEventSource::new();
+
+        let source = source.ok().map(|x| Box::new(x) as Box<dyn EventSource>);
+
+        InternalEventReader {
+            source,
+            events: VecDeque::with_capacity(32),
+            skipped_events: Vec::with_capacity(32),
+        }
+    }
+}
+
+impl InternalEventReader {
+    /// Returns a `Waker` allowing to wake/force the `poll` method to return `Ok(false)`.
+    #[cfg(feature = "event-stream")]
+    pub(crate) fn waker(&self) -> Waker {
+        self.source.as_ref().expect("reader source not set").waker()
+    }
+
+    /// Discard matching events already available, without waiting or losing input.
+    #[cfg(unix)]
+    pub(crate) fn discard_pending<F: Filter>(&mut self, filter: &F) -> io::Result<()> {
+        let source = self.source.as_mut().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "Failed to initialize input reader")
+        })?;
+        let pending = source.pending_events()?;
+        self.events.extend(self.skipped_events.drain(..));
+        self.events.retain(|event| !filter.eval(event));
+        for event in pending {
+            if !filter.eval(&event) {
+                self.events.push_back(event);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn poll<F>(&mut self, timeout: Option<Duration>, filter: &F) -> io::Result<bool>
+    where
+        F: Filter,
+    {
+        for event in &self.events {
+            if filter.eval(event) {
+                return Ok(true);
+            }
+        }
+
+        let event_source = match self.source.as_mut() {
+            Some(source) => source,
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "Failed to initialize input reader",
+                ))
+            }
+        };
+
+        let poll_timeout = PollTimeout::new(timeout);
+
+        loop {
+            let maybe_event = match event_source.try_read(poll_timeout.leftover()) {
+                Ok(None) => None,
+                Ok(Some(event)) => {
+                    if filter.eval(&event) {
+                        Some(event)
+                    } else {
+                        self.skipped_events.push(event);
+                        None
+                    }
+                }
+                Err(e) => {
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        return Ok(false);
+                    }
+
+                    return Err(e);
+                }
+            };
+
+            if poll_timeout.elapsed() || maybe_event.is_some() {
+                self.events.extend(self.skipped_events.drain(..));
+
+                if let Some(event) = maybe_event {
+                    self.events.push_front(event);
+                    return Ok(true);
+                }
+
+                return Ok(false);
+            }
+        }
+    }
+
+    pub(crate) fn read<F>(&mut self, filter: &F) -> io::Result<InternalEvent>
+    where
+        F: Filter,
+    {
+        let mut skipped_events = VecDeque::new();
+
+        loop {
+            while let Some(event) = self.events.pop_front() {
+                if filter.eval(&event) {
+                    while let Some(event) = skipped_events.pop_front() {
+                        self.events.push_back(event);
+                    }
+
+                    return Ok(event);
+                } else {
+                    // We can not directly write events back to `self.events`.
+                    // If we did, we would put our self's into an endless loop
+                    // that would enqueue -> dequeue -> enqueue etc.
+                    // This happens because `poll` in this function will always return true if there are events in it's.
+                    // And because we just put the non-fulfilling event there this is going to be the case.
+                    // Instead we can store them into the temporary buffer,
+                    // and then when the filter is fulfilled write all events back in order.
+                    skipped_events.push_back(event);
+                }
+            }
+
+            let _ = self.poll(None, filter)?;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+    use std::{collections::VecDeque, time::Duration};
+
+    #[cfg(unix)]
+    use super::super::filter::CursorPositionFilter;
+    use super::{super::Event, EventSource, Filter, InternalEvent, InternalEventReader};
+
+    #[derive(Debug, Clone)]
+    pub(crate) struct InternalEventFilter;
+
+    impl Filter for InternalEventFilter {
+        fn eval(&self, _: &InternalEvent) -> bool {
+            true
+        }
+    }
+
+    // Catches: a timed-out cursor report is reused by the next query, or
+    // removing it consumes keyboard/resize events queued on either side.
+    #[test]
+    #[cfg(unix)]
+    fn discard_pending_cursor_reports_preserves_input_order() {
+        use super::super::{KeyCode, KeyEvent, KeyModifiers};
+        let key = InternalEvent::Event(Event::Key(KeyEvent::new(
+            KeyCode::Char('x'),
+            KeyModifiers::NONE,
+        )));
+        let resize = InternalEvent::Event(Event::Resize(80, 24));
+        let mut reader = InternalEventReader {
+            events: vec![InternalEvent::CursorPosition(0, 18), key.clone()].into(),
+            source: Some(Box::new(FakeSource::with_events(&[
+                resize.clone(),
+                InternalEvent::CursorPosition(79, 18),
+                key.clone(),
+            ]))),
+            skipped_events: Vec::new(),
+        };
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), key);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), resize);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), key);
+        assert!(!reader
+            .poll(Some(Duration::ZERO), &InternalEventFilter)
+            .unwrap());
+    }
+
+    // Catches: a partial terminal key sequence makes cursor-query draining
+    // block until the user sends more input, despite its zero timeout.
+    #[test]
+    #[cfg(unix)]
+    fn discard_pending_does_not_wait_for_partial_key_sequence() {
+        use std::{io::Write, os::unix::net::UnixStream, time::Instant};
+
+        use super::super::{KeyCode, KeyEvent, KeyModifiers};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        sender.write_all(b"\x1b[").unwrap();
+        let completion = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            sender.write_all(b"A").unwrap();
+            sender
+        });
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        let start = Instant::now();
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        let elapsed = start.elapsed();
+        let _sender = completion.join().unwrap();
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)))
+        );
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "zero-timeout cursor drain waited for partial key input: {elapsed:?}"
+        );
+    }
+
+    // Catches: a zero-timeout drain stops at a partial paste buffer and
+    // leaves an already-arrived stale CPR for the next cursor query.
+    #[test]
+    #[cfg(all(unix, feature = "bracketed-paste"))]
+    fn discard_pending_removes_cursor_report_behind_multibuffer_paste() {
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+        use std::{io::Write, os::unix::net::UnixStream};
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        let text = "x".repeat(2048);
+        sender
+            .write_all(format!("y\x1b[200~{text}\x1b[201~\x1b[19;1R").as_bytes())
+            .unwrap();
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Key(super::super::KeyCode::Char('y').into()))
+        );
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Paste(text))
+        );
+        assert!(
+            !reader
+                .poll(Some(Duration::from_millis(20)), &CursorPositionFilter)
+                .unwrap(),
+            "pre-query cursor drain left an already-arrived stale report behind a large paste"
+        );
+    }
+    // Catches: re-polling an edge-triggered source loses unread paste bytes
+    // beyond the first read buffer when no new bytes arrive afterward.
+    #[test]
+    #[cfg(all(unix, feature = "bracketed-paste"))]
+    fn partial_paste_rechecks_already_ready_bytes() {
+        use std::{io::Write, os::unix::net::UnixStream};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        let text = "x".repeat(2048);
+        sender.write_all(format!("\x1b[200~{text}\x1b[201~").as_bytes()).unwrap();
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        assert!(reader.poll(Some(Duration::from_millis(100)), &InternalEventFilter).unwrap());
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), InternalEvent::Event(Event::Paste(text)));
+    }
+
+
+    // Catches: a zero-timeout drain follows new paste bytes until the producer stops.
+    #[test]
+    #[cfg(all(unix, feature = "bracketed-paste"))]
+    fn zero_timeout_does_not_follow_continuously_arriving_paste() {
+        use std::{io::Write, os::unix::net::UnixStream, time::Instant};
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::fd::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        sender.write_all(b"\x1b[200~").unwrap();
+        sender.write_all(&vec![b'x'; 65536]).unwrap();
+        let writer = std::thread::spawn(move || {
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_millis(250) {
+                sender.write_all(&[b'x'; 4096]).unwrap();
+            }
+            sender.write_all(b"\x1b[201~").unwrap();
+            sender
+        });
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        let start = Instant::now();
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        let elapsed = start.elapsed();
+        // Drain the producer afterward even on a correct early return.
+        assert!(matches!(reader.read(&InternalEventFilter).unwrap(), InternalEvent::Event(Event::Paste(_))));
+        let _sender = writer.join().unwrap();
+        eprintln!("continuous paste zero-timeout drain: {elapsed:?}");
+        assert!(elapsed < Duration::from_millis(100), "zero-timeout drain followed new input for {elapsed:?}");
+    }
+    #[test]
+    fn test_poll_fails_without_event_source() {
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: None,
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert!(reader.poll(None, &InternalEventFilter).is_err());
+        assert!(reader
+            .poll(Some(Duration::from_secs(0)), &InternalEventFilter)
+            .is_err());
+        assert!(reader
+            .poll(Some(Duration::from_secs(10)), &InternalEventFilter)
+            .is_err());
+    }
+
+    #[test]
+    fn test_poll_returns_true_for_matching_event_in_queue_at_front() {
+        let mut reader = InternalEventReader {
+            events: vec![InternalEvent::Event(Event::Resize(10, 10))].into(),
+            source: None,
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert!(reader.poll(None, &InternalEventFilter).unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_poll_returns_true_for_matching_event_in_queue_at_back() {
+        let mut reader = InternalEventReader {
+            events: vec![
+                InternalEvent::Event(Event::Resize(10, 10)),
+                InternalEvent::CursorPosition(10, 20),
+            ]
+            .into(),
+            source: None,
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert!(reader.poll(None, &CursorPositionFilter).unwrap());
+    }
+
+    #[test]
+    fn test_read_returns_matching_event_in_queue_at_front() {
+        const EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
+
+        let mut reader = InternalEventReader {
+            events: vec![EVENT].into(),
+            source: None,
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_read_returns_matching_event_in_queue_at_back() {
+        const CURSOR_EVENT: InternalEvent = InternalEvent::CursorPosition(10, 20);
+
+        let mut reader = InternalEventReader {
+            events: vec![InternalEvent::Event(Event::Resize(10, 10)), CURSOR_EVENT].into(),
+            source: None,
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(reader.read(&CursorPositionFilter).unwrap(), CURSOR_EVENT);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_read_does_not_consume_skipped_event() {
+        const SKIPPED_EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
+        const CURSOR_EVENT: InternalEvent = InternalEvent::CursorPosition(10, 20);
+
+        let mut reader = InternalEventReader {
+            events: vec![SKIPPED_EVENT, CURSOR_EVENT].into(),
+            source: None,
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(reader.read(&CursorPositionFilter).unwrap(), CURSOR_EVENT);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), SKIPPED_EVENT);
+    }
+
+    #[test]
+    fn test_poll_timeouts_if_source_has_no_events() {
+        let source = FakeSource::default();
+
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert!(!reader
+            .poll(Some(Duration::from_secs(0)), &InternalEventFilter)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_poll_returns_true_if_source_has_at_least_one_event() {
+        let source = FakeSource::with_events(&[InternalEvent::Event(Event::Resize(10, 10))]);
+
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert!(reader.poll(None, &InternalEventFilter).unwrap());
+        assert!(reader
+            .poll(Some(Duration::from_secs(0)), &InternalEventFilter)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_reads_returns_event_if_source_has_at_least_one_event() {
+        const EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
+
+        let source = FakeSource::with_events(&[EVENT]);
+
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+    }
+
+    #[test]
+    fn test_read_returns_events_if_source_has_events() {
+        const EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
+
+        let source = FakeSource::with_events(&[EVENT, EVENT, EVENT]);
+
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+    }
+
+    #[test]
+    fn test_poll_returns_false_after_all_source_events_are_consumed() {
+        const EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
+
+        let source = FakeSource::with_events(&[EVENT, EVENT, EVENT]);
+
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+        assert!(!reader
+            .poll(Some(Duration::from_secs(0)), &InternalEventFilter)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_poll_propagates_error() {
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(FakeSource::new(&[]))),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(
+            reader
+                .poll(Some(Duration::from_secs(0)), &InternalEventFilter)
+                .err()
+                .map(|e| format!("{:?}", &e.kind())),
+            Some(format!("{:?}", io::ErrorKind::Other))
+        );
+    }
+
+    #[test]
+    fn test_read_propagates_error() {
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(FakeSource::new(&[]))),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(
+            reader
+                .read(&InternalEventFilter)
+                .err()
+                .map(|e| format!("{:?}", &e.kind())),
+            Some(format!("{:?}", io::ErrorKind::Other))
+        );
+    }
+
+    #[test]
+    fn test_poll_continues_after_error() {
+        const EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
+
+        let source = FakeSource::new(&[EVENT, EVENT]);
+
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+        assert!(reader.read(&InternalEventFilter).is_err());
+        assert!(reader
+            .poll(Some(Duration::from_secs(0)), &InternalEventFilter)
+            .unwrap());
+    }
+
+    #[test]
+    fn test_read_continues_after_error() {
+        const EVENT: InternalEvent = InternalEvent::Event(Event::Resize(10, 10));
+
+        let source = FakeSource::new(&[EVENT, EVENT]);
+
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::with_capacity(32),
+        };
+
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+        assert!(reader.read(&InternalEventFilter).is_err());
+        assert_eq!(reader.read(&InternalEventFilter).unwrap(), EVENT);
+    }
+
+    #[derive(Default)]
+    struct FakeSource {
+        events: VecDeque<InternalEvent>,
+        error: Option<io::Error>,
+    }
+
+    impl FakeSource {
+        fn new(events: &[InternalEvent]) -> FakeSource {
+            FakeSource {
+                events: events.to_vec().into(),
+                error: Some(io::Error::new(io::ErrorKind::Other, "")),
+            }
+        }
+
+        fn with_events(events: &[InternalEvent]) -> FakeSource {
+            FakeSource {
+                events: events.to_vec().into(),
+                error: None,
+            }
+        }
+    }
+
+    impl EventSource for FakeSource {
+        #[cfg(unix)]
+        fn pending_events(&mut self) -> io::Result<Vec<InternalEvent>> {
+            Ok(self.events.drain(..).collect())
+        }
+
+        fn try_read(&mut self, _timeout: Option<Duration>) -> io::Result<Option<InternalEvent>> {
+            // Return error if set in case there's just one remaining event
+            if self.events.len() == 1 {
+                if let Some(error) = self.error.take() {
+                    return Err(error);
+                }
+            }
+
+            // Return all events from the queue
+            if let Some(event) = self.events.pop_front() {
+                return Ok(Some(event));
+            }
+
+            // Return error if there're no more events
+            if let Some(error) = self.error.take() {
+                return Err(error);
+            }
+
+            // Timeout
+            Ok(None)
+        }
+
+        #[cfg(feature = "event-stream")]
+        fn waker(&self) -> super::super::sys::Waker {
+            unimplemented!();
+        }
+    }
+}

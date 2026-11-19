@@ -1,0 +1,86 @@
+[package]
+name = "ego-tools"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# Match reqwest's OS trust policy, including system-managed inspection CAs.
+async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-platform-verifier"] }
+ego-core.workspace = true
+ego-mcp.workspace = true
+fd-lock = "4.0.4"
+futures = "0.3.34"
+getrandom = "0.3.4"
+# Use a caret range so the MSRV-aware resolver selects the newest allowed
+# release without manually keeping an exact version aligned with the floor.
+globset = "0.4"
+ignore = "0.4"
+jsonschema = { version = "0.49.9", default-features = false }
+keyring = { version = "=4.1.6", default-features = false, features = ["v1"] }
+regex = "1.12"
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
+    "rustls-native-certs",
+    "stream",
+    "http2",
+] }
+# Already locked transitively; typed, payload-free TLS diagnostics only.
+rustls = { version = "0.23.46", default-features = false, features = ["std"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10.9"
+similar = { version = "3.2.0", default-features = false, features = ["text"] }
+hmac = "0.12.1"
+html2text = "0.17"
+tempfile = "3.27.0"
+tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+toml_edit = "0.25.13"
+tracing = "0.1.44"
+url = "2.5.8"
+zeroize = "1.9.0"
+yaml-rust2.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31.3", features = ["process", "signal", "term", "user", "fs"] }
+# Already locked transitively; safe descriptor-relative enumeration and unlink.
+rustix = { version = "1.1.4", features = ["fs"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4.7"
+
+[target.'cfg(windows)'.dependencies]
+process-wrap = { path = "../../vendor/process-wrap", default-features = false, features = [
+    "tokio1",
+    "creation-flags",
+    "job-object",
+    "kill-on-drop",
+] }
+windows = { version = "0.62.2", features = ["Win32_System_Threading"] }
+windows-permissions = "0.2.4"
+winapi-util = "0.1.11"
+
+[features]
+# `NonDurableOsIo`: `OsIo` with the fsync barriers elided, for tests that
+# sweep thousands of filesystem states and assert nothing about surviving a
+# power loss. Behind a feature, and not merely behind a doc comment, because
+# a durability-free `StoreIo` exported from the crate that *is* the
+# durability contract is a hazard advice cannot close — the same reason
+# `ego_core::permit::Permit` seals its constructor rather than asking
+# callers not to forge one. With this off, the type does not exist to be
+# misused.
+#
+# Enabled for this crate's own tests by the self dev-dependency below, which
+# is the only supported way an integration test (a separate crate) can see a
+# gated item. No non-test build turns it on.
+test-support = []
+
+[lints]
+workspace = true
+

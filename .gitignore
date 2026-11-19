@@ -1,0 +1,10 @@
+/target/
+/.ego-bin/
+/docs/book/
+.env
+.env.*
+!.env.example
+.DS_Store
+*.swp
+*.profraw
+__pycache__/

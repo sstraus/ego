@@ -1,0 +1,37 @@
+[package]
+name = "ego-listen"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The admission policy this crate enforces. `ego-core` decides which endpoint
+# kinds exist and which authentication each compels; this crate only binds what
+# it is handed. Nothing else is taken: a listener that owns no protocol must not
+# be able to reach one, and `ego-acp` and `ego-a2a` both sit above it.
+ego-core.workspace = true
+# `net` for the listeners, `io-util` for the `AsyncRead`/`AsyncWrite` the
+# protocols above consume, and `macros`/`sync`/`time` plus `tokio-util` for the
+# connection lifecycle, occupancy, lifetime and shutdown. The peer's uid comes
+# from tokio's own `peer_cred` and the socket owner's from
+# `std::os::unix::fs::MetadataExt`; rustix also supplies the current euid and
+# no-follow lease open.
+tokio = { version = "1", features = ["macros", "net", "io-util", "rt", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+tracing = "0.1.44"
+
+[target.'cfg(unix)'.dependencies]
+fd-lock = "4.0.4"
+rustix = { version = "1.1.4", features = ["fs", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+# Safe Tokio pipe lifecycle with an explicit security descriptor.
+interprocess = { version = "2.4.4", features = ["tokio"] }
+# Current TokenUser SID and safe kernel-descriptor inspection.
+windows-permissions = "0.2.4"
+
+[lints]
+workspace = true
+

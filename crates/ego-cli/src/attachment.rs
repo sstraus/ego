@@ -1,0 +1,772 @@
+//! CLI acquisition for image attachments.
+//!
+//! Paths and URLs end here. The durable and provider-facing value contains
+//! only exact validated bytes or the session-local reference to those bytes.
+
+use std::collections::BTreeSet;
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use ego_core::generator::capabilities::{ImageInputSupport, ImageLimits, ModelCapabilities};
+use ego_core::generator::types::{
+    Image, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_IMAGES_PER_PROMPT, MAX_TOTAL_IMAGE_BYTES,
+};
+use ego_core::permit::{
+    GuardedHttp, HttpRequest, HttpRoute, HttpScheme, NetworkTarget, OneHopResponse, PreparedConnect,
+};
+use ego_core::store::blob::{BlobStore, BlobWriter};
+use ego_tools::exec::RunEffectPorts;
+use futures::StreamExt;
+use url::Url;
+
+use crate::cli::UsageError;
+
+const READ_CHUNK: usize = 64 * 1024;
+const MAX_REDIRECTS: usize = 10;
+
+enum Source {
+    Path(PathBuf),
+    Https(Url),
+}
+
+struct Staged {
+    image: Image,
+    writer: Box<dyn BlobWriter>,
+}
+
+/// Ordered sources for one prompt, admitted under one aggregate limit.
+#[derive(Clone)]
+pub(crate) enum AttachmentInput {
+    Spec(String),
+    Inline(Image),
+    Published(ImageRef),
+}
+
+/// Acquire, validate, and publish one ordered CLI attachment batch.
+///
+/// Capability support and count are proved before a source is touched. Blob
+/// commits happen only after every exact byte sequence satisfies both product
+/// and selected-model limits, and therefore before any prompt can reference
+/// the returned values.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn acquire_ordered(
+    inputs: &[AttachmentInput],
+    capabilities: &ModelCapabilities,
+    profile: &str,
+    resolved_model: &str,
+    cwd: &Path,
+    ports: &RunEffectPorts,
+    blobs: &dyn BlobStore,
+) -> Result<Vec<ImageRef>, UsageError> {
+    if inputs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let limits = supported_limits(capabilities, profile, resolved_model)?;
+    let max_images = limits.max_images().map_or(MAX_IMAGES_PER_PROMPT, |value| {
+        usize::try_from(value.get()).expect("model image count is product-bounded at 100")
+    });
+    if inputs.len() > max_images {
+        return Err(UsageError(format!(
+            "model profile `{profile}` resolved to `{resolved_model}` accepts at most \
+             {max_images} images, but {} images were supplied",
+            inputs.len()
+        )));
+    }
+
+    // Parse every path/URL before reading any source.
+    let sources = inputs
+        .iter()
+        .map(|input| match input {
+            AttachmentInput::Spec(spec) => parse_source(spec, cwd).map(Some),
+            _ => Ok(None),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let max_per_image = limits
+        .max_bytes_per_image()
+        .map_or(MAX_IMAGE_BYTES, |value| value.get());
+    let max_total = limits
+        .max_total_bytes()
+        .map_or(MAX_TOTAL_IMAGE_BYTES, |value| value.get());
+    let mut total = 0_u64;
+    let mut staged = Vec::with_capacity(sources.len());
+
+    for (offset, (input, source)) in inputs.iter().zip(sources).enumerate() {
+        let index = offset + 1;
+        let mut writer = blobs.begin().map_err(|error| {
+            UsageError(format!(
+                "attachment {index} could not begin its session blob: {error}"
+            ))
+        })?;
+        let bytes = match (input, source) {
+            (AttachmentInput::Inline(image), _) => {
+                stage_bounded(
+                    0,
+                    writer.as_mut(),
+                    image.bytes(),
+                    index,
+                    max_per_image,
+                    max_total,
+                    &mut total,
+                )?;
+                image.bytes().to_vec()
+            }
+            (AttachmentInput::Published(reference), _) => {
+                let bytes = blobs.read(reference.reference()).map_err(|error| {
+                    UsageError(format!("recalled image {index} could not be read: {error}"))
+                })?;
+                reference.hydrate(bytes.clone()).map_err(|error| {
+                    UsageError(format!("recalled image {index} is invalid: {error}"))
+                })?;
+                stage_bounded(
+                    0,
+                    writer.as_mut(),
+                    &bytes,
+                    index,
+                    max_per_image,
+                    max_total,
+                    &mut total,
+                )?;
+                bytes
+            }
+            (_, Some(Source::Path(path))) => read_path_once(
+                &path,
+                writer.as_mut(),
+                index,
+                max_per_image,
+                max_total,
+                &mut total,
+            )?,
+            (_, Some(Source::Https(url))) => {
+                fetch_https(
+                    url,
+                    writer.as_mut(),
+                    index,
+                    max_per_image,
+                    max_total,
+                    &mut total,
+                    ports,
+                )
+                .await?
+            }
+            (AttachmentInput::Spec(_), None) => {
+                unreachable!("specs were parsed before acquisition")
+            }
+        };
+        let media_type = media_type(&bytes).ok_or_else(|| {
+            UsageError(format!(
+                "attachment {index} is not a JPEG, PNG, single-frame GIF, or WebP image"
+            ))
+        })?;
+        let image = Image::new(bytes, media_type).map_err(|error| {
+            UsageError(format!(
+                "attachment {index} is not an admitted image: {error}"
+            ))
+        })?;
+        let text_offset = match input {
+            AttachmentInput::Inline(image) => image.text_offset(),
+            AttachmentInput::Published(image) => image.text_offset(),
+            AttachmentInput::Spec(_) => None,
+        };
+        let image = match text_offset {
+            Some(offset) => image.with_text_offset(offset),
+            None => image,
+        };
+        validate_model_image(&image, index, limits, profile, resolved_model)?;
+        staged.push(Staged { image, writer });
+    }
+
+    commit_staged(staged)
+}
+
+/// Commit an ordered staged batch and name each blob durably.
+///
+/// The tail both admission paths end in. Kept as one function because the rule
+/// it encodes — every image passes, *then* anything is committed — is the rule
+/// that keeps a refused prompt from leaving blobs behind, and two copies of it
+/// could drift into disagreeing about that.
+fn commit_staged(staged: Vec<Staged>) -> Result<Vec<ImageRef>, UsageError> {
+    let mut references = Vec::with_capacity(staged.len());
+    for (offset, staged) in staged.into_iter().enumerate() {
+        let index = offset + 1;
+        let reference = staged.writer.commit().map_err(|error| {
+            UsageError(format!(
+                "attachment {index} could not be committed to the session blob store: {error}"
+            ))
+        })?;
+        references.push(
+            ImageRef::new(
+                reference,
+                staged.image.media_type(),
+                staged.image.width(),
+                staged.image.height(),
+            )
+            .map(|reference| match staged.image.text_offset() {
+                Some(offset) => reference.with_text_offset(offset),
+                None => reference,
+            })
+            .map_err(|error| {
+                UsageError(format!(
+                    "attachment {index} produced invalid durable metadata: {error}"
+                ))
+            })?,
+        );
+    }
+    Ok(references)
+}
+
+pub(crate) fn supported_limits<'a>(
+    capabilities: &'a ModelCapabilities,
+    profile: &str,
+    resolved_model: &str,
+) -> Result<&'a ImageLimits, UsageError> {
+    match &capabilities.image_input {
+        ImageInputSupport::Supported(limits) => Ok(limits),
+        ImageInputSupport::Unknown => Err(UsageError(format!(
+            "model profile `{profile}` resolved to `{resolved_model}`, but its image-input \
+             capability is unknown; no attachment was fetched"
+        ))),
+        ImageInputSupport::Unsupported => Err(UsageError(format!(
+            "model profile `{profile}` resolved to `{resolved_model}` does not support image \
+             input; no attachment was fetched"
+        ))),
+    }
+}
+
+fn parse_source(spec: &str, cwd: &Path) -> Result<Source, UsageError> {
+    if spec.is_empty() {
+        return Err(UsageError(
+            "--attach requires a non-empty path or HTTPS URL".to_string(),
+        ));
+    }
+    let path = PathBuf::from(spec);
+    if path.is_absolute() {
+        return Ok(Source::Path(path));
+    }
+    match Url::parse(spec) {
+        Ok(url) => {
+            validate_https_url(&url)?;
+            Ok(Source::Https(url))
+        }
+        Err(url::ParseError::RelativeUrlWithoutBase) => Ok(Source::Path(cwd.join(path))),
+        Err(error) => Err(UsageError(format!(
+            "--attach value `{spec}` is neither an explicit path nor a valid HTTPS URL: {error}"
+        ))),
+    }
+}
+
+fn validate_https_url(url: &Url) -> Result<(), UsageError> {
+    if url.scheme() != "https" {
+        return Err(UsageError(format!(
+            "attachment URL uses `{}`; only HTTPS URLs are accepted",
+            url.scheme()
+        )));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(UsageError(
+            "attachment URL contains user-info, which is not accepted".to_string(),
+        ));
+    }
+    if url.fragment().is_some() {
+        return Err(UsageError(
+            "attachment URL contains a fragment, which is not sent and is not accepted".to_string(),
+        ));
+    }
+    if url.host_str().is_none() {
+        return Err(UsageError("attachment URL has no network host".to_string()));
+    }
+    Ok(())
+}
+
+fn read_path_once(
+    path: &Path,
+    writer: &mut dyn BlobWriter,
+    index: usize,
+    max_per_image: u64,
+    max_total: u64,
+    total: &mut u64,
+) -> Result<Vec<u8>, UsageError> {
+    let mut file = File::open(path).map_err(|error| {
+        UsageError(format!(
+            "attachment {index} could not open {}: {error}",
+            path.display()
+        ))
+    })?;
+    let mut bytes = Vec::new();
+    let mut chunk = [0_u8; READ_CHUNK];
+    loop {
+        let read = file.read(&mut chunk).map_err(|error| {
+            UsageError(format!(
+                "attachment {index} could not read {}: {error}",
+                path.display()
+            ))
+        })?;
+        if read == 0 {
+            break;
+        }
+        append_bounded(
+            &mut bytes,
+            writer,
+            &chunk[..read],
+            index,
+            max_per_image,
+            max_total,
+            total,
+        )?;
+    }
+    Ok(bytes)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn fetch_https(
+    mut url: Url,
+    writer: &mut dyn BlobWriter,
+    index: usize,
+    max_per_image: u64,
+    max_total: u64,
+    total: &mut u64,
+    ports: &RunEffectPorts,
+) -> Result<Vec<u8>, UsageError> {
+    let deadline = ports.begin_http_call();
+    let guarded = GuardedHttp::new(ports.resolver_handle(), ports.one_hop_handle());
+    let mut seen = BTreeSet::new();
+
+    for redirects in 0..=MAX_REDIRECTS {
+        validate_https_url(&url)?;
+        if !seen.insert(url.as_str().to_string()) {
+            return Err(UsageError(format!(
+                "attachment {index} redirect cycle reached `{url}`"
+            )));
+        }
+        let host = url.host_str().expect("validated HTTPS URLs have a host");
+        let port = url
+            .port_or_known_default()
+            .expect("HTTPS has a default port");
+        let target = NetworkTarget::new(host, port).map_err(|error| {
+            UsageError(format!(
+                "attachment {index} URL `{url}` has an invalid exact route: {error}"
+            ))
+        })?;
+        let route = HttpRoute::new(HttpScheme::Https, target.clone()).map_err(|error| {
+            UsageError(format!(
+                "attachment {index} URL `{url}` could not form an HTTPS route: {error}"
+            ))
+        })?;
+        let mut path = url.path().to_string();
+        if path.is_empty() {
+            path.push('/');
+        }
+        if let Some(query) = url.query() {
+            path.push('?');
+            path.push_str(query);
+        }
+        let request = HttpRequest::get(&path).map_err(|error| {
+            UsageError(format!(
+                "attachment {index} URL `{url}` has an invalid request target: {error}"
+            ))
+        })?;
+        let connect = PreparedConnect::new(target, &request);
+        let response = guarded
+            .execute_admitted(route, connect, request, deadline)
+            .await
+            .map_err(|error| {
+                UsageError(format!(
+                    "attachment {index} could not fetch `{url}` through the admitted transport: {error}"
+                ))
+            })?;
+
+        match response {
+            OneHopResponse::Response {
+                status, mut body, ..
+            } => {
+                if !(200..300).contains(&status) {
+                    return Err(UsageError(format!(
+                        "attachment {index} URL `{url}` returned HTTP {status}"
+                    )));
+                }
+                let mut bytes = Vec::new();
+                while let Some(chunk) = body.next().await {
+                    let chunk = chunk.map_err(|error| {
+                        UsageError(format!(
+                            "attachment {index} response body from `{url}` failed: {error}"
+                        ))
+                    })?;
+                    append_bounded(
+                        &mut bytes,
+                        writer,
+                        &chunk,
+                        index,
+                        max_per_image,
+                        max_total,
+                        total,
+                    )?;
+                }
+                return Ok(bytes);
+            }
+            OneHopResponse::Redirect { location, .. } => {
+                if redirects == MAX_REDIRECTS {
+                    return Err(UsageError(format!(
+                        "attachment {index} exceeded {MAX_REDIRECTS} HTTPS redirects"
+                    )));
+                }
+                let location = std::str::from_utf8(&location).map_err(|_| {
+                    UsageError(format!(
+                        "attachment {index} URL `{url}` returned a non-UTF-8 redirect location"
+                    ))
+                })?;
+                url = url.join(location).map_err(|error| {
+                    UsageError(format!(
+                        "attachment {index} URL `{url}` returned invalid redirect `{location}`: {error}"
+                    ))
+                })?;
+                // The next loop validates HTTPS and constructs a fresh exact
+                // route plus request-bound one-shot authority for this hop.
+            }
+        }
+    }
+    unreachable!("the redirect loop returns at its explicit bound")
+}
+
+/// Stage one chunk against both ceilings, and account for it.
+///
+/// Separate from [`append_bounded`] because the two admission paths differ in
+/// exactly one thing: a fetched attachment is accumulated chunk by chunk as it
+/// arrives, while an image that came inside the request is already whole and
+/// copying it a second time to reuse that accumulation would be the largest
+/// avoidable allocation on the path. What must not differ is the arithmetic,
+/// so that lives here and neither caller restates it.
+fn stage_bounded(
+    staged_len: usize,
+    writer: &mut dyn BlobWriter,
+    chunk: &[u8],
+    index: usize,
+    max_per_image: u64,
+    max_total: u64,
+    total: &mut u64,
+) -> Result<(), UsageError> {
+    let chunk_len = u64::try_from(chunk.len()).unwrap_or(u64::MAX);
+    let image_len = u64::try_from(staged_len)
+        .unwrap_or(u64::MAX)
+        .saturating_add(chunk_len);
+    if image_len > max_per_image {
+        return Err(UsageError(format!(
+            "attachment {index} exceeds the selected model's {max_per_image}-byte per-image limit"
+        )));
+    }
+    let next_total = total.checked_add(chunk_len).unwrap_or(u64::MAX);
+    if next_total > max_total {
+        return Err(UsageError(format!(
+            "attachments exceed the selected model's {max_total}-byte aggregate image limit"
+        )));
+    }
+    writer.append(chunk).map_err(|error| {
+        UsageError(format!(
+            "attachment {index} could not stage exact bytes in the session blob store: {error}"
+        ))
+    })?;
+    *total = next_total;
+    Ok(())
+}
+
+fn append_bounded(
+    bytes: &mut Vec<u8>,
+    writer: &mut dyn BlobWriter,
+    chunk: &[u8],
+    index: usize,
+    max_per_image: u64,
+    max_total: u64,
+    total: &mut u64,
+) -> Result<(), UsageError> {
+    stage_bounded(
+        bytes.len(),
+        writer,
+        chunk,
+        index,
+        max_per_image,
+        max_total,
+        total,
+    )?;
+    bytes.extend_from_slice(chunk);
+    Ok(())
+}
+
+pub(crate) fn media_type(bytes: &[u8]) -> Option<ImageMediaType> {
+    if bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]) {
+        Some(ImageMediaType::Png)
+    } else if bytes.starts_with(&[0xff, 0xd8]) {
+        Some(ImageMediaType::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(ImageMediaType::Gif)
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some(ImageMediaType::Webp)
+    } else {
+        None
+    }
+}
+
+fn validate_model_image(
+    image: &Image,
+    index: usize,
+    limits: &ImageLimits,
+    profile: &str,
+    resolved_model: &str,
+) -> Result<(), UsageError> {
+    let refuse = |reason: String| {
+        UsageError(format!(
+            "attachment {index} is incompatible with model profile `{profile}` resolved to \
+             `{resolved_model}`: {reason}"
+        ))
+    };
+    if !limits.accepted_media_types().contains(&image.media_type()) {
+        return Err(refuse(format!(
+            "{} is not an accepted image media type",
+            image.media_type().mime()
+        )));
+    }
+    if let Some(max) = limits.max_width()
+        && image.width() > max.get()
+    {
+        return Err(refuse(format!(
+            "width {} exceeds {} pixels",
+            image.width(),
+            max.get()
+        )));
+    }
+    if let Some(max) = limits.max_height()
+        && image.height() > max.get()
+    {
+        return Err(refuse(format!(
+            "height {} exceeds {} pixels",
+            image.height(),
+            max.get()
+        )));
+    }
+    let pixels = u64::from(image.width()).saturating_mul(u64::from(image.height()));
+    if let Some(max) = limits.max_pixels()
+        && pixels > max.get()
+    {
+        return Err(refuse(format!(
+            "{pixels} pixels exceed the {}-pixel limit",
+            max.get()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ego_core::event::id::SessionId;
+    use ego_core::generator::capabilities::{
+        CacheRetention, CancelSemantics, ReasoningCarryover, ReasoningEffortSupport, Transport,
+    };
+    use ego_core::turn::CancelToken;
+    use ego_tools::store::SessionBlobStore;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Catches: requiring both GIF version signatures rejects either supported variant.
+    #[test]
+    fn media_type_accepts_both_gif_versions() {
+        let actual = [b"GIF87a", b"GIF89a"].map(|header| media_type(header));
+        assert_eq!(actual, [Some(ImageMediaType::Gif); 2]);
+    }
+
+    // Catches: accepting either RIFF or WEBP alone misclassifies other containers.
+    #[test]
+    fn media_type_requires_riff_and_webp_tags() {
+        let actual = [b"RIFF\x04\x00\x00\x00WAVE", b"NOPE\x04\x00\x00\x00WEBP"]
+            .map(|header| media_type(header));
+        assert_eq!(actual, [None; 2]);
+    }
+
+    // Catches: an inverted length guard reads past a truncated RIFF header.
+    #[test]
+    fn media_type_rejects_every_truncated_webp_header() {
+        let header = b"RIFF\x04\x00\x00\x00WEBP";
+        let actual: Vec<_> = (0..12)
+            .map(|length| media_type(&header[..length]))
+            .collect();
+        assert_eq!(actual, vec![None; 12]);
+        assert_eq!(media_type(header), Some(ImageMediaType::Webp));
+    }
+
+    // Catches: inverted WEBP tag equality admits a RIFF header with a mismatched tag.
+    #[test]
+    fn media_type_rejects_each_mismatched_webp_tag_byte() {
+        let actual: Vec<_> = (8..12)
+            .map(|offset| {
+                let mut header = *b"RIFF\x04\x00\x00\x00WEBP";
+                header[offset] = b'?';
+                media_type(&header)
+            })
+            .collect();
+        assert_eq!(actual, vec![None; 4]);
+    }
+
+    // Catches: HTTPS acquisition downgrades to plaintext or publishes bytes before TLS validation.
+    #[tokio::test]
+    async fn https_attachment_rejects_plaintext_peer_without_publishing_a_blob() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut hello = [0_u8; 4096];
+            let received = stream.read(&mut hello).await.unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\n\x89PNG\r\n\x1a\n")
+                .await
+                .unwrap();
+            received
+        });
+        let owner = tempfile::tempdir().unwrap();
+        let blobs = SessionBlobStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let capabilities = image_capabilities();
+        let result = acquire_ordered(
+            &[AttachmentInput::Spec(format!(
+                "https://{address}/image.png"
+            ))],
+            &capabilities,
+            "fixture",
+            "fixture/image",
+            owner.path(),
+            effects.ports(),
+            &blobs,
+        )
+        .await;
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("could not fetch"), "{error}");
+        assert!(
+            peer.await.unwrap() > 0,
+            "the local peer received no TLS handshake"
+        );
+        assert_eq!(
+            blobs.collect_garbage(&[]).unwrap(),
+            0,
+            "failed TLS published a blob"
+        );
+    }
+    fn image_capabilities() -> ModelCapabilities {
+        ModelCapabilities {
+            schema_version: ModelCapabilities::SCHEMA_VERSION,
+            audio_input: ego_core::generator::capabilities::AudioInputSupport::Unknown,
+            max_context_tokens: Some(8192),
+            max_output_tokens: Some(128),
+            max_tools: None,
+            supports_parallel_tool_calls: false,
+            reasoning_carryover: ReasoningCarryover::Unsupported,
+            reasoning_efforts: ReasoningEffortSupport::Any,
+            reasoning_state_dialect: None,
+            cancel: CancelSemantics::Cooperative,
+            cache: CacheRetention::Short,
+            transport: Transport::Sse,
+            image_input: ImageInputSupport::Supported(
+                ImageLimits::new(
+                    [ImageMediaType::Png].into_iter().collect(),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap(),
+            ),
+            default_reasoning_effort: None,
+        }
+    }
+
+    // Catches: collecting inline images separately reorders a mixed draft.
+    #[tokio::test]
+    async fn mixed_image_sources_preserve_the_draft_order() {
+        let owner = tempfile::tempdir().unwrap();
+        let bytes = crate::run::test_support::PNG_1X1;
+        let path = owner.path().join("middle.png");
+        std::fs::write(&path, bytes).unwrap();
+        let blobs = SessionBlobStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let image = Image::new(bytes.to_vec(), ImageMediaType::Png).unwrap();
+        let inputs = [
+            AttachmentInput::Inline(image.clone().with_text_offset(1)),
+            AttachmentInput::Spec(path.to_string_lossy().into_owned()),
+            AttachmentInput::Inline(image.with_text_offset(3)),
+        ];
+        let references = acquire_ordered(
+            &inputs,
+            &image_capabilities(),
+            "fixture",
+            "fixture/image",
+            owner.path(),
+            effects.ports(),
+            &blobs,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            references
+                .iter()
+                .map(ImageRef::text_offset)
+                .collect::<Vec<_>>(),
+            [Some(1), None, Some(3)]
+        );
+        for reference in references {
+            assert_eq!(blobs.read(reference.reference()).unwrap(), bytes);
+        }
+    }
+
+    // Catches: inline/path batches each pass a separate aggregate byte budget
+    // and publish a prompt that exceeds the selected model's total limit.
+    #[tokio::test]
+    async fn mixed_image_sources_share_one_aggregate_limit_before_publication() {
+        let owner = tempfile::tempdir().unwrap();
+        let bytes = crate::run::test_support::PNG_1X1;
+        let path = owner.path().join("second.png");
+        std::fs::write(&path, bytes).unwrap();
+        let blobs = SessionBlobStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let mut capabilities = image_capabilities();
+        capabilities.image_input = ImageInputSupport::Supported(
+            ImageLimits::new(
+                [ImageMediaType::Png].into_iter().collect(),
+                None,
+                None,
+                std::num::NonZeroU64::new(bytes.len() as u64),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        );
+        let inputs = [
+            AttachmentInput::Inline(Image::new(bytes.to_vec(), ImageMediaType::Png).unwrap()),
+            AttachmentInput::Spec(path.to_string_lossy().into_owned()),
+        ];
+        let error = acquire_ordered(
+            &inputs,
+            &capabilities,
+            "fixture",
+            "fixture/image",
+            owner.path(),
+            effects.ports(),
+            &blobs,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("aggregate image limit"),
+            "{error}"
+        );
+        assert_eq!(
+            blobs.collect_garbage(&[]).unwrap(),
+            0,
+            "a refused mixed batch must not publish blobs"
+        );
+    }
+}

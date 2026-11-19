@@ -1,0 +1,191 @@
+//! Persistent session-goal state and transitions.
+
+use serde::{Deserialize, Serialize};
+
+use crate::ceiling::Ceilings;
+use crate::event::id::{GoalId, Seq, TurnId};
+use crate::store::evidence::EvidenceRef;
+
+/// Consecutive distinct-turn observations needed to block an active goal.
+pub const BLOCKER_OBSERVATION_LIMIT: u64 = 5;
+
+/// Default number of automatic work turns for a goal identity.
+pub const DEFAULT_CONTINUATION_BUDGET: u32 = 20;
+
+/// Authority responsible for a goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalOwner {
+    Operator,
+    Automated,
+    /// Independent session goal evaluator.
+    Check,
+}
+
+/// Current state of a persistent goal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GoalState {
+    Active,
+    Achieved,
+    Blocked,
+}
+
+/// An observation that may change a goal's reduced state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GoalTransition {
+    /// Operator grants more automatic work without replacing the goal.
+    AllowanceExtended {
+        turns: u32,
+    },
+    /// A checked condition requires operator action, not another work turn.
+    Blocked {
+        reason: String,
+    },
+    BlockerObserved {
+        reason: String,
+    },
+    Achieved {
+        attested_by: GoalOwner,
+        evidence: Option<EvidenceRef>,
+    },
+}
+
+/// A goal transition that would contradict its durable authority or state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GoalRefusal {
+    NoActiveGoal,
+    InvalidExtension,
+    AlreadyTerminal(GoalState),
+    ActiveGoalExists,
+    EvidenceRequired,
+    AttestationWouldWiden,
+}
+
+impl std::fmt::Display for GoalRefusal {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidExtension => formatter.write_str(
+                "goal extension requires a positive turn count and must not overflow the allowance",
+            ),
+            Self::NoActiveGoal => formatter.write_str("session has no active goal"),
+            Self::AlreadyTerminal(state) => write!(formatter, "goal is already {state:?}"),
+            Self::ActiveGoalExists => formatter.write_str("session already has an active goal"),
+            Self::EvidenceRequired => {
+                formatter.write_str("automated goal achievement requires evidence")
+            }
+            Self::AttestationWouldWiden => {
+                formatter.write_str("goal achievement would widen automated authority")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GoalRefusal {}
+
+/// Immutable goal facts plus the current blocker audit projected by replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GoalRecord {
+    pub id: GoalId,
+    pub objective: String,
+    pub owner: GoalOwner,
+    pub ceilings: Ceilings,
+    pub derived_from: Option<GoalId>,
+    pub created_seq: Seq,
+    pub state: GoalState,
+    #[serde(default)]
+    pub continuation_turns: u32,
+    #[serde(default)]
+    pub continuation_budget: Option<u32>,
+    #[serde(default)]
+    pub check_stop: Option<String>,
+    pub blocker_reason: Option<String>,
+    pub blocker_observations: u64,
+    pub achieved_by: Option<GoalOwner>,
+    pub achievement_evidence: Option<EvidenceRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) blocker_turns: Vec<TurnId>,
+}
+
+impl GoalRecord {
+    /// Check whether this record may accept a transition without widening its authority.
+    pub fn admits(&self, transition: &GoalTransition) -> Result<(), GoalRefusal> {
+        if self.state != GoalState::Active {
+            return Err(GoalRefusal::AlreadyTerminal(self.state));
+        }
+        if let GoalTransition::AllowanceExtended { turns } = transition
+            && (*turns == 0
+                || self
+                    .continuation_budget
+                    .unwrap_or(DEFAULT_CONTINUATION_BUDGET)
+                    .checked_add(*turns)
+                    .is_none())
+        {
+            return Err(GoalRefusal::InvalidExtension);
+        }
+        if let GoalTransition::Achieved {
+            attested_by,
+            evidence,
+        } = transition
+            && *attested_by != GoalOwner::Operator
+        {
+            if *attested_by == GoalOwner::Automated && self.owner != GoalOwner::Automated {
+                return Err(GoalRefusal::AttestationWouldWiden);
+            }
+            if evidence.is_none() {
+                return Err(GoalRefusal::EvidenceRequired);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn observe_blocker(&mut self, turn: TurnId, reason: &str) {
+        if self.state != GoalState::Active {
+            return;
+        }
+
+        let normalized = normalize_reason(reason);
+        let same_condition = self
+            .blocker_reason
+            .as_deref()
+            .is_some_and(|current| normalize_reason(current) == normalized);
+        if !same_condition {
+            self.blocker_reason = Some(reason.to_owned());
+            self.blocker_turns.clear();
+        }
+        if self.blocker_turns.contains(&turn) {
+            return;
+        }
+
+        self.blocker_turns.push(turn);
+        self.blocker_observations = self.blocker_turns.len() as u64;
+        if self.blocker_observations >= BLOCKER_OBSERVATION_LIMIT {
+            self.state = GoalState::Blocked;
+        }
+    }
+
+    pub(crate) fn clear_blocker_after_completed_turn(&mut self, turn: TurnId) {
+        if self.state == GoalState::Active
+            && self
+                .blocker_turns
+                .last()
+                .is_some_and(|observed| *observed != turn)
+        {
+            self.blocker_reason = None;
+            self.blocker_observations = 0;
+            self.blocker_turns.clear();
+        }
+    }
+}
+
+fn normalize_reason(reason: &str) -> String {
+    let mut normalized = String::new();
+    for word in reason.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.extend(word.chars().flat_map(char::to_lowercase));
+    }
+    normalized
+}

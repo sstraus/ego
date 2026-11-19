@@ -1,0 +1,48 @@
+[workspace]
+members = [
+    "crates/ego-core",
+    "crates/ego-ai",
+    "crates/ego-tools",
+    "crates/ego-acp",
+    "crates/ego-a2a",
+    "crates/ego-listen",
+    "crates/ego-mcp",
+    "crates/ego-cli",
+]
+exclude = ["vendor/process-wrap", "vendor/reedline", "vendor/crossterm"]
+resolver = "3"
+
+[workspace.package]
+version = "0.4.3"
+edition = "2024"
+# Minimum Rust version required by the workspace and vendored terminal libraries.
+rust-version = "1.95.0"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+minijinja = { version = "=2.12.0", default-features = false, features = ["builtins", "debug", "multi_template", "fuel", "serde"] }
+ego-core = { path = "crates/ego-core" }
+ego-listen = { path = "crates/ego-listen" }
+ego-mcp = { path = "crates/ego-mcp" }
+yaml-rust2 = "0.12.0"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+# Keep source locations in backtraces with smaller debug artifacts.
+[profile.dev]
+debug = "line-tables-only"
+
+# The process capability cache hashes the running executable (tens of MB); at
+# opt-level 0 that read cost ~4.7 s per session/new in a dev build.
+[profile.dev.package.sha2]
+opt-level = 3
+
+[patch.crates-io]
+# DEFERRED (2026-10-17) — Drop this copy when upstream fixes Escape/CPR
+# ownership in src/event/source/unix/{mio,tty}.rs, Parser::advance (lines 198/247).
+crossterm = { path = "vendor/crossterm" }
