@@ -1,0 +1,52 @@
+name: ego 0.4.19 candidate
+on:
+  push:
+    branches: [staging/ego-0.4.19]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: macos-15, target: aarch64-apple-darwin, asset: macos-arm64}
+          - {os: macos-15-intel, target: x86_64-apple-darwin, asset: macos-x64}
+          - {os: ubuntu-22.04, target: x86_64-unknown-linux-gnu, asset: linux-x64}
+          - {os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, asset: linux-arm64}
+          - {os: windows-2025, target: x86_64-pc-windows-msvc, asset: windows-x64}
+    env:
+      TARGET: ${{ matrix.target }}
+      EGO_BUILD_COMMIT: 5026ad9ac
+      CARGO_PROFILE_RELEASE_STRIP: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify runtime tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          git rm --cached -- .github/workflows/ego-release-precheck.yml scripts/package-release.sh scripts/check-glibc.sh
+          test "$(git write-tree)" = 8d6437c235f23dd26439f2cfdecc49eeb7a7a035
+      - name: Build and smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --target "$TARGET"
+          cargo +1.98.1 build --release --locked -p ego-cli --bin ego --target "$TARGET"
+          bin="target/$TARGET/release/ego"
+          if [[ "$RUNNER_OS" == Windows ]]; then bin+=.exe; fi
+          version=$("$bin" --version | tr -d '\r')
+          test "$version" = 'ego 0.4.19'
+          "$bin" --help >/dev/null
+          if [[ "$RUNNER_OS" == Linux ]]; then scripts/check-glibc.sh "$bin" 2.35; fi
+          scripts/package-release.sh "$TARGET" '${{ matrix.asset }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ego-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
