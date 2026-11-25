@@ -203,10 +203,10 @@ fn render_page(page: &Mutex<PageState>, status: &SharedStatus) -> String {
     table.extend(matches[start..end].iter().enumerate().map(|(index, meta)| {
         let stamp = i64::try_from(meta.updated.as_millis())
             .ok()
-            .and_then(chrono::DateTime::from_timestamp_millis)
+            .and_then(|ms| jiff::Timestamp::from_millisecond(ms).ok())
             .map(|at| {
-                at.with_timezone(&chrono::Local)
-                    .format("%Y-%m-%d %H:%M")
+                at.to_zoned(jiff::tz::TimeZone::system())
+                    .strftime("%Y-%m-%d %H:%M")
                     .to_string()
             })
             .unwrap_or_else(|| "—".into());

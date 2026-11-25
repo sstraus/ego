@@ -1440,8 +1440,8 @@ async fn mutation_suite(
 
     let link_source = root.join("link-source");
     let link_destination = root.join("link-destination");
-    if fs::write(&link_source, b"link").is_err()
-        || probe(
+    fs::write(&link_source, b"link").is_ok()
+        && probe(
             backend,
             evidence,
             cancel,
@@ -1454,12 +1454,8 @@ async fn mutation_suite(
             ],
         )
         .await
-            != allowed
-        || link_destination.exists() != allowed
-    {
-        return false;
-    }
-    true
+            == allowed
+        && link_destination.exists() == allowed
 }
 
 /// Run one probe command through the production path and keep the outcome.

@@ -37,6 +37,10 @@ conformance repairs, or that an earlier version section already lists. The relea
 - Preserve the `/side` cache prefix when the active turn offers provider-hosted web search. `/side` can use that search but never runs local tools (#867-af6f).
 - Start subagents on the first valid launch request instead of discarding the call and asking the model to repeat it.
 
+### Security
+
+- Update the MCP SDK, bundled SQLite, and URL parser to address dependency advisories. Replace the unmaintained date-time library.
+
 ## [0.4.19] - 2026-11-25
 
 <!-- internal: 1152-8424 -->

@@ -3,7 +3,6 @@
 mod context;
 mod estimate;
 
-use chrono::{Local, TimeZone};
 use ego_core::cost::Money;
 use ego_core::run::RunTermination;
 use ego_core::state::ContextWindow;
@@ -11,6 +10,7 @@ use ego_core::usage::{
     CostBreakdown, EstimateBasis, UsageLine, UsagePeriod, UsageReport, UsageReportService,
 };
 use ego_tools::clock::SystemClock;
+use jiff::{Timestamp as JiffTimestamp, tz::TimeZone};
 
 use crate::cli::{UsageArgs, UsageError};
 use crate::output::Stdout;
@@ -149,7 +149,7 @@ pub(crate) fn render_text(
     all_roles: bool,
     context: Option<ContextWindow>,
 ) -> String {
-    render_text_in(report, all_roles, context, &Local, None)
+    render_text_in(report, all_roles, context, &TimeZone::system(), None)
 }
 
 /// Render interactive usage within the current terminal width.
@@ -158,20 +158,23 @@ pub(crate) fn render_interactive(
     context: ContextWindow,
     width: usize,
 ) -> String {
-    render_text_in(report, false, Some(context), &Local, Some(width.max(1)))
+    render_text_in(
+        report,
+        false,
+        Some(context),
+        &TimeZone::system(),
+        Some(width.max(1)),
+    )
 }
 
 /// [`render_text`] with the time zone `as_of` is written in made explicit.
-fn render_text_in<Tz: TimeZone>(
+fn render_text_in(
     report: &UsageReport,
     all_roles: bool,
     context: Option<ContextWindow>,
-    zone: &Tz,
+    zone: &TimeZone,
     width: Option<usize>,
-) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
+) -> String {
     let period = match report.period {
         UsagePeriod::All => "all".to_string(),
         UsagePeriod::Last { seconds } => format!("last {}s", seconds.get()),
@@ -221,16 +224,17 @@ where
 }
 
 /// An instant as a minute-precision calendar time in `zone`.
-fn local_stamp<Tz: TimeZone>(zone: &Tz, millis: u64) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
+fn local_stamp(zone: &TimeZone, millis: u64) -> String {
     i64::try_from(millis)
         .ok()
-        .and_then(|millis| zone.timestamp_millis_opt(millis).single())
+        .and_then(|millis| JiffTimestamp::from_millisecond(millis).ok())
         .map_or_else(
             || "an unrepresentable time".to_string(),
-            |at| at.format("%Y-%m-%d %H:%M").to_string(),
+            |at| {
+                at.to_zoned(zone.clone())
+                    .strftime("%Y-%m-%d %H:%M")
+                    .to_string()
+            },
         )
 }
 
@@ -384,11 +388,11 @@ fn money_text(money: &Money) -> String {
 #[cfg(test)]
 mod text_red {
     use super::*;
-    use chrono::FixedOffset;
     use ego_core::cost::{Amount, CurrencyCode, UnknownCost};
     use ego_core::event::time::Timestamp;
     use ego_core::state::Usage;
     use ego_core::usage::UsageLines;
+    use jiff::tz::Offset;
 
     fn line(cost: CostBreakdown) -> UsageLine {
         UsageLine {
@@ -449,7 +453,7 @@ mod text_red {
     fn the_header_shows_a_local_date_and_not_an_epoch_number() {
         // 2026-09-29 06:13:31 UTC.
         let as_of = 1_790_662_411_741;
-        let zone = FixedOffset::east_opt(2 * 3600).expect("offset");
+        let zone = Offset::constant(2).to_time_zone();
         let text = render_text_in(&report(as_of, none()), false, None, &zone, None);
         let header = text.lines().next().expect("header");
         assert_eq!(header, "usage as of 2026-09-29 08:13 period=all");
@@ -556,7 +560,7 @@ mod text_red {
             window: Some(200_000),
             ..ContextWindow::default()
         };
-        let zone = FixedOffset::east_opt(0).expect("offset");
+        let zone = TimeZone::UTC;
         let text = render_text_in(&report(0, none()), false, Some(context), &zone, None);
         assert!(
             text.lines()

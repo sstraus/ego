@@ -14,7 +14,9 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn local_datetime(&self) -> String {
-        chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)
+        jiff::Zoned::now()
+            .strftime("%Y-%m-%dT%H:%M:%S%:z")
+            .to_string()
     }
 
     /// The current time, or the epoch if the system clock is set before it.

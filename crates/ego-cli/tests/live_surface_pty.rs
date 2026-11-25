@@ -1307,9 +1307,10 @@ fn sessions_picker_contract(populated: bool) {
             .unwrap()["updated"]
             .as_u64()
             .unwrap();
-        let utc = chrono::DateTime::from_timestamp_millis(i64::try_from(millis).unwrap()).unwrap();
-        expected_stamp = (utc - chrono::Duration::hours(10))
-            .format("%Y-%m-%d %H:%M")
+        let utc = jiff::Timestamp::from_millisecond(i64::try_from(millis).unwrap()).unwrap();
+        expected_stamp = utc
+            .to_zoned(jiff::tz::Offset::constant(-10).to_time_zone())
+            .strftime("%Y-%m-%d %H:%M")
             .to_string();
     }
     let ego = places

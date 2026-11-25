@@ -1319,7 +1319,7 @@ impl EventSink for TextSink<'_> {
                 {
                     self.finish();
                     let elapsed = tool_row::duration(started.elapsed());
-                    let clock = chrono::Local::now().format("%-I:%M %p");
+                    let clock = jiff::Zoned::now().strftime("%-I:%M %p").to_string();
                     let outcome = if *ok { "done" } else { "stopped" };
                     let mut receipt = format!("Turn elapsed {elapsed} · {outcome} {clock}");
                     if let Some(lines) = lines {
@@ -1610,13 +1610,13 @@ impl EventSink for TextSink<'_> {
                     format!("attempt {attempt}/{limit}")
                 };
                 let (problem, at) = if *capacity {
-                    let next = chrono::Local::now()
-                        + chrono::TimeDelta::milliseconds(
-                            i64::try_from(*delay_ms).unwrap_or(i64::MAX / 1_000_000),
-                        );
+                    let next =
+                        jiff::Zoned::now().saturating_add(jiff::SignedDuration::from_millis(
+                            i64::try_from(*delay_ms).unwrap_or(i64::MAX),
+                        ));
                     (
                         "provider at capacity",
-                        format!(" at {}", next.format("%-I:%M:%S %p")),
+                        format!(" at {}", next.strftime("%-I:%M:%S %p")),
                     )
                 } else {
                     ("connection problem", String::new())

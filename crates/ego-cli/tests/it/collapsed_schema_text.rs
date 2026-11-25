@@ -449,8 +449,9 @@ fn collapsed_schedule_one_hour_needs_one_discovery_hop() {
                 r#"{"tool_name":"automations"}"#,
             )));
         }
-        let once_local = (chrono::Local::now() + chrono::Duration::hours(1))
-            .format("%Y-%m-%dT%H:%M:%S")
+        let once_local = jiff::Zoned::now()
+            .saturating_add(jiff::SignedDuration::from_hours(1))
+            .strftime("%Y-%m-%dT%H:%M:%S")
             .to_string();
         let arguments = serde_json::json!({
             "tool_name":"automations", "arguments": {"action":"create", "definition": {
@@ -510,11 +511,13 @@ fn collapsed_schedule_one_hour_needs_one_discovery_hop() {
                 .flat_map(str::lines)
                 .find_map(|line| line.strip_prefix("- Current local date-time: "))
                 .expect("current time on each generation");
-            let observed = chrono::DateTime::parse_from_rfc3339(timestamp)
+            let observed = timestamp
+                .parse::<jiff::Timestamp>()
                 .expect("local date-time has an explicit UTC offset");
             assert!(
-                (chrono::Local::now().signed_duration_since(observed))
-                    .num_seconds()
+                jiff::Timestamp::now()
+                    .duration_since(observed)
+                    .as_secs()
                     .abs()
                     < 100
             );

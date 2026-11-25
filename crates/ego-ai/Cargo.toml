@@ -25,7 +25,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 # supplying the feature would stop compiling for a reason unrelated to either.
 serde_json = { version = "1.0.151", features = ["raw_value", "preserve_order"] }
 tracing = "0.1.44"
-url = "2.5.8"
+url = "2.5.9"
 [dev-dependencies]
 reqwest = { version = "0.13", default-features = false, features = ["stream"] }
 tokio = { version = "1", features = ["rt", "macros", "net", "io-util", "test-util"] }

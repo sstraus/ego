@@ -8,7 +8,7 @@ use rmcp::model::{
     CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
     ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion,
     ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
-    ResourceContents, ServerCapabilities, ServerInfo, Tool,
+    ResourceContents, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::{ServerHandler, ServiceExt};
@@ -149,8 +149,8 @@ impl ServerHandler for ServerAdapter {
         Cow::Borrowed(INBOUND_HANDSHAKE_PROTOCOLS)
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()

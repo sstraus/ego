@@ -16,7 +16,7 @@ use futures::stream::BoxStream;
 use http::{HeaderName, HeaderValue};
 use rmcp::model::{
     CallToolRequest, CallToolRequestParams, CallToolResponse, CallToolResult,
-    CancelledNotificationParam, ClientCapabilities, ClientInfo, ClientJsonRpcMessage,
+    CancelledNotificationParam, ClientCapabilities, ClientConfig, ClientJsonRpcMessage,
     ClientRequest, ElicitationCapability, FormElicitationCapability, GetPromptRequest,
     GetPromptRequestParams, GetPromptResponse, GetPromptResult, Implementation, ListPromptsRequest,
     ListResourcesRequest, ListToolsRequest, PaginatedRequestParams, Prompt, ProtocolVersion,
@@ -773,7 +773,7 @@ struct AcpConnection {
 enum ClientState {
     Pending(PendingTransport),
     Running {
-        service: RunningService<RoleClient, ClientInfo>,
+        service: RunningService<RoleClient, ClientConfig>,
         duplex: Option<SharedDuplex>,
     },
     Failed {
@@ -986,7 +986,7 @@ impl McpClient {
         };
         let tasks = self.options.tasks
             && matches!(state, ClientState::Pending(PendingTransport::Http { .. }));
-        let client_info = ClientInfo::new(
+        let client_info = ClientConfig::new(
             client_capabilities(tasks),
             Implementation::new("ego", env!("CARGO_PKG_VERSION")),
         )
@@ -1009,7 +1009,7 @@ impl McpClient {
                             Arc::clone(&self.control),
                         )
                         .await?;
-                        let info = ClientInfo::new(
+                        let info = ClientConfig::new(
                             ClientCapabilities::default(),
                             Implementation::new("ego", env!("CARGO_PKG_VERSION")),
                         )
@@ -1513,7 +1513,7 @@ impl McpClient {
 
     fn running_service_mut(
         &mut self,
-    ) -> Result<&mut RunningService<RoleClient, ClientInfo>, McpError> {
+    ) -> Result<&mut RunningService<RoleClient, ClientConfig>, McpError> {
         if self.control.cancelled.load(Ordering::Acquire) {
             return Err(McpError::new(
                 McpFailure::Cancelled,
@@ -1543,7 +1543,7 @@ impl McpClient {
     }
 
     async fn list_current_tools(
-        service: &mut RunningService<RoleClient, ClientInfo>,
+        service: &mut RunningService<RoleClient, ClientConfig>,
         options: McpClientOptions,
         control: Arc<ClientControl>,
     ) -> Result<CurrentList<rmcp::model::Tool>, McpError> {
@@ -1585,7 +1585,7 @@ impl McpClient {
     }
 
     async fn list_current_resources(
-        service: &mut RunningService<RoleClient, ClientInfo>,
+        service: &mut RunningService<RoleClient, ClientConfig>,
         options: McpClientOptions,
         control: Arc<ClientControl>,
     ) -> Result<CurrentList<Resource>, McpError> {
@@ -1627,7 +1627,7 @@ impl McpClient {
     }
 
     async fn list_current_prompts(
-        service: &mut RunningService<RoleClient, ClientInfo>,
+        service: &mut RunningService<RoleClient, ClientConfig>,
         options: McpClientOptions,
         control: Arc<ClientControl>,
     ) -> Result<CurrentList<Prompt>, McpError> {
@@ -1669,7 +1669,7 @@ impl McpClient {
     }
 
     async fn send_current_request(
-        service: &mut RunningService<RoleClient, ClientInfo>,
+        service: &mut RunningService<RoleClient, ClientConfig>,
         request: ClientRequest,
         options: McpClientOptions,
         control: Arc<ClientControl>,

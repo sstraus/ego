@@ -8,7 +8,7 @@ publish.workspace = true
 
 [dependencies]
 base64 = "0.22.1"
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+jiff = "0.2.39"
 # Match reqwest's OS trust policy, including system-managed inspection CAs.
 async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-platform-verifier"] }
 ego-core.workspace = true
@@ -38,7 +38,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 # Already locked transitively; typed, payload-free TLS diagnostics only.
 rustls = { version = "0.23.46", default-features = false, features = ["std"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -52,7 +52,7 @@ tokio-util = { version = "0.7", features = ["compat"] }
 toml = "1.1.4"
 toml_edit = "0.25.13"
 tracing = "0.1.44"
-url = "2.5.8"
+url = "2.5.9"
 zeroize = "1.9.0"
 # Cold session storage (story 841): ego's own zstd siblings, cross-platform.
 zstd = { version = "0.14", default-features = false }

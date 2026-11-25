@@ -408,9 +408,10 @@ fn retry_at(value: Option<&str>, now: u64) -> u64 {
                 .ok()
                 .map(|seconds| now.saturating_add(seconds.saturating_mul(1000)))
                 .or_else(|| {
-                    chrono::DateTime::parse_from_rfc2822(s)
+                    jiff::fmt::rfc2822::DateTimeParser::new()
+                        .parse_timestamp(s)
                         .ok()
-                        .and_then(|date| u64::try_from(date.timestamp_millis()).ok())
+                        .and_then(|date| u64::try_from(date.as_millisecond()).ok())
                 })
         })
         .unwrap_or_else(|| now.saturating_add(CADENCE_MS))
@@ -425,9 +426,11 @@ fn percent(value: &Value) -> Option<serde_json::Number> {
 
 fn reset(value: &Value) -> Option<u64> {
     value.as_u64().or_else(|| {
-        chrono::DateTime::parse_from_rfc3339(value.as_str()?)
+        value
+            .as_str()?
+            .parse::<jiff::Timestamp>()
             .ok()
-            .and_then(|date| u64::try_from(date.timestamp()).ok())
+            .and_then(|date| u64::try_from(date.as_second()).ok())
     })
 }
 

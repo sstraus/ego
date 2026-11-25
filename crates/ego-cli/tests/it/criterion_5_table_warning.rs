@@ -194,7 +194,7 @@ fn capacity_retry_notice_names_capacity_the_wait_and_the_next_attempt_time() {
     let (clock, counter) = tail.split_once(" (").expect("attempt counter");
     assert_eq!(counter, "attempt 1/3)");
     assert!(
-        chrono::NaiveTime::parse_from_str(clock, "%I:%M:%S %p").is_ok(),
+        jiff::civil::Time::strptime("%I:%M:%S %p", clock).is_ok(),
         "next attempt time: {clock}"
     );
 }

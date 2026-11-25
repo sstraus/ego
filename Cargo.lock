@@ -1463,7 +1463,6 @@ dependencies = [
  "async-tungstenite",
  "base64 0.22.1",
  "bytes",
- "chrono",
  "clap",
  "clap_complete",
  "clipboard-win",
@@ -1479,6 +1478,7 @@ dependencies = [
  "ego-tools",
  "fd-lock",
  "futures",
+ "jiff",
  "jsonschema",
  "minijinja",
  "nix 0.28.0",
@@ -1583,7 +1583,6 @@ version = "0.4.20"
 dependencies = [
  "async-tungstenite",
  "base64 0.22.1",
- "chrono",
  "ego-core",
  "ego-mcp",
  "ego-tools",
@@ -1594,6 +1593,7 @@ dependencies = [
  "hmac 0.12.1",
  "html2text",
  "ignore",
+ "jiff",
  "jsonschema",
  "keyring",
  "landlock",
@@ -1839,9 +1839,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -2772,9 +2772,9 @@ checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.38.2"
+version = "0.39.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
+checksum = "14a5f01b87b92705d07b433c06f96cbc764637d81a0bffb5734ce17cf0f9a2b3"
 dependencies = [
  "cc",
  "pkg-config",
@@ -3779,9 +3779,9 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "3.1.4"
+version = "3.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a15bc53261a9dc37e105df006e4656c598379a8f9581f8950debb130f27a7cf"
+checksum = "d24a7e92f4bcaa36b97fa93c4fa7ca8f3e669eced949345b3462dba333c7f909"
 dependencies = [
  "base64 0.23.1",
  "bytes",
@@ -3790,6 +3790,7 @@ dependencies = [
  "hmac 0.13.0",
  "http",
  "indexmap 2.14.2",
+ "libc",
  "pastey",
  "pin-project-lite",
  "schemars 1.2.3",
@@ -3818,9 +3819,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.40.2"
+version = "0.41.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "23f2a97da3e3873c73cb2a2e71b35c40ff95e0b1eefa8d72d8499a6928c3b5b3"
+checksum = "da9bba6f3506135e120a6586df05be18b48d18896600646a4bec8f993d91a594"
 dependencies = [
  "bitflags 2.13.2",
  "fallible-iterator",
@@ -5055,9 +5056,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
