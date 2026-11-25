@@ -31,9 +31,10 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                             "command file reference leaves its scope or exceeds eight files".into(),
                         );
                     }
-                    let (_, call) = self
-                        .tools
-                        .prepare("read", &serde_json::json!({"path":path}).to_string())?;
+                    let (_, call) = self.tools.prepare(
+                        "read",
+                        &serde_json::json!({"files":[{"path":path}]}).to_string(),
+                    )?;
                     let file = call
                         .ops()
                         .iter()
@@ -136,8 +137,8 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                         .await
                         .map_err(|e| e.to_string())?;
                     let (ok, mut result) = match outcome {
-                        ToolOutcome::Answered { ok, result }
-                        | ToolOutcome::Executed { ok, result, .. } => (ok, result),
+                        ToolOutcome::Answered { ok, result } => (ok, result),
+                        ToolOutcome::Executed { status, result, .. } => (status.ok(), result),
                         ToolOutcome::Refused { denial } => return Err(denial.to_string()),
                         ToolOutcome::Unanswerable { .. } => {
                             return Err("command shell preprocessing requires permission".into());

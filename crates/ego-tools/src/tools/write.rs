@@ -1,68 +1,76 @@
-//! `write`: one named file, replaced whole, through the guarded seam.
+//! `write`: whole-file replacements through the guarded seam.
 
+use super::edit::{diff_lines, diff_summary};
+use super::{resolve_target, wrong_op};
 use ego_core::permit::{
-    Change, GuardedIo, Op, PrepareCtx, PreparedCall, ToolError, ToolResult, TypedTool,
+    BEFORE_IMAGE_LIMIT, BeforeImage, Change, FileWriteEvidence, GuardedIo, Op, PrepareCtx,
+    PreparedCall, ToolError, ToolResult, TypedTool,
 };
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
 use serde::Deserialize;
-
-use super::{only_op, resolve_target, wrong_op};
+use serde_json::json;
 
 #[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct WriteParams {
-    /// The file to write. Absolute, or relative to the working directory.
-    /// It is created if it does not exist; its parent directory must.
+    /// One to sixteen complete file replacements.
+    #[schemars(length(min = 1, max = 16))]
+    pub files: Vec<WriteFile>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WriteFile {
+    /// Absolute, or relative to the working directory.
     pub path: String,
-    /// The complete new contents. This replaces the file, it does not append
-    /// to it.
+    /// The complete replacement contents.
     pub contents: String,
 }
 
-/// Replaces one file's contents. The first builtin that can do damage.
-///
-/// **Whole-file, and that is the shape rather than a simplification.** This is
-/// the tool whose effect can be read off the call with nothing else known:
-/// [`Change::Whole`] carries the bytes that will be on disk afterwards, so what
-/// the permission system weighs — and what a human would be shown — is the
-/// content itself. `edit` is the tool for changing a region, and it pays for
-/// that with a `Change` whose result depends on the file it finds.
 pub struct WriteTool;
-
 impl TypedTool for WriteTool {
     type Params = WriteParams;
-
     fn name(&self) -> &str {
         "write"
     }
-
     fn description(&self) -> &str {
-        "Write a complete file; use edit for targeted substitutions. Replaces all existing contents. Creates the file if it does not exist; \
-         its parent directory must already exist. The path may be absolute or relative to the \
-         working directory."
+        "Replace 1 to 16 complete files in order. All operations require admission before writing; execution stops on the first error."
     }
-
     fn prepare_typed(
         &self,
         params: WriteParams,
         ctx: &PrepareCtx<'_>,
     ) -> Result<PreparedCall, ToolError> {
-        Ok(PreparedCall::new(
-            self.name(),
-            Op::Write {
-                // `resolve_target`, not `resolve`: a write whose target had to
-                // already exist could only ever overwrite.
-                path: resolve_target(ctx, &params.path)?,
-                // The bytes ride in the operation, so what policy weighs and
-                // what a human would be shown is the content itself and not a
-                // promise about it. A tool that kept its params and wrote
-                // those instead would be authorised for one thing and perform
-                // another.
-                change: Change::Whole(params.contents.into_bytes()),
-            },
-        ))
+        if !(1..=16).contains(&params.files.len()) {
+            return Err(ToolError::InvalidParams(
+                "files must contain 1 to 16 entries".into(),
+            ));
+        }
+        let mut ops = Vec::new();
+        let mut paths = Vec::new();
+        let mut names = Vec::new();
+        for file in params.files {
+            let path = resolve_target(ctx, &file.path)?;
+            if paths.contains(&path) {
+                return Err(ToolError::InvalidParams(
+                    "duplicate resolved write target".into(),
+                ));
+            }
+            paths.push(path.clone());
+            names.push(file.path);
+            ops.push(Op::Write {
+                path,
+                change: Change::Whole(file.contents.into_bytes()),
+            });
+        }
+        let mut ops = ops.into_iter();
+        let mut call = PreparedCall::new(self.name(), ops.next().expect("nonempty"));
+        for op in ops {
+            call = call.with_op(op);
+        }
+        Ok(call.with_write_items(names))
     }
-
     fn execute<'a, 'io>(
         &'a self,
         call: PreparedCall,
@@ -72,23 +80,79 @@ impl TypedTool for WriteTool {
         'io: 'a,
     {
         Box::pin(async move {
-            let Op::Write {
-                path,
-                change: Change::Whole(contents),
-            } = only_op(call)?
-            else {
+            let names = call.write_items().to_vec();
+            let (_, ops) = call.into_parts();
+            if ops.is_empty() || ops.len() != names.len() {
                 return Err(wrong_op(self.name()));
-            };
-            // The bytes come out of the authorised call, never out of the
-            // params — see `prepare_typed`.
-            io.write(&path, &contents)?;
-            Ok(ToolResult::builtin(format!(
-                "wrote {} bytes to {path}{}",
-                contents.len(),
-                io.write_notice(&path)
-                    .map(|notice| format!("\n{notice}"))
-                    .unwrap_or_default()
-            )))
+            }
+            let mut items = Vec::new();
+            let mut evidence = Vec::new();
+            let mut failed = false;
+            for (index, op) in ops.into_iter().enumerate() {
+                let Op::Write {
+                    path,
+                    change: Change::Whole(contents),
+                } = op
+                else {
+                    return Err(wrong_op(self.name()));
+                };
+                let name = &names[index];
+                if failed {
+                    items.push(json!({"index": index, "path": name, "status": "unattempted"}));
+                    continue;
+                }
+                let attempt = io.write_attempt(&path, &contents);
+                let summary = match &attempt.before_image {
+                    Some(BeforeImage::New) => {
+                        diff_summary(&diff_lines("", &String::from_utf8_lossy(&contents)))
+                    }
+                    Some(BeforeImage::Text(before)) => {
+                        diff_summary(&diff_lines(before, &String::from_utf8_lossy(&contents)))
+                    }
+                    Some(BeforeImage::Omitted) => {
+                        " (diff omitted: the replaced file is over 64 KiB, not text, or protected)"
+                            .into()
+                    }
+                    None => String::new(),
+                };
+                let notice = if attempt.result.is_ok() || attempt.checkpoint.is_some() {
+                    io.write_notice(&path)
+                } else {
+                    None
+                };
+                match &attempt.result {
+                    Ok(()) => items.push(json!({"index": index, "path": name, "status": "completed", "bytes": contents.len(), "summary": summary, "notice": notice})),
+                    Err(error) => { failed = true; items.push(json!({"index": index, "path": name, "status": "failed", "error": error.to_string(), "possibly_modified": attempt.possibly_modified, "summary": summary, "notice": notice})); }
+                }
+                let after_image = if attempt.result.is_ok()
+                    && matches!(
+                        attempt.before_image,
+                        Some(BeforeImage::New | BeforeImage::Text(_))
+                    )
+                    && contents.len() <= BEFORE_IMAGE_LIMIT
+                {
+                    String::from_utf8(contents).ok()
+                } else {
+                    None
+                };
+                evidence.push(FileWriteEvidence {
+                    path: path.to_string(),
+                    completed: attempt.result.is_ok(),
+                    before_image: attempt.before_image,
+                    after_image,
+                    checkpoint: attempt.checkpoint,
+                    possibly_modified: attempt.possibly_modified,
+                    summary,
+                    notice,
+                });
+            }
+            let result =
+                ToolResult::builtin(json!({"files":items}).to_string()).with_file_writes(evidence);
+            if failed {
+                Err(ToolError::WriteFailed(Box::new(result)))
+            } else {
+                Ok(result)
+            }
         })
     }
 }

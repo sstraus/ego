@@ -1,5 +1,7 @@
-//! `FakeGenerator`: scriptable generator for tests and deterministic event
-//! replay without a network call.
+//! `FakeGenerator`: a scriptable `Generator` for tests and for the
+//! eval/replay seam (U3, the design notes) — record a real session's
+//! `AiEvent` stream once, then replay it deterministically without a
+//! network call.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;

@@ -1,9 +1,11 @@
 //! ACP v1 permission adapter: the connected host is the sole human seat.
 //!
-//! The connected client is the sole human seat in an ACP-owned turn.
-//! The adapter must not open stdin when that client cannot answer. Questions
-//! carry the canonical operation; every answer other than an explicit grant
-//! settles as a denial.
+//! the design notes
+//! makes the connected client the only person in an ACP-owned turn, and
+//! forbids the adapter from opening stdin when that client cannot answer.
+//! Everything below exists to keep both halves of that true: the question
+//! carries the canonical operation, and every answer that is not an explicit
+//! grant settles as a denial.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -19,6 +21,13 @@ use ego_core::permit::{Escalation, HumanApprover, Op, PermissionDecision, Permis
 
 /// Atomic user-rule mutation owned by the binary, never by the ACP host.
 pub trait PermissionRuleWriter: std::fmt::Debug + Send + Sync {
+    /// Whether a stored user deny covers a sandbox request.
+    fn denies_sandbox(
+        &self,
+        grant: &ego_core::permit::SandboxGrant,
+        workspace: &std::path::Path,
+    ) -> Result<bool, String>;
+
     fn remember<'a>(
         &'a self,
         effect: ManagedRuleEffect,
@@ -169,6 +178,9 @@ impl AcpPermissionAdapter {
                     format!("{dimension:?}").to_lowercase()
                 ));
             }
+            if plan.discloses_values() {
+                title.push_str(&format!("\nWarning: {}", RememberPlan::DISCLOSURE_NOTICE));
+            }
         }
         Self::wire_request(
             &self.session,
@@ -193,7 +205,7 @@ impl AcpPermissionAdapter {
             v1::RequestPermissionOutcome::Selected(selected)
                 if selected.option_id.0.as_ref() == Self::ALLOW_ONCE =>
             {
-                PermissionDecision::Allow
+                PermissionDecision::AllowOnce
             }
             _ => PermissionDecision::Deny,
         }
@@ -213,7 +225,8 @@ impl AcpPermissionAdapter {
     /// from its side the prompt is still open.
     async fn decide_live(&self, item: ItemId, request: PermissionRequest) -> PermissionDecision {
         let Some(connection) = self.connection.as_ref() else {
-            // No seat is not consent. Never open terminal input behind an ACP connection.
+            // No seat is not consent, and the fallback a terminal would offer
+            // is the second invisible human the ADR rejects.
             return PermissionDecision::Deny;
         };
         // A previous tool-session grant cannot approve newly reconstructed

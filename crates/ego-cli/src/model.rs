@@ -38,6 +38,13 @@ use crate::facts;
 /// point the binary at a loopback stub without a network.
 pub const OLLAMA_HOST: &str = "OLLAMA_HOST";
 
+#[cfg(test)]
+thread_local! {
+    /// A recording transport scoped to the current-thread native driver fixture.
+    pub(crate) static TEST_DRIVER_PROVIDER_HTTP: std::cell::RefCell<Option<Arc<dyn Http>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// The environment variable every openai-compatible client reads to be pointed
 /// somewhere other than `api.openai.com`.
 ///
@@ -52,8 +59,11 @@ pub const OPENROUTER_BASE_URL: &str = "OPENROUTER_BASE_URL";
 /// The variable every Anthropic client reads to be pointed somewhere other
 /// than `api.anthropic.com`.
 ///
-/// Offline hosted tests use this selectable row with supplied rates,
-/// independently of the public OpenAI mapping.
+/// It exists for the reason the other two do, and it became *necessary* on
+/// 2026-09-07. Until then `openai` was the only hosted row a test could point
+/// at a stub, so it carried every offline assertion about hosted behaviour;
+/// `2026-09-03-public-provider-wires-require-live-promotion.md` moved that row
+/// to Responses and made it unselectable pending live evidence.
 ///
 /// `anthropic` and not `openrouter` is the row that inherits those tests,
 /// because the two settle identically: both declare
@@ -69,10 +79,18 @@ pub const ANTHROPIC_BASE_URL: &str = "ANTHROPIC_BASE_URL";
 /// URLs. Ollama and OpenAI use `/v1/`. Anthropic preserves a gateway prefix
 /// and appends `/v1/` only when that suffix is absent.
 ///
-/// Rows carry versioned base URLs, not request endpoints. Mappings join
-/// their own paths onto those bases.
+/// It sets a versioned base, not a request endpoint: a row carries a base and the
+/// mapping joins its own path onto it
+/// (the design notes
+/// §2). Both variables name a *server*, which is what a base is, so this is
+/// also the spelling an operator already has in them.
 fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
-    let Ok(given) = std::env::var(var) else {
+    base_from(var, std::env::var(var).ok().as_deref(), fallback)
+}
+
+/// [`base`] over an already-read variable value.
+fn base_from(var: &str, given: Option<&str>, fallback: &str) -> Result<Url, ResolveError> {
+    let Some(given) = given else {
         return Ok(Url::parse(fallback).expect("a constant this file controls"));
     };
     let given = given.trim();
@@ -85,6 +103,19 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
         endpoint: given.to_string(),
         message: format!("{var} is not an address: {err}"),
     })?;
+    if var == OLLAMA_HOST {
+        // A server bind address is not a destination. Map the unspecified
+        // address to loopback, as the Ollama client does.
+        match url.host() {
+            Some(url::Host::Ipv4(address)) if address.is_unspecified() => {
+                let _ = url.set_ip_host(std::net::Ipv4Addr::LOCALHOST.into());
+            }
+            Some(url::Host::Ipv6(address)) if address.is_unspecified() => {
+                let _ = url.set_ip_host(std::net::Ipv6Addr::LOCALHOST.into());
+            }
+            _ => {}
+        }
+    }
     if var == ANTHROPIC_BASE_URL {
         let prefix = url.path().trim_end_matches('/');
         let path = if prefix.ends_with("/v1") {
@@ -99,35 +130,69 @@ fn base(var: &str, fallback: &str) -> Result<Url, ResolveError> {
     Ok(url)
 }
 
+/// The request and status views share the same provider-over-global choice.
+pub(crate) fn selected_protocol_filter<'a>(
+    auth: &'a std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
+    global: Option<&'a ego_core::config::ProtocolFilterConfig>,
+    provider: &str,
+) -> Option<(&'a ego_core::config::ProtocolFilterConfig, &'static str)> {
+    auth.get(provider)
+        .and_then(|auth| auth.protocol_filter.as_ref())
+        .map(|filter| (filter, "provider"))
+        .or_else(|| global.map(|filter| (filter, "global")))
+}
+
 /// The rows this build knows how to reach.
 ///
-/// All rows exist regardless of credentials. They name credential variables
-/// without reading them, so a missing key is an authentication state, not
-/// an unknown-provider error.
+/// Every row, unconditionally. A row names the variable its credential lives
+/// in and never reads it
+/// (the design notes §3), so a
+/// machine with no `OPENAI_API_KEY` still *has* an OpenAI row — it simply
+/// cannot authenticate against it yet, which is a different sentence and a
+/// different error.
 ///
 /// It used to be conditional, because a row could not be built without a key.
 /// That made a missing credential indistinguishable from an unknown provider
 /// and forced [`resolve`] to name one provider by hand to say the true thing.
 ///
-/// The API-key `xai` candidate stays absent. `xai-oauth` is a distinct
-/// subscription contract with separate metering; Gemini is present.
+/// The API-key `xai` candidate remains absent. The distinct `xai-oauth` row
+/// is present because the Pi ∪ Hermes inclusion decision explicitly promotes
+/// that subscription contract without collapsing its metering into the API
+/// key row. Gemini used to be absent for want of acceptance evidence and is
+/// now present:
+/// the design notes.
 pub(crate) fn rows(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Vec<ProviderRow>, ResolveError> {
-    let mut rows = mapped_rows(
+    let address = std::env::var(OPENROUTER_BASE_URL)
+        .unwrap_or_else(|_| ego_ai::provider::OPENROUTER_BASE.to_owned());
+    let openrouter = Url::parse(&address).map_err(|error| ResolveError::EndpointUnreachable {
+        endpoint: "OpenRouter API base".to_owned(),
+        message: error.to_string(),
+    })?;
+    let mut rows = ego_ai::conformance::final_provider_rows(
         ProviderRow::ollama(base(OLLAMA_HOST, OLLAMA_BASE)?),
         ProviderRow::openai_at(base(OPENAI_BASE_URL, OPENAI_BASE)?),
         ProviderRow::anthropic(base(ANTHROPIC_BASE_URL, ANTHROPIC_BASE)?),
-    );
+        ProviderRow::openrouter(openrouter),
+        ProviderRow::bedrock(bedrock_base()?),
+    )
+    .map_err(ResolveError::DuplicateProvider)?;
     for row in &mut rows {
-        if row.id() == "openrouter" {
-            let address = std::env::var(OPENROUTER_BASE_URL)
-                .unwrap_or_else(|_| ego_ai::provider::OPENROUTER_BASE.to_owned());
-            let url = Url::parse(&address).map_err(|error| ResolveError::EndpointUnreachable {
-                endpoint: "OpenRouter API base".to_owned(),
-                message: error.to_string(),
-            })?;
-            *row = ProviderRow::openrouter(url);
+        if row.id() == "gemini" && std::env::var_os("GEMINI_BASE_URL").is_some() {
+            let endpoint = base("GEMINI_BASE_URL", ego_ai::provider::GEMINI_BASE)?;
+            if !endpoint.host_str().is_some_and(|host| {
+                host.trim_matches(['[', ']'])
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+            }) || !matches!(endpoint.scheme(), "http" | "https")
+            {
+                return Err(ResolveError::EndpointUnreachable {
+                    endpoint: "Gemini API base".into(),
+                    message: "GEMINI_BASE_URL requires an HTTP(S) loopback IP".into(),
+                });
+            }
+            *row = ProviderRow::gemini(endpoint);
         }
         if let Some(config) = auth.get(row.id()) {
             let overlay = config
@@ -146,12 +211,27 @@ pub(crate) fn rows(
     Ok(rows)
 }
 
-fn mapped_rows(
-    ollama: ProviderRow,
-    openai: ProviderRow,
-    anthropic: ProviderRow,
-) -> Vec<ProviderRow> {
-    ego_ai::conformance::final_provider_rows(ollama, openai, anthropic).into()
+/// The Bedrock base for the region the AWS SDKs would use.
+///
+/// `AWS_REGION`, then `AWS_DEFAULT_REGION`, then the documented default: the
+/// order the AWS CLI and SDKs read them. A blank variable is no region.
+fn bedrock_base() -> Result<Url, ResolveError> {
+    let region = ["AWS_REGION", "AWS_DEFAULT_REGION"]
+        .into_iter()
+        .find_map(|var| {
+            std::env::var(var)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| (var, value))
+        });
+    let (var, region) = region.unwrap_or((
+        "the default region",
+        ego_ai::provider::BEDROCK_DEFAULT_REGION.to_owned(),
+    ));
+    ego_ai::provider::bedrock_base(&region).ok_or_else(|| ResolveError::EndpointUnreachable {
+        endpoint: region.trim().to_owned(),
+        message: format!("{var} is not an AWS region"),
+    })
 }
 
 /// Assemble the one resolver-selected catalogue from current rows and facts.
@@ -160,6 +240,18 @@ pub(crate) fn catalogue(
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
 ) -> Result<Catalogue, ResolveError> {
     Ok(catalogue_from_rows(hosted, rows(auth)?))
+}
+
+/// Compose trusted deployments into the same catalogue before any credential effect.
+pub(crate) fn catalogue_with_instances(
+    hosted: Vec<(String, facts::Hosted)>,
+    auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
+    providers: &ego_core::config::ResolvedProviders,
+    connections: &std::collections::BTreeMap<String, ego_core::config::ConnectionConfig>,
+) -> Result<Catalogue, String> {
+    catalogue(hosted, auth)
+        .map_err(|error| error.to_string())?
+        .with_instances(providers, connections)
 }
 
 fn catalogue_from_rows(hosted: Vec<(String, facts::Hosted)>, rows: Vec<ProviderRow>) -> Catalogue {
@@ -177,21 +269,18 @@ fn catalogue_from_rows(hosted: Vec<(String, facts::Hosted)>, rows: Vec<ProviderR
 /// catalogue value; the returned profile cannot carry metering or pricing.
 pub(crate) fn supplied_request_profile(
     identity: &ModelRef,
+    providers: &ego_core::config::ResolvedProviders,
+    connections: &std::collections::BTreeMap<String, ego_core::config::ConnectionConfig>,
 ) -> Result<Option<StaticRequestProfile>, GenerationModelError> {
     let hosted = facts::supplied(&Ceilings::default()).map_err(|error| {
         GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
     })?;
     let slug = ModelSlug::parse(&identity.0).map_err(generation_error)?;
-    let catalogue = catalogue_from_rows(
-        hosted,
-        mapped_rows(
-            ProviderRow::ollama_default(),
-            ProviderRow::openai_at(
-                Url::parse(OPENAI_BASE).expect("the built-in OpenAI base is a URL"),
-            ),
-            ProviderRow::anthropic_default(),
-        ),
-    );
+    let rows = ego_ai::conformance::default_final_provider_rows()
+        .map_err(|error| generation_error(ResolveError::DuplicateProvider(error)))?;
+    let catalogue = catalogue_from_rows(hosted, rows)
+        .with_instances(providers, connections)
+        .map_err(|message| GenerationModelError::new(GenerationModelErrorClass::Usage, message))?;
     catalogue
         .static_request_profile(&slug)
         .map_err(generation_error)
@@ -213,6 +302,29 @@ pub(crate) fn reasoning_default_notice(
 
 /// Use the least effort the resolved judge explicitly supports.
 /// Startup and generation must validate the same effort policy.
+/// The permission judge reasons: a low effort when the model offers one.
+pub(crate) fn judge_reasoning(
+    capabilities: &ego_core::generator::capabilities::ModelCapabilities,
+) -> Result<ThinkingLevel, ego_core::generator::capabilities::ReasoningSelectionError> {
+    use ego_core::generator::capabilities::ReasoningEffortSupport;
+    let effort = match &capabilities.reasoning_efforts {
+        ReasoningEffortSupport::Only(levels) => [ThinkingLevel::Low, ThinkingLevel::Minimal]
+            .into_iter()
+            .find(|level| levels.contains(level))
+            .or_else(|| {
+                levels
+                    .iter()
+                    .copied()
+                    .find(|level| *level != ThinkingLevel::Off)
+            })
+            .or_else(|| levels.first().copied()),
+        ReasoningEffortSupport::Any => Some(ThinkingLevel::Low),
+        ReasoningEffortSupport::Unknown => None,
+    }
+    .unwrap_or(ThinkingLevel::Off);
+    capabilities.resolve_reasoning_effort(Some(effort))
+}
+
 pub(crate) fn judge_thinking(
     capabilities: &ego_core::generator::capabilities::ModelCapabilities,
 ) -> Result<ThinkingLevel, ego_core::generator::capabilities::ReasoningSelectionError> {
@@ -232,9 +344,12 @@ pub(crate) fn judge_thinking(
 /// error it is. Folding it into [`ResolveError`] would make "your TOML has a
 /// stray bracket" arrive as a statement about a model.
 ///
-/// Read credentials here once and return the resolved value with the model.
-/// The validation check and the eventual request headers then use the same
-/// credential snapshot.
+/// `creds` is passed in for the same reason and one more: this is the *only*
+/// place a credential is read. What comes back beside the model is the
+/// resolved value itself, so the check here and the header sent later cannot
+/// disagree about whether a key exists — they are the same read
+/// (the design notes
+/// §6).
 ///
 /// Returned beside the [`ResolvedModel`] rather than inside it, and that is
 /// the point of the pair: a resolved model is `Clone` and `Debug` and travels
@@ -254,6 +369,7 @@ pub async fn resolve(
         creds,
         auth,
         ResolutionInventory::default(),
+        None,
     )
     .await
 }
@@ -265,9 +381,23 @@ async fn resolve_with_inventory(
     creds: &dyn Credentials,
     auth: &std::collections::HashMap<String, ego_core::config::AuthProviderLayer>,
     inventory: ResolutionInventory,
+    instances: Option<(
+        &ego_core::config::ResolvedProviders,
+        &std::collections::BTreeMap<String, ego_core::config::ConnectionConfig>,
+    )>,
 ) -> Result<(ResolvedModel, ResolvedCredential), ResolveError> {
     let slug = ModelSlug::parse(slug)?;
-    let catalogue = catalogue(hosted, auth)?.with_resolution_inventory(inventory);
+    let catalogue = if let Some((providers, connections)) = instances {
+        catalogue_with_instances(hosted, auth, providers, connections).map_err(|message| {
+            ResolveError::EndpointUnreachable {
+                endpoint: "trusted provider instances".into(),
+                message,
+            }
+        })?
+    } else {
+        catalogue(hosted, auth)?
+    }
+    .with_resolution_inventory(inventory);
     let row = catalogue.row(&slug.provider)?;
     // Before the credential, deliberately: a row nobody may select should not
     // make a keychain prompt or a `credential_command` run, and "no key" is
@@ -329,6 +459,7 @@ pub struct GenerationSelectionSnapshot {
 /// Mutable session selection observed afresh at every main generation boundary.
 #[derive(Debug)]
 pub struct GenerationSelection {
+    connection: std::sync::OnceLock<(String, Option<ego_core::config::ConnectionConfig>)>,
     current: RwLock<Option<MainSelection>>,
     tiers: RwLock<std::collections::HashMap<String, ego_ai::service_tier::ServiceTier>>,
 }
@@ -336,6 +467,7 @@ pub struct GenerationSelection {
 impl GenerationSelection {
     pub fn new(identity: ModelRef, thinking: ThinkingLevel) -> Self {
         Self {
+            connection: std::sync::OnceLock::new(),
             tiers: RwLock::new(Default::default()),
             current: RwLock::new(Some(MainSelection {
                 identity,
@@ -347,14 +479,25 @@ impl GenerationSelection {
 
     fn unresolved() -> Self {
         Self {
+            connection: std::sync::OnceLock::new(),
             current: RwLock::new(None),
             tiers: RwLock::new(Default::default()),
         }
     }
 
+    pub fn connection(&self) -> Option<&str> {
+        self.connection.get().map(|(id, _)| id.as_str())
+    }
+
+    /// A picker-admitted account carries its exact config, which may postdate startup.
+    pub(crate) fn live_connection(&self) -> Option<(&str, &ego_core::config::ConnectionConfig)> {
+        let (id, config) = self.connection.get()?;
+        Some((id, config.as_ref()?))
+    }
+
     /// Install the selection committed by the interactive picker.
     pub fn install(&self, identity: ModelRef, thinking: ThinkingLevel) -> Result<(), String> {
-        self.install_with_commit(identity, thinking, || Ok(()))
+        self.install_with_commit(identity, thinking, None, || Ok(()))
     }
 
     /// Hold the installation authority until its durable commit has succeeded.
@@ -362,18 +505,85 @@ impl GenerationSelection {
         &self,
         identity: ModelRef,
         thinking: ThinkingLevel,
+        account: Option<crate::auth::SavedKeyAccount>,
         commit: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), String> {
         let mut current = self
             .current
             .write()
             .map_err(|_| "the model selection lock is poisoned".to_string())?;
+        if let Some(account) = &account
+            && self.connection().is_some_and(|id| id != account.id)
+        {
+            return Err("this session already has a different saved account".into());
+        }
         commit()?;
+        if let Some(account) = account {
+            // Both pin writers hold the same lock; an existing identical pin wins.
+            let _ = self.connection.set((account.id, Some(account.config)));
+        }
         *current = Some(MainSelection {
             identity,
             thinking,
             explicit_thinking: Some(thinking),
         });
+        Ok(())
+    }
+
+    /// Resolve the exact captured account policy shared by model confirmation and generation.
+    /// `instance_reference` distinguishes a built-in route from an instance with no credential.
+    pub(crate) fn connection_for_route<'a>(
+        &'a self,
+        route: &str,
+        instance_reference: Option<Option<&str>>,
+        captured: Option<&str>,
+        connections: &'a std::collections::BTreeMap<String, ego_core::config::ConnectionConfig>,
+    ) -> Result<Option<(&'a str, &'a ego_core::config::ConnectionConfig)>, String> {
+        let pinned = self.connection().or(captured);
+        if let Some(reference) = instance_reference {
+            if pinned.is_some_and(|id| Some(id) != reference) {
+                return Err(
+                    "connection selection cannot rebind a configured provider instance".into(),
+                );
+            }
+            return reference
+                .map(|id| {
+                    connections
+                        .get_key_value(id)
+                        .map(|(id, connection)| (id.as_str(), connection))
+                        .ok_or_else(|| "instance credential reference is missing".to_owned())
+                })
+                .transpose();
+        }
+        let selected = if let Some((id, Some(connection))) = self.connection.get() {
+            Some((id.as_str(), connection))
+        } else {
+            ego_core::config::select_connection(
+                connections,
+                pinned,
+                Some(crate::auth::connection_vendor(route)),
+            )?
+        };
+        if let Some((_, connection)) = selected {
+            let required = crate::auth::connection_route(connection);
+            if required != route {
+                return Err(format!(
+                    "selected account requires route {required}; selected model uses {route}"
+                ));
+            }
+        }
+        Ok(selected)
+    }
+
+    fn pin_connection(&self, id: &str) -> Result<(), GenerationModelError> {
+        let _current = self.current.write().map_err(|_| selection_lock_error())?;
+        let _ = self.connection.set((id.to_owned(), None));
+        if self.connection() != Some(id) {
+            return Err(GenerationModelError::new(
+                GenerationModelErrorClass::Usage,
+                "connection selection changed after resolution",
+            ));
+        }
         Ok(())
     }
 
@@ -485,6 +695,11 @@ fn unresolved_selection_error() -> GenerationModelError {
 
 /// CLI adapter for the core-owned fresh generation-model port.
 pub struct CliGenerationModelSource {
+    providers: ego_core::config::ResolvedProviders,
+    connection: Option<String>,
+    connection_binding: Option<String>,
+    connections: std::collections::BTreeMap<String, ego_core::config::ConnectionConfig>,
+    cache_ttl_seconds: Option<std::num::NonZeroU64>,
     selection: Arc<GenerationSelection>,
     initial_identity: ModelRef,
     initial_thinking: Option<ThinkingLevel>,
@@ -494,7 +709,9 @@ pub struct CliGenerationModelSource {
     judge: Option<ModelRef>,
     ceilings: Ceilings,
     auth: std::collections::HashMap<String, AuthProviderLayer>,
+    protocol_filter: Option<ego_core::config::ProtocolFilterConfig>,
     credential_commands: Arc<dyn crate::auth::CredentialCommandPort>,
+    catalogue: Result<ego_core::model_catalogue::ModelCatalogue, String>,
 }
 
 impl CliGenerationModelSource {
@@ -505,18 +722,89 @@ impl CliGenerationModelSource {
         ceilings: Ceilings,
         auth: std::collections::HashMap<String, AuthProviderLayer>,
     ) -> Self {
+        let catalogue = crate::models::read_only_catalogue(&auth, &ceilings);
         Self {
+            providers: ego_core::config::ResolvedProviders::default(),
+            connection: None,
+            connection_binding: None,
+            connections: std::collections::BTreeMap::new(),
+            catalogue,
             selection: Arc::new(GenerationSelection::unresolved()),
             initial_identity: identity,
             initial_thinking: thinking,
             output_limit: None,
+            cache_ttl_seconds: None,
             offline: false,
             proxy: None,
             judge,
             ceilings,
             auth,
+            protocol_filter: None,
             credential_commands: Arc::new(crate::auth::OsCredentialCommand),
         }
+    }
+
+    pub(crate) fn with_catalogue_snapshot(
+        mut self,
+        snapshot: Option<&ego_ai::catalogue::ModelCatalogueSnapshot>,
+    ) -> Self {
+        if let Some(snapshot) = snapshot {
+            self.catalogue = crate::models::catalogue_snapshot_view(snapshot, &self.auth);
+        }
+        self
+    }
+
+    /// Capture complete trusted endpoint/auth/facts authority for future resolutions.
+    pub fn with_provider_instances(
+        mut self,
+        providers: ego_core::config::ResolvedProviders,
+    ) -> Self {
+        self.providers = providers;
+        self.refresh_captured_catalogue();
+        self
+    }
+
+    pub fn with_connections(
+        mut self,
+        selected: Option<String>,
+        connections: std::collections::BTreeMap<String, ego_core::config::ConnectionConfig>,
+    ) -> Self {
+        self.connection = selected;
+        self.connections = connections;
+        self.refresh_captured_catalogue();
+        self
+    }
+
+    pub(crate) fn with_connection_binding(mut self, binding: Option<String>) -> Self {
+        self.connection_binding = binding;
+        self
+    }
+
+    fn refresh_captured_catalogue(&mut self) {
+        self.catalogue = crate::models::read_only_provider_catalogue(
+            &self.auth,
+            &self.ceilings,
+            self.connection.as_deref(),
+            &self.connections,
+            self.initial_identity
+                .0
+                .split_once('/')
+                .map(|(provider, _)| provider),
+            &self.providers,
+        );
+    }
+
+    pub fn with_protocol_filter(
+        mut self,
+        filter: Option<ego_core::config::ProtocolFilterConfig>,
+    ) -> Self {
+        self.protocol_filter = filter;
+        self
+    }
+
+    pub fn with_cache_ttl_seconds(mut self, ttl: Option<std::num::NonZeroU64>) -> Self {
+        self.cache_ttl_seconds = ttl;
+        self
     }
 
     pub fn with_output_limit(mut self, limit: Option<std::num::NonZeroU64>) -> Self {
@@ -538,9 +826,41 @@ impl CliGenerationModelSource {
         &self,
         ports: Arc<ego_tools::exec::RunEffectPorts>,
     ) -> Arc<dyn Http> {
+        #[cfg(test)]
+        if let Some(http) = TEST_DRIVER_PROVIDER_HTTP.with(|port| port.borrow().clone()) {
+            return http;
+        }
         Arc::new(
             crate::provider_http::ProviderHttpAdapter::new(ports).with_proxy(self.proxy.clone()),
         )
+    }
+
+    pub(crate) fn egress_filter_selection(
+        &self,
+    ) -> Result<
+        (
+            String,
+            String,
+            Option<ego_core::config::ProtocolFilterConfig>,
+        ),
+        &'static str,
+    > {
+        let identity = self
+            .selection
+            .snapshot()
+            .map_err(|_| "protocol_filter model selection unavailable")?
+            .identity;
+        let (provider, model) = identity
+            .0
+            .split_once('/')
+            .ok_or("protocol_filter model identity unavailable")?;
+        let filter = self
+            .auth
+            .get(provider)
+            .and_then(|auth| auth.protocol_filter.clone())
+            .or_else(|| self.protocol_filter.clone())
+            .filter(|config| config.enabled);
+        Ok((provider.to_owned(), model.to_owned(), filter))
     }
 
     pub fn selection(&self) -> Arc<GenerationSelection> {
@@ -631,9 +951,9 @@ impl CliGenerationModelSource {
         let hosted = facts::supplied(&self.ceilings).map_err(|error| {
             GenerationModelError::new(GenerationModelErrorClass::Usage, error.to_string())
         })?;
-        if role == GenerationRole::GoalCheck
-            || (role == GenerationRole::Judge && self.judge.is_none())
-        {
+        // The judge decides on development work: it keeps the main model, never
+        // the provider's smallest one. Only the goal check downgrades.
+        if role == GenerationRole::GoalCheck {
             let preferred = match provider_id {
                 "openai-codex" => Some("openai-codex/codex-auto-review"),
                 "openai" => Some("openai/gpt-6-luna"),
@@ -675,18 +995,92 @@ impl CliGenerationModelSource {
             .split_once('/')
             .map(|(provider, _)| provider)
             .unwrap_or(identity.0.as_str());
-        let credentials = crate::auth::request_credentials_scoped(
-            provider_id,
-            self.auth
-                .get(provider_id)
-                .and_then(|auth| auth.credential_command.as_deref()),
-            http.as_ref(),
-            self.credential_commands.as_ref(),
-            cancel,
-            run_deadline,
-        )
-        .await
-        .map_err(auth_generation_error)?;
+        let instance = self
+            .providers
+            .instances
+            .iter()
+            .find(|(id, _)| id.as_str() == provider_id)
+            .map(|(_, sourced)| &sourced.value);
+        // Validate every instance and the exact alias before credentials execute.
+        let instance_catalogue = if instance.is_some() {
+            let catalogue = catalogue_with_instances(
+                Vec::new(),
+                &self.auth,
+                &self.providers,
+                &self.connections,
+            )
+            .map_err(|message| {
+                GenerationModelError::new(GenerationModelErrorClass::Usage, message)
+            })?;
+            catalogue
+                .static_request_profile(&ModelSlug::parse(&identity.0).map_err(generation_error)?)
+                .map_err(generation_error)?;
+            Some(catalogue)
+        } else {
+            None
+        };
+        let selected = self
+            .selection
+            .connection_for_route(
+                provider_id,
+                instance.map(|instance| instance.credential_ref.as_ref().map(|id| id.as_str())),
+                self.connection.as_deref(),
+                &self.connections,
+            )
+            .map_err(|message| {
+                GenerationModelError::new(GenerationModelErrorClass::Usage, message)
+            })?;
+        if self.connection_binding.is_some() && selected.is_none() {
+            return Err(GenerationModelError::new(
+                GenerationModelErrorClass::Usage,
+                crate::auth::CHANGED_CONNECTION_BINDING,
+            ));
+        }
+        let credentials = if let Some((id, connection)) = selected {
+            if instance.is_none() {
+                self.selection.pin_connection(id)?;
+            }
+            let row = if let Some(catalogue) = &instance_catalogue {
+                Some(
+                    catalogue
+                        .row(provider_id)
+                        .map_err(generation_error)?
+                        .clone(),
+                )
+            } else {
+                rows(&self.auth)
+                    .map_err(generation_error)?
+                    .into_iter()
+                    .find(|row| row.id() == provider_id)
+            }
+            .ok_or_else(|| {
+                GenerationModelError::new(
+                    GenerationModelErrorClass::Usage,
+                    format!("unknown provider {provider_id}"),
+                )
+            })?;
+            let credential_route = if connection.vendor == ego_core::config::AZURE_OPENAI {
+                ego_core::config::AZURE_OPENAI
+            } else {
+                provider_id
+            };
+            crate::auth::connection_credentials(
+                id,
+                connection,
+                credential_route,
+                &row.credential,
+                &self.auth,
+                self.connection_binding.as_deref(),
+                http.as_ref(),
+                self.credential_commands.as_ref(),
+                cancel,
+                run_deadline,
+            )
+            .await
+            .map_err(auth_generation_error)?
+        } else {
+            Arc::new(ego_ai::provider::EnvCredentials) as Arc<dyn Credentials>
+        };
         let (mut resolved, credential) = resolve_with_inventory(
             &identity.0,
             hosted,
@@ -694,6 +1088,7 @@ impl CliGenerationModelSource {
             credentials.as_ref(),
             &self.auth,
             inventory.clone(),
+            Some((&self.providers, &self.connections)),
         )
         .await
         .map_err(generation_error)?;
@@ -761,7 +1156,9 @@ impl CliGenerationModelSource {
                 equivalent.service_tier = "fast".to_owned();
             }
         }
-        let thinking = if matches!(role, GenerationRole::Judge | GenerationRole::GoalCheck) {
+        let thinking = if role == GenerationRole::Judge {
+            judge_reasoning(&resolved.capabilities)
+        } else if role == GenerationRole::GoalCheck {
             judge_thinking(&resolved.capabilities)
         } else {
             resolved
@@ -776,9 +1173,11 @@ impl CliGenerationModelSource {
                 .initialize(identity.clone(), thinking, self.initial_thinking)?;
         }
         let request_model = resolved.model.clone();
+        let connection_id = selected.map(|(id, _)| id);
         let mut retained = retained.lock().map_err(|_| selection_lock_error())?;
         let generator: Arc<dyn Generator> = if role == GenerationRole::Main
             && let Some(previous) = retained.as_ref()
+            && previous.generator.matches_connection_id(connection_id)
             && previous.generator.service_tier() == service_tier
             && previous.model == request_model
             && previous
@@ -787,17 +1186,19 @@ impl CliGenerationModelSource {
         {
             previous.generator.clone()
         } else {
-            let filter = self
-                .auth
-                .get(provider_id)
-                .and_then(|auth| auth.protocol_filter.clone());
+            let filter =
+                selected_protocol_filter(&self.auth, self.protocol_filter.as_ref(), provider_id)
+                    .map(|(filter, _)| filter.clone());
             let generator = ego_ai::generator::WireGenerator::new(
                 resolved.row,
                 resolved.wire,
                 Arc::clone(http),
                 credential,
             )
-            .with_service_tier(service_tier);
+            .with_connection_id(connection_id.map(str::to_owned))
+            .with_generation_role(role)
+            .with_service_tier(service_tier)
+            .with_cache_ttl_seconds(self.cache_ttl_seconds);
             let generator = match filter {
                 Some(config) if config.enabled => generator.with_protocol_filter(
                     config.clone(),
@@ -847,6 +1248,9 @@ struct BoundGenerationModelSource {
 }
 
 impl GenerationModelSource for BoundGenerationModelSource {
+    fn catalogue(&self) -> Result<ego_core::model_catalogue::ModelCatalogue, String> {
+        self.source.catalogue.clone()
+    }
     fn resolve<'a>(
         &'a self,
         request: GenerationModelRequest,
@@ -887,12 +1291,16 @@ fn auth_generation_error(error: crate::auth::AuthError) -> GenerationModelError 
 
 /// Whether a resolution failure is the network's fault or the caller's.
 ///
-/// Invalid model selection is a usage error; daemon or network failure is a runtime
-/// error. A model not installed remains an invalid selection regardless of response
-/// delay.
+/// `CLI.md` §4.3 gives them different exit codes on purpose — a script retries
+/// a 4 and never retries a 2 — and this is the only place the distinction is
+/// drawn. A model that is not installed is a 2 however long the daemon took to
+/// say so.
 pub fn is_provider_failure(err: &ResolveError) -> bool {
     matches!(err, ResolveError::EndpointUnreachable { .. })
 }
+
+#[cfg(test)]
+mod account_isolation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -961,6 +1369,318 @@ mod tests {
         }
     }
 
+    // Catches: an already-running legacy source adopts accounts added after its startup snapshot.
+    #[tokio::test]
+    async fn named_connections_unbound_source_never_adopts_later_config() {
+        const CHILD: &str = "EGO_UNBOUND_CONNECTION_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join("config.toml"), "").unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "model::tests::named_connections_unbound_source_never_adopts_later_config",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("EGO_HOME", home.path())
+                .env("ANTHROPIC_API_KEY", "unbound-original-key")
+                .env_remove("ANTHROPIC_AUTH_TOKEN")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let source = Arc::new(CliGenerationModelSource::new(
+            ModelRef("anthropic/claude-opus-5-5".into()),
+            Some(ThinkingLevel::Low),
+            None,
+            Ceilings::default(),
+            Default::default(),
+        ));
+        let bound = source.bind(Arc::new(NoHttp), CancelToken::new(), None);
+        bound
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
+            .await
+            .unwrap();
+        let home = std::path::PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+        for config in [
+            "[connections.later]\nname='Later'\nvendor='anthropic'\naccess='oauth'\n",
+            "[connections.a]\nname='A'\nvendor='anthropic'\naccess='oauth'\n[connections.b]\nname='B'\nvendor='anthropic'\naccess='oauth'\n",
+            "connection='other'\n[connections.other]\nname='Other'\nvendor='openai'\naccess='oauth'\n",
+        ] {
+            std::fs::write(home.join("config.toml"), config).unwrap();
+            bound
+                .resolve(GenerationModelRequest::new(GenerationRole::Main))
+                .await
+                .unwrap();
+            assert_eq!(source.selection().connection(), None);
+        }
+    }
+
+    // Catches: after preflight a native child's next generation sends its refresh token to a new plugin.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pinned_generation_rejects_late_oauth_refresh_plugin_before_invocation() {
+        use crate::auth::{AuthEntry, AuthStore, CredentialCommandPort, CredentialCommandRequest};
+        use ego_core::config::{ConnectionAccess, ConnectionConfig};
+        use ego_core::credentials::SecretMaterial;
+        use std::os::unix::fs::PermissionsExt;
+
+        const CHILD: &str = "EGO_PINNED_REFRESH_SOURCE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "model::tests::pinned_generation_rejects_late_oauth_refresh_plugin_before_invocation",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("EGO_HOME", home.path())
+                .env("PATH", home.path())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        struct NoRefresh;
+        impl CredentialCommandPort for NoRefresh {
+            fn run<'a>(
+                &'a self,
+                _: CredentialCommandRequest,
+            ) -> futures::future::BoxFuture<
+                'a,
+                Result<SecretMaterial, crate::auth::CredentialCommandFailure>,
+            > {
+                panic!("a replacement plugin must not receive the account credential")
+            }
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+        let account = ConnectionConfig {
+            name: "Work".into(),
+            vendor: "anthropic".into(),
+            access: ConnectionAccess::Oauth,
+            key_env: None,
+            azure_resource: None,
+        };
+        let store = AuthStore::new(&home);
+        let entry = |expires| AuthEntry::OAuth {
+            access: SecretMaterial::new(b"sk-ant-oat01-example-access".to_vec()),
+            refresh: Some(SecretMaterial::new(b"example-refresh".to_vec())),
+            expires,
+            scope_binding: None,
+        };
+        store.put("connection:work", entry(None)).unwrap();
+        let admitted = crate::auth::connection_refresh_source("anthropic", None, Some(&home));
+        let binding = crate::auth::connection_binding("work", &account, Some(&admitted));
+        let mut source = CliGenerationModelSource::new(
+            ModelRef("anthropic/claude-opus-5-5".into()),
+            Some(ThinkingLevel::Low),
+            None,
+            Ceilings::default(),
+            Default::default(),
+        )
+        .with_connections(Some("work".into()), [("work".into(), account)].into())
+        .with_connection_binding(Some(binding));
+        source.credential_commands = Arc::new(NoRefresh);
+        let bound = Arc::new(source).bind(Arc::new(NoHttp), CancelToken::new(), None);
+        bound
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
+            .await
+            .unwrap();
+
+        let plugin = home.join("plugins/auth/anthropic");
+        std::fs::create_dir_all(plugin.parent().unwrap()).unwrap();
+        std::fs::write(&plugin, "not invoked").unwrap();
+        std::fs::set_permissions(plugin, std::fs::Permissions::from_mode(0o700)).unwrap();
+        store.put("connection:work", entry(Some(1))).unwrap();
+        let before = std::fs::read(store.path()).unwrap();
+        let result = bound
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
+            .await;
+        let Err(error) = result else {
+            panic!("changed source was admitted");
+        };
+        assert!(
+            error.to_string().contains("no matching credential binding"),
+            "{error}"
+        );
+        assert_eq!(std::fs::read(store.path()).unwrap(), before);
+    }
+
+    // Catches: fresh resolution loses the selected ID, logout borrows another account, or resume uses a changed default.
+    #[tokio::test]
+    async fn named_connections_bound_source_pins_id_and_refuses_logout_fallback() {
+        use ego_core::config::{ConfigLayer, Source};
+        const CHILD: &str = "EGO_NAMED_CONNECTION_SOURCE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            std::fs::write(home.path().join("config.toml"), "connection='account_a'\n[connections.account_a]\nname='Personal'\nvendor='anthropic'\naccess='oauth'\n[connections.account_b]\nname='Work'\nvendor='anthropic'\naccess='oauth'\n").unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "model::tests::named_connections_bound_source_pins_id_and_refuses_logout_fallback", "--nocapture"])
+                .env(CHILD, "1").env("EGO_HOME", home.path()).env("NAMED_TEST_KEY", "selected-key").env("NAMED_SHORT_KEY", "short").env("ANTHROPIC_API_KEY", "ambient-key").output().unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let home = std::path::PathBuf::from(std::env::var_os("EGO_HOME").unwrap());
+        let store = crate::auth::AuthStore::new(&home);
+        for id in ["account_a", "account_b"] {
+            store
+                .put(
+                    &crate::auth::connection_storage_key(id),
+                    crate::auth::AuthEntry::OAuth {
+                        access: ego_core::credentials::SecretMaterial::new(
+                            format!("sk-ant-oat01-{id}").into_bytes(),
+                        ),
+                        refresh: None,
+                        expires: None,
+                        scope_binding: None,
+                    },
+                )
+                .unwrap();
+        }
+        // Explicit Key access must not adopt either saved OAuth account or the ambient vendor key.
+        let key = ego_core::config::ConnectionConfig {
+            name: "Key".into(),
+            vendor: "anthropic".into(),
+            access: ego_core::config::ConnectionAccess::Key,
+            key_env: Some("NAMED_TEST_KEY".into()),
+            azure_resource: None,
+        };
+        let row = rows(&Default::default())
+            .unwrap()
+            .into_iter()
+            .find(|row| row.id() == "anthropic")
+            .unwrap();
+        let credentials = crate::auth::connection_credentials(
+            "key_account",
+            &key,
+            "anthropic",
+            &row.credential,
+            &Default::default(),
+            None,
+            &NoHttp,
+            &crate::auth::OsCredentialCommand,
+            &CancelToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        let credential = row.credential.resolve(credentials.as_ref()).unwrap();
+        assert!(
+            credential
+                .headers()
+                .iter()
+                .any(|header| header.name() == "x-api-key" && header.value() == b"selected-key")
+        );
+        assert!(
+            !credential
+                .headers()
+                .iter()
+                .any(|header| header.name().eq_ignore_ascii_case("authorization"))
+        );
+        // A valid secret-marked name still cannot admit a value omitted by minimum-length masking.
+        let mut short_key = key;
+        short_key.key_env = Some("NAMED_SHORT_KEY".into());
+        let short_credentials = crate::auth::connection_credentials(
+            "short",
+            &short_key,
+            "anthropic",
+            &row.credential,
+            &Default::default(),
+            None,
+            &NoHttp,
+            &crate::auth::OsCredentialCommand,
+            &CancelToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(row.credential.resolve(short_credentials.as_ref()).is_err());
+        let config = ConfigLayer::parse(
+            Source::User,
+            &std::fs::read_to_string(home.join("config.toml")).unwrap(),
+        )
+        .unwrap()
+        .value;
+        let source = Arc::new(
+            CliGenerationModelSource::new(
+                ModelRef("anthropic/claude-opus-5-5".into()),
+                Some(ThinkingLevel::Low),
+                None,
+                Ceilings::default(),
+                Default::default(),
+            )
+            .with_connections(Some("account_b".into()), config.connections),
+        );
+        let bound = source.bind(Arc::new(NoHttp), CancelToken::new(), None);
+        bound
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
+            .await
+            .unwrap();
+        assert_eq!(source.selection().connection(), Some("account_b"));
+        let selections = ego_core::run::RunSelections::empty()
+            .with_connection(source.selection().connection().map(str::to_owned));
+        let restored: ego_core::run::RunSelections =
+            serde_json::from_str(&serde_json::to_string(&selections).unwrap()).unwrap();
+        assert_eq!(restored.connection(), Some("account_b"));
+        let path = home.join("config.toml");
+        std::fs::write(
+            &path,
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .replace("name='Work'", "name='Renamed'"),
+        )
+        .unwrap();
+        bound
+            .resolve(GenerationModelRequest::new(GenerationRole::Main))
+            .await
+            .unwrap();
+        let crate::cli::Invocation::Auth(args) = crate::cli::parse(
+            ["ego", "auth", "logout", "--connection", "account_b"]
+                .map(str::to_owned)
+                .to_vec(),
+        )
+        .unwrap() else {
+            panic!("expected auth command")
+        };
+        let output = crate::auth::execute(&args, &CancelToken::new())
+            .await
+            .unwrap();
+        assert!(
+            output.contains("logged out anthropic") && !output.contains("account_b"),
+            "{output}"
+        );
+        assert!(
+            bound
+                .resolve(GenerationModelRequest::new(GenerationRole::Main))
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .read_secret_material(&crate::auth::connection_storage_key("account_a"))
+                .is_ok()
+        );
+    }
+
     fn codex_hosted() -> HostedModel {
         HostedModel {
             capabilities: ModelCapabilities {
@@ -1014,9 +1734,13 @@ mod tests {
     // Catches: a listed chat-latest alias refuses the measured Medium effort at admission.
     #[test]
     fn chat_latest_admission_accepts_measured_effort_without_guessing_other_levels() {
-        let profile = supplied_request_profile(&ModelRef("openai/chat-latest".into()))
-            .unwrap()
-            .expect("the listed alias has a request profile");
+        let profile = supplied_request_profile(
+            &ModelRef("openai/chat-latest".into()),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap()
+        .expect("the listed alias has a request profile");
         let capabilities = profile.capabilities();
         assert_eq!(
             capabilities.resolve_reasoning_effort(Some(ThinkingLevel::Medium)),
@@ -1034,10 +1758,34 @@ mod tests {
         );
     }
 
+    // Catches: an `OLLAMA_HOST` bind address (0.0.0.0, [::]) is dialled as-is
+    // and refused or misrouted, and a mapping that rewrites other hosts.
+    #[test]
+    fn ollama_host_unspecified_bind_address_resolves_to_loopback() {
+        for (given, expected) in [
+            ("0.0.0.0", "http://127.0.0.1/v1/"),
+            ("0.0.0.0:8080", "http://127.0.0.1:8080/v1/"),
+            ("http://0.0.0.0:8080", "http://127.0.0.1:8080/v1/"),
+            ("https://0.0.0.0", "https://127.0.0.1/v1/"),
+            ("[::]", "http://[::1]/v1/"),
+            ("[::]:8080", "http://[::1]:8080/v1/"),
+            ("http://[::]:8080", "http://[::1]:8080/v1/"),
+            ("192.168.1.5:11434", "http://192.168.1.5:11434/v1/"),
+            ("gpu.example:11434", "http://gpu.example:11434/v1/"),
+            ("0.0.0.1:11434", "http://0.0.0.1:11434/v1/"),
+        ] {
+            let url = base_from(OLLAMA_HOST, Some(given), OLLAMA_BASE).unwrap();
+            assert_eq!(url.as_str(), expected, "OLLAMA_HOST={given}");
+        }
+        // The mapping is for OLLAMA_HOST only.
+        let other = base_from(OPENAI_BASE_URL, Some("http://0.0.0.0:1"), OPENAI_BASE).unwrap();
+        assert_eq!(other.host_str(), Some("0.0.0.0"));
+    }
+
     // Catches: gateway prefixes are erased, or an existing /v1 suffix is duplicated.
     #[test]
     fn anthropic_base_override_keeps_gateway_prefix_without_duplicating_v1() {
-        const EXPECTED: &str = "EGO_TEST_MODEL_EXPECTED_MESSAGES_URL";
+        const EXPECTED: &str = "EGO_TEST_636_EXPECTED_MESSAGES_URL";
         if let Ok(expected) = std::env::var(EXPECTED) {
             let row = rows(&Default::default())
                 .unwrap()
@@ -1260,13 +2008,14 @@ mod tests {
             let home = tempfile::tempdir().unwrap();
             // Synthetic subscription state; never inspect the developer's credentials.
             std::fs::write(home.path().join("auth.json"), serde_json::json!({
-                "openai-codex": {"type":"o_auth", "access":
+                "connection:fixture": {"type":"o_auth", "access":
                     "head.eyJodHRwczovL2FwaS5vcGVuYWkuY29tL2F1dGgiOnsiY2hhdGdwdF9hY2NvdW50X2lkIjoiYWNjdF8xIn19.sig"}
             }).to_string()).unwrap();
             let output = std::process::Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "model::tests::codex_generation_boundaries_preserve_incremental_tool_continuation", "--nocapture"])
                 .env(CHILD, "1")
                 .env("EGO_HOME", home.path())
+                .env_remove(ego_ai::provider::OPENAI_CODEX_ACCESS_TOKEN_ENV)
                 .output().unwrap();
             assert!(
                 output.status.success(),
@@ -1328,13 +2077,22 @@ mod tests {
 
         let recording = Arc::new(RecordingHttp::default());
         let http = recording.clone() as Arc<dyn Http>;
-        let source = Arc::new(CliGenerationModelSource::new(
-            ModelRef("openai-codex/gpt-6.1-sol".into()),
-            Some(ThinkingLevel::Low),
-            None,
-            Ceilings::default(),
-            Default::default(),
-        ))
+        let layer = ego_core::config::ConfigLayer::parse(
+            ego_core::config::Source::User,
+            "[connections.fixture]\nname='Fixture'\nvendor='openai'\naccess='oauth'\n",
+        )
+        .unwrap()
+        .value;
+        let source = Arc::new(
+            CliGenerationModelSource::new(
+                ModelRef("openai-codex/gpt-6.1-sol".into()),
+                Some(ThinkingLevel::Low),
+                None,
+                Ceilings::default(),
+                Default::default(),
+            )
+            .with_connections(Some("fixture".into()), layer.connections),
+        )
         .bind(http, CancelToken::new(), None);
         let id = SessionId::new();
         let mut messages = vec![Message::text(Role::User, "read")];
@@ -1351,6 +2109,7 @@ mod tests {
             let req = GenRequest {
                 web_search: None,
                 cache: Some(PromptCache {
+                    verifier: None,
                     session_id: id,
                     lineage_root: id,
                     retention: CacheRetention::Short,
@@ -1508,11 +2267,8 @@ mod tests {
 
         let catalogue = catalogue_from_rows(
             hosted,
-            mapped_rows(
-                ProviderRow::ollama_default(),
-                ProviderRow::openai(),
-                ProviderRow::anthropic_default(),
-            ),
+            ego_ai::conformance::default_final_provider_rows()
+                .expect("the final inventory defines each provider once"),
         );
         let row = catalogue
             .row("openai-codex")
@@ -1599,12 +2355,21 @@ mod tests {
 
     /// The API-key candidate is still not runnable.
     ///
-    /// The API-key xAI candidate uses a retired endpoint. Offline fixtures or a
-    /// live recording cannot make that legacy mapping current; offering it
-    /// requires the current Responses contract.
+    /// the design notes
+    /// §9 draws the line at selectability: a provider assembled from a
+    /// published document has offline evidence and no acceptance evidence, and
+    /// its legacy endpoint is now vendor-deprecated. Adding that candidate to
+    /// [`rows`] is one line and looks like progress, so the current-contract
+    /// rule needs a test rather than a comment. A live recording cannot promote
+    /// the retired mapping; an API-key row would first need the current
+    /// Responses mapping.
     ///
-    /// Gemini uses a current published contract with offline fixtures. The xAI
-    /// API-key candidate lacks a current mapping, not merely a recording.
+    /// `gemini` used to be in this list and is not a counter-example to it.
+    /// The bar §9 sets is a **current** contract, and
+    /// `2026-09-07-a-published-contract-is-enough-to-offer-a-row.md` says a
+    /// current published contract with passing fixtures clears it. `xai`
+    /// cannot: its mapping is the vendor-deprecated endpoint, so what it lacks
+    /// is not a recording but a contract worth recording against.
     #[test]
     fn a_candidate_provider_cannot_be_selected() {
         let ids = selectable();
@@ -1622,9 +2387,22 @@ mod tests {
         assert!(catalogue.row("xai-oauth").is_ok());
     }
 
-    /// Build an Anthropic request from builtin capabilities with both file layers explicitly
-    /// empty. Reaching request assembly proves the capabilities are usable; the process test
-    /// separately proves the ordinary path works without a supplied models file.
+    /// An Anthropic request assembles from the builtin catalogue alone.
+    ///
+    /// The other half of story the earlier change's fourth criterion, kept as an
+    /// in-process assertion after story the earlier change moved the child-process
+    /// half onto this same row.
+    ///
+    /// The layers are assembled here, with both file layers explicitly empty
+    /// — which is a *stronger* statement about where the facts came from than
+    /// an absent file would be, and reads nothing from the environment,
+    /// including the `ANTHROPIC_BASE_URL` the harness now sets. What it cannot
+    /// say is that the real code path skips the files; the child-process test
+    /// in `tests/run.rs` says that.
+    ///
+    /// It goes as far as `build_request`, because "reaches request assembly"
+    /// is the criterion and a `ResolvedModel` that never produced bytes has
+    /// not demonstrated that its capabilities are usable.
     #[test]
     fn an_anthropic_request_assembles_from_the_builtin_catalogue_alone() {
         let hosted = crate::facts::builtin_only();
@@ -1638,11 +2416,8 @@ mod tests {
 
         let catalogue = catalogue_from_rows(
             hosted,
-            mapped_rows(
-                ProviderRow::ollama_default(),
-                ProviderRow::openai(),
-                ProviderRow::anthropic_default(),
-            ),
+            ego_ai::conformance::default_final_provider_rows()
+                .expect("the final inventory defines each provider once"),
         );
         let row = catalogue.row("anthropic").expect("anthropic is selectable");
         let credential = row
@@ -1701,6 +2476,14 @@ mod tests {
                 "nous",
                 "openrouter",
                 "gemini",
+                "bedrock",
+                "bedrock-runtime",
+                "vertex",
+                "vertex-gemini",
+                "deepseek",
+                "zai",
+                "kimi-api",
+                "mistral",
             ],
             "the selectable provider table changed"
         );

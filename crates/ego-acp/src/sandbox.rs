@@ -4,9 +4,9 @@
 //! The permission seat in [`crate::permission`] answers "may this call run".
 //! This one answers a different question that only exists after a command ran:
 //! the sandbox refused a path, and only a person can say it may be reached. A
-//! session answer lives in memory and ends with the session; an "always"
-//! answer is handed to the binary's [`SandboxGrantStore`] and read back for the
-//! next session in the same workspace.
+//! session answer is journaled by the executing turn before it is applied;
+//! same-ID resume and compaction restore that receipt. An "always" answer
+//! also reaches [`SandboxGrantStore`] for future sessions in the workspace.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use agent_client_protocol::{Client, ConnectionTo};
 use agent_client_protocol_schema::v1;
 use ego_core::event::id::ItemId;
-use ego_core::permit::{SandboxAccess, SandboxGrant, SandboxGrantPort};
+use ego_core::permit::{RefusalAnswer, SandboxAccess, SandboxGrant, SandboxGrantPort};
 use futures::future::BoxFuture;
 
 /// Grants a person asked to keep for a workspace, owned by the binary.
@@ -40,6 +40,7 @@ pub struct AcpSandboxGrants {
     workspace: PathBuf,
     store: Option<Arc<dyn SandboxGrantStore>>,
     session_grants: SessionSandboxGrants,
+    rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
 }
 
 impl AcpSandboxGrants {
@@ -47,6 +48,7 @@ impl AcpSandboxGrants {
     pub const ALLOW_SESSION: &'static str = "sandbox-session";
     pub const ALLOW_ALWAYS: &'static str = "sandbox-always";
     pub const DENY: &'static str = "sandbox-deny";
+    pub const DENY_ALWAYS: &'static str = "sandbox-deny-always";
 
     pub fn new(
         session: v1::SessionId,
@@ -61,7 +63,16 @@ impl AcpSandboxGrants {
             workspace,
             store,
             session_grants,
+            rules: None,
         }
+    }
+
+    pub fn with_rules(
+        mut self,
+        rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
+    ) -> Self {
+        self.rules = rules;
+        self
     }
 
     /// The question, addressed to the host.
@@ -83,7 +94,7 @@ impl AcpSandboxGrants {
         };
         let title = format!(
             "The sandbox refused a command access to {path}.\nAllow it to {action} {path}? \
-             This command will run again:\n{command}",
+             No command will be retried; prior effects may already have occurred:\n{command}",
             path = grant.path
         );
         let tool_call = v1::ToolCallUpdate::new(
@@ -95,11 +106,20 @@ impl AcpSandboxGrants {
             format!("Allow {grant} for this session"),
             v1::PermissionOptionKind::AllowAlways,
         )];
-        if rememberable {
+        if rememberable && grant.access != SandboxAccess::Exec {
             options.push(v1::PermissionOption::new(
                 v1::PermissionOptionId::new(Self::ALLOW_ALWAYS),
-                format!("Allow {grant} always for this workspace"),
+                format!("Allow {grant} always as a root (confirmation follows)"),
                 v1::PermissionOptionKind::AllowAlways,
+            ));
+        }
+        if rememberable
+            && ego_core::config::rule_management::RememberPlan::for_sandbox_path(grant).is_some()
+        {
+            options.push(v1::PermissionOption::new(
+                v1::PermissionOptionId::new(Self::DENY_ALWAYS),
+                "Keep blocked (remember rule)",
+                v1::PermissionOptionKind::RejectAlways,
             ));
         }
         options.push(v1::PermissionOption::new(
@@ -120,36 +140,54 @@ impl AcpSandboxGrants {
         }
     }
 
-    async fn decide(&self, grant: &SandboxGrant, command: &str) -> bool {
-        let wire = Self::request(&self.session, grant, command, self.store.is_some());
+    async fn decide(&self, grant: &SandboxGrant, command: &str) -> RefusalAnswer {
+        if let Some(rules) = &self.rules {
+            match rules.denies_sandbox(grant, &self.workspace) {
+                Ok(true) => return RefusalAnswer::Deny,
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "ACP sandbox deny rules could not be read");
+                    return RefusalAnswer::Deny;
+                }
+            }
+        }
+        let mut wire = Self::request(&self.session, grant, command, self.store.is_some());
+        if self.rules.is_none() {
+            wire.options
+                .retain(|option| option.option_id.0.as_ref() != Self::DENY_ALWAYS);
+        }
         let response = match self.connection.send_request(wire).block_task().await {
             Ok(response) => response,
             Err(error) => {
                 // A transport failure leaves the sandbox as it was.
                 tracing::warn!(%error, "ACP sandbox question failed");
-                return false;
+                return RefusalAnswer::Deny;
             }
         };
         let v1::RequestPermissionOutcome::Selected(selected) = &response.outcome else {
-            return false;
+            return RefusalAnswer::Deny;
         };
         match selected.option_id.0.as_ref() {
             Self::ALLOW_SESSION => {
                 self.keep_for_session(grant);
-                true
+                RefusalAnswer::Session
             }
-            Self::ALLOW_ALWAYS => {
-                let Some(store) = &self.store else {
-                    return false;
-                };
-                if let Err(error) = store.remember(&self.workspace, grant).await {
-                    tracing::warn!(%error, "ACP sandbox grant could not be stored");
-                    return false;
+            Self::DENY_ALWAYS => {
+                if let (Some(rules), Some(plan)) = (
+                    &self.rules,
+                    ego_core::config::rule_management::RememberPlan::for_sandbox_path(grant),
+                ) && let Err(error) = rules
+                    .remember(ego_core::config::ManagedRuleEffect::Deny, plan)
+                    .await
+                {
+                    tracing::warn!(%error, "ACP sandbox deny could not be stored");
                 }
-                self.keep_for_session(grant);
-                true
+                RefusalAnswer::Deny
             }
-            _ => false,
+            Self::ALLOW_ALWAYS if self.store.is_some() && grant.access != SandboxAccess::Exec => {
+                RefusalAnswer::Always
+            }
+            _ => RefusalAnswer::Deny,
         }
     }
 }
@@ -173,7 +211,11 @@ impl SandboxGrantPort for AcpSandboxGrants {
         granted
     }
 
-    fn ask<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool> {
+    fn ask<'a>(
+        &'a self,
+        request: &'a SandboxGrant,
+        command: &'a str,
+    ) -> BoxFuture<'a, RefusalAnswer> {
         Box::pin(self.decide(request, command))
     }
 }

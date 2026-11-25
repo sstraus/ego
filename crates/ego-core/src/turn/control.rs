@@ -37,12 +37,19 @@ impl fmt::Display for ControlError {
 
 impl std::error::Error for ControlError {}
 
+/// A durable recall and the remaining queue at that same coordinator boundary.
+pub struct RecalledPrompt {
+    pub prompt: QueuedPrompt,
+    pub queue: QueueStatus,
+    pub pending: Vec<QueuedPrompt>,
+}
+
 pub(crate) enum ControlIntent {
     RetryNow {
         reply: oneshot::Sender<Result<(), ControlError>>,
     },
     Recall {
-        reply: oneshot::Sender<Result<Option<(QueuedPrompt, QueueStatus)>, ControlError>>,
+        reply: oneshot::Sender<Result<Option<RecalledPrompt>, ControlError>>,
     },
     Background {
         reply: oneshot::Sender<Result<crate::event::id::DetachedExecId, ControlError>>,
@@ -59,10 +66,16 @@ pub(crate) enum ControlIntent {
 
 struct Admission {
     open: AtomicBool,
+    interruptible: AtomicBool,
 }
 
 impl Admission {
+    fn begin_turn(&self) {
+        self.interruptible.store(true, Ordering::Release);
+    }
+
     fn open(&self) {
+        self.begin_turn();
         self.open.store(true, Ordering::Release);
     }
 
@@ -90,6 +103,12 @@ impl Clone for InteractiveIngress {
 }
 
 impl InteractiveIngress {
+    /// Arm cancellation before a host exposes a newly submitted turn as busy.
+    /// The host must then hand the accepted input to this session's coordinator.
+    pub fn begin_turn(&self) {
+        self.admission.begin_turn();
+    }
+
     /// Request an immediate attempt only while the coordinator is in retry backoff.
     pub async fn retry_now(&self) -> Result<(), ControlError> {
         let (reply, answer) = oneshot::channel();
@@ -103,7 +122,7 @@ impl InteractiveIngress {
     }
 
     /// Durably withdraw the latest input still owned by the queue.
-    pub async fn recall(&self) -> Result<Option<(QueuedPrompt, QueueStatus)>, ControlError> {
+    pub async fn recall(&self) -> Result<Option<RecalledPrompt>, ControlError> {
         let (reply, answer) = oneshot::channel();
         let mut sender = self.sender.lock().await;
         if !self.admission.open.load(Ordering::Acquire) {
@@ -158,8 +177,12 @@ impl InteractiveIngress {
     pub async fn interrupt(&self) -> Result<QueueStatus, ControlError> {
         let (reply, answer) = oneshot::channel();
         let mut sender = self.sender.lock().await;
-        // Prompt admission can close while checkpoint generation is active.
-        // Cancellation remains owned by the receiver until it is dropped.
+        // Checkpoint generation can close prompt admission while still owning
+        // cancellation. The idle boundary closes this separate admission under
+        // the same sender gate, before the host starts waiting for a new line.
+        if !self.admission.interruptible.load(Ordering::Acquire) {
+            return Err(ControlError::Closed);
+        }
         sender
             .send(ControlIntent::Interrupt { reply })
             .await
@@ -167,6 +190,12 @@ impl InteractiveIngress {
         drop(sender);
         answer.await.map_err(|_| ControlError::Closed)?
     }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum ControlBoundary {
+    Checkpoint,
+    Idle,
 }
 
 pub(crate) enum BoundaryIntent {
@@ -184,6 +213,12 @@ pub struct InteractiveControl {
 }
 
 impl InteractiveControl {
+    /// Arm cancellation before a host publishes an automatic turn as busy.
+    /// This does not reopen prompt admission or start a coordinator.
+    pub fn begin_turn(&self) {
+        self.admission.begin_turn();
+    }
+
     pub fn status(&self) -> QueueStatus {
         self.status
     }
@@ -204,7 +239,7 @@ impl InteractiveControl {
         self.admission.close();
     }
 
-    pub(crate) async fn next_or_close(&mut self) -> BoundaryIntent {
+    pub(crate) async fn next_or_close(&mut self, boundary: ControlBoundary) -> BoundaryIntent {
         self.admission.close();
         let Some(sender) = self.sender.upgrade() else {
             return match self.receiver.next().await {
@@ -217,7 +252,13 @@ impl InteractiveControl {
             let barrier = Box::pin(sender.lock());
             match select(next, barrier).await {
                 Either::Left((intent, _)) => Either::Left(intent),
-                Either::Right((_guard, _)) => Either::Right(()),
+                Either::Right((_guard, _)) => {
+                    self.admission.interruptible.store(
+                        matches!(boundary, ControlBoundary::Checkpoint),
+                        Ordering::Release,
+                    );
+                    Either::Right(())
+                }
             }
         };
         match raced {
@@ -234,6 +275,7 @@ pub fn interactive_control() -> (InteractiveIngress, InteractiveControl) {
     let sender = Arc::new(SenderGate::new(sender));
     let admission = Arc::new(Admission {
         open: AtomicBool::new(true),
+        interruptible: AtomicBool::new(false),
     });
     (
         InteractiveIngress {
@@ -247,4 +289,108 @@ pub fn interactive_control() -> (InteractiveIngress, InteractiveControl) {
             admission,
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::{FutureExt, poll};
+
+    // Catches: a late Escape waits forever on a retained but idle receiver,
+    // or leaks an old interrupt into the next active turn.
+    #[test]
+    fn late_interrupt_after_quiescence_rejects_without_poisoning_the_next_turn() {
+        futures::executor::block_on(async {
+            let (ingress, mut control) = interactive_control();
+            control.open();
+            assert!(matches!(
+                control.next_or_close(ControlBoundary::Idle).await,
+                BoundaryIntent::Quiescent
+            ));
+            for _ in 0..3 {
+                assert_eq!(
+                    ingress.interrupt().now_or_never(),
+                    Some(Err(ControlError::Closed))
+                );
+            }
+
+            control.open();
+            let mut prompt = Box::pin(ingress.submit("after repeated Escape".into(), Vec::new()));
+            assert!(poll!(prompt.as_mut()).is_pending());
+            let Some(ControlIntent::Submit { text, reply, .. }) = control.next().await else {
+                panic!("repeated Escape prevented the next explicit prompt");
+            };
+            assert_eq!(text, "after repeated Escape");
+            let _ = reply.send(Ok(control.status()));
+            assert_eq!(prompt.await, Ok(control.status()));
+            let mut interrupt = Box::pin(ingress.interrupt());
+            assert!(poll!(interrupt.as_mut()).is_pending());
+            let Some(ControlIntent::Interrupt { reply }) = control.next().await else {
+                panic!("a new turn must receive only its own interrupt");
+            };
+            let _ = reply.send(Ok(control.status()));
+            assert_eq!(interrupt.await, Ok(control.status()));
+        });
+    }
+
+    // Catches: an automatic turn publishes Busy before core attachment and
+    // discards immediate Escape because only explicit submissions were armed.
+    #[test]
+    fn automatic_turn_arming_accepts_escape_before_the_first_coordinator_poll() {
+        futures::executor::block_on(async {
+            let (ingress, mut control) = interactive_control();
+            assert!(matches!(
+                control.next_or_close(ControlBoundary::Idle).await,
+                BoundaryIntent::Quiescent
+            ));
+            control.begin_turn();
+            assert_eq!(
+                ingress.submit("not admitted".into(), Vec::new()).await,
+                Err(ControlError::Closed)
+            );
+            let mut interrupt = Box::pin(ingress.interrupt());
+            assert!(poll!(interrupt.as_mut()).is_pending());
+            let Some(ControlIntent::Interrupt { reply }) = control.next().await else {
+                panic!("the automatic turn lost its early interrupt");
+            };
+            let _ = reply.send(Ok(control.status()));
+            assert_eq!(interrupt.await, Ok(control.status()));
+        });
+    }
+
+    // Catches: fixing late Escape by reusing prompt admission also prevents
+    // cancellation during checkpoint generation, where prompt admission closes.
+    #[test]
+    fn prompt_closure_keeps_interrupts_until_the_settlement_barrier() {
+        futures::executor::block_on(async {
+            let (ingress, mut control) = interactive_control();
+            control.open();
+            control.close();
+            assert!(matches!(
+                control.next_or_close(ControlBoundary::Checkpoint).await,
+                BoundaryIntent::Quiescent
+            ));
+            assert_eq!(
+                ingress.submit("late prompt".into(), Vec::new()).await,
+                Err(ControlError::Closed)
+            );
+            let mut interrupt = Box::pin(ingress.interrupt());
+            assert!(poll!(interrupt.as_mut()).is_pending());
+            let BoundaryIntent::Intent(ControlIntent::Interrupt { reply }) =
+                control.next_or_close(ControlBoundary::Idle).await
+            else {
+                panic!("settlement must acknowledge the interrupt ordered before it");
+            };
+            let _ = reply.send(Ok(control.status()));
+            assert_eq!(interrupt.await, Ok(control.status()));
+            assert!(matches!(
+                control.next_or_close(ControlBoundary::Idle).await,
+                BoundaryIntent::Quiescent
+            ));
+            assert_eq!(
+                ingress.interrupt().now_or_never(),
+                Some(Err(ControlError::Closed))
+            );
+        });
+    }
 }

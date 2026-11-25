@@ -1,7 +1,8 @@
 //! Tables laid out in cells, and a table that will not fit turned into
 //! something that will.
 //!
-//! Two decisions determine this module's layout:
+//! the design notes §3. The
+//! two decisions worth restating where the code is:
 //!
 //! **Width is measured, never assumed.** A model emits a markdown table with
 //! no idea how wide the window is; alignment is entirely the renderer's job,
@@ -13,6 +14,8 @@
 //! renderer that has to survive being piped into a log. So below a floor the
 //! table becomes a labelled list, which is what the content wanted at that
 //! width anyway.
+
+use std::io::IsTerminal;
 
 use super::caps::Depth;
 use super::line::{Line, Span};
@@ -72,6 +75,61 @@ impl Table {
         }
         let widths = distribute(&minimum, &maximum, available);
         self.as_grid(&widths, depth)
+    }
+
+    /// Compact command inventories: one physical line per item. Unlike model
+    /// prose, these are summaries with a separate full detail surface.
+    pub fn render_listing(&self, width: usize) -> Vec<Line> {
+        let columns = self.columns();
+        if columns == 0 || width == 0 {
+            return Vec::new();
+        }
+        // Keep useful columns on the left. At extremely narrow widths omit
+        // trailing columns instead of wrapping an item into several rows.
+        let columns = columns.min(width.saturating_add(2) / 3).max(1);
+        let available = width.saturating_sub((columns - 1) * 2);
+        let clean = |cell: &Line| Line::plain(cell.text().replace(['\n', '\r', '\t'], " "));
+        let rows = std::iter::once(&self.header)
+            .chain(&self.rows)
+            .collect::<Vec<_>>();
+        let maximum = (0..columns)
+            .map(|column| {
+                rows.iter()
+                    .filter_map(|row| row.get(column))
+                    .map(|cell| clean(cell).width())
+                    .max()
+                    .unwrap_or(0)
+                    .max(1)
+            })
+            .collect::<Vec<_>>();
+        // Preserve short useful fields before sharing the remaining space
+        // between verbose cells. A long description must not squeeze a name
+        // or state down to a single ellipsis.
+        let minimum = maximum
+            .iter()
+            .map(|maximum| (*maximum).min(available / columns).max(1))
+            .collect::<Vec<_>>();
+        let widths = distribute(&minimum, &maximum, available);
+        rows.into_iter()
+            .filter(|row| !row.is_empty())
+            .map(|row| {
+                let mut line = Line::empty();
+                for (column, width) in widths.iter().enumerate() {
+                    if column > 0 {
+                        line.push(Span::plain("  "));
+                    }
+                    let mut cell = row.get(column).map(clean).unwrap_or_default();
+                    if cell.width() > *width {
+                        cell = cell.truncate_to(width.saturating_sub(1));
+                        cell.push(Span::plain("…"));
+                    }
+                    for span in align(&cell, *width, self.align_of(column)).spans {
+                        line.push(span);
+                    }
+                }
+                Line::plain(line.text().trim_end())
+            })
+            .collect()
     }
 
     /// For each column: the narrowest it can be without breaking a word, and
@@ -226,6 +284,34 @@ impl Table {
     }
 }
 
+/// Plain command tables and key/value summaries share the cell layout above.
+/// The first row contains labels; remaining rows contain items.
+pub(crate) fn plain_table(rows: Vec<Vec<String>>) -> Vec<String> {
+    let width = if std::io::stdout().is_terminal() {
+        crossterm::terminal::size().map_or(usize::MAX, |(width, _)| {
+            usize::from(width).saturating_sub(2)
+        })
+    } else {
+        usize::MAX
+    };
+    plain_table_with_width(rows, width)
+}
+
+pub(crate) fn plain_table_with_width(rows: Vec<Vec<String>>, width: usize) -> Vec<String> {
+    let mut rows = rows
+        .into_iter()
+        .map(|row| row.into_iter().map(Line::plain).collect::<Vec<_>>());
+    Table {
+        header: rows.next().unwrap_or_default(),
+        rows: rows.collect(),
+        align: Vec::new(),
+    }
+    .render_listing(width)
+    .iter()
+    .map(Line::text)
+    .collect()
+}
+
 /// Distribute `available` cells over columns that want between `minimum` and
 /// `maximum`.
 ///
@@ -333,6 +419,44 @@ fn emphasise(cell: &Line) -> Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches byte-based padding, embedded newlines and overflowing identifiers
+    // turning one inventory item into multiple terminal rows.
+    #[test]
+    fn listing_aligns_unicode_and_truncates_without_multiline_items() {
+        let rows = vec![
+            vec!["name".into(), "state".into()],
+            vec!["日本".into(), "ready".into()],
+            vec!["x".into(), "line\nsecond\tfield".into()],
+        ];
+        assert_eq!(
+            plain_table_with_width(rows.clone(), 40),
+            ["name  state", "日本  ready", "x     line second field"]
+        );
+        for width in [1, 2, 3, 8, 16, 24] {
+            let rendered = plain_table_with_width(rows.clone(), width);
+            assert_eq!(rendered.len(), 3, "width {width}");
+            for line in rendered {
+                assert!(super::super::line::cells(&line) <= width, "{width}: {line}");
+                assert!(!line.contains(['\n', '\t', '\r']));
+            }
+        }
+        assert!(plain_table_with_width(rows, 0).is_empty());
+    }
+
+    // Catches: proportional shrinking lets a verbose detail hide the item
+    // name and state even though both fit comfortably in the terminal.
+    #[test]
+    fn listing_keeps_short_identity_and_state_before_verbose_detail() {
+        let rows = vec![
+            vec!["Name".into(), "State".into(), "Detail".into()],
+            vec!["worker-a".into(), "ready".into(), "x".repeat(200)],
+        ];
+        let lines = plain_table_with_width(rows, 40);
+        assert!(lines[1].starts_with("worker-a  ready  "), "{}", lines[1]);
+        assert!(lines[1].ends_with('…'));
+        assert!(super::super::line::cells(&lines[1]) <= 40);
+    }
 
     fn table() -> Table {
         Table {
@@ -449,7 +573,9 @@ mod tests {
         assert!(widths.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
-    /// Below the width floor, render a list rather than deleting table columns.
+    /// The decision the ADR spends a paragraph on: below the floor the table
+    /// becomes a list rather than losing columns. Truncating would delete what
+    /// the model said.
     #[test]
     fn a_table_too_narrow_to_draw_becomes_a_list_and_keeps_every_value() {
         let table = Table {

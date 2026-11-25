@@ -19,6 +19,8 @@ use crate::{
 
 pub const MCP_DEFAULT_MAX_SSE_EVENT_SIZE: usize = 16 * 1024 * 1024;
 pub const MCP_DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+/// Bound server discovery independently of long-running tool calls.
+pub const MCP_DEFAULT_ADMISSION_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(crate) struct McpRuntimeCandidateAdmission {
     http_management: Arc<dyn McpHttpEffects>,
@@ -28,6 +30,8 @@ pub(crate) struct McpRuntimeCandidateAdmission {
     schemas: Arc<dyn McpToolSchemaAdmission>,
     max_sse_event_size: usize,
     timeout: Duration,
+    /// Declare MCP Tasks to HTTP servers (the user's opt-in).
+    tasks: bool,
 }
 
 impl McpRuntimeCandidateAdmission {
@@ -48,12 +52,20 @@ impl McpRuntimeCandidateAdmission {
             schemas,
             max_sse_event_size,
             timeout,
+            tasks: false,
         }
+    }
+
+    /// Declare MCP Tasks to HTTP servers (the user's opt-in).
+    #[must_use]
+    pub(crate) fn with_tasks(mut self, tasks: bool) -> Self {
+        self.tasks = tasks;
+        self
     }
 
     fn options(&self) -> Result<McpClientOptions, McpCandidateError> {
         let deadline = Instant::now()
-            .checked_add(self.timeout)
+            .checked_add(self.timeout.min(MCP_DEFAULT_ADMISSION_TIMEOUT))
             .ok_or_else(|| invalid_candidate("MCP candidate admission deadline overflowed"))?;
         McpClientOptions::new(self.max_sse_event_size, deadline)
             .map_err(|error| invalid_candidate(error.to_string()))
@@ -72,7 +84,7 @@ impl McpRuntimeCandidateAdmission {
                 bootstrap,
                 Arc::clone(&self.schemas),
             )
-            .map(|factory| Arc::new(factory) as Arc<dyn McpOperationFactory>)
+            .map(|factory| Arc::new(factory.with_tasks(self.tasks)) as Arc<dyn McpOperationFactory>)
             .map_err(|error| invalid_candidate(error.to_string())),
             McpServerConfig::Stdio(_) => McpStdioOperationFactory::runtime(
                 Arc::clone(&self.continuations),
@@ -102,6 +114,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
         let schemas = Arc::clone(&self.schemas);
         let max_sse_event_size = self.max_sse_event_size;
         let timeout = self.timeout;
+        let tasks = self.tasks;
         Box::pin(async move {
             let runtime = Self::new(
                 http_management,
@@ -111,7 +124,8 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 max_sse_event_size,
                 timeout,
                 acp_management,
-            );
+            )
+            .with_tasks(tasks);
             let options = runtime.options()?;
             if let McpServerConfig::Stdio(config) = request.config()
                 && let Some(session) = runtime.stdio_management.session_stdio()
@@ -121,7 +135,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                 let (child, inventory) = session
                     .admit(request.name().clone(), spec, options)
                     .await
-                    .map_err(candidate_error)?;
+                    .map_err(|error| candidate_error(error, options.deadline()))?;
                 let bootstrap = McpCollapsedBootstrap::detect(&inventory.tools)
                     .map_err(|error| invalid_candidate(error.to_string()))?;
                 let factory = McpStdioOperationFactory::runtime_session(
@@ -214,7 +228,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                         )
                     }
                 }
-                .map_err(|error| invalid_candidate(error.to_string()))?;
+                .map_err(|error| candidate_error(error, options.deadline()))?;
                 let inventory = async {
                     client.discover().await?;
                     client.inventory().await
@@ -232,7 +246,7 @@ impl McpCandidateAdmission for McpRuntimeCandidateAdmission {
                     {
                         McpCandidateError::CredentialRequired
                     } else {
-                        candidate_error(error)
+                        candidate_error(error, options.deadline())
                     }
                 })?;
                 if let Some((connection_id, effects)) = &acp_session {
@@ -364,11 +378,25 @@ fn invalid_candidate(cause: impl Into<String>) -> McpCandidateError {
     }
 }
 
-fn candidate_error(error: crate::McpError) -> McpCandidateError {
-    match error.denied_executable() {
-        Some(denial) => McpCandidateError::ExecutableDenied {
+/// Map a failed admission exchange to its registry class. A failure that the server
+/// or its connection reported keeps its class; the remaining failures stay a
+/// configuration error.
+fn candidate_error(error: crate::McpError, deadline: Instant) -> McpCandidateError {
+    use crate::McpFailure;
+    if let Some(denial) = error.denied_executable() {
+        return McpCandidateError::ExecutableDenied {
             denial: denial.clone(),
-        },
-        None => invalid_candidate(error.to_string()),
+        };
+    }
+    let cause = error.to_string();
+    match error.failure() {
+        McpFailure::ProtocolVersion => McpCandidateError::ProtocolVersion { cause },
+        failure if failure != McpFailure::Cancelled && Instant::now() >= deadline => {
+            McpCandidateError::TimedOut
+        }
+        McpFailure::Protocol => McpCandidateError::Protocol { cause },
+        McpFailure::InvalidResponse => McpCandidateError::InvalidResponse { cause },
+        McpFailure::Transport => McpCandidateError::Transport { cause },
+        _ => invalid_candidate(cause),
     }
 }

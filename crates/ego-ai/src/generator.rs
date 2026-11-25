@@ -1,6 +1,7 @@
 //! The binding: the wire format, the transport and the attempt, joined.
 //!
-//! See the provider guide at `docs/guides/providers.md`.
+//! See `plans/m0b-vertical-slice.md` Step 13.5 and
+//! the design notes.
 //!
 //! This module composes and returns. It folds no delivery certainty and
 //! decides no stop reason, because both already have exactly one owner:
@@ -85,6 +86,8 @@ impl StaticRequestProfile {
 /// The resolved model supplies the mapping beside the row, so dynamic model
 /// authorities cannot expose a plausible protocol before resolution.
 pub struct WireGenerator {
+    connection_id: Option<String>,
+    cache_ttl_seconds: Option<std::num::NonZeroU64>,
     row: ProviderRow,
     service_tier: crate::service_tier::ServiceTier,
     wire: &'static dyn WireFormat,
@@ -95,14 +98,21 @@ pub struct WireGenerator {
     http: Arc<dyn Http>,
     /// The row's credential, already resolved.
     ///
-    /// The generator holds the resolved credential because it must send it.
-    /// Neither the provider row nor the cloneable, ledger-bound `ResolvedModel`
-    /// holds a secret.
+    /// The one copy in the process, and it lives here because this is the one
+    /// thing that must send it — the row must not hold a secret
+    /// (the design notes §3) and
+    /// neither may a `ResolvedModel`, which is `Clone` and travels to the
+    /// ledger.
     ///
-    /// Resolved once, not re-read per request. Rotating an environment variable
-    /// mid-run must not silently change generation identity. Credential failures
-    /// are reported at startup, where the missing variable can be named.
+    /// Resolved rather than resolvable, which is
+    /// `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §6's whole
+    /// point: this field used to be an `Arc<dyn Credentials>` and every
+    /// generation re-read the environment through it, so a variable rotated
+    /// mid-run changed behaviour silently and every generation was fallible
+    /// for a condition settled at startup. Now the failure has exactly one
+    /// site, and it is the site that can name the variable to set.
     credential: ResolvedCredential,
+    generation_role: ego_core::event::domain::GenerationRole,
     protocol_filter: Option<(
         ego_core::config::ProtocolFilterConfig,
         Arc<dyn crate::protocol_filter::ProtocolFilterCommand>,
@@ -123,6 +133,8 @@ impl WireGenerator {
             None => row.http_profile.clone(),
         };
         WireGenerator {
+            connection_id: None,
+            cache_ttl_seconds: None,
             row,
             service_tier: crate::service_tier::ServiceTier::Standard,
             wire,
@@ -131,12 +143,36 @@ impl WireGenerator {
             credential,
             codex_session: Arc::default(),
             protocol_filter: None,
+            generation_role: ego_core::event::domain::GenerationRole::Main,
         }
+    }
+
+    /// Bind private continuation and cache evidence to a stable local identity.
+    /// Display names and token refreshes do not change this identity.
+    pub fn with_connection_id(mut self, connection_id: Option<String>) -> Self {
+        self.connection_id = connection_id;
+        self
+    }
+
+    pub fn matches_connection_id(&self, connection_id: Option<&str>) -> bool {
+        self.connection_id.as_deref() == connection_id
+    }
+
+    /// A user estimate for provider-managed lifetimes; never sent on the wire.
+    pub fn with_cache_ttl_seconds(mut self, ttl: Option<std::num::NonZeroU64>) -> Self {
+        self.cache_ttl_seconds = ttl;
+        self
     }
 
     /// Bind a tier to this generation profile, not mutable process state.
     pub fn with_service_tier(mut self, tier: crate::service_tier::ServiceTier) -> Self {
         self.service_tier = tier;
+        self
+    }
+
+    /// Bind the resolved role used by the startup context.
+    pub fn with_generation_role(mut self, role: ego_core::event::domain::GenerationRole) -> Self {
+        self.generation_role = role;
         self
     }
 
@@ -170,6 +206,11 @@ impl WireGenerator {
             && std::ptr::eq(self.wire, wire)
             && self.credential.base_override() == credential.base_override()
             && self.credential.headers() == credential.headers()
+            && match (&self.credential.signer, &credential.signer) {
+                (Some(current), Some(next)) => Arc::ptr_eq(current, next),
+                (None, None) => true,
+                _ => false,
+            }
     }
 
     /// Which provider this generates against.
@@ -181,8 +222,28 @@ impl WireGenerator {
         &self,
         req: &GenRequest,
     ) -> Result<(crate::http::HttpRequest, ToolNames), wire::RequestRefused> {
+        for block in req
+            .messages
+            .messages()
+            .iter()
+            .flat_map(|message| &message.content)
+        {
+            if let ego_core::generator::types::ContentBlock::Reasoning { state }
+            | ego_core::generator::types::ContentBlock::ProviderContent { state, .. } = block
+                && state.connection != self.connection_id
+            {
+                return Err(wire::RequestRefused::new(
+                    "private provider history belongs to another or unbound connection; start a new session for this connection",
+                ));
+            }
+        }
         if let Some((config, _)) = &self.protocol_filter {
             config.validate().map_err(wire::RequestRefused::new)?;
+            if self.credential.signer.is_some() {
+                return Err(wire::RequestRefused::new(
+                    "protocol_filter cannot rewrite a SigV4-signed Bedrock request",
+                ));
+            }
             if self.wire.websocket() {
                 return Err(wire::RequestRefused::new(
                     "protocol_filter v1 does not support rewriting WebSocket transports",
@@ -193,14 +254,6 @@ impl WireGenerator {
             return Err(wire::RequestRefused::new(
                 "this provider does not support native hosted search; no fallback is used",
             ));
-        }
-        let dialect = match self.row.id() {
-            "openai" => "openai-responses",
-            "anthropic" => "anthropic-messages",
-            _ => "",
-        };
-        if req.messages.messages().iter().flat_map(|message| &message.content).any(|block| matches!(block, ego_core::generator::types::ContentBlock::ProviderContent { state } if state.dialect != dialect || dialect.is_empty())) {
-            return Err(wire::RequestRefused::new("provider-owned search content cannot be replayed to another provider"));
         }
         let mut headers = self.credential.headers();
         for (name, value) in &self.row.extra_headers {
@@ -261,6 +314,11 @@ impl WireGenerator {
             tracing::debug!(target: "ego_ai::tool_names", index, original_name = %original.name,
                 provider_name = %tool.name, "provider tool declaration");
         }
+        if let Some(signer) = &self.credential.signer {
+            signer
+                .sign(&mut request, std::time::SystemTime::now())
+                .map_err(wire::RequestRefused::new)?;
+        }
         trace_request_tool_names(&request);
         Ok((request, names))
     }
@@ -289,6 +347,53 @@ fn trace_request_tool_names(request: &crate::http::HttpRequest) {
 }
 
 impl Generator for WireGenerator {
+    fn cache_request_identity(
+        &self,
+        req: &GenRequest,
+        previous_input_items: Option<usize>,
+    ) -> Option<ego_core::usage::CacheRequestIdentity> {
+        if self.protocol_filter.is_some()
+            || req.cache.as_ref()?.retention
+                == ego_core::generator::capabilities::CacheRetention::None
+        {
+            return None;
+        }
+        let (request, _) = self.build_request(req).ok()?;
+        let credential = crate::usage_limits::credential_fingerprint(&request.headers);
+        let scope = ego_core::digest::sha256_hex(
+            &serde_json::to_vec(&(
+                self.row.id(),
+                &self.connection_id,
+                req.model.as_str(),
+                request.url.as_str(),
+                credential,
+                &self.row.extra_headers,
+            ))
+            .ok()?,
+        );
+        self.wire
+            .cache_request_identity(request.body.as_deref()?, scope, previous_input_items)
+    }
+
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        // A user filter can rewrite cache controls; its output has no declared TTL contract.
+        let mut policy = if self.protocol_filter.is_some() {
+            ego_core::usage::PromptCachePolicy::default()
+        } else {
+            self.wire.prompt_cache_policy(req)
+        };
+        if policy.ttl_seconds.is_none()
+            && req.cache.as_ref().is_some_and(|cache| {
+                cache.retention != ego_core::generator::capabilities::CacheRetention::None
+            })
+        {
+            policy.ttl_seconds = self.cache_ttl_seconds;
+            // An override explicitly selects the user's request-to-request estimate.
+            policy.refresh_on_read = self.cache_ttl_seconds.is_some();
+        }
+        policy
+    }
+
     fn release_idle_connection(&self, session: ego_core::event::id::SessionId) {
         // An active stream owns the lock and its socket, not idle state. Only
         // this session's completed connection may be released here.
@@ -298,7 +403,17 @@ impl Generator for WireGenerator {
     }
 
     fn supports_web_search(&self) -> bool {
-        matches!(self.row.id(), "openai" | "anthropic")
+        self.wire.supports_web_search()
+    }
+
+    fn supports_default_web_search(&self, model: &str) -> bool {
+        self.wire.supports_web_search()
+            && self.wire.supports_default_web_search(
+                model,
+                self.credential.base_override().unwrap_or(self.row.base()),
+                &self.credential,
+                &self.row.credential,
+            )
     }
 
     fn ensure_expressible(&self, req: &GenRequest) -> Result<(), RequestExpressibilityError> {
@@ -308,9 +423,13 @@ impl Generator for WireGenerator {
     }
 
     fn generate(&self, req: GenRequest, attempt: GenerationAttempt) -> AttemptStream {
-        // Resolve credentials once before generation. Missing keys produce a
-        // configuration refusal rather than a repeated provider failure, and mid-run
-        // environment rotation must not change identity.
+        // No credential branch here, and its absence is the change §6 bought.
+        // A missing key is refused once, at resolution, where the message can
+        // name the variable to set and the exit code can be `CLI.md` §4.3's 2
+        // rather than a provider's 4. What used to sit here was the same
+        // refusal re-derived per generation, for a condition that could not
+        // have changed since — and it re-read the environment to do it, so a
+        // rotated variable silently changed a running turn.
         let (request, names) = match self.build_request(&req) {
             Ok(request) => request,
             // Refused before a socket exists. `DefinitelyUnsent` is honest
@@ -354,39 +473,62 @@ impl Generator for WireGenerator {
         {
             let _ = prepared_prefix.set(prefix);
         }
+        let signer = self.credential.signer.clone();
+        let diagnostic_headers = if signer.is_some() {
+            request
+                .headers
+                .iter()
+                .filter(|header| header.is_secret())
+                .cloned()
+                .collect()
+        } else {
+            self.credential.headers()
+        };
+        let connection_id = self.connection_id.clone();
         let publish_prefix = Arc::clone(&prepared_prefix);
         let filter = self.protocol_filter.clone();
+        let generation_role = self.generation_role;
         let attempt_ref = attempt.attempt();
         tracing::debug!(target: "ego_ai::tool_names", provider = self.row.id(), model = %req.model,
             "provider generation request");
         let http = Arc::clone(&self.http);
+        let quota_http = Arc::clone(&self.http);
+        let quota_credential =
+            crate::usage_limits::credential_fingerprint(&self.credential.headers());
         let profile = self.profile.clone();
-        // Pass the row's declared cost decoder to the mapping. Shared mappings
-        // must not choose it through provider-id branches.
+        // The row's own declaration of where it states a charge, carried to
+        // the decoder rather than looked up there: one mapping is spoken by
+        // providers that report a cost and by providers that do not, and a
+        // `match` on the provider id inside a wire format is the special case
+        // the metering ADR §8 forbids.
         let cost = self.row.cost.clone();
         let wire = self.wire;
         let websocket = wire.websocket();
+        let follow_redirects = self.credential.signer.is_none();
         let session = self.codex_session.clone();
         let provider = self.row.id().to_owned();
         let limit_model = format!("{}/{}", provider, req.model);
         let decode_provider = provider.clone();
+        let hosted_search = req.web_search;
         let (filter_events, local_events) = futures::channel::mpsc::unbounded();
         let inner = stream::once(async move {
             let mut request = request;
             let filtered = filter.is_some();
             let response_filter = if let Some((config, command)) = filter {
-                Some(
-                    crate::protocol_filter::apply(
-                        &config,
-                        command.as_ref(),
-                        &provider,
-                        &req.model,
-                        attempt_ref,
-                        &mut request,
-                        &filter_events,
-                    )
-                    .await?,
+                crate::protocol_filter::apply(
+                    &config,
+                    command.as_ref(),
+                    crate::protocol_filter::FilterIdentity {
+                        provider: &provider,
+                        model: &req.model,
+                        generation_role,
+                        wire_format: wire.name(),
+                    },
+                    attempt_ref,
+                    &mut request,
+                    &filter_events,
                 )
+                .await?
             } else {
                 None
             };
@@ -415,35 +557,51 @@ impl Generator for WireGenerator {
                     profile,
                     request,
                     req.cache.as_ref().map(|cache| cache.session_id),
+                    crate::codex_session::Quota {
+                        provider: provider.clone(),
+                        credential: quota_credential.clone(),
+                    },
                 )
                 .await
             } else {
-                profile.execute(http.as_ref(), request).await
+                profile
+                    .execute_with_redirects(http.as_ref(), request, follow_redirects)
+                    .await
+                    .map(|response| (response, ego_core::usage::CacheTransport::HttpFull))
             };
-            Ok::<_, &'static str>(match (response, response_filter) {
-                (Ok(response), Some(filter)) => filter.wrap(response).await,
+            if let Ok((response, _)) = &response {
+                quota_http.observe_rate_limits(&provider, &quota_credential, &response.headers);
+            }
+            Ok::<_, crate::protocol_filter::FilterFailure>(match (response, response_filter) {
+                (Ok((response, transport)), Some(filter)) => filter
+                    .wrap(response)
+                    .await
+                    .map(|response| (response, transport)),
                 (response, _) => response,
             })
         })
         .flat_map(move |result| {
             let response = match result {
                 Ok(response) => response,
-                Err(message) => {
+                Err(failure) => {
                     use ego_core::generator::port::AiEvent;
+                    let diagnostic = failure.message();
                     return stream::iter([
                         AiEvent::DeliveryObserved(DeliveryCertainty::DefinitelyUnsent),
                         AiEvent::Error {
-                            message: message.to_owned(),
-                            kind: ErrorKind::Invalid,
+                            message: diagnostic.clone(),
+                            kind: failure.kind(),
                         },
-                        AiEvent::LocalFailure {
-                            cause: message.to_owned(),
-                        },
+                        AiEvent::LocalFailure { cause: diagnostic },
                         AiEvent::Stop(ego_core::generator::types::StopReason::Error),
                     ])
                     .boxed();
                 }
             };
+            let transport = response.as_ref().ok().map(|(_, transport)| {
+                ego_core::generator::port::AiEvent::CacheTransportObserved(*transport)
+            });
+            let response = response.map(|(response, _)| response);
             let limits = response
                 .as_ref()
                 .ok()
@@ -457,13 +615,78 @@ impl Generator for WireGenerator {
                     model: limit_model.clone(),
                     limits,
                 });
-            stream::iter(observation)
-                .chain(wire.decode(response, cost.clone()))
+            stream::iter(transport)
+                .chain(stream::iter(observation))
+                .chain(wire.decode_generation(response, cost.clone(), hosted_search))
                 .boxed()
+        })
+        .map(move |mut event| {
+            use ego_core::generator::port::AiEvent;
+            match &mut event {
+                AiEvent::ReasoningState(state) | AiEvent::ProviderContent { state, .. } => {
+                    state.connection = connection_id.clone();
+                }
+                _ => {}
+            }
+            // Providers can reflect the credential in a typed error field.
+            // Mask it before either the host or attempt receipt observes it.
+            let diagnostic = match &mut event {
+                AiEvent::Error { message, .. } => Some(message),
+                AiEvent::ProviderFailure { cause, .. } | AiEvent::LocalFailure { cause } => {
+                    Some(cause)
+                }
+                _ => None,
+            };
+            if let Some(diagnostic) = diagnostic {
+                if let Some(signer) = &signer {
+                    signer.redact_diagnostic(diagnostic, &diagnostic_headers);
+                } else {
+                    for header in diagnostic_headers
+                        .iter()
+                        .filter(|header| header.is_secret())
+                    {
+                        let value = header.value();
+                        let value = value.strip_prefix(b"Bearer ").unwrap_or(value);
+                        if let Ok(value) = std::str::from_utf8(value)
+                            && !value.is_empty()
+                        {
+                            *diagnostic = diagnostic.replace(value, "[REDACTED]");
+                        }
+                    }
+                }
+            }
+            event
         })
         .flat_map(move |event| stream::iter(names.restore(event)))
         .boxed();
-        AttemptStream::new(attempt, stream::select(inner, local_events).boxed())
-            .with_prepared_cache_prefix(prepared_prefix)
+        // Polling the provider/filter can queue a local diagnostic and return
+        // its terminal error in the same poll. Drain that diagnostic first;
+        // a caller may legitimately stop consuming at the terminal marker.
+        let mut inner = inner.fuse();
+        let mut local_events = local_events.fuse();
+        let mut pending = None;
+        let ordered = stream::poll_fn(move |cx| {
+            use futures::stream::FusedStream;
+            use std::task::Poll;
+            if let Poll::Ready(Some(local)) = local_events.poll_next_unpin(cx) {
+                return Poll::Ready(Some(local));
+            }
+            if let Some(event) = pending.take() {
+                return Poll::Ready(Some(event));
+            }
+            let polled = inner.poll_next_unpin(cx);
+            if let Poll::Ready(Some(local)) = local_events.poll_next_unpin(cx) {
+                if let Poll::Ready(Some(event)) = polled {
+                    pending = Some(event);
+                }
+                return Poll::Ready(Some(local));
+            }
+            match polled {
+                Poll::Ready(Some(event)) => Poll::Ready(Some(event)),
+                _ if inner.is_terminated() && local_events.is_terminated() => Poll::Ready(None),
+                _ => Poll::Pending,
+            }
+        });
+        AttemptStream::new(attempt, ordered.boxed()).with_prepared_cache_prefix(prepared_prefix)
     }
 }

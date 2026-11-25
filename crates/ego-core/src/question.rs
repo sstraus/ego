@@ -480,4 +480,13 @@ pub trait Elicitor: Send + Sync {
         question: crate::event::id::ItemId,
         request: QuestionRequest,
     ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>>;
+
+    /// Confirm a root grant through the host's permission surface when available.
+    fn confirm_root<'a>(
+        &'a self,
+        question: crate::event::id::ItemId,
+        request: QuestionRequest,
+    ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
+        self.elicit(question, request)
+    }
 }

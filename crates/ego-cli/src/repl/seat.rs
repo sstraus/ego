@@ -13,11 +13,11 @@ use crossterm::event::Event;
 use futures::channel::oneshot;
 use futures::future::BoxFuture;
 use reedline::{
-    ColumnarMenu, Completer, CompletionResult, EditCommand, EditMode, Emacs, ExternalPrinter,
-    KeyCode, KeyModifiers, Keybindings, Menu, MenuBuilder, MenuEvent, Painter, Prompt,
-    PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent, ReedlineMenu, ReedlineRawEvent,
-    Span, Suggestion, Vi, default_emacs_keybindings, default_vi_insert_keybindings,
-    default_vi_normal_keybindings,
+    BreakSignal, ColumnarMenu, Completer, CompletionResult, EditCommand, EditMode, Emacs,
+    ExternalPrinter, ExternalPrinterSender, KeyCode, KeyModifiers, Keybindings, Menu, MenuBuilder,
+    MenuEvent, Painter, Prompt, PromptEditMode, PromptHistorySearch, Reedline, ReedlineEvent,
+    ReedlineMenu, ReedlineRawEvent, Span, Suggestion, Vi, default_emacs_keybindings,
+    default_vi_insert_keybindings, default_vi_normal_keybindings,
 };
 
 use super::actions::{
@@ -35,8 +35,8 @@ use super::status::{
 };
 use super::surface::InteractivePainter;
 use super::{
-    BACKGROUND_COMMAND, BUSY_RECALL_COMMAND, BUSY_STEER_COMMAND, BUSY_SUBMIT_COMMAND,
-    DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, PASTE_PATH_COMMAND,
+    BACKGROUND_COMMAND, BUSY_CANCEL_COMMAND, BUSY_RECALL_COMMAND, BUSY_STEER_COMMAND,
+    BUSY_SUBMIT_COMMAND, DRAFT_COMMAND, HostCommand, INTERRUPT_COMMAND, Line, PASTE_PATH_COMMAND,
     REMOVE_PASTE_IMAGE_COMMAND, answer,
 };
 use crate::cli::{managed_rule, managed_rule_effect, managed_rule_id};
@@ -108,6 +108,7 @@ enum SurfaceActionEffect {
     Fork,
     Sessions,
     Usage,
+    Context,
     New,
     Name,
     Goal,
@@ -115,7 +116,9 @@ enum SurfaceActionEffect {
     Clear,
     Statusline,
     Mcp,
+    Login,
     Tasks,
+    Side,
     Tools,
     Expand,
     Skills,
@@ -155,6 +158,7 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Fork => SurfaceActionEffect::Fork,
             ActionId::Sessions => SurfaceActionEffect::Sessions,
             ActionId::Usage => SurfaceActionEffect::Usage,
+            ActionId::Context => SurfaceActionEffect::Context,
             ActionId::New => SurfaceActionEffect::New,
             ActionId::Name => SurfaceActionEffect::Name,
             ActionId::Goal => SurfaceActionEffect::Goal,
@@ -162,7 +166,9 @@ impl ActionSink for SurfaceActionSink {
             ActionId::Clear => SurfaceActionEffect::Clear,
             ActionId::Statusline => SurfaceActionEffect::Statusline,
             ActionId::Mcp => SurfaceActionEffect::Mcp,
+            ActionId::Login => SurfaceActionEffect::Login,
             ActionId::Tasks => SurfaceActionEffect::Tasks,
+            ActionId::Side => SurfaceActionEffect::Side,
             ActionId::Tools => SurfaceActionEffect::Tools,
             ActionId::Expand => SurfaceActionEffect::Expand,
             ActionId::Skills => SurfaceActionEffect::Skills,
@@ -190,6 +196,7 @@ impl ActionSink for SurfaceActionSink {
 
 struct ActionCompleter {
     registry: Arc<ActionRegistry>,
+    status: SharedStatus,
 }
 
 impl Completer for ActionCompleter {
@@ -197,6 +204,46 @@ impl Completer for ActionCompleter {
         let Some(prefix) = line.get(..position) else {
             return CompletionResult::fresh(Vec::<Suggestion>::new());
         };
+        if let Some(start) = prefix.rfind('@') {
+            let query = &prefix[start + 1..];
+            {
+                let config = {
+                    let mut status = self.status.lock().expect("surface status lock");
+                    status.file_menu = true;
+                    status.file_picker.clone()
+                };
+                let Some((root, perimeter)) = config else {
+                    return CompletionResult::fresh(Vec::<Suggestion>::new());
+                };
+                let files = ego_tools::fs::workspace_files(
+                    &root,
+                    &|path| path.starts_with(&root) && !perimeter.refuses(&CanonPath::new(path)),
+                    &|path| path.to_str().is_some_and(|path| path.contains(query)),
+                );
+                // A query may hold spaces, for file names that do. When such a query
+                // matches nothing it is prose after an @, so the menu closes instead
+                // of staying open on NO RECORDS FOUND under the sentence.
+                if files.is_empty() && query.contains(char::is_whitespace) {
+                    self.status.lock().expect("surface status lock").file_menu = false;
+                }
+                return CompletionResult::fresh(
+                    files
+                        .into_iter()
+                        .filter_map(|path| {
+                            let path = path.to_str()?;
+                            Some(Suggestion {
+                                value: format!("@{}", shell_words::quote(path)),
+                                display_override: Some(path.to_owned()),
+                                span: Span::new(start, position),
+                                append_whitespace: false,
+                                ..Suggestion::default()
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        self.status.lock().expect("surface status lock").file_menu = false;
         let Some(filter) = prefix.strip_prefix('/') else {
             return CompletionResult::fresh(Vec::<Suggestion>::new());
         };
@@ -289,17 +336,29 @@ impl Completer for ActionCompleter {
 /// closes it only when the authoritative completer has no remaining choice.
 struct ActionMenu {
     inner: ColumnarMenu,
+    status: SharedStatus,
 }
 
 impl ActionMenu {
-    fn new(inner: ColumnarMenu) -> Self {
-        Self { inner }
+    fn new(inner: ColumnarMenu, status: SharedStatus) -> Self {
+        Self { inner, status }
+    }
+
+    /// An open menu with nothing left to choose closes, unless it is a file menu
+    /// whose query still names a possible file: that one shows NO RECORDS FOUND.
+    fn close_when_empty(&mut self) {
+        if self.inner.is_active()
+            && self.inner.get_values().is_empty()
+            && !self.status.lock().expect("surface status lock").file_menu
+        {
+            self.inner.menu_event(MenuEvent::Deactivate);
+        }
     }
 }
 
 impl Menu for ActionMenu {
     fn submit_on_accept(&self) -> bool {
-        true
+        !self.status.lock().expect("surface status lock").file_menu
     }
 
     fn name(&self) -> &str {
@@ -327,11 +386,28 @@ impl Menu for ActionMenu {
     }
 
     fn menu_event(&mut self, event: MenuEvent) {
+        let is_file = self.status.lock().expect("surface status lock").file_menu;
+        let erasing = self.status.lock().expect("surface status lock").erasing;
+        let event = if is_file || erasing {
+            match event {
+                MenuEvent::Activate(_) => MenuEvent::Activate(false),
+                MenuEvent::Edit(_) => MenuEvent::Edit(false),
+                MenuEvent::MoveDown => MenuEvent::NextElement,
+                MenuEvent::MoveUp => MenuEvent::PreviousElement,
+                other => other,
+            }
+        } else {
+            event
+        };
+        if matches!(event, MenuEvent::Deactivate) {
+            self.status.lock().expect("surface status lock").file_menu = false;
+        }
         self.inner.menu_event(event);
     }
 
     fn can_quick_complete(&self) -> bool {
-        self.inner.can_quick_complete()
+        let status = self.status.lock().expect("surface status lock");
+        !status.file_menu && !status.erasing && self.inner.can_quick_complete()
     }
 
     fn can_partially_complete(
@@ -346,9 +422,7 @@ impl Menu for ActionMenu {
 
     fn update_values(&mut self, editor: &mut reedline::Editor, completer: &mut dyn Completer) {
         self.inner.update_values(editor, completer);
-        if self.inner.get_values().is_empty() {
-            self.inner.menu_event(MenuEvent::Deactivate);
-        }
+        self.close_when_empty();
     }
 
     fn update_working_details(
@@ -359,10 +433,63 @@ impl Menu for ActionMenu {
     ) {
         self.inner
             .update_working_details(editor, completer, painter);
+        // A pending edit refreshes the values here, not in update_values.
+        self.close_when_empty();
+        // Edit modes parse an entire input burst before its commands run.
+        // Keep deletion non-inserting until that burst reaches the painter.
+        self.status.lock().expect("surface status lock").erasing = false;
     }
 
     fn replace_in_buffer(&self, editor: &mut reedline::Editor) {
+        let config = {
+            let mut status = self.status.lock().expect("surface status lock");
+            if status.file_menu {
+                status.file_menu = false;
+                status.file_picker.clone()
+            } else {
+                None
+            }
+        };
+        let Some((root, perimeter)) = config else {
+            self.inner.replace_in_buffer(editor);
+            return;
+        };
+        let before = editor.get_buffer().to_owned();
+        let mut cursor = 0;
+        editor.edit_buffer(
+            |line| cursor = line.insertion_point(),
+            reedline::UndoBehavior::MoveCursor,
+        );
         self.inner.replace_in_buffer(editor);
+        let after = editor.get_buffer();
+        let selected = self.inner.get_values().iter().find(|item| {
+            before
+                .get(..item.span.start)
+                .zip(before.get(item.span.end..))
+                .is_some_and(|(left, right)| format!("{left}{}{right}", item.value) == after)
+        });
+        let still_exists = selected
+            .and_then(|item| item.display_override.as_deref())
+            .is_some_and(|path| {
+                let files = ego_tools::fs::workspace_files(
+                    &root,
+                    &|candidate| {
+                        candidate.starts_with(&root)
+                            && !perimeter.refuses(&CanonPath::new(candidate))
+                    },
+                    &|candidate| candidate == Path::new(path),
+                );
+                !files.is_empty()
+            });
+        if !still_exists {
+            editor.edit_buffer(
+                |line| {
+                    line.set_buffer(before);
+                    line.set_insertion_point(cursor);
+                },
+                reedline::UndoBehavior::MoveCursor,
+            );
+        }
     }
 
     fn menu_required_lines(&self, terminal_columns: u16) -> u16 {
@@ -428,6 +555,11 @@ fn repaint_status(status: &SharedStatus) {
     let (painter, line) = {
         let mut status = status.lock().expect("surface status lock");
         let painter = Arc::clone(&status.painter);
+        if let Some(snapshot) = status.snapshot.as_mut() {
+            snapshot.set_time(ego_core::event::time::Clock::now(
+                &ego_tools::clock::SystemClock,
+            ));
+        }
         let rendered = status
             .native_status
             .then(|| status.snapshot.as_ref())
@@ -459,19 +591,49 @@ mod background;
 pub(crate) use background::{BackgroundActivity, BackgroundTaskSurface};
 
 struct ChildActivity {
+    profile: Option<ego_core::model_catalogue::ExecutionProfile>,
     name: String,
     activity: String,
     started: Instant,
     output_tokens: u64,
 }
 
+struct QueuedPreview {
+    text: String,
+    images: usize,
+    admitted: bool,
+}
+
+#[derive(Clone, Copy, Default)]
+enum ActivityKind {
+    #[default]
+    Working,
+    Compacting,
+}
+
+impl ActivityKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Working => "Working",
+            Self::Compacting => "Compacting",
+        }
+    }
+}
+
 struct SurfaceStatus {
     details: Arc<crate::output::ExpansionHistory>,
     setup_cancel: Option<tokio::sync::watch::Sender<bool>>,
     queue: QueueStatus,
+    queued_previews: std::collections::VecDeque<QueuedPreview>,
     drafts: usize,
     activity: bool,
+    activity_kind: ActivityKind,
     native_turn: Option<ego_core::event::id::TurnId>,
+    /// Journal-derived host activity, independent of the parent editor phase.
+    native_activity: crate::render::osc::State,
+    /// The last turn was refused, or its context recovery stopped; idle is
+    /// reported as error until a turn starts.
+    refused: bool,
     activity_since: Option<Instant>,
     activity_output_chars: usize,
     children: std::collections::BTreeMap<ItemId, ChildActivity>,
@@ -484,6 +646,7 @@ struct SurfaceStatus {
     reply_started: Arc<AtomicBool>,
     retry: Option<(String, Instant, u64)>,
     shell: Option<crate::render::Line>,
+    shell_preview: Vec<crate::render::Line>,
     notice: Option<String>,
     image_chips: Vec<String>,
     images: super::ImageDraft,
@@ -498,6 +661,10 @@ struct SurfaceStatus {
     snapshot: Option<SurfaceSnapshot>,
     status_base: Option<StatusBase>,
     selected_mode: Option<Mode>,
+    file_picker: Option<(PathBuf, ego_core::permit::ReadPerimeter)>,
+    file_menu: bool,
+    /// A destructive edit may open suggestions, but must never insert one.
+    erasing: bool,
     painter: Arc<InteractivePainter>,
     actions: Option<Actions>,
     inspections: Option<(Sender<HostCommand>, Arc<futures::task::AtomicWaker>)>,
@@ -516,6 +683,10 @@ struct SurfaceStatus {
     /// receipts that have no run output to travel with. `None` without a live
     /// terminal.
     transcript: Option<Sender<SurfaceMessage>>,
+    printer_output: Option<Receiver<String>>,
+    printer_cancel: Option<CancelToken>,
+    #[cfg(test)]
+    printer_test_output: Option<Arc<Mutex<ingress_wait::TestOutput>>>,
     /// What the host is told around a modal wait, and whether `-q` is on.
     signals: Option<(Osc, bool)>,
     cursor_selectors: bool,
@@ -524,16 +695,101 @@ struct SurfaceStatus {
 }
 
 impl SurfaceStatus {
-    fn observe_native_turn(&mut self, event: &ego_core::public::PublicEvent) {
+    fn stage_queue_preview(&mut self, text: String, images: usize) {
+        self.queued_previews.push_back(QueuedPreview {
+            text,
+            images,
+            admitted: false,
+        });
+    }
+
+    fn settle_queue_preview(&mut self, accepted: bool) {
+        if accepted {
+            if let Some(preview) = self.queued_previews.back_mut() {
+                preview.admitted = true;
+            }
+        } else {
+            self.queued_previews.pop_back();
+        }
+    }
+
+    fn consume_queue_preview(&mut self, event: &ego_core::public::PublicEvent) -> Option<String> {
+        use ego_core::public::{ItemKind, PublicEvent};
+        let PublicEvent::ItemCompleted {
+            kind: ItemKind::UserMessage,
+            text: Some(text),
+            ..
+        } = event
+        else {
+            return None;
+        };
+        let index = self
+            .queued_previews
+            .iter()
+            .position(|preview| preview.text == *text)?;
+        // A consumed prompt can reach the seat before its ingress receipt.
+        // Stage before awaiting admission, but paint only accepted previews.
+        let preview = self.queued_previews.remove(index)?;
+        let mut receipt = background_notice::row(&preview.text, self.width.saturating_sub(1))
+            .unwrap_or_else(|| format!("> {}", preview.text.replace('\n', "\n… ")));
+        if let Some(label) = crate::render::attachments::label(preview.images) {
+            receipt.push('\n');
+            receipt.push_str(&label);
+        }
+        Some(receipt)
+    }
+
+    fn reconcile_queue_previews<'a>(
+        &mut self,
+        prompts: impl IntoIterator<Item = &'a ego_core::state::QueuedPrompt>,
+    ) -> bool {
+        let mut pending = std::collections::HashMap::<&str, usize>::new();
+        for prompt in prompts {
+            *pending.entry(prompt.text()).or_default() += 1;
+        }
+        let before = self.queued_previews.len();
+        self.queued_previews.retain(|preview| {
+            if !preview.admitted {
+                return true;
+            }
+            let Some(count) = pending.get_mut(preview.text.as_str()) else {
+                return false;
+            };
+            if *count == 0 {
+                return false;
+            }
+            *count -= 1;
+            true
+        });
+        self.queued_previews.len() != before
+    }
+
+    fn observe_native_turn(&mut self, event: &ego_core::public::PublicEvent, state: &SessionState) {
         use ego_core::public::PublicEvent;
         match event {
-            PublicEvent::SessionStarted { .. } => self.native_turn = None,
-            PublicEvent::TurnStarted { turn } => self.native_turn = Some(*turn),
-            PublicEvent::TurnCompleted { turn, .. } if self.native_turn == Some(*turn) => {
+            PublicEvent::SessionStarted { .. } => {
                 self.native_turn = None;
+                self.refused = false;
+            }
+            PublicEvent::TurnStarted { turn } => {
+                self.native_turn = Some(*turn);
+                self.refused = false;
+            }
+            PublicEvent::TurnCompleted {
+                turn,
+                ok,
+                exit_reason,
+            } if self.native_turn == Some(*turn) => {
+                self.native_turn = None;
+                self.refused = crate::output::refused(*ok, *exit_reason);
             }
             _ => {}
         }
+        self.native_activity = match crate::run::native_activity(state, self.native_turn.is_some())
+        {
+            crate::render::osc::State::Idle if self.refused => crate::render::osc::State::Error,
+            activity => activity,
+        };
     }
 
     fn begin_activity(&mut self) {
@@ -566,6 +822,7 @@ impl SurfaceStatus {
                     && let Some(name) = args.get("name").and_then(serde_json::Value::as_str)
                 {
                     self.children.entry(*item).or_insert_with(|| ChildActivity {
+                        profile: None,
                         name: name.to_owned(),
                         activity: "Working".to_owned(),
                         started: Instant::now(),
@@ -573,6 +830,15 @@ impl SurfaceStatus {
                     });
                 }
                 self.thinking_since = None;
+            }
+            PublicEvent::GenerationProfileSelected {
+                item: Some(item),
+                profile,
+                ..
+            } => {
+                if let Some(child) = self.children.get_mut(item) {
+                    child.profile = Some(profile.clone());
+                }
             }
             PublicEvent::ChildProgress {
                 item,
@@ -633,9 +899,13 @@ impl Default for SurfaceStatus {
             details: Arc::default(),
             setup_cancel: None,
             queue: QueueStatus::default(),
+            queued_previews: Default::default(),
             drafts: 0,
             activity: false,
+            activity_kind: ActivityKind::Working,
             native_turn: None,
+            native_activity: crate::render::osc::State::Idle,
+            refused: false,
             activity_since: None,
             activity_output_chars: 0,
             children: Default::default(),
@@ -646,6 +916,7 @@ impl Default for SurfaceStatus {
             reply_started: Arc::new(AtomicBool::new(false)),
             retry: None,
             shell: None,
+            shell_preview: Vec::new(),
             notice: None,
             image_chips: Vec::new(),
             images: super::ImageDraft::default(),
@@ -660,6 +931,9 @@ impl Default for SurfaceStatus {
             snapshot: None,
             status_base: None,
             selected_mode: None,
+            file_picker: None,
+            file_menu: false,
+            erasing: false,
             painter: Arc::new(InteractivePainter::new()),
             actions: None,
             inspections: None,
@@ -672,6 +946,10 @@ impl Default for SurfaceStatus {
             permission_capabilities: crate::render::Capabilities::plain(),
             permission_rules: None,
             transcript: None,
+            printer_output: None,
+            printer_cancel: None,
+            #[cfg(test)]
+            printer_test_output: None,
             signals: None,
             cursor_selectors: false,
             mcp_actions: None,
@@ -828,6 +1106,7 @@ pub(crate) const DEFAULT_STATUSLINE_SEGMENTS: &[ego_core::config::StatusSegmentN
     ego_core::config::StatusSegmentName::Mode,
     ego_core::config::StatusSegmentName::Context,
     ego_core::config::StatusSegmentName::Cost,
+    ego_core::config::StatusSegmentName::Cache,
     ego_core::config::StatusSegmentName::Queue,
     ego_core::config::StatusSegmentName::Drafts,
     ego_core::config::StatusSegmentName::Interrupt,
@@ -909,6 +1188,7 @@ pub struct SurfaceOutput {
     pending: String,
     pending_answer: bool,
     shell: Option<String>,
+    running_tools: Vec<RunningTool>,
     status: Option<SharedStatus>,
     answer_block: bool,
     wrote: bool,
@@ -916,6 +1196,12 @@ pub struct SurfaceOutput {
     signals: Option<Sender<String>>,
     cancel: CancelToken,
     reply_started: Arc<AtomicBool>,
+}
+
+struct RunningTool {
+    item: ego_core::event::id::ItemId,
+    line: crate::render::Line,
+    preview: Vec<crate::render::Line>,
 }
 
 impl SurfaceOutput {
@@ -926,6 +1212,7 @@ impl SurfaceOutput {
             pending: String::new(),
             pending_answer: false,
             shell: None,
+            running_tools: Vec::new(),
             status: None,
             answer_block: false,
             wrote: false,
@@ -937,10 +1224,11 @@ impl SurfaceOutput {
     }
 
     pub(super) fn pumped(
-        external: Sender<String>,
+        external: impl Into<ExternalPrinterSender<String>>,
         cancel: CancelToken,
         reply_started: Arc<AtomicBool>,
     ) -> (Self, std::thread::JoinHandle<()>) {
+        let external = external.into();
         let (sender, receiver) = crossbeam::channel::unbounded();
         let pump_cancel = cancel.clone();
         let owner = std::thread::Builder::new()
@@ -993,6 +1281,7 @@ impl SurfaceOutput {
                 pending: String::new(),
                 pending_answer: false,
                 shell: None,
+                running_tools: Vec::new(),
                 status: None,
                 answer_block: false,
                 wrote: false,
@@ -1048,7 +1337,11 @@ impl SurfaceOutput {
 
     pub(crate) fn signal(&self, sequence: &str) -> Result<(), SendError<String>> {
         match &self.signals {
-            Some(signals) => signals.send(sequence.to_owned()),
+            Some(signals) => {
+                signals.send(sequence.to_owned())?;
+                let _ = crossterm::event::wake();
+                Ok(())
+            }
             None => self.send(sequence.to_owned()),
         }
     }
@@ -1056,6 +1349,56 @@ impl SurfaceOutput {
     pub fn write(&mut self, text: &str) -> Result<(), SendError<String>> {
         self.settle_shell()?;
         self.write_with_kind(text, false)
+    }
+
+    pub(crate) fn start_tool(
+        &mut self,
+        item: ego_core::event::id::ItemId,
+        line: crate::render::Line,
+    ) {
+        self.running_tools.push(RunningTool {
+            item,
+            line,
+            preview: Vec::new(),
+        });
+        self.repaint_running_tool();
+    }
+
+    pub(crate) fn update_tool(
+        &mut self,
+        item: ego_core::event::id::ItemId,
+        line: crate::render::Line,
+        preview: Vec<crate::render::Line>,
+    ) {
+        if let Some(current) = self.running_tools.iter_mut().find(|tool| tool.item == item) {
+            current.line = line;
+            current.preview = preview;
+            self.repaint_running_tool();
+        }
+    }
+
+    pub(crate) fn finish_tool(&mut self, item: ego_core::event::id::ItemId) {
+        self.running_tools.retain(|tool| tool.item != item);
+        self.repaint_running_tool();
+    }
+
+    pub(crate) fn clear_tools(&mut self) {
+        if !self.running_tools.is_empty() {
+            self.running_tools.clear();
+            self.repaint_running_tool();
+        }
+    }
+
+    fn repaint_running_tool(&self) {
+        if let Some(status) = &self.status {
+            {
+                let mut surface = status.lock().expect("surface status lock");
+                let tool = self.running_tools.first();
+                surface.shell = tool.map(|tool| tool.line.clone());
+                surface.shell_preview = tool.map_or_else(Vec::new, |tool| tool.preview.clone());
+            }
+            repaint_status(status);
+        }
     }
 
     pub(crate) fn write_shell(
@@ -1067,7 +1410,12 @@ impl SurfaceOutput {
             return self.write_tool(rows);
         };
         self.shell = Some(rows.to_owned());
-        status.lock().expect("surface status lock").shell = Some(live);
+        status.lock().expect("surface status lock").shell = Some(
+            self.running_tools
+                .first()
+                .map(|tool| tool.line.clone())
+                .unwrap_or(live),
+        );
         repaint_status(status);
         Ok(())
     }
@@ -1075,7 +1423,8 @@ impl SurfaceOutput {
     pub(crate) fn settle_shell(&mut self) -> Result<(), SendError<String>> {
         if let Some(rows) = self.shell.take() {
             if let Some(status) = &self.status {
-                status.lock().expect("surface status lock").shell = None;
+                status.lock().expect("surface status lock").shell =
+                    self.running_tools.first().map(|tool| tool.line.clone());
                 repaint_status(status);
             }
             self.write_tool(&rows)?;
@@ -1188,8 +1537,8 @@ impl SurfaceOutput {
 
 enum Control {
     SessionPicker {
-        sessions: Vec<ego_core::store::session_store::SessionMeta>,
-        reply: Sender<Option<SessionId>>,
+        source: crate::catalogue::ResumePicker,
+        reply: Sender<crate::catalogue::SessionPick>,
     },
     InsertPasteText {
         text: String,
@@ -1243,6 +1592,7 @@ enum Control {
 }
 
 struct LiveSeat {
+    ingress: InteractiveIngress,
     input: Receiver<Line>,
     inspections: Receiver<HostCommand>,
     background_ready: Receiver<()>,
@@ -1250,7 +1600,7 @@ struct LiveSeat {
     inspection_waker: Arc<futures::task::AtomicWaker>,
     control: Sender<Control>,
     activated: AtomicBool,
-    break_signal: Arc<AtomicBool>,
+    break_signal: BreakSignal,
     phase: SurfacePhase,
     status: SharedStatus,
     git_worker: Mutex<Option<GitWorker>>,
@@ -1262,7 +1612,7 @@ struct LiveSeat {
 impl LiveSeat {
     fn wake_owner(&self) {
         if self.activated.load(Ordering::Acquire) {
-            self.break_signal.store(true, Ordering::Release);
+            self.break_signal.request_break();
         }
     }
 }
@@ -1323,6 +1673,16 @@ fn emacs_composer() -> Emacs {
 }
 
 fn add_action_menu(keybindings: &mut Keybindings) {
+    for modifiers in [KeyModifiers::NONE, KeyModifiers::SHIFT] {
+        keybindings.add_binding(
+            modifiers,
+            KeyCode::Char('@'),
+            ReedlineEvent::Multiple(vec![
+                ReedlineEvent::Edit(vec![EditCommand::InsertChar('@')]),
+                ReedlineEvent::Menu(ACTION_MENU.to_owned()),
+            ]),
+        );
+    }
     keybindings.add_binding(
         KeyModifiers::NONE,
         KeyCode::Char('/'),
@@ -1347,10 +1707,37 @@ fn composer_editor(vim: bool) -> Box<dyn EditMode> {
 }
 
 impl Seat {
-    pub(crate) fn observe_native_turn(&self, event: &ego_core::public::PublicEvent) {
+    fn start_activity(&self, kind: ActivityKind) {
+        self.registry.set_availability(
+            ActionId::Compact,
+            Availability::BusyWithReason {
+                reason: "ego is busy; a turn is running",
+            },
+        );
         if let SeatKind::Live(live) = &self.kind {
             let mut status = live.status.lock().expect("surface status lock");
-            status.observe_native_turn(event);
+            status.begin_activity();
+            status.activity_kind = kind;
+            live.phase.set_activity(EditPhase::Busy);
+            drop(status);
+            repaint_status(&live.status);
+        }
+    }
+
+    pub(crate) fn observe_native_turn(
+        &self,
+        event: &ego_core::public::PublicEvent,
+        state: &SessionState,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            let receipt = {
+                let mut status = live.status.lock().expect("surface status lock");
+                status.observe_native_turn(event, state);
+                status.consume_queue_preview(event)
+            };
+            if let Some(receipt) = receipt {
+                commit_to_transcript(&live.status, &receipt);
+            }
         }
     }
 
@@ -1365,8 +1752,9 @@ impl Seat {
 
     /// Build the applicable editor and, for a terminal, its only output port.
     ///
-    /// Bracketed paste is not a nicety: without it a pasted stack trace submits its first
-    /// line as a whole prompt, which is the failure that makes pasting one impossible.
+    /// Bracketed paste is not a nicety: without it a pasted stack trace
+    /// submits its first line as a whole prompt, which is the failure that
+    /// makes pasting one impossible. `CLI.md` §6.1.
     pub fn new(cancel: CancelToken) -> std::io::Result<(Self, Option<SurfaceOutput>)> {
         Self::with_keyboard(cancel, &ego_core::config::UiLayer::default())
     }
@@ -1411,6 +1799,8 @@ impl Seat {
             Arc::clone(&status),
         );
         let asked_for_image = mode.asked_for_image();
+        let crate::render::Rgb(r, g, b) = crate::render::Palette::HEADING;
+        let selected_style = reedline::Color::Rgb(r, g, b).bold();
         let mut editor = Reedline::create()
             .with_edit_mode(Box::new(mode))
             .with_highlighter(Box::new(background_notice::NoticeHighlighter(Arc::clone(
@@ -1418,6 +1808,7 @@ impl Seat {
             ))))
             .with_completer(Box::new(ActionCompleter {
                 registry: Arc::clone(&registry),
+                status: Arc::clone(&status),
             }))
             .with_quick_completions(true)
             // Erasing inside a /-prefixed draft re-filters the menu; ActionMenu closes it
@@ -1428,8 +1819,9 @@ impl Seat {
                     .with_name(ACTION_MENU)
                     .with_text_style(reedline::Color::Default.normal())
                     .with_description_text_style(reedline::Color::Default.normal())
-                    .with_selected_text_style(reedline::Color::Default.reverse())
-                    .with_selected_match_text_style(reedline::Color::Default.reverse().underline()),
+                    .with_selected_text_style(selected_style)
+                    .with_selected_match_text_style(selected_style.underline()),
+                Arc::clone(&status),
             ))))
             .use_bracketed_paste(true)
             .use_kitty_keyboard_enhancement(true);
@@ -1473,7 +1865,12 @@ impl Seat {
         #[cfg(test)]
         let held_printer = printer.sender();
         let startup_output = printer.receiver().clone();
-        let break_signal = Arc::new(AtomicBool::new(false));
+        {
+            let mut current = status.lock().expect("surface status lock");
+            current.printer_output = Some(startup_output.clone());
+            current.printer_cancel = Some(cancel.clone());
+        }
+        let break_signal = BreakSignal::default();
         // The driver can wait for the output pump at turn completion. Its
         // terminal owner must remain free to drain that pump's printer even
         // when several input lines arrive before the driver reads again.
@@ -1484,9 +1881,10 @@ impl Seat {
             Some((inspection_sender.clone(), Arc::clone(&inspection_waker)));
         let owner_inspection_waker = Arc::clone(&inspection_waker);
         let (seat_control, control_receiver) = bounded(CHANNEL_CAPACITY);
-        let owner_break = Arc::clone(&break_signal);
+        let owner_break = break_signal.clone();
         let owner_phase = phase.clone();
         let owner_status = Arc::clone(&status);
+        let seat_ingress = ingress.clone();
         let owner = std::thread::Builder::new()
             .name("ego-reedline".to_string())
             .spawn(move || {
@@ -1529,6 +1927,10 @@ impl Seat {
                         let state = status.lock().expect("surface status lock");
                         (activity_phase.get() == EditPhase::Busy && state.activity)
                             || !state.background_children.rows.is_empty()
+                            || state
+                                .snapshot
+                                .as_ref()
+                                .is_some_and(|snapshot| snapshot.cache_is_live())
                     };
                     if repaint {
                         repaint_status(&status);
@@ -1540,6 +1942,7 @@ impl Seat {
         Ok((
             Self {
                 kind: SeatKind::Live(Box::new(LiveSeat {
+                    ingress: seat_ingress,
                     input,
                     inspections,
                     background_ready,
@@ -1566,29 +1969,44 @@ impl Seat {
         ))
     }
 
+    /// Read one live line, or `None` when `timeout` fires first.
+    fn read_live(live: &LiveSeat, timeout: &Receiver<Instant>) -> Option<Line> {
+        // Already admitted inspections belong to the current session, so
+        // answer them before ordinary input can switch or close it.
+        let line = crossbeam::channel::select_biased! {
+            recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
+            recv(live.input) -> line => line.unwrap_or(Line::Ended),
+            recv(live.background_ready) -> _ => Line::HostCommand(HostCommand::BackgroundExecSettled),
+            recv(timeout) -> _ => return None,
+        };
+        if matches!(
+            line,
+            Line::Submitted(_) | Line::HostCommand(HostCommand::SubmittedDraft { .. })
+        ) {
+            live.ingress.begin_turn();
+            let mut status = live.status.lock().expect("surface status lock");
+            status.begin_activity();
+            live.phase.set_activity(EditPhase::Busy);
+            drop(status);
+            repaint_status(&live.status);
+        }
+        Some(line)
+    }
+
+    /// Read one line, or `None` when a live seat stays idle until `deadline`.
+    /// A sequential seat has no idle period, so it never times out.
+    pub fn read_before(&self, deadline: Instant) -> Option<Line> {
+        match &self.kind {
+            SeatKind::Live(live) => Self::read_live(live, &crossbeam::channel::at(deadline)),
+            SeatKind::Sequential(_) => Some(self.read()),
+        }
+    }
+
     /// Read one line.
     pub fn read(&self) -> Line {
         match &self.kind {
-            SeatKind::Live(live) => {
-                // Already admitted inspections belong to the current session, so
-                // answer them before ordinary input can switch or close it.
-                let line = crossbeam::channel::select_biased! {
-                    recv(live.inspections) -> command => command.map(Line::HostCommand).unwrap_or(Line::Ended),
-                    recv(live.input) -> line => line.unwrap_or(Line::Ended),
-                    recv(live.background_ready) -> _ => Line::HostCommand(HostCommand::BackgroundExecSettled),
-                };
-                if matches!(
-                    line,
-                    Line::Submitted(_) | Line::HostCommand(HostCommand::SubmittedDraft { .. })
-                ) {
-                    let mut status = live.status.lock().expect("surface status lock");
-                    status.begin_activity();
-                    live.phase.set_activity(EditPhase::Busy);
-                    drop(status);
-                    repaint_status(&live.status);
-                }
-                line
-            }
+            SeatKind::Live(live) => Self::read_live(live, &crossbeam::channel::never())
+                .expect("a read without a deadline cannot time out"),
             SeatKind::Sequential(seat) => {
                 let line =
                     read_sequential_line(&mut *seat.input.lock().expect("sequential input lock"));
@@ -1613,16 +2031,23 @@ impl Seat {
                     Dispatch::Fork(item) => Line::HostCommand(HostCommand::Fork(item)),
                     Dispatch::Hooks => Line::HostCommand(HostCommand::Hooks),
                     Dispatch::Tasks(arguments) => Line::HostCommand(HostCommand::Tasks(arguments)),
+                    Dispatch::Side(question) => {
+                        Line::HostCommand(HostCommand::SideQuestion(question))
+                    }
                     Dispatch::Pins(command) => Line::HostCommand(HostCommand::Pins(command)),
                     Dispatch::McpContext(command) => {
                         Line::HostCommand(HostCommand::McpContext(command))
                     }
                     Dispatch::Mcp(arguments) => Line::HostCommand(HostCommand::Mcp(arguments)),
+                    Dispatch::Login(provider) => Line::HostCommand(HostCommand::Login(provider)),
                     Dispatch::Setup(arguments) => Line::HostCommand(HostCommand::Setup(arguments)),
                     Dispatch::Init(arguments) => Line::HostCommand(HostCommand::Init(arguments)),
                     Dispatch::Fast(enabled) => Line::HostCommand(HostCommand::Fast(enabled)),
                     Dispatch::Mode(mode) => {
                         Line::HostCommand(HostCommand::Policy(PolicyControlRequest::SetMode(mode)))
+                    }
+                    Dispatch::ModelQuery(_) => {
+                        Line::Refused("model selection needs an interactive terminal")
                     }
                     Dispatch::Config(arguments) => {
                         Line::HostCommand(HostCommand::Config(arguments))
@@ -1676,7 +2101,7 @@ impl Seat {
                 let _ = worker.sender.try_send(GitWork::Shutdown);
             }
             let _ = live.control.send(Control::Shutdown);
-            live.break_signal.store(true, Ordering::Release);
+            live.break_signal.request_break();
         }
     }
 
@@ -1760,6 +2185,7 @@ impl Seat {
             ActionId::Fork,
             ActionId::Sessions,
             ActionId::Usage,
+            ActionId::Context,
             ActionId::New,
             ActionId::Name,
             ActionId::Goal,
@@ -1767,7 +2193,9 @@ impl Seat {
             ActionId::Clear,
             ActionId::Statusline,
             ActionId::Mcp,
+            ActionId::Login,
             ActionId::Tasks,
+            ActionId::Side,
             ActionId::Tools,
             ActionId::Expand,
             ActionId::Skills,
@@ -1882,6 +2310,16 @@ impl Seat {
                 .lock()
                 .expect("surface status lock")
                 .selected_mode = Some(mode);
+        }
+    }
+
+    pub(crate) fn set_file_picker(
+        &self,
+        root: PathBuf,
+        perimeter: ego_core::permit::ReadPerimeter,
+    ) {
+        if let SeatKind::Live(live) = &self.kind {
+            live.status.lock().expect("surface status lock").file_picker = Some((root, perimeter));
         }
     }
 
@@ -2059,6 +2497,23 @@ impl Seat {
         }
     }
 
+    /// Project the session's cache authority; the seat never resets a deadline.
+    pub(crate) fn observe_prompt_cache(&self, state: &SessionState) {
+        let SeatKind::Live(live) = &self.kind else {
+            return;
+        };
+        let changed = live
+            .status
+            .lock()
+            .expect("surface status lock")
+            .snapshot
+            .as_mut()
+            .is_some_and(|snapshot| snapshot.set_prompt_cache(state.prompt_cache.clone()));
+        if changed {
+            repaint_status(&live.status);
+        }
+    }
+
     /// Replace state/selection facts and request one coalesced Git refresh.
     pub fn refresh_status(&self, state: &SessionState, selection: GenerationSelectionSnapshot) {
         let SeatKind::Live(live) = &self.kind else {
@@ -2188,9 +2643,19 @@ impl Seat {
 }
 
 fn read_sequential_line(input: &mut impl BufRead) -> Line {
+    read_sequential_line_reporting(input, &mut crate::output::note)
+}
+
+/// [`read_sequential_line`], naming through `report` the cause of a read that
+/// failed.
+fn read_sequential_line_reporting(input: &mut impl BufRead, report: &mut dyn FnMut(&str)) -> Line {
     let mut text = String::new();
     match input.read_line(&mut text) {
-        Ok(0) | Err(_) => Line::Ended,
+        Ok(0) => Line::Ended,
+        Err(error) => {
+            super::report_input_failure(&error, report);
+            Line::Ended
+        }
         Ok(_) => {
             if text.ends_with('\n') {
                 text.pop();
@@ -2210,6 +2675,10 @@ impl crate::run::Reads for Seat {
 }
 
 impl crate::run::InteractiveSeat for Seat {
+    fn read_before(&self, deadline: Instant) -> Option<Line> {
+        Seat::read_before(self, deadline)
+    }
+
     fn wake_background_exec(&self) {
         if let SeatKind::Live(live) = &self.kind {
             // One token covers every ready snapshot; no process task waits
@@ -2220,7 +2689,7 @@ impl crate::run::InteractiveSeat for Seat {
 
     fn pasteboard_kind(&self) -> Result<crate::run::PasteboardKind, String> {
         #[cfg(test)]
-        if std::env::var_os("EGO_IMAGE_TEST_PTY_CHILD").is_some() {
+        if std::env::var_os("EGO_464_PTY_CHILD").is_some() {
             return Ok(crate::run::PasteboardKind::Image);
         }
         super::clipboard::kind()
@@ -2272,6 +2741,10 @@ impl crate::run::InteractiveSeat for Seat {
         render_action_help(&self.registry, self.width().saturating_sub(4))
     }
 
+    fn action_help_details(&self) -> String {
+        render_action_help_details(&self.registry, self.width().saturating_sub(4))
+    }
+
     fn key_hints(&self) -> String {
         let width = self.width();
         let width = if width == 0 {
@@ -2284,6 +2757,10 @@ impl crate::run::InteractiveSeat for Seat {
         render_key_hints(&self.registry, width)
     }
 
+    fn startup_key_hints(&self) -> String {
+        render_startup_key_hints(&self.registry, self.width())
+    }
+
     fn read_startup_model(
         &self,
         picker: Arc<Mutex<ModelPicker>>,
@@ -2293,19 +2770,11 @@ impl crate::run::InteractiveSeat for Seat {
     }
 
     fn busy(&self) {
-        self.registry.set_availability(
-            ActionId::Compact,
-            Availability::BusyWithReason {
-                reason: "ego is busy; a turn is running",
-            },
-        );
-        if let SeatKind::Live(live) = &self.kind {
-            let mut status = live.status.lock().expect("surface status lock");
-            status.begin_activity();
-            live.phase.set_activity(EditPhase::Busy);
-            drop(status);
-            repaint_status(&live.status);
-        }
+        self.start_activity(ActivityKind::Working);
+    }
+
+    fn compacting(&self) {
+        self.start_activity(ActivityKind::Compacting);
     }
 
     fn modal_wait(&self) -> std::time::Duration {
@@ -2320,10 +2789,26 @@ impl crate::run::InteractiveSeat for Seat {
         }
     }
 
+    fn hold_error(&self, message: &str) {
+        if let SeatKind::Live(live) = &self.kind {
+            {
+                let mut status = live.status.lock().expect("surface status lock");
+                status.refused = true;
+                if status.native_activity == crate::render::osc::State::Idle {
+                    status.native_activity = crate::render::osc::State::Error;
+                }
+            }
+            question::tell_host_current(&live.status, |osc, _, current| {
+                [osc.error(message), osc.state(current.native_activity)].concat()
+            });
+        }
+    }
+
     fn idle(&self) {
         if let SeatKind::Live(live) = &self.kind {
             let mut status = live.status.lock().expect("surface status lock");
             status.activity = false;
+            status.activity_kind = ActivityKind::Working;
             live.phase.set_activity(EditPhase::Idle);
             status.activity_since = None;
             status.children.clear();
@@ -2369,7 +2854,8 @@ impl crate::run::InteractiveSeat for Seat {
         if let SeatKind::Live(live) = &self.kind {
             let queue = live_queue(state);
             let mut status = live.status.lock().expect("surface status lock");
-            if status.queue == queue {
+            let previews_changed = status.reconcile_queue_previews(state.unacknowledged_prompts());
+            if status.queue == queue && !previews_changed {
                 return;
             }
             status.queue = queue;
@@ -2391,9 +2877,12 @@ impl crate::run::InteractiveSeat for Seat {
 
     fn pick_session(
         &self,
-        sessions: Vec<ego_core::store::session_store::SessionMeta>,
-    ) -> Option<SessionId> {
-        self.request(|reply| Control::SessionPicker { sessions, reply }, None)
+        source: crate::catalogue::ResumePicker,
+    ) -> crate::catalogue::SessionPick {
+        self.request(
+            |reply| Control::SessionPicker { source, reply },
+            crate::catalogue::SessionPick::Cancelled,
+        )
     }
 
     fn activate_session(&self, target: SessionId) -> bool {
@@ -2493,6 +2982,19 @@ impl Elicitor for Seat {
     }
 }
 
+/// Retire accepted queued input without making its preview a transcript row.
+fn accept_queued_buffer(editor: &mut Reedline, text: &str) -> std::io::Result<()> {
+    editor.erase_last_prompt()?;
+    let mut entry = reedline::HistoryItem::from_command_line(text);
+    entry.session_id = editor.get_history_session_id();
+    editor
+        .history_mut()
+        .save(entry)
+        .map_err(std::io::Error::other)?;
+    editor.run_edit_commands(&[EditCommand::Clear]);
+    Ok(())
+}
+
 fn own_terminal(
     mut editor: Reedline,
     input: Sender<Line>,
@@ -2534,7 +3036,8 @@ fn own_terminal(
         }
         if !active && pending_control.is_none() {
             // A startup modal's read_line restores cooked mode on return.
-            if crossterm::terminal::enable_raw_mode().is_err() {
+            if let Err(error) = crossterm::terminal::enable_raw_mode() {
+                report_terminal_failure("raw mode", error);
                 cancel.cancel(CancelCause::Host);
                 break;
             }
@@ -2544,7 +3047,8 @@ fn own_terminal(
                 recv(signals) -> sequence => {
                     let Ok(sequence) = sequence else { break };
                     let mut out = std::io::stdout().lock();
-                    if out.write_all(sequence.as_bytes()).and_then(|()| out.flush()).is_err() {
+                    if let Err(error) = out.write_all(sequence.as_bytes()).and_then(|()| out.flush()) {
+                        report_terminal_failure("output", error);
                         cancel.cancel(CancelCause::Host);
                         break;
                     }
@@ -2552,7 +3056,8 @@ fn own_terminal(
                 }
                 recv(startup_output) -> row => {
                     let Ok(row) = row else { break };
-                    if write_printer_message(&mut std::io::stdout().lock(), &row).is_err() {
+                    if let Err(error) = write_printer_message(&mut std::io::stdout().lock(), &row) {
+                        report_terminal_failure("output", error);
                         cancel.cancel(CancelCause::Host);
                         break;
                     }
@@ -2671,7 +3176,20 @@ fn own_terminal(
                 continue;
             }
             let accepted = if phase.get() == EditPhase::Busy {
-                match futures::executor::block_on(ingress.submit(text.clone(), images.clone())) {
+                status
+                    .lock()
+                    .expect("surface status lock")
+                    .stage_queue_preview(text.clone(), images.len());
+                let result = ingress_wait::wait(
+                    &mut editor,
+                    &status,
+                    ingress.submit(text.clone(), images.clone()),
+                );
+                status
+                    .lock()
+                    .expect("surface status lock")
+                    .settle_queue_preview(result.is_ok());
+                match result {
                     Ok(queue) => {
                         let mut current = status.lock().expect("surface status lock");
                         current.queue = queue;
@@ -2690,11 +3208,19 @@ fn own_terminal(
             } else {
                 false
             };
-            if editor
-                .accept_buffer(&Waiting::new(Arc::clone(&status)))
-                .is_err()
-            {
-                break;
+            if accepted {
+                if let Err(error) = accept_queued_buffer(&mut editor, &text) {
+                    report_terminal_failure("queued input", error);
+                    break;
+                }
+            } else {
+                if let Err(error) = editor.accept_buffer(&Waiting::new(Arc::clone(&status))) {
+                    report_terminal_failure("output", error);
+                    break;
+                }
+                if let Some(label) = crate::render::attachments::label(images.len()) {
+                    commit_to_transcript(&status, &label);
+                }
             }
             draft.clear();
             {
@@ -2707,7 +3233,7 @@ fn own_terminal(
             restore_latest_draft(&mut editor, &status, &mut drafts);
             if accepted {
                 if steer {
-                    request_interrupt(&status, &ingress);
+                    request_interrupt(&mut editor, &status, &ingress);
                 }
                 repaint_status(&status);
                 continue;
@@ -2726,9 +3252,15 @@ fn own_terminal(
         } else {
             line
         };
+        if let Line::HostCommand(HostCommand::Tasks(arguments)) = &line
+            && background::attachment_command(&status, arguments, &mut drafts)
+        {
+            restore_latest_draft(&mut editor, &status, &mut drafts);
+            continue;
+        }
         if phase.get() == EditPhase::Busy
             && let Line::HostCommand(command) = &line
-            && (command.is_read_only_inspection() || command.is_root_revocation())
+            && command.is_concurrent_native()
         {
             if inspections.send(command.clone()).is_err() {
                 break;
@@ -2823,6 +3355,7 @@ fn own_terminal(
                             )
                         }
                         HostCommand::Tasks(_) => "/tasks".to_owned(),
+                        HostCommand::SideQuestion(_) => "/side".to_owned(),
                         HostCommand::Config(_) => "/config".to_owned(),
                         HostCommand::Fork(_) => "/fork".to_owned(),
                         HostCommand::Resume(_) => "/resume".to_owned(),
@@ -2842,6 +3375,9 @@ fn own_terminal(
             }
         }
     }
+    // No producer may retain a live printer receiver after its only consumer
+    // exits: finish acknowledgements must observe disconnection, not block.
+    status.lock().expect("surface status lock").printer_output = None;
 }
 
 /// Wait for a driver effect without taking the terminal away from the active
@@ -2874,14 +3410,26 @@ fn wait_image_reply(
             recv(signals) -> sequence => {
                 let Ok(sequence) = sequence else { return None; };
                 let mut out = std::io::stdout().lock();
-                if out.write_all(sequence.as_bytes()).and_then(|()| out.flush()).is_err() { return None; }
+                if let Err(error) = out.write_all(sequence.as_bytes()).and_then(|()| out.flush()) {
+                    report_terminal_failure("output", error);
+                    return None;
+                }
             }
             recv(output) -> row => {
                 let Ok(row) = row else { return None; };
-                if write_printer_message(&mut std::io::stdout().lock(), &row).is_err() { return None; }
+                if let Err(error) = write_printer_message(&mut std::io::stdout().lock(), &row) {
+                    report_terminal_failure("output", error);
+                    return None;
+                }
             }
         }
     }
+}
+
+/// Name the terminal failure that stops the terminal owner. Its exit ends the
+/// interactive session, which would otherwise end with the cause unrecorded.
+fn report_terminal_failure(what: &str, error: std::io::Error) {
+    crate::output::note(&format!("terminal {what} failed: {error}"));
 }
 
 /// Write one external-printer message before Reedline reads, with the line
@@ -2901,6 +3449,7 @@ fn write_printer_message(output: &mut impl std::io::Write, message: &str) -> std
 mod action_execution;
 mod background_notice;
 mod edit_mode;
+mod ingress_wait;
 mod permission;
 mod permission_modal;
 mod picker_surface;
@@ -2909,7 +3458,9 @@ mod suspend;
 
 #[cfg(test)]
 use action_execution::apply_surface_effect;
-pub(crate) use action_execution::{render_action_help, render_key_hints};
+pub(crate) use action_execution::{
+    render_action_help, render_action_help_details, render_key_hints, render_startup_key_hints,
+};
 use action_execution::{request_interrupt, restore_latest_draft, surface_line};
 pub use edit_mode::SurfaceEditMode;
 pub(crate) use permission::Confirmation;
@@ -2931,18 +3482,21 @@ use question::{PermissionWord, parse_permission};
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+mod queue_critic_tests;
+
 mod session_picker;
 
 // Only the isolated PTY child arms this seam. The real Seat::new printer and
 // receipt sender are unchanged; the terminal owner cannot drain while held.
 #[cfg(test)]
 thread_local! {
-    static HELD_PRINTER: std::cell::RefCell<Option<Sender<String>>> = const { std::cell::RefCell::new(None) };
+    static HELD_PRINTER: std::cell::RefCell<Option<ExternalPrinterSender<String>>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 pub(super) fn hold_permission_printer() {
-    if std::env::var_os("EGO_HELD_PERMISSION_PTY_CHILD").is_none() {
+    if std::env::var_os("EGO_355_PTY_CHILD").is_none() {
         return;
     }
     HELD_PRINTER.with(|slot| {
@@ -2950,7 +3504,7 @@ pub(super) fn hold_permission_printer() {
         let sender = slot.as_ref().expect("real live printer");
         assert_eq!(sender.capacity(), Some(1));
         sender
-            .try_send("HELD-EXM-ROW\n".to_owned())
+            .try_send("HELD-355-ROW\n".to_owned())
             .expect("empty modal printer");
     });
     std::fs::write("printer-held", "bounded(1) full").unwrap();
@@ -2958,7 +3512,7 @@ pub(super) fn hold_permission_printer() {
 
 #[cfg(test)]
 pub(super) fn await_permission_printer_release() {
-    if std::env::var_os("EGO_HELD_PERMISSION_PTY_CHILD").is_some() {
+    if std::env::var_os("EGO_355_PTY_CHILD").is_some() {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !Path::new("printer-release").exists() {
             assert!(Instant::now() < deadline, "PTY printer release deadline");

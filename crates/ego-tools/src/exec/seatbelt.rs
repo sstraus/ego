@@ -24,7 +24,7 @@ use super::profile::{self, ProfileInput};
 mod tests;
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
-const BACKEND_REVISION: &str = "seatbelt-inline-profile-v11-optional-pnpm-locks";
+const BACKEND_REVISION: &str = "seatbelt-inline-profile-v12-dev-roots";
 
 /// Policy text is owned by the host and passed directly to each launcher.
 /// No child-writable file can change a later spawn's policy.
@@ -95,6 +95,25 @@ impl SeatbeltBackend {
         } else {
             Vec::new()
         };
+        let dev = if matches!(
+            policy.level(),
+            Confinement::Workspace | Confinement::Adaptive
+        ) {
+            let home = std::env::var_os("HOME").map(PathBuf::from);
+            home.and_then(|home| fs::canonicalize(home).ok())
+                .map(|home| {
+                    let env = |key| std::env::var_os(key).map(PathBuf::from);
+                    let toolchain = super::dev_roots::Toolchain {
+                        cargo: env("CARGO_HOME").unwrap_or_else(|| home.join(".cargo")),
+                        rustup: env("RUSTUP_HOME").unwrap_or_else(|| home.join(".rustup")),
+                    };
+                    super::dev_roots::derive(&home, &toolchain, tuic_binary().as_deref())
+                })
+                .unwrap_or_default()
+        } else {
+            super::dev_roots::DevRoots::default()
+        };
+        exec_paths.extend(dev.exec.iter().cloned());
         let (lookup_metadata, lookup_targets) = lookup_metadata(derived_runtime_roots);
         let base = ProfileBase {
             lookup_metadata,
@@ -102,7 +121,10 @@ impl SeatbeltBackend {
             user_config: if policy.level() == Confinement::Off {
                 Vec::new()
             } else {
-                super::user_config::capture()?
+                super::user_config::capture_for(&super::user_config::writable_roots(
+                    policy,
+                    private_scratch.as_path(),
+                ))?
             },
             adaptive,
             level: policy.level(),
@@ -113,6 +135,7 @@ impl SeatbeltBackend {
                 .iter()
                 .map(|root| root.as_path().to_path_buf())
                 .chain(pnpm.iter().take(1).cloned())
+                .chain(dev.exec.iter().cloned())
                 .collect(),
             exec_paths,
             read_only_roots: policy
@@ -145,6 +168,12 @@ impl SeatbeltBackend {
                 .chain(pnpm.into_iter().map(|path| {
                     SandboxGrant::new(CanonPath::new(path), ego_core::permit::SandboxAccess::Write)
                 }))
+                .chain(dev.read.into_iter().map(|path| {
+                    SandboxGrant::new(CanonPath::new(path), ego_core::permit::SandboxAccess::Read)
+                }))
+                .chain(dev.write.into_iter().map(|path| {
+                    SandboxGrant::new(CanonPath::new(path), ego_core::permit::SandboxAccess::Write)
+                }))
                 .collect(),
         };
         Self::render_profile(base, &[], &[], policy.requirements().required())
@@ -159,7 +188,21 @@ impl SeatbeltBackend {
         grants: &[SandboxGrant],
         no_exec: &[CanonPath],
     ) -> Result<Self, ProcessError> {
-        Self::render_profile(self.base.clone(), grants, no_exec, self.maximum_caps)
+        let mut base = self.base.clone();
+        // A write grant can hold a hardlink alias of the config that the
+        // prepare-time scan of the original roots did not see.
+        let writable = grants
+            .iter()
+            .filter(|grant| grant.access == ego_core::permit::SandboxAccess::Write)
+            .map(|grant| grant.path.as_path())
+            .collect::<Vec<_>>();
+        if base.level != Confinement::Off && !writable.is_empty() {
+            base.user_config
+                .extend(super::user_config::capture_for(&writable)?);
+            base.user_config.sort();
+            base.user_config.dedup();
+        }
+        Self::render_profile(base, grants, no_exec, self.maximum_caps)
     }
 
     fn render_profile(
@@ -184,6 +227,9 @@ impl SeatbeltBackend {
             .cloned()
             .chain(base.read_only_roots.iter().cloned())
             .collect::<Vec<_>>();
+        // Configured roots are excluded. Judge grants still cross the shared
+        // floor recheck and cannot name an eligible maintenance file.
+        let maintenance = grants;
         let grants = base.roots.iter().chain(grants).cloned().collect::<Vec<_>>();
         let mut profile = profile::render(&ProfileInput {
             adaptive: base.adaptive.as_ref(),
@@ -194,6 +240,7 @@ impl SeatbeltBackend {
             runtime_roots: &runtime_roots,
             exec_paths: &exec_paths,
             grants: &grants,
+            maintenance,
         })
         .map_err(|error| ProcessError::Backend(error.to_string()))?;
         if matches!(base.level, Confinement::Workspace | Confinement::Ro)
@@ -316,7 +363,7 @@ impl SeatbeltBackend {
             profile.push_str(")\n");
         }
         profile.push_str(
-            &profile::deny_exec(&no_exec)
+            &profile::deny_exec_with_owner(&no_exec, &grants)
                 .map_err(|error| ProcessError::Backend(error.to_string()))?,
         );
 
@@ -360,6 +407,24 @@ impl SeatbeltBackend {
     /// capability.
     pub(crate) const fn maximum_demonstrable_caps(&self) -> ExecCaps {
         self.maximum_caps
+    }
+
+    /// Under `workspace` the private scratch is the only temporary space a
+    /// child can write, so its temporary-directory variables name it; an
+    /// inherited `TMPDIR` outside the sandbox only makes cargo, mbx and npm fail.
+    pub(crate) fn launch_env(&self) -> Vec<(OsString, OsString)> {
+        if self.base.level != Confinement::Workspace {
+            return Vec::new();
+        }
+        ["TMPDIR", "TMP", "TEMP"]
+            .into_iter()
+            .map(|name| {
+                (
+                    OsString::from(name),
+                    self.base.private_scratch.clone().into_os_string(),
+                )
+            })
+            .collect()
     }
 
     pub(crate) fn launch_prefix(&self) -> LaunchPrefix {
@@ -412,6 +477,14 @@ fn validate_private_scratch(path: &Path) -> Result<(), ProcessError> {
     Ok(())
 }
 
+/// The `tuic` CLI of the session that TUICommander manages, resolved on `PATH`.
+fn tuic_binary() -> Option<PathBuf> {
+    std::env::var_os("TUIC_SESSION")?;
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("tuic"))
+        .find(|candidate| candidate.is_file())
+}
+
 /// Fixed runtime roots required by Apple's installed command-line runtime.
 ///
 /// The list is backend-owned input. It is intentionally conservative: paired
@@ -447,6 +520,8 @@ pub(crate) fn derived_runtime_roots() -> Result<Vec<CanonPath>, ProcessError> {
             "/opt/homebrew",
             "/Applications/Xcode.app",
             "/Library/Developer/CommandLineTools",
+            // OpenSSL configuration and CA bundle: curl and git fetch read them.
+            "/etc/ssl",
         ] {
             match fs::canonicalize(path) {
                 Ok(root) if root.is_dir() => {

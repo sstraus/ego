@@ -15,6 +15,12 @@ use crate::generator::attempt::DeliveryCertainty;
 use crate::permit::{InvocationDigest, ToolResult};
 use crate::store::evidence::EvidenceRef;
 
+use crate::mcp_task::valid_task_id;
+pub use crate::mcp_task::{
+    McpTaskLedger, McpTaskPoll, McpTaskPoller, McpTaskPollerHandle, McpTaskPort, McpTaskSeed,
+    McpTaskSettlement, McpTaskStart, McpTaskTicket,
+};
+
 /// Maximum UTF-8 bytes admitted from one server's instructions.
 /// Kept at the same 64 KiB bound as instruction files and skill bodies.
 pub const FOREIGN_VISIBLE_BYTES: usize = 64 * 1024;
@@ -94,9 +100,26 @@ pub enum ContextKind {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum McpSubject {
-    Tool { server: String, name: String },
-    Resource { server: String, uri: String },
-    Prompt { server: String, name: String },
+    Tool {
+        server: String,
+        name: String,
+    },
+    Resource {
+        server: String,
+        uri: String,
+    },
+    Prompt {
+        server: String,
+        name: String,
+    },
+    /// A server task that this session's own `tools/call` created. `tool` is
+    /// the originating tool, so policy and display name the tool that earned
+    /// the authority.
+    Task {
+        server: String,
+        tool: String,
+        task_id: String,
+    },
 }
 
 impl McpSubject {
@@ -104,13 +127,15 @@ impl McpSubject {
         match self {
             Self::Tool { server, .. }
             | Self::Resource { server, .. }
-            | Self::Prompt { server, .. } => server,
+            | Self::Prompt { server, .. }
+            | Self::Task { server, .. } => server,
         }
     }
 
     pub fn operation_name(&self) -> &str {
         match self {
             Self::Tool { name, .. } | Self::Prompt { name, .. } => name,
+            Self::Task { tool, .. } => tool,
             Self::Resource { uri, .. } => uri,
         }
     }
@@ -119,6 +144,11 @@ impl McpSubject {
         if !valid_identity(self.server())
             || self.operation_name().trim().is_empty()
             || self.operation_name().chars().any(char::is_control)
+        {
+            return Err(McpProjectionError::InvalidIdentity);
+        }
+        if let Self::Task { task_id, .. } = self
+            && !valid_task_id(task_id)
         {
             return Err(McpProjectionError::InvalidIdentity);
         }
@@ -134,6 +164,10 @@ pub enum McpOperationKind {
     CallTool,
     ReadResource,
     GetPrompt,
+    /// `tasks/get`: only for a task id recorded in an [`McpTaskTicket`].
+    GetTask,
+    /// `tasks/cancel`: only for a task id recorded in an [`McpTaskTicket`].
+    CancelTask,
 }
 
 impl McpOperationKind {
@@ -142,6 +176,8 @@ impl McpOperationKind {
             Self::CallTool => "tools/call",
             Self::ReadResource => "resources/read",
             Self::GetPrompt => "prompts/get",
+            Self::GetTask => "tasks/get",
+            Self::CancelTask => "tasks/cancel",
         }
     }
 
@@ -151,6 +187,7 @@ impl McpOperationKind {
             (Self::CallTool, McpSubject::Tool { .. })
                 | (Self::ReadResource, McpSubject::Resource { .. })
                 | (Self::GetPrompt, McpSubject::Prompt { .. })
+                | (Self::GetTask | Self::CancelTask, McpSubject::Task { .. })
         )
     }
 }
@@ -187,11 +224,34 @@ impl ForeignInputRequired {
     }
 }
 
-/// The only two outcomes a foreign tool execution may expose.
+/// The outcomes a foreign tool execution may expose.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolExecution {
     Complete(ToolResult),
     InputRequired(ForeignInputRequired),
+    /// The server made a task of the call. The model gets `result` now; the
+    /// settled task reaches it later through the session's [`McpTaskPort`].
+    TaskStarted(McpTaskStart),
+}
+
+/// A resume failure that distinguishes cancellation before the foreign retry
+/// is claimed from errors that may have crossed the effect boundary.
+#[derive(Debug)]
+pub enum ForeignQuestionError {
+    CancelledBeforeClaim,
+    Failed(String),
+}
+
+impl From<String> for ForeignQuestionError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<&str> for ForeignQuestionError {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.to_owned())
+    }
 }
 
 /// Consumer-owned boundary for resuming one already-recorded foreign
@@ -200,12 +260,15 @@ pub trait ForeignQuestionPort: Send + Sync {
     /// Terminal local settlement. It must never invoke the remote operation.
     fn cancel(&self, continuation_id: &str) -> Result<(), String>;
 
+    /// Acknowledge a result or successor already committed by the turn.
+    fn acknowledge_publication(&self, _continuation_id: &str) {}
+
     fn resume<'a>(
         &'a self,
         continuation_id: &'a str,
         canonical_json: &'a str,
         causality: crate::hook::HookCausality,
-    ) -> BoxFuture<'a, Result<ToolExecution, String>>;
+    ) -> BoxFuture<'a, Result<ToolExecution, ForeignQuestionError>>;
 }
 
 /// Session-owned factory for a foreign-question adapter bound to the exact
@@ -299,6 +362,9 @@ pub enum ForeignContent {
     Text {
         text: String,
     },
+    Image {
+        image: crate::generator::types::ImageRef,
+    },
     Unsupported {
         content_type: String,
         retained: Vec<u8>,
@@ -380,10 +446,17 @@ pub struct ForeignResult {
     // Owned only until publication. Never put the complete payload in events.
     #[serde(skip)]
     pending_output: Option<String>,
+    // Bounded ordered model projection. Only text and validated references are
+    // retained here; complete text and unsupported bytes remain evidence-owned.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_content: Vec<ForeignContent>,
     unsupported: Vec<UnsupportedContent>,
     evidence: EvidenceRef,
     delivery: DeliveryCertainty,
     cancellation: CancellationClassification,
+    /// The server marked this complete tool result as an error (`isError`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    tool_error: bool,
 }
 
 impl ForeignResult {
@@ -411,6 +484,11 @@ impl ForeignResult {
             return Err(McpProjectionError::MissingResultType);
         }
 
+        let has_images = content
+            .iter()
+            .any(|block| matches!(block, ForeignContent::Image { .. }));
+        let mut model_content = Vec::new();
+        let mut model_text_bytes = 0;
         let mut visible_text = String::new();
         let mut unsupported = Vec::new();
         for block in content {
@@ -420,6 +498,36 @@ impl ForeignResult {
                         visible_text.push('\n');
                     }
                     visible_text.push_str(&text);
+                    if has_images && !text.is_empty() {
+                        let remaining = MCP_RESULT_VISIBLE_BYTES.saturating_sub(model_text_bytes);
+                        // Omit a whole overflowing block rather than cutting a
+                        // secret before the ordinary masking boundary sees it.
+                        let text_bytes = text.len().saturating_add(usize::from(matches!(
+                            model_content.last(),
+                            Some(ForeignContent::Text { .. })
+                        )));
+                        let text = if text_bytes <= remaining {
+                            model_text_bytes = model_text_bytes.saturating_add(text_bytes);
+                            text
+                        } else {
+                            "[MCP text block omitted from ordered context; see the truncated result output]".into()
+                        };
+                        if let Some(ForeignContent::Text { text: previous }) =
+                            model_content.last_mut()
+                        {
+                            // All useful text contributes to the shared budget;
+                            // repeated overflow diagnostics need not be repeated.
+                            if !text.starts_with("[MCP text block omitted") {
+                                previous.push('\n');
+                                previous.push_str(&text);
+                            }
+                        } else {
+                            model_content.push(ForeignContent::text(text));
+                        }
+                    }
+                }
+                ForeignContent::Image { image } => {
+                    model_content.push(ForeignContent::Image { image })
                 }
                 ForeignContent::Unsupported {
                     content_type,
@@ -452,11 +560,25 @@ impl ForeignResult {
             visible_truncated,
             output_path: None,
             pending_output,
+            model_content,
             unsupported,
             evidence,
             delivery,
             cancellation,
+            tool_error: false,
         })
+    }
+
+    /// Record the server's `isError` flag of a complete tool result.
+    #[must_use]
+    pub fn with_tool_error(mut self, tool_error: bool) -> Self {
+        self.tool_error = tool_error;
+        self
+    }
+
+    /// True when the server reported this tool result as an error.
+    pub const fn tool_error(&self) -> bool {
+        self.tool_error
     }
 
     pub fn server(&self) -> &str {
@@ -484,12 +606,51 @@ impl ForeignResult {
         self.cache_scope
     }
     pub(crate) fn mask_secrets(&mut self, values: &crate::secrets::SecretValues) {
+        for block in &mut self.model_content {
+            if let ForeignContent::Text { text } = block {
+                *text = values.mask(text);
+            }
+        }
         if let Some(text) = &mut self.pending_output {
             *text = values.mask(text);
             self.visible_text = render_mcp_preview(text, None);
         } else {
             self.visible_text = values.mask(&self.visible_text);
         }
+    }
+
+    /// Ordered, bounded text/image context following the correlated tool result.
+    pub fn model_content(&self) -> &[ForeignContent] {
+        &self.model_content
+    }
+
+    /// Untrusted tool output with ordered references to its separately hydrated images.
+    pub fn model_text(&self) -> String {
+        if self.model_content.is_empty() {
+            return self.visible_text.clone();
+        }
+        let mut output = String::new();
+        let mut image_index = 0;
+        for block in &self.model_content {
+            let text = match block {
+                ForeignContent::Text { text } if !text.is_empty() => text.clone(),
+                ForeignContent::Image { .. } => {
+                    image_index += 1;
+                    format!("[image {image_index}]")
+                }
+                _ => continue,
+            };
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str(&text);
+        }
+        if self.visible_truncated {
+            output.push_str("\n[MCP text truncated. ");
+            output.push_str(&mcp_output_location(self.output_path.as_deref()));
+            output.push(']');
+        }
+        output
     }
 
     pub fn visible_text(&self) -> &str {
@@ -544,17 +705,21 @@ fn render_mcp_preview(text: &str, path: Option<&std::path::Path>) -> String {
     }
     let preview = &text[..boundary];
     let separator = if preview.ends_with('\n') { "" } else { "\n" };
-    let saved = match path {
-        Some(path) => format!(
-            "Full output written to: {}. Use read(path) to read it.",
-            path.display()
-        ),
-        None => "Full output could not be saved.".to_owned(),
-    };
+    let saved = mcp_output_location(path);
     format!(
         "{preview}{separator}[MCP output truncated: showing first {boundary} bytes of {} bytes. {saved}]",
         text.len()
     )
+}
+
+fn mcp_output_location(path: Option<&std::path::Path>) -> String {
+    match path {
+        Some(path) => format!(
+            "Full output written to: {}. Use read with a files array containing this path to read it.",
+            path.display()
+        ),
+        None => "Full output could not be saved.".to_owned(),
+    }
 }
 
 fn append_bounded_text(target: &mut String, text: &str, truncated: &mut bool) {
@@ -806,4 +971,80 @@ impl std::error::Error for ContextError {}
 
 fn valid_identity(value: &str) -> bool {
     !value.trim().is_empty() && !value.chars().any(char::is_control)
+}
+
+/// Correlate one durable tool call across MCP dispatch and ACP history replay.
+///
+/// SHA-256 input is `ego/tuic-call-id/v1\0`, followed by three UTF-8 fields,
+/// each prefixed by its byte length as a big-endian u64: canonical session id,
+/// identity kind (`provider` or `item`), and identity value. The result is
+/// lowercase hex. Legacy records without a provider call id use the durable
+/// ego item id, in a separate namespace; no new identity is persisted.
+/// This identifies a call, not permission to retry an uncertain effect.
+pub fn tool_call_correlation_id(
+    session: &str,
+    item: crate::event::id::ItemId,
+    provider_call_id: Option<&str>,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let item_id = item.to_string();
+    let (kind, value) = match provider_call_id {
+        Some(id) => ("provider", id),
+        None => ("item", item_id.as_str()),
+    };
+    let mut hash = Sha256::new();
+    hash.update(b"ego/tuic-call-id/v1\0");
+    for field in [session, kind, value] {
+        hash.update((field.len() as u64).to_be_bytes());
+        hash.update(field.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+
+#[cfg(test)]
+mod correlation_tests {
+    use super::tool_call_correlation_id;
+    use crate::event::id::ItemId;
+
+    // Catches: missing session scoping, item fallback drift, ambiguous concatenation,
+    // or accidentally hashing the transient item instead of the provider call id.
+    #[test]
+    fn durable_tool_correlation_vectors_and_identity_boundaries() {
+        let session = "00000000-0000-7000-8000-000000000001";
+        let item: ItemId = "00000000-0000-7000-8000-000000000002".parse().unwrap();
+        let other: ItemId = "00000000-0000-7000-8000-000000000003".parse().unwrap();
+        let provider = tool_call_correlation_id(session, item, Some("call-17"));
+        // Independent Python hashlib SHA-256 vectors of the documented byte contract.
+        assert_eq!(
+            provider,
+            "aa7602e8fee6fe7c6f275f4ae5b7f5140d98b639f7f18c4f679ef99717c70d81"
+        );
+        let legacy = tool_call_correlation_id(session, item, None);
+        assert_eq!(
+            legacy,
+            "41b2f3110aa4c4f4aa0ad353528ec86f7ca2a0d3ebe15f3e94b1c2465337c55a"
+        );
+        assert_eq!(
+            provider,
+            tool_call_correlation_id(session, other, Some("call-17"))
+        );
+        assert_ne!(
+            provider,
+            tool_call_correlation_id("another-session", item, Some("call-17"))
+        );
+        assert_ne!(
+            provider,
+            tool_call_correlation_id(session, item, Some("call-18"))
+        );
+        assert_ne!(legacy, tool_call_correlation_id(session, other, None));
+        assert_ne!(
+            legacy,
+            tool_call_correlation_id(session, item, Some(&item.to_string()))
+        );
+        assert_ne!(legacy, tool_call_correlation_id(session, item, Some("")));
+        assert_ne!(
+            tool_call_correlation_id("ab", item, Some("c")),
+            tool_call_correlation_id("a", item, Some("bc"))
+        );
+    }
 }

@@ -1,13 +1,75 @@
-//! Chat Completions mapping for the published request and stream contract. Compatible branding
-//! alone does not establish compatibility.
+//! The `openai-completions` wire format: `POST /chat/completions`, streamed.
 //!
-//! Usage categories form a partition: uncached input excludes cached and cache-write tokens.
-//! Reasoning extension fields are decoded uniformly by field name, not provider identity.
-//! `content_filter` is an error; a gateway's `end_turn` is accepted as completion.
+//! The shape behind OpenAI, OpenRouter, Groq, Together, Fireworks, DeepSeek,
+//! and local daemons that advertise an
+//! "OpenAI-compatible" endpoint
+//! (`ARCHITECTURE.md` §3.1). Every field name, enum spelling and nullability
+//! below was read from `openai/openai-openapi` rather than recalled — the
+//! constraint `plans/m0b-vertical-slice.md` Step 9 puts on this step, because
+//! a golden pinned from memory pins the memory, not the contract.
 //!
-//! Emit `Stop` once, last, after any usage chunk. A received finish reason determines
-//! completion even if later usage is lost; without a finish reason, truncation is an error.
-//! Missing usage remains explicitly unknown and is charged pessimistically.
+//! # What the schema settled, and what it ruled out
+//!
+//! - **The usage breakdown is a partition, not overlapping subsets.** OpenAI's
+//!   own aggregate schema says `input_tokens` is "including cached and
+//!   cache-write tokens" while `input_uncached_tokens` is "excluding
+//!   cache-write tokens", and both published examples add up exactly
+//!   (400+100+500=1000; 1800+200+3000=5000). So `uncached = prompt_tokens −
+//!   cached_tokens − cache_write_tokens`, and
+//!   [`Usage::total_tokens`](ego_core::state::Usage::total_tokens) comes back
+//!   to `prompt + completion` with nothing counted twice. Subtracting only
+//!   `cached_tokens` — the obvious reading, and the one the per-request schema
+//!   alone would leave you with — would double-count every cache-write token.
+//! - **There is no reasoning text in *OpenAI's* schema.** The streaming delta
+//!   has `content`, `refusal`, `tool_calls`, `role` and `function_call`, and
+//!   nothing else; reasoning appears only as a *count*
+//!   (`completion_tokens_details.reasoning_tokens`).
+//!
+//!   But this format serves a family, and other members of it do stream the
+//!   text — as `reasoning` or as `reasoning_content`, in the same `delta`
+//!   object. Those are not a different row's problem: `ARCHITECTURE.md`'s
+//!   wire decision §4 rules that an extension field is decoded
+//!   **opportunistically and uniformly for every member**, because the field
+//!   *name* is the contract and the vendor is not. A member that never sends
+//!   it simply leaves the field absent, so there is nothing to branch on and
+//!   no provider identity to consult.
+//!
+//!   `Delta` decodes both names, so this is where
+//!   [`AiEvent::ReasoningDelta`] gets its first producer in the workspace.
+//!   The measured cost of not decoding them is in
+//!   `tests/ollama_reasoning.rs`: 117 of 118 output tokens billed and
+//!   dropped. **The tokens are still not separable** — this family's usage
+//!   chunk has no `completion_tokens_details` on the rows that send reasoning
+//!   — and that half stays open as `POTENTIALS.md` P24.
+//! - **`finish_reason` has five spellings**, and one of them —
+//!   `content_filter` — has no [`StopReason`] to land on. It is reported as
+//!   [`StopReason::Error`] with a named [`AiEvent::Error`] beside it rather
+//!   than mapped onto `Stop`, which would claim a filtered answer finished
+//!   normally.
+//!
+//!   `consume_finish_reason` maps a sixth, `end_turn`, which is *not* in the
+//!   schema and arrives anyway: a gateway passing its upstream's reason
+//!   through untranslated. Decoded for the whole family and not for the row
+//!   that sends it, on the same rule as the reasoning fields above — the
+//!   string is the contract and the vendor is not.
+//!
+//! # The one event ordering rule
+//!
+//! **`Stop` is last, always, exactly once.** Not at the `finish_reason` chunk,
+//! where it would arrive before the usage chunk that follows it — OpenAI sends
+//! usage *after* the choice that ends the turn and before `data: [DONE]`. So
+//! the finish reason is remembered when it arrives and emitted when the byte
+//! stream ends, whatever ended it.
+//!
+//! Which gives the truncation table a single line: **the `finish_reason` is
+//! the answer.** If it arrived, the generation ended the way it says, and a
+//! stream cut afterwards costs only the usage report — which
+//! [`UsageReport::Missing`](ego_core::generator::attempt::UsageReport) already
+//! charges pessimistically, and which OpenAI's own schema warns about ("If the
+//! stream is interrupted, you may not receive the final usage chunk"). If it
+//! never arrived, the generation ended in `Error`, and the error says which of
+//! the ways it was: cut mid-frame, ended between frames, or `[DONE]` with
+//! nothing before it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -16,7 +78,8 @@ use base64::Engine as _;
 use ego_core::cost::Money;
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, ErrorKind, GenRequest, Image, Message, Role, StopReason, ThinkingLevel,
+    ContentBlock, ErrorKind, GenRequest, Image, Message, ReasoningState, Role, StopReason,
+    ThinkingLevel,
 };
 use ego_core::state::Usage;
 use futures::stream::BoxStream;
@@ -30,8 +93,13 @@ use super::sse::SseDecoder;
 use super::{RequestRefused, RequestTarget, WireFormat};
 
 /// The `openai-completions` mapping, as a value a profile can name.
-/// A unit struct: address, credential and cost behavior arrive as parameters
-/// from the row. The mapping holds no provider-specific state.
+///
+/// A unit struct: everything that varies between the providers speaking this
+/// shape — the address, the credential, whether a monetary total is stated —
+/// is on the profile and arrives as a parameter, so there is nothing left for
+/// an instance to hold. That emptiness is the ADR §4 claim made structural: a
+/// mapping with no per-provider state has nowhere to keep a per-provider
+/// branch.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct OpenAiCompletions;
 
@@ -53,11 +121,30 @@ impl WireFormat for OpenAiCompletions {
     }
 }
 
+/// The reasoning-state dialect the OpenRouter mapping mints and replays.
+///
+/// The state is the plain reasoning text of a finished assistant turn, sent
+/// back as `reasoning_content`. OpenRouter documents that field as an alias
+/// of `reasoning` and says plain text is enough only for models that return
+/// raw reasoning strings; families that return signed or encrypted reasoning
+/// need `reasoning_details`, which this mapping does not carry. The row
+/// therefore states this dialect only for the models it admits
+/// ([`crate::openrouter`]).
+pub const OPENROUTER_REASONING_DIALECT: &str = "openrouter-chat";
+
 /// OpenRouter owns routing affinity and routed Claude's explicit cache markers.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct OpenRouterCompletions;
 
 impl WireFormat for OpenRouterCompletions {
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        if req.model.starts_with("anthropic/") {
+            super::cache::policy(req, true, false)
+        } else {
+            ego_core::usage::PromptCachePolicy::default()
+        }
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -73,7 +160,7 @@ impl WireFormat for OpenRouterCompletions {
         response: Result<HttpResponse, HttpError>,
         cost: Option<Arc<dyn ProviderCost>>,
     ) -> BoxStream<'static, AiEvent> {
-        decode(response, cost)
+        decode_replaying(response, cost, OPENROUTER_REASONING_DIALECT)
     }
 }
 
@@ -88,17 +175,20 @@ pub const PATH: &str = "chat/completions";
 
 /// A `GenRequest` this format cannot express without lying about it.
 ///
-/// Each error prevents silently dropping requested behavior. A shared HTTP
-/// shape does not guarantee equivalent semantics, and downstream code
-/// cannot detect a request that has already been mistranslated.
+/// Every variant is a case where the alternative would be to drop something
+/// the caller asked for and send the request anyway. the design notes
+/// I5 is about exactly that: a shared HTTP shape is not equivalent semantics,
+/// and a silent mistranslation is worse than a refusal because nothing
+/// downstream can tell it happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
-    /// The request carries reasoning state, and this format has nowhere to put
-    /// it: the chat-completions request schema has no field for a reasoning
-    /// signature. Dropping it silently would be
+    AudioNotSupported,
+    /// The request carries provider state this mapping cannot send: provider
+    /// content, or reasoning state of a dialect other than the one the
+    /// mapping replays as `reasoning_content` (every dialect, for a mapping
+    /// that replays none). Dropping it silently would be
     /// [`ReasoningCarryover::Unsupported`](ego_core::generator::capabilities::ReasoningCarryover::Unsupported)
     /// pretending to be support.
-    AudioNotSupported,
     ReasoningStateNotCarriable,
 }
 
@@ -110,8 +200,8 @@ impl std::fmt::Display for Inexpressible {
             }
             Inexpressible::ReasoningStateNotCarriable => write!(
                 f,
-                "openai-completions has no field for reasoning state, so \
-                 carrying it over would mean dropping it"
+                "this openai-completions mapping cannot send this reasoning \
+                 state, so carrying it over would mean dropping it"
             ),
         }
     }
@@ -134,15 +224,20 @@ impl From<Inexpressible> for RequestRefused {
 /// Everything in this family's request body that does not depend on which
 /// member is being addressed.
 ///
-/// Ollama reads `max_tokens` instead of `max_completion_tokens`. The
-/// [`super::ollama`] serializer shares this projection and changes that field,
-/// without a provider flag in the common mapping.
+/// Split out because exactly one member's body differs, in exactly one field:
+/// Ollama reads `max_tokens` and discards `max_completion_tokens`
+/// (the design notes §8).
+/// §4 place 3 makes that an adapter difference and offers no third option, so
+/// the difference is carried by *which mapping serialises this*, and never by
+/// a flag one shared mapping reads. `pub(crate)` for that reason and no other:
+/// [`super::ollama`] is the second serialiser, not a second copy.
 #[derive(Debug, Serialize)]
 pub(crate) struct CommonRequest<'a> {
     model: &'a str,
     messages: Vec<WireMessage<'a>>,
     stream: bool,
-    stream_options: StreamOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<StreamOptions>,
     /// Always sent, including `"none"`.
     ///
     /// Omitting it when the caller said [`ThinkingLevel::Off`] would silently
@@ -159,6 +254,31 @@ pub(crate) struct CommonRequest<'a> {
     tools: Vec<WireTool<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parallel_tool_calls: Option<bool>,
+}
+
+impl CommonRequest<'_> {
+    /// A mapping without a documented streaming-usage request control.
+    pub(crate) fn without_stream_options(mut self) -> Self {
+        self.stream_options = None;
+        self
+    }
+
+    /// For a member whose schema has no `parallel_tool_calls` field.
+    ///
+    /// The member's server may accept, ignore or refuse a field its schema
+    /// does not list; sending it would make that unknown part of every
+    /// request with tools.
+    pub(crate) fn without_parallel_tool_calls(mut self) -> Self {
+        self.parallel_tool_calls = None;
+        self
+    }
+
+    /// For a member whose effort vocabulary is not the family's. `None`
+    /// omits the field.
+    pub(crate) fn with_reasoning_effort(mut self, effort: Option<&'static str>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
 }
 
 /// The body this mapping sends: the common part, plus the ceiling in the
@@ -183,10 +303,18 @@ struct StreamOptions {
     /// usage. Without it the settlement has no figures at all and every
     /// generation reconciles at its pessimistic bound.
     ///
-    /// OpenRouter treats this flag as inert and returns full usage automatically.
-    /// Keep it because the originating Chat Completions contract requires it for
-    /// usage reporting and Ollama honors it. `tests/deprecated_spellings.rs`
-    /// checks contract-specific field retirement.
+    /// **One member of this family calls the field deprecated, and it is sent
+    /// anyway.** OpenRouter states that this flag and its own
+    /// `usage: {include: true}` "are deprecated and have no effect", returning
+    /// full usage automatically. That is not a reason to drop it:
+    /// `ChatCompletionStreamOptions.include_usage` is undeprecated on the
+    /// contract *this mapping is derived from*, where it is the only way usage
+    /// arrives at all, while Ollama honours it.
+    /// OpenRouter retired a **precondition, not a spelling** — nothing
+    /// succeeded it — so there is no second spelling to be carrying, which is
+    /// the shape `AGENTS.md` forbids. Audited in
+    /// the design notes §3 and guarded by
+    /// `tests/deprecated_spellings.rs`.
     include_usage: bool,
 }
 
@@ -206,6 +334,11 @@ struct WireMessage<'a> {
     tool_calls: Vec<WireToolCall<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<&'a str>,
+    /// The assistant turn's own earlier reasoning, sent back. Not in
+    /// `openai/openai-openapi`; it is the extension field the decoder reads,
+    /// and a mapping sends it only for state of the dialect it replays.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -299,7 +432,11 @@ fn reasoning_effort(level: ThinkingLevel) -> &'static str {
 /// a tool message a `content` and nothing else, so a failure reaches the
 /// model as whatever the tool said about it. That is this format's own
 /// convention, not a loss invented here.
-fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
+///
+/// `replay` is the reasoning dialect sent back as `reasoning_content`, when
+/// the request carries it at all. The reasoning of one message goes on the
+/// first wire message that message produces.
+fn wire_messages<'a>(messages: &'a [Message], replay: Option<&str>) -> Vec<WireMessage<'a>> {
     let mut wire = Vec::with_capacity(messages.len());
     for message in messages {
         let role = match message.role {
@@ -311,12 +448,26 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
         let mut text = String::new();
         let mut images = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut reasoning = replay.and_then(|dialect| {
+            let blobs: String = message
+                .content
+                .iter()
+                .filter_map(|block| match block {
+                    ContentBlock::Reasoning { state } if state.dialect == dialect => {
+                        Some(state.blob.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            (!blobs.is_empty()).then_some(blobs)
+        });
+        let reasoning = &mut reasoning;
         for block in &message.content {
             match block {
-                // Unreachable in practice: `request_body` refuses a history
-                // carrying one before this runs, because this schema has
-                // nowhere to put it. Dropped rather than refused a second
-                // time so that the refusal stays in one place.
+                // Read above when replayed. `common_request` refuses every
+                // other state before this runs; dropped here rather than
+                // refused a second time so that the refusal stays in one
+                // place.
                 ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. } => {}
                 ContentBlock::Image { image } => images.push(WireContentPart::ImageUrl {
                     image_url: WireImageUrl {
@@ -324,7 +475,14 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
                     },
                 }),
                 ContentBlock::Audio { audio } => {
-                    flush(&mut wire, role, &mut images, &mut text, &mut tool_calls);
+                    flush(
+                        &mut wire,
+                        role,
+                        &mut images,
+                        &mut text,
+                        &mut tool_calls,
+                        reasoning,
+                    );
                     wire.push(WireMessage {
                         role,
                         content: Some(WireContent::Parts(vec![WireContentPart::InputAudio {
@@ -336,6 +494,7 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
                         }])),
                         tool_calls: Vec::new(),
                         tool_call_id: None,
+                        reasoning_content: None,
                     });
                 }
                 ContentBlock::Text { text: chunk } => {
@@ -359,17 +518,32 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
                 ContentBlock::ToolResult {
                     call_id, output, ..
                 } => {
-                    flush(&mut wire, role, &mut images, &mut text, &mut tool_calls);
+                    flush(
+                        &mut wire,
+                        role,
+                        &mut images,
+                        &mut text,
+                        &mut tool_calls,
+                        reasoning,
+                    );
                     wire.push(WireMessage {
                         role: "tool",
                         content: Some(WireContent::Text(output.clone())),
                         tool_calls: Vec::new(),
                         tool_call_id: Some(call_id),
+                        reasoning_content: None,
                     });
                 }
             }
         }
-        flush(&mut wire, role, &mut images, &mut text, &mut tool_calls);
+        flush(
+            &mut wire,
+            role,
+            &mut images,
+            &mut text,
+            &mut tool_calls,
+            reasoning,
+        );
     }
     wire
 }
@@ -379,15 +553,17 @@ fn wire_messages(messages: &[Message]) -> Vec<WireMessage<'_>> {
 /// `content` is omitted only when the turn is nothing but tool calls: the
 /// schema permits that for an assistant turn and requires content otherwise,
 /// and an empty string is a message that says nothing rather than one that is
-/// not there.
+/// not there. A turn that is nothing but replayed reasoning still becomes a
+/// message, with empty content, because the reasoning must reach the model.
 fn flush<'a>(
     wire: &mut Vec<WireMessage<'a>>,
     role: &'static str,
     images: &mut Vec<WireContentPart>,
     text: &mut String,
     tool_calls: &mut Vec<WireToolCall<'a>>,
+    reasoning: &mut Option<String>,
 ) {
-    if images.is_empty() && text.is_empty() && tool_calls.is_empty() {
+    if images.is_empty() && text.is_empty() && tool_calls.is_empty() && reasoning.is_none() {
         return;
     }
     let content = if images.is_empty() {
@@ -408,6 +584,7 @@ fn flush<'a>(
         content,
         tool_calls: std::mem::take(tool_calls),
         tool_call_id: None,
+        reasoning_content: reasoning.take(),
     });
 }
 
@@ -425,11 +602,16 @@ pub(crate) fn image_data_url(image: &Image) -> String {
 /// URL or a credential in it — the body is the contract with the provider;
 /// the endpoint and the auth header are the provider row's business.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    body(req, None)
+}
+
+/// [`request_body`], replaying reasoning state of `replay` when given.
+fn body(req: &GenRequest, replay: Option<&str>) -> Result<Vec<u8>, Inexpressible> {
     if super::request_has_audio(req) && req.model != "gpt-audio-1.5" {
         return Err(Inexpressible::AudioNotSupported);
     }
     let wire = WireRequest {
-        common: common_request(req)?,
+        common: common_request(req, replay)?,
         max_completion_tokens: req.max_output_tokens,
     };
     Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))
@@ -441,7 +623,8 @@ pub fn openrouter_request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressibl
         return Err(Inexpressible::AudioNotSupported);
     }
     let mut body: serde_json::Value =
-        serde_json::from_slice(&request_body(req)?).expect("request JSON");
+        serde_json::from_slice(&body(req, Some(OPENROUTER_REASONING_DIALECT))?)
+            .expect("request JSON");
     if req.thinking == ThinkingLevel::Off {
         // The unified switch also disables reasoning models whose default is on;
         // omitting effort alone would leave that provider default active.
@@ -465,7 +648,8 @@ pub fn openrouter_request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressibl
             .expect("cache metadata")
             .stable_messages
             .min(req.messages.messages().len());
-        let stable = wire_messages(&req.messages.messages()[..boundary]).len();
+        let replay = (!req.tools.is_empty()).then_some(OPENROUTER_REASONING_DIALECT);
+        let stable = wire_messages(&req.messages.messages()[..boundary], replay).len();
         let messages = body["messages"].as_array_mut().expect("messages array");
         for message in messages
             .iter_mut()
@@ -501,7 +685,7 @@ pub fn openrouter_request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressibl
     Ok(serde_json::to_vec(&body).expect("a JSON value serialises"))
 }
 
-/// The captured client-contract projection for compatible endpoints.
+/// The captured Pi/Hermes client projection for compatible endpoints.
 ///
 /// Copilot and Nous Portal agree on two omissions: they do not
 /// send a reasoning field when thinking is off, and their pinned clients do
@@ -524,26 +708,64 @@ pub(crate) fn captured_client_request_body(req: &GenRequest) -> Result<Vec<u8>, 
 
 /// The part of the body every member of this family shares.
 ///
-/// The refusal lives here rather than in either caller: a request carrying
-/// reasoning state is unexpressible on this *shape*, and both members send the
-/// shape. `pub(crate)` for [`super::ollama`], which supplies the other
-/// ceiling field and nothing else.
-pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, Inexpressible> {
-    let carries_reasoning = req
+/// The refusal lives here rather than in either caller. `replay` is the one
+/// reasoning dialect the calling mapping sends back as `reasoning_content`;
+/// state of any other dialect, and provider content, is unexpressible on this
+/// *shape* and refused. Replayed reasoning is sent only when the request has
+/// tools: the published contract that needs it (a reasoning model continuing
+/// a tool turn) is the tool turn, and without tools it is ignored.
+/// `pub(crate)` for [`super::ollama`], which supplies the other ceiling field
+/// and nothing else.
+pub(crate) fn common_request<'a>(
+    req: &'a GenRequest,
+    replay: Option<&str>,
+) -> Result<CommonRequest<'a>, Inexpressible> {
+    validate_replay(req, replay)?;
+    let replay = replay.filter(|_| !req.tools.is_empty());
+    Ok(common_projection(
+        req,
+        wire_messages(req.messages.messages(), replay),
+    ))
+}
+
+/// Full-history replay for contracts that preserve reasoning on every turn.
+/// Tool-only assistant messages keep an explicit empty content string, matching
+/// the complete assistant message those contracts require callers to return.
+pub(crate) fn common_request_preserving_reasoning<'a>(
+    req: &'a GenRequest,
+    dialect: &str,
+) -> Result<CommonRequest<'a>, Inexpressible> {
+    validate_replay(req, Some(dialect))?;
+    let mut messages = wire_messages(req.messages.messages(), Some(dialect));
+    for message in &mut messages {
+        if message.role == "assistant"
+            && message.content.is_none()
+            && !message.tool_calls.is_empty()
+        {
+            message.content = Some(WireContent::Text(String::new()));
+        }
+    }
+    Ok(common_projection(req, messages))
+}
+
+fn validate_replay(req: &GenRequest, replay: Option<&str>) -> Result<(), Inexpressible> {
+    let unsendable = req
         .messages
         .messages()
         .iter()
         .flat_map(|message| &message.content)
-        .any(|block| {
-            matches!(
-                block,
-                ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. }
-            )
+        .any(|block| match block {
+            ContentBlock::Reasoning { state } => replay != Some(state.dialect.as_str()),
+            ContentBlock::ProviderContent { .. } => true,
+            _ => false,
         });
-    if carries_reasoning {
+    if unsendable {
         return Err(Inexpressible::ReasoningStateNotCarriable);
     }
-    let messages = wire_messages(req.messages.messages());
+    Ok(())
+}
+
+fn common_projection<'a>(req: &'a GenRequest, messages: Vec<WireMessage<'a>>) -> CommonRequest<'a> {
     let tools: Vec<WireTool<'_>> = req
         .tools
         .iter()
@@ -557,23 +779,26 @@ pub(crate) fn common_request(req: &GenRequest) -> Result<CommonRequest<'_>, Inex
         })
         .collect();
     let parallel_tool_calls = (!tools.is_empty()).then_some(req.parallel_tool_calls);
-    Ok(CommonRequest {
+    CommonRequest {
         model: &req.model,
         messages,
         stream: true,
-        stream_options: StreamOptions {
+        stream_options: Some(StreamOptions {
             include_usage: true,
-        },
+        }),
         reasoning_effort: (req.model != "gpt-audio-1.5").then(|| reasoning_effort(req.thinking)),
         tools,
         parallel_tool_calls,
-    })
+    }
 }
 
 /// A complete HTTP request for `req` against `target`.
 ///
-/// The target carries the row's headers and base; the mapping joins its own [`PATH`].
-/// Credentials and provider identity stay outside wire-format decisions.
+/// The target's headers come from the provider row — the auth header above all
+/// — because credentials are not this module's to know
+/// (`ARCHITECTURE.md` §3.1), and its base is joined with [`PATH`] here rather
+/// than carried whole by the row, because a path is a fact about the API shape
+/// and the row is not allowed to know one.
 pub fn build_request(
     target: &RequestTarget<'_>,
     req: &GenRequest,
@@ -655,11 +880,18 @@ struct Delta {
     /// Reasoning text, spelling one. Ollama sends this
     /// (`tests/goldens/ollama_reasoning_high.sse`, measured), and so does
     /// OpenRouter.
-    /// Decode extension fields uniformly by field name, not provider identity.
-    /// Absent fields remain `None` and do not change other members' behavior.
+    ///
+    /// Not in `openai/openai-openapi`, and read anyway: the shared-shape ADR
+    /// §4 rules that an extension field is decoded opportunistically and
+    /// uniformly for every member of the family, because the *field name* is
+    /// the contract and the vendor is not. A member that never sends it
+    /// leaves it absent, which decodes to `None` and changes nothing — so
+    /// there is no branch here, and nothing to consult a provider id about.
     #[serde(default)]
     reasoning: Option<String>,
-    /// Reasoning text, spelling two.
+    /// Reasoning text, spelling two. The retired xAI Chat schema supplied the
+    /// original evidence for this opportunistic extension (`POTENTIALS.md`
+    /// P24); that evidence is archival and no current xAI row uses this wire.
     ///
     /// Two fields and not one aliased field: `#[serde(alias)]` would decode
     /// either name into one slot and silently keep the last one written if a
@@ -758,8 +990,13 @@ fn map_usage(usage: &WireUsage) -> Option<Usage> {
         // wrote nothing at an extended retention.
         cache_write_extended_tokens: 0,
         output_tokens: usage.completion_tokens,
-        // Read reasoning usage where present; otherwise keep it unknown.
-        // An absent `completion_tokens_details` must not become zero reasoning cost.
+        // Read where it is published and left unknown where it is not — the
+        // same opportunistic, uniform decode the sibling ADR §4 rules for
+        // every extension field, with no provider id anywhere near it.
+        // OpenRouter fills this in. The retired xAI Chat fixtures did too;
+        // that evidence is archival. Ollama sends no
+        // `completion_tokens_details` at all, and `None` says so rather than
+        // claiming it reasoned for nothing.
         web_search_requests: 0,
         reasoning_tokens: usage
             .completion_tokens_details
@@ -821,8 +1058,12 @@ enum Incomplete {
 #[derive(Debug, Default)]
 pub struct StreamDecoder {
     /// How this provider states the money it will charge, when it states it.
-    /// The provider row supplies the cost decoder. Shared wire code does not
-    /// branch on which providers report monetary totals.
+    ///
+    /// Carried by the provider row, not chosen here: this format is spoken by
+    /// OpenAI, OpenRouter, Groq and local daemons, and only some report a cost.
+    /// A `match` on the provider id
+    /// in this file would be exactly the special case the metering ADR §8
+    /// forbids.
     cost: Option<Arc<dyn ProviderCost>>,
     /// The last figure the cost decoder read, held rather than forwarded, for
     /// the same reason `usage` below is: a stated cost is a total for the
@@ -844,13 +1085,43 @@ pub struct StreamDecoder {
     /// the end, and a second report replaces the first instead of adding to
     /// it.
     usage: Option<Usage>,
-    /// A usage object whose parts did not fit its total. Held so it can be
-    /// reported once, at the end, beside everything else that went wrong.
+    /// A usage object whose parts did not fit its total. The shared
+    /// [`policy`](super::policy) stage reports it.
+    usage_mapper: Option<fn(&RawValue, Usage) -> Option<Usage>>,
     usage_incoherent: bool,
     /// An explicit provider error carried after the response status was
     /// already 200. It outranks any finish reason in the same stream.
     provider_error: Option<(String, ErrorKind)>,
+    /// The dialect of the reasoning state this mapping replays, when it
+    /// replays any. Set by the mapping, never inferred from the stream: a
+    /// member that does not send reasoning back mints no state, so its
+    /// journal does not hold the reasoning text twice.
+    reasoning_replay: Option<ReasoningReplay>,
+    /// The exact replay payload of this generation so far, kept separately
+    /// from opportunistic display events.
+    reasoning: String,
 }
+
+/// The response fields an admitted mapping treats as replayable state.
+/// Display decoding remains shared and reads both spellings regardless.
+#[derive(Debug, Clone, Copy)]
+enum ReasoningReplay {
+    BothSpellings(&'static str),
+    ContentOnly(&'static str),
+}
+
+impl ReasoningReplay {
+    fn dialect(self) -> &'static str {
+        match self {
+            Self::BothSpellings(dialect) | Self::ContentOnly(dialect) => dialect,
+        }
+    }
+}
+
+/// Finish reasons that say the server interrupted the generation: its
+/// inference system ran out of resources, or it cut the generation off
+/// (DeepSeek Chat reference, `finish_reason`, read 2026-11-14).
+const INTERRUPTED: [&str; 2] = ["insufficient_system_resource", "aborted"];
 
 impl super::StreamSink for StreamDecoder {
     fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
@@ -859,6 +1130,10 @@ impl super::StreamSink for StreamDecoder {
 
     fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent> {
         StreamDecoder::finish(*self, transport)
+    }
+
+    fn usage_incoherent(&self) -> bool {
+        self.usage_incoherent
     }
 }
 
@@ -874,6 +1149,25 @@ impl StreamDecoder {
         Self {
             cost: Some(cost),
             ..Self::default()
+        }
+    }
+
+    /// This decoder, also minting the turn's reasoning text as
+    /// [`AiEvent::ReasoningState`] of `dialect` when the model reports why it
+    /// stopped. A stream cut before that mints nothing: half a reasoning is
+    /// not state the model produced.
+    pub fn replaying_reasoning(self, dialect: &'static str) -> Self {
+        Self {
+            reasoning_replay: Some(ReasoningReplay::BothSpellings(dialect)),
+            ..self
+        }
+    }
+
+    /// Mint replay state from exactly `reasoning_content`, not display aliases.
+    pub(crate) fn replaying_reasoning_content(self, dialect: &'static str) -> Self {
+        Self {
+            reasoning_replay: Some(ReasoningReplay::ContentOnly(dialect)),
+            ..self
         }
     }
 
@@ -895,22 +1189,6 @@ impl StreamDecoder {
         let mut out = Vec::new();
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
-        }
-        if self.usage_incoherent {
-            // `Unclassified` on purpose, and it is the honest answer rather
-            // than an unconsidered default. The generation itself did not
-            // fail — it completes and settles at its bound — so `Transient`
-            // would invite a retry of a turn that succeeded, and neither the
-            // request nor the account is what went wrong. None of the other
-            // three describes "the provider contradicted itself about a
-            // number", which is precisely what `Unclassified` is for.
-            out.push(AiEvent::Error {
-                message: "the provider's prompt cache breakdown was larger than \
-                          the prompt it broke down, so no usage figure could be \
-                          trusted; this generation settles at its bound"
-                    .to_string(),
-                kind: ErrorKind::Unclassified,
-            });
         }
         if let Some((message, kind)) = self.provider_error.take() {
             self.calls.clear();
@@ -1080,12 +1358,15 @@ impl StreamDecoder {
             tracing::warn!("skipping a usage object this wire format cannot decode");
             return;
         };
-        match map_usage(&usage) {
+        match map_usage(&usage).and_then(|mapped| match self.usage_mapper {
+            Some(map) => map(raw, mapped),
+            None => Some(mapped),
+        }) {
             Some(mapped) => self.usage = Some(mapped),
             None => {
                 tracing::warn!(
                     prompt_tokens = usage.prompt_tokens,
-                    "the reported prompt cache breakdown exceeds the prompt; \
+                    "the reported prompt cache breakdown is inconsistent; \
                      discarding the whole usage report rather than repairing it"
                 );
                 self.usage = None;
@@ -1095,6 +1376,18 @@ impl StreamDecoder {
     }
 
     fn consume_delta(&mut self, delta: &Delta, out: &mut Vec<AiEvent>) {
+        // A display extension is not necessarily part of the exact replay
+        // contract. Keep the admitted payload separate from the display walk.
+        if let Some(replay) = self.reasoning_replay {
+            if matches!(replay, ReasoningReplay::BothSpellings(_))
+                && let Some(text) = &delta.reasoning
+            {
+                self.reasoning.push_str(text);
+            }
+            if let Some(text) = &delta.reasoning_content {
+                self.reasoning.push_str(text);
+            }
+        }
         // Before the visible text, because that is the order a chunk carrying
         // both means: the model reasoned and then answered. Both spellings,
         // in a fixed order, because a provider sending both is a provider
@@ -1157,11 +1450,25 @@ impl StreamDecoder {
     }
 
     fn consume_finish_reason(&mut self, reason: &str, out: &mut Vec<AiEvent>) {
+        // The reasoning is whole once the model says why it stopped, and it
+        // precedes the calls it led to. A generation the server interrupted
+        // did not finish its reasoning, so it mints nothing.
+        if self.finish_reason.is_none()
+            && !INTERRUPTED.contains(&reason)
+            && let Some(replay) = self.reasoning_replay
+            && !self.reasoning.is_empty()
+        {
+            out.push(AiEvent::ReasoningState(ReasoningState {
+                connection: None,
+                blob: std::mem::take(&mut self.reasoning),
+                dialect: replay.dialect().to_string(),
+            }));
+        }
         // Flushed here rather than at the end so tool calls precede the usage
         // chunk that follows this one — and because this is the point at which
         // the arguments are known to be whole.
-        for (index, call) in std::mem::take(&mut self.calls) {
-            Self::emit_call(index, call, out);
+        for call in std::mem::take(&mut self.calls).into_values() {
+            Self::emit_call(call, out);
         }
         if self.finish_reason.is_some() {
             tracing::warn!(reason, "ignoring a second finish_reason");
@@ -1174,13 +1481,36 @@ impl StreamDecoder {
             // Deprecated in the schema, still emitted by older gateways, and
             // the same event: the model stopped in order to call something.
             "function_call" => StopReason::ToolUse,
-            // Gateways can pass upstream `end_turn` through unchanged. Normalize that
-            // spelling uniformly rather than switching on provider identity.
+            // Anthropic's spelling of `stop`, reaching this wire because a
+            // gateway passes its upstream's reason through untranslated
+            // rather than mapping it (survey row 45; the retired xAI Chat
+            // recording is the archival measured case). It is not this
+            // format's vocabulary and it arrives in
+            // this format's stream anyway, which is the whole reason the
+            // table is widened here rather than made conditional on a
+            // provider id — a `match` on the row inside a wire format is what
+            // the sibling ADR §5's name-absence test forbids.
             //
             // Widening is safe in the direction that matters: `end_turn` has
             // exactly one meaning wherever it is minted, so no row that does
             // *not* emit it can be harmed by an arm it never reaches.
             "end_turn" => StopReason::Stop,
+            // A member's server interrupted the generation on its side: its
+            // inference system ran out of resources, or it cut the generation
+            // off. The request was not the problem and the model did not
+            // finish, so the turn is a retryable server error and never a
+            // clean stop. Widened here for the reason `end_turn` is: each
+            // string has one meaning wherever it is minted.
+            _ if INTERRUPTED.contains(&reason) => {
+                out.push(AiEvent::Error {
+                    message: format!(
+                        "the provider interrupted the generation on its side \
+                         (finish_reason {reason}); a retry may succeed"
+                    ),
+                    kind: ErrorKind::Transient,
+                });
+                StopReason::Error
+            }
             "content_filter" => {
                 out.push(AiEvent::Error {
                     message: "the provider's content filter stopped the generation".to_string(),
@@ -1228,7 +1558,7 @@ impl StreamDecoder {
         self.finish_reason = Some(stop);
     }
 
-    fn emit_call(index: u32, call: PartialToolCall, out: &mut Vec<AiEvent>) {
+    fn emit_call(call: PartialToolCall, out: &mut Vec<AiEvent>) {
         if let Some(conflict) = call.conflict {
             out.push(AiEvent::Error {
                 message: format!(
@@ -1239,39 +1569,11 @@ impl StreamDecoder {
             });
             return;
         }
-        // Both of these are unanswerable rather than merely incomplete. A
-        // result message needs the `tool_call_id` to send back, and a dispatch
-        // needs a name; inventing either produces a request the provider
-        // rejects, or a call to the wrong tool.
-        //
-        // `""` is treated as absent, and this guard is fail-closed rather
-        // than an accommodation for a row that needs it. No implementation
-        // speaking this wire is known to emit an empty id — Ollama's compat
-        // layer, the row the survey suspected, overwrites the field
-        // unconditionally and so cannot (measured, `server/routes.go`;
-        // the survey's original claim was retracted). The guard exists
-        // because an empty id is *unusable* if one ever arrives: it would be
-        // carried into `ContentBlock::ToolUse` as a legitimate key, where
-        // `Conversation`'s uniqueness invariant would then read two
-        // unidentified calls as one duplicate. Refusing it costs a call that
-        // could not have been answered anyway.
-        let Some(call_id) = call.id.filter(|id| !id.is_empty()) else {
-            out.push(AiEvent::Error {
-                message: format!(
-                    "the provider streamed a tool call at index {index} with no id, \
-                     so its result could never be attributed back to it"
-                ),
-                kind: ErrorKind::Unclassified,
-            });
-            return;
-        };
-        let Some(name) = call.name.filter(|name| !name.is_empty()) else {
-            out.push(AiEvent::Error {
-                message: format!("tool call {call_id} arrived with no function name"),
-                kind: ErrorKind::Unclassified,
-            });
-            return;
-        };
+        // An absent id or name is passed on empty. Whether a call can be
+        // attributed or dispatched is the shared post-adapter stage's
+        // decision, made once for every wire (story 838).
+        let call_id = call.id.unwrap_or_default();
+        let name = call.name.unwrap_or_default();
         // `args` is passed through exactly as assembled, including when it is
         // not valid JSON. The schema warns that "the model does not always
         // generate valid JSON", the tool owns the schema that would judge it,
@@ -1297,11 +1599,50 @@ pub fn decode(
     response: Result<HttpResponse, HttpError>,
     cost: Option<Arc<dyn ProviderCost>>,
 ) -> BoxStream<'static, AiEvent> {
-    let decoder = match cost {
+    super::decode_response(response, Box::new(decoder(cost)))
+}
+
+/// [`decode`] for a mapping that replays reasoning state of `dialect`.
+pub fn decode_replaying(
+    response: Result<HttpResponse, HttpError>,
+    cost: Option<Arc<dyn ProviderCost>>,
+    dialect: &'static str,
+) -> BoxStream<'static, AiEvent> {
+    super::decode_response(
+        response,
+        Box::new(decoder(cost).replaying_reasoning(dialect)),
+    )
+}
+
+/// Decode a contract whose replay payload is exactly `reasoning_content`.
+/// The other spelling remains visible but cannot become durable state.
+pub(crate) fn decode_replaying_content(
+    response: Result<HttpResponse, HttpError>,
+    cost: Option<Arc<dyn ProviderCost>>,
+    dialect: &'static str,
+) -> BoxStream<'static, AiEvent> {
+    super::decode_response(
+        response,
+        Box::new(decoder(cost).replaying_reasoning_content(dialect)),
+    )
+}
+
+pub(super) fn decode_with_usage_mapping(
+    response: Result<HttpResponse, HttpError>,
+    cost: Option<Arc<dyn ProviderCost>>,
+    dialect: &'static str,
+    usage_mapper: fn(&RawValue, Usage) -> Option<Usage>,
+) -> BoxStream<'static, AiEvent> {
+    let mut decoder = decoder(cost).replaying_reasoning_content(dialect);
+    decoder.usage_mapper = Some(usage_mapper);
+    super::decode_response(response, Box::new(decoder))
+}
+
+fn decoder(cost: Option<Arc<dyn ProviderCost>>) -> StreamDecoder {
+    match cost {
         Some(cost) => StreamDecoder::reporting_cost(cost),
         None => StreamDecoder::default(),
-    };
-    super::decode_response(response, Box::new(decoder))
+    }
 }
 
 #[cfg(test)]

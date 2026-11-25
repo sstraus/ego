@@ -30,6 +30,59 @@ Omitting the corresponding flags retains those values, even `yolo` and `off`.
 Saving a default affects future sessions. Use live `/model`, `/thinking`, or
 `/mode` controls to change current session selections.
 
+## Named account connections
+
+Account metadata belongs in `$EGO_HOME/config.toml`, not project configuration.
+`connection` selects a stable account ID; `connections.ID` defines its display
+name, vendor and access method. Labels and table order never select an account.
+For example, these are two independently selected key-backed accounts:
+
+```toml
+connection = "work_key"
+
+[connections.work_key]
+name = "Work"
+vendor = "anthropic"
+access = "key"
+key_env = "WORK_API_KEY"
+
+[connections.personal_key]
+name = "Personal"
+vendor = "anthropic"
+access = "key"
+key_env = "PERSONAL_API_KEY"
+```
+
+Keep secrets in the named environment variables, never in this document.
+`access = "key"` with `key_env` reads only that environment variable, whose
+name must be secret-marked, such as `WORK_API_KEY`, and its value must be at
+least eight bytes for output masking. Without `key_env`, ego reads
+only the credential saved for that exact connection by
+an API-key login, for example `ego auth login gemini`. Neither source falls back
+to the other. `access = "oauth"` forbids `key_env`; OAuth login saves its
+credential separately. Do not create an OAuth table as a substitute for login.
+
+Change only `name` to rename an account. Keep the table ID unchanged: credentials,
+saved selections and private history bind to the ID, not the label. IDs and
+vendors accept letters, digits, underscores and hyphens. Names require 1–128
+characters without control characters and cannot be blank.
+
+`--account N` with the target model provider overrides the saved default for that invocation. An unknown ID,
+a vendor mismatch or an ambiguous choice refuses rather than borrowing another
+account. An unselected single matching account can be resolved automatically;
+multiple matching accounts require an explicit selection. Plain resume retains
+the admitted identity instead of silently adopting a changed default. An explicit
+CLI resume model from another provider resolves an account for that provider.
+
+The user-only `[account_numbers]` ledger is managed by ego. It maps provider
+and internal account identity to a positive number. Retired entries reserve
+numbers after account removal; do not delete or edit the ledger to renumber
+accounts. See `ego auth status PROVIDER` for public selectors.
+
+See [providers and login](../guides/providers.md#multiple-accounts) for account
+creation and targeted management. Selection does not establish provider
+entitlement, pool quotas, rotate accounts or authorize paid search.
+
 ## Destination policy and declared profiles
 
 `ego config ls --effective` (also `--json`), `ego doctor`, and the session
@@ -72,10 +125,13 @@ The view explains these enforcement boundaries:
   selected socket address. Literal addresses skip DNS. Redirects are one hop
   per authorization; the next destination needs fresh authorization and DNS
   validation, not the first destination's grant.
-- Native public web requests reject special-use literal addresses and DNS
-  answers on each hop. An authorized foreign HTTP effect can use private
-  destinations, including a local MCP endpoint. A `net(...)` allow does not
-  bypass the native public web address checks.
+- Native web requests reject special-use literal addresses and DNS answers on
+  each hop. A user `net(...)` allow that names hosts (a name, a `*.` pattern,
+  an address or a CIDR block such as `net(192.168.1.0/24)`) admits loopback,
+  LAN and shared-space addresses for the matching destinations, and
+  `web_private_network = true` admits them for every call. Bare `net(*)` and
+  project rules do not. See [tools](../guides/tools.md). An authorized foreign
+  HTTP effect can use private destinations, including a local MCP endpoint.
 - Destination rules do not filter child-process sockets. Child offline
   isolation needs a measured backend `offline` capability. Inspection reports
   `not_checked` until there is probe evidence; this is not a guarantee.
@@ -98,32 +154,63 @@ higher or lower layer supplies a value.
 | Key | Accepted value | Default / applicability |
 | --- | --- | --- |
 | `model` | Full `provider/model` string | No fixed model; interactive first-run selection, explicit/configured model in headless |
-| `max_output_tokens` | Positive integer | Optional generated-token limit per request; system limits cannot be relaxed by lower layers |
+| `max_output_tokens` | Positive integer | 32,768 generated tokens per request by default, capped by the model maximum, or by half the context window when the model declares no maximum; an explicit value replaces the default; system limits cannot be relaxed by lower layers |
 | `thinking` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | Model-declared default; unknown requires explicit selection |
 | `mode` | `plan`, `default`, `auto`, `accept-edits`, `yolo` (legacy input alias: `edits`) | Trusted interactive with no configured mode uses `auto`; ordinary unresolved policy uses `default` |
 | `sandbox` | `ro`, `workspace`, `adaptive`, `off` | `adaptive` when absent on macOS, `workspace` elsewhere; effective inspection reports the platform default reason; explicit selections retain their meaning, system ceilings bind, mode is independent |
 | `max_mode` | Same mode vocabulary | Absent = no system maximum; system-only, does not select a mode |
-| `roots` | Array of `{path="...", access="read"\|"read-write"}` | Under strict levels, no extra roots are granted by default. `[]` clears configured roots, while adaptive derived roots remain. System declarations cap additional roots |
-| `exec_paths` | Array of paths | Empty; extra read/executable roots, under system root bounds |
+| `roots` | Array of `{path="...", access="read"\|"read-write"}` | Under strict levels, no extra roots are granted by default. `[]` clears configured roots, while adaptive derived roots remain. System declarations cap additional roots. System and user layers may declare either access; project and local layers may declare only `access="read"` roots, which restrict access; any other layer is refused. A project asks for a writable root through [`[grants]`](#project-grant-proposals) |
+| `exec_paths` | Array of paths | Empty; extra read/executable roots, under system root bounds. System, user and command line only; any other layer is refused |
+| `grants` | `{roots=[...], exec_paths=[...], allow=["tool(...)"]}` | Project and local layers only; absent = no proposal. See [Project grant proposals](#project-grant-proposals) |
 | `exec.env` | `inherit`, `core`, `allowlist` | `inherit` |
 | `exec.env_allowlist` | Array of environment names | Empty; used only with `allowlist` |
 | `network` | `on`, `off` | `on`; explicit `--offline` cannot be cleared by this setting |
-| `permissions.judge` | Full model slug or `none` | Absent prefers a supplied same-provider review model, otherwise the active model; `none` disables advisory generation |
+| `web_private_network` | Boolean | False (block on); user-only. `true` lets `web_fetch` reach every loopback, LAN and shared-space (Tailscale `100.x`) address of an admitted call. Unspecified, broadcast and multicast addresses stay refused. Any other layer that sets it, including the system file, is a configuration error |
+| `permissions.judge` | Full model slug or `none` | Absent uses the active main model; `none` disables advisory generation. Only goal checks prefer a smaller same-provider model |
 | `permissions.allow` | Array of canonical predicates | Empty contribution |
 | `permissions.deny` | Array of canonical predicates | Empty contribution; system denies remain immutable |
 | `budget` | String such as `"20k"`, `"400k"`, or `"2.5$"` | No configured ceiling; system money/token limits clamp requests independently |
 | `bare` | Boolean | False when trusted; untrusted resolution is bare regardless |
-| `cache` | `none`, `short`, `long` | `short`; `long` requires explicit user config |
+| `checkpoints` | Boolean | True; user configuration and command line only; any other file that sets it, including the system file, is refused. False stops `write` and `edit` from saving private Git checkpoints in the worktree; `--no-checkpoints` does it for one run |
+| `deny_prompts` | Boolean | False; user configuration and command line only; any other file that sets it, including the system file, is refused. Not a managed `config set` key or an `ego setup` row; edit it with `ego config edit`. True makes an interactive session deny a call that would wait on a permission prompt; the model reads the denial and the turn continues. See [unattended interactive sessions](../guides/permissions.md#unattended-interactive-sessions) |
+| `tools` | Array of tool names | Unset: every default tool. User configuration and command line only; any other file that sets it, including the system file, is refused. Same names as `--tools`, `[]` is `--no-tools`; `--tools` overrides it for one run |
+| `memory` | Boolean | False; user configuration and command line (`--memory` for one run) only; any other layer is refused. True keeps one memory file per workspace under `$EGO_HOME/memory/` that the model can add to. See [workspace memory](../guides/memory.md#workspace-memory) |
+| `lsp` | Boolean | False; user configuration only; any other layer is refused. True gives the model the `lsp` tool: read-only definition, reference and diagnostics queries through a language server that ego chooses from the file extension. It starts processes. See [tools](../guides/tools.md) |
+| `build_recipes` | Boolean | False; user configuration only; any other layer is refused. True lets the model save build-output recipes for this workspace (the `build_recipe` tool) that shorten later successful `exec` answers. Inspect, disable or delete stored recipes with `ego build-recipes ls\|show\|disable\|enable\|rm` |
+| `mcp_tasks` | Boolean | False; user configuration only; any other layer is refused. True declares the MCP Tasks extension to HTTP MCP servers in interactive sessions, so a server can answer a tool call with a task that ego polls and reports when it ends. See [MCP](../integrations/mcp.md) |
+| `doctor_network` | Boolean | False; user configuration only; values in other layers are ignored. True makes `ego doctor` and `/doctor` run one unauthenticated reachability probe per configured provider, as `ego doctor --probe-network` does. `--offline` or `network = "off"` skips every probe |
+| `connection` | Account ID string (letters, digits, `_`, `-`) | Absent: no saved account selection. User configuration only for ordinary use; the CLI accepts `--account N`; any other layer is refused. See [named account connections](#named-account-connections) |
+| `connections.ID` | `{name="...", vendor="...", access="key"\|"oauth", key_env="..."}` | No named accounts. User configuration only; any other layer is refused. `access="key"` optionally names a secret-marked environment variable with `key_env`; without it, uses the exact named auth-store key. `access="oauth"` forbids `key_env` |
+| `cache` | `none`, `short`, `long` | `short`; project and local layers may select `long` only in a trusted workspace; the trust question names the file |
+| `compaction.threshold` | Integer 1–99 | 90; user/system file or command line; project and local values are ignored; percent of the measured window at which a turn yields and the session compacts. `compaction.idle_threshold` may not exceed it |
+| `compaction.idle` | Boolean | False; user/system file or command line; project and local values are ignored. True compacts an idle interactive session once per known prompt-cache deadline ([CLI.md](../../CLI.md), automatic compaction) |
+| `compaction.idle_margin_seconds` | Positive integer | 30; user/system file or command line; seconds before the cache deadline at which idle compaction starts |
+| `compaction.idle_threshold` | Integer 1–99 | 50; user/system file or command line; minimum measured context, in percent of the measured window |
+| `compaction.headless` | Boolean | False; user/system file or command line; project and local values are ignored. True lets a headless `ego run` or `ego resume` whose turn ends with `context_overflow` compact the session and continue in the successor, in the same process. False ends such a run with `context_overflow`, exit 4 |
+| `recap.enabled` | Boolean | False; user/system file only; project, local and command-line values are ignored (a row in `ego setup`). True shows a short recap before the first interactive prompt after an absence; the recap is one model call, booked on the main model, and is not added to the history ([interactive guide](../guides/interactive.md)) |
+| `recap.after_minutes` | Positive integer | 30; user/system file only; minutes without a completed turn after which the next prompt gets a recap |
+| `residual_limits.decisions_per_call` | Positive integer | 3; user/system file only; project, local and command-line values are ignored. Most [sandbox judge decisions for residual writes](../guides/permissions.md#sandbox-judge-for-residual-writes) one command may raise |
+| `residual_limits.decisions_per_session` | Positive integer | 32; user/system file only. Most sandbox judge decisions one session may raise; every judge grant counts as a decision |
+| `residual_limits.deadline_ms` | Positive integer (milliseconds) | 5000; user/system file only. Upper bound on one sandbox judge decision, including provider queueing |
+| `task.model` | Model reference | Unset: task children use the parent's model. A named agent's `model` wins ([CLI.md](../../CLI.md), named tasks) |
+| `task.effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max` | Unset: task children use the parent's effort. A named agent's `effort` wins |
+| `skills.hide` | List of skill names | Empty; user, system and flag configuration only. A named skill is hidden from the model and the user can still type it (a skill only the model could use is removed) |
+| `skills.off` | List of skill names | Empty; user, system and flag configuration only. A named skill is hidden from the model and from the user. A project cannot undo either list |
 | `profile.NAME` | Profile table | No selected profile without `--profile`/`EGO_PROFILE` |
+| `profile.NAME.cache_ttl_seconds` | Positive integer | Absent. Display-only estimate of the provider-managed prompt-cache lifetime for the interactive cache countdown; it sends no provider parameter and does not change caching charges. A TTL the request itself states takes precedence |
 | `auth.PROVIDER` | Credential-command/identity-header table | No override |
 | `ui.statusline.template` | MiniJinja template string | Compact default; `{{ prompt }}` disables optional status |
-| `ui.statusline.providers.NAME` | `{argv=[...], timeout_ms=250}` | No commands by default; at most four, timeout 1–1000 ms |
+| `ui.statusline.providers.NAME` | `{argv=[...], timeout_ms=250}` | No commands by default; at most four, timeout 1–1000 ms. System, user and command line only; project and local values are ignored |
 | `ui.keybindings` | Map of action names to key-chord arrays | User-only shortcut overrides; an empty array removes an action's shortcuts |
 | `ui.vim` | Boolean | False; user-only Vim composer preference, also selected by `--vim` |
 | `mcp.servers.NAME` | Complete tagged server entry (optional `enabled = false` detaches it from session start) or tombstone | No configured external server |
 | `instructions.shared_root` | Absolute shared ancestor directory; user layer only | Absent: discover from the repository root; grants no sandbox authority |
 | `instructions.exclude_roots` | Array of absolute subtree directories; user layer only | Empty; repositories inside an excluded subtree do not inherit shared instructions |
+| `instructions.max_files` | Integer ≥ 1; user layer only | 8; caps loaded instruction files and distinct import attempts per run. The 64 KiB per-file and 256 KiB total limits are fixed |
 | `hooks` | Ordered array of hook entries | Empty contribution; hooks combine across admitted sources |
+| `sessions.compress` | Boolean; user layer only | True; false stops the background cold storage job, and compressed sessions stay readable. `ego setup` has a row for it and `--no-session-compression` stops the job for one run |
+| `sessions.compress_after_days` | Positive integer; user layer only | 7; a session with no write for this many days is cold |
+| `sessions.retention_days` | Positive integer; user layer only | 30. **Automatic deletion is on by default:** a session nobody opened or wrote for this many days is permanently deleted, without a prompt, at most once a day at start-up, even when `sessions.compress` is false. `ego rm --expired --yes` runs the same deletion on demand. There is no off switch; set a larger value to keep sessions longer. Open, held and recently resumed sessions, and the sources of kept sessions, stay |
 
 `permissions` is a whole-block override, not a merge of individual lists.
 System denies and built-in credential-read protection survive replacement.
@@ -159,8 +246,8 @@ The default status template is `{{ compact }}\n{{ prompt }}`. The prompt must
 render once on its own line. MiniJinja `{% filter priority(integer) %}` blocks drop as
 whole units in ascending priority order when a row is too wide. Text before the
 prompt goes above the buffer, and text after it goes below. Critical operational
-state remains visible even if omitted. See [interactive use](../guides/interactive.md)
-for terminal controls. The unreleased
+state remains visible even if omitted. See [the command reference](cli.md)
+for the variables, filters, limits and fallback diagnostics. The unreleased
 `segments` key is no longer accepted.
 
 Status provider commands run once per trusted native interactive prompt epoch,
@@ -169,11 +256,72 @@ that needs more authority is omitted without asking a model or human. Output mus
 be one UTF-8 line, at most 1024 bytes, with no stderr or truncation. Failures are
 diagnostic notes. Source: [status providers](../../crates/ego-cli/src/status_provider.rs).
 
+Cold session storage: an interactive or headless run starts one background
+pass per process over its session store, never on the turn path. The pass
+compresses each cold session: `events.jsonl`, `manifest.json` and every
+`evidence/*.blob` larger than 4 KiB become zstd files with a `.zst` suffix;
+smaller files stay plain because compression saves no disk block. On real
+sessions the allocated disk space falls about four times (3.9x). A held lease, a lease heartbeat newer than the threshold, or a
+held `events.lock` keeps a session plain. A writer that starts during the pass
+wins, and the pass keeps the original files. Each file goes to a temporary file,
+fsync and rename before the plain file is removed, so a crash leaves a readable
+session. Resume, history, search, evidence and export read compressed sessions
+the same as plain ones. Resuming a compressed session restores plain
+`events.jsonl` and `manifest.json` before the first new event; evidence blobs
+stay compressed. The pass uses one thread, rests three times its work time, runs at nice +10 on
+Linux (macOS and Windows keep normal priority, because only a process-wide call
+exists there), and
+writes only debug log lines. CI runs and ACP hosts do not start it. Older ego
+versions cannot read compressed sessions.
+
+## Project grant proposals
+
+A project cannot declare `exec_paths`, a read-write root or a `tool(<server>/*)`
+permission itself: these fail at load in a project or local layer. (Read-only
+`roots` entries are accepted there, because they only restrict access.) To ask
+for that authority, the project writes a `[grants]` table in `.ego/config.toml` or
+`.ego/config.local.toml`:
+
+```toml
+[grants]
+roots = [{ path = "/srv/shared", access = "read-write" }]
+exec_paths = ["/opt/tools/bin"]
+allow = ["tool(docs/*)"]
+```
+
+Only these three keys exist. `roots` paths are absolute or start with `~/`,
+`exec_paths` are absolute, and `allow` takes MCP tool rules only (`tool(server/name)`
+or `tool(server/*)`). Any other table or key refuses the file. A system, user, env,
+agent-file or flags layer cannot carry `[grants]`.
+
+**Approval.** The workspace trust question lists each proposed root, executable
+path and MCP grant, then you answer once. The answer is stored in the workspace
+trust ledger against the exact text of the proposal, so it is the receipt. An
+unchanged proposal is never asked about again. Any added, removed or edited
+entry changes the executable surface and asks again, showing what changed.
+`--trust-workspace` is the same owner approval given on the command line.
+
+**Effect.** An approved proposal adds to your own roots, `exec_paths` and
+allow rules; it never replaces them. Grants from a proposal show the project
+layer as their origin. Without trust, under `--bare`, or in headless runs with no
+stored answer, the whole project layer is discarded and `/config` names
+`grants` among the discarded settings.
+
+**Retained protections.** System root bounds, `max_mode`, sandbox ceilings and
+system `deny` rules bind approved grants like any other root or rule; a proposed
+root outside a system bound stops the run with the bound's message. Credential
+floors, explicit denies and the sandbox still apply.
+
+**Recovery.** To revoke, delete the `[grants]` table or answer no to the next
+question. To forget an approval, remove the workspace entry from the trust
+ledger under `$EGO_HOME`; the next launch asks again.
+
 ## Profiles and managed edits
 
 A profile accepts `model`, `max_output_tokens`, `thinking`, `mode`, `sandbox`, `roots`, `exec`,
-`exec_paths`, `network`, `permissions`, `budget`, and `mcp`.
-It does not accept base-only `bare`, `cache`, `max_mode`, `auth`, `ui`, or `hooks`.
+`exec_paths`, `network`, `permissions`, `budget`, `mcp`, and `cache_ttl_seconds`.
+Every other key is base-only and refused in a profile, for example `bare`, `cache`,
+`web_private_network`, `max_mode`, `memory`, `tools`, `compaction`, `auth`, `ui`, or `hooks`.
 Only `profile.ci` accepts `session_dir` and `artifact_dir`, both absent by default.
 
 The `ci` profile activates explicitly, never from ambient `CI`. It requires
@@ -187,9 +335,9 @@ The CLI managed key set is intentionally smaller than the full file schema:
 
 | Target | Keys accepted by `config set/get/unset` |
 | --- | --- |
-| User base | `model`, `thinking`, `mode`, `sandbox`, `roots`, `exec_paths`, `budget`, `bare`, `permissions.judge`, `ui.statusline.template`, `ui.keybindings`, `ui.vim`, `exec.env`, `exec.env_allowlist`, `network`, `auth.PROVIDER.headers`, `auth.PROVIDER.credential_command` |
-| User profile | Same minus `bare`, all `ui.*` keys, and both `auth.PROVIDER.*` keys |
-| User `ci` profile | Profile keys plus `session_dir`, `artifact_dir` |
+| User base | `model`, `thinking`, `mode`, `sandbox`, `roots`, `exec_paths`, `budget`, `bare`, `permissions.judge`, `ui.statusline.template`, `ui.keybindings`, `ui.vim`, `exec.env`, `exec.env_allowlist`, `network`, `web_private_network`, `compaction.idle`, `compaction.idle_margin_seconds`, `compaction.idle_threshold`, `compaction.headless`, `doctor_network`, `recap.enabled`, `recap.after_minutes`, `mcp_tasks`, `memory`, `checkpoints`, `tools`, `sessions.compress`, `cache`, `instructions.max_files`, `lsp`, `build_recipes`, `auth.PROVIDER.headers`, `auth.PROVIDER.credential_command` |
+| User profile | Exactly `model`, `thinking`, `mode`, `sandbox`, `budget`, `permissions.judge`, `exec.env`, `exec.env_allowlist`, `network`, `roots`, `exec_paths` |
+| User `ci` profile | The user profile keys plus `session_dir`, `artifact_dir` |
 
 Authentication edits replace the selected provider's complete headers map or
 credential command. They are base-only. `config ls`, `config get`, and mutation
@@ -219,19 +367,49 @@ An invocation-scoped JSON entry cannot be a tombstone.
 
 | Transport | Keys and defaults |
 | --- | --- |
-| `stdio` | Required `transport="stdio"`, `command`; `args=[]`, `cwd` absent, `inherit_env=[]` |
-| `http` | Required `transport="http"`, `url`; `profile="current"` (or explicit `legacy-sse`), `auth="none"` (or `oauth`), `allow_insecure_loopback=false` |
+| `stdio` | Required `transport="stdio"`, `command`; `args=[]`, `cwd` absent, `inherit_env=[]`, `enabled=true` |
+| `http` | Required `transport="http"`, `url`; `profile="current"` (or explicit `legacy-sse`), `auth="none"` (or `oauth`), `allow_insecure_loopback=false`, `oauth_hosts=[]` (extra bare https origins for OAuth), `enabled=true` |
 | Tombstone | `removed=true`, with no transport fields |
 
+Set `enabled=false` on either transport to keep the entry configured but detached
+from session start. `ego mcp add` writes no `enabled` key and the invocation-scoped
+JSON entry refuses it.
+
+The top-level user-layer key `mcp_tasks` turns on the MCP tasks extension for HTTP
+servers; see its row in [every config.toml key](#every-configtoml-key).
+
 HTTP URLs reject embedded credentials. HTTP without TLS needs the explicit
-insecure-loopback opt-in and a loopback URL. Explicit inherited variable names
+per-server `allow_insecure_loopback = true` opt-in, which admits any named host,
+loopback or owner network; it is invalid for HTTPS. See
+[plaintext HTTP on the owner network](../integrations/mcp.md#plaintext-http-on-the-owner-network). Explicit inherited variable names
 are admission facts, not arbitrary environment values in TOML.
 See [MCP](../integrations/mcp.md) for connection and login behavior.
 
 ## Authentication keys
 
+`auth.PROVIDER.oauth_login_enabled` is an optional, **user-only** Boolean.
+When absent, Anthropic login is disabled and other providers retain enabled
+login. Set `auth.anthropic.oauth_login_enabled = true` to opt in, or set the
+field to `false` to disable login for any provider. It gates login discovery,
+login-method pickers and direct CLI/session login before browser, network or
+credential-command effects. System, project, local, environment, flag and
+agent-file configuration reject this field. A protocol filter does not enable
+login or establish provider compatibility.
+
+Provider visibility, API-key authentication, existing stored OAuth credential
+use, refresh, status and logout are unchanged. Generic troubleshooting and
+model-readiness hints can still name a disabled login flow; direct login
+explains the user opt-in. Anthropic can use `ANTHROPIC_API_KEY` independently of
+this setting. See [provider login](../guides/providers.md).
+
 `auth.PROVIDER.credential_command` is an optional program for login/refresh;
-its stdout carries a secret result. `auth.PROVIDER.headers` is a string map,
+its stdout carries a secret result. `auth.PROVIDER.credential_timeout_secs`
+(1–3600, default 120) bounds each call, so a slow browser login can finish; the
+program and its descendants are still stopped on timeout, cancellation or the run
+deadline. When the program fails, ego shows its exit code and up to 4 KiB of its
+stderr. The request it received, its own stdout and credential-shaped values are
+masked; other text it prints is shown as written, so a helper must not print
+secrets it invented. Remove the key to restore the default. `auth.PROVIDER.headers` is a string map,
 empty by default, for non-secret identity overrides. Case-insensitive empty
 values remove a declared header. `authorization`, `x-api-key`, `content-type`,
 `accept`, `openai-beta`, and `chatgpt-account-id` are forbidden overrides.
@@ -247,15 +425,16 @@ The canonical [hook schema](../../crates/ego-core/src/hook.rs) accepts:
 | `event` | Required lifecycle event; list in [hooks](../integrations/hooks.md) |
 | `matcher` | Optional exact lifecycle-native matcher; absent matches the event |
 | `once` | False; true only for invocation-scoped skill hooks |
+| `on_failure` | `allow`: a pre-effect gate whose handler fails to start, times out or crashes continues and shows one notice; `block` stops the guarded action instead. Refused on post-effect events |
 | `handler.type` | `command`, `http`, `mcp_tool`, or `prompt` |
 | Command fields | Required `command`; optional `args`, `shell`; argv form when `args` is present |
 | HTTP fields | Required `url`; `headers=[]` pairs; optional `allowed_env_vars` |
 | MCP fields | Required `server`, `tool`, `input` |
 | Prompt fields | Required `prompt`; optional `model` |
-| `handler.timeout` | Positive integer seconds; 30 for prompt, 600 for other kinds; other kinds use 30 on UserPromptSubmit/PreModelSwitch/PostModelSwitch |
+| `handler.timeout` | Positive integer seconds; 30 for prompt, 600 for other kinds; other kinds use 30 on UserPromptSubmit/PreModelSwitch/PostModelSwitch/Interrupt |
 
 The closed TOML/skill domain schema must not be confused with historical
-Claude-shaped compatibility examples. Unknown fields, including fields absent
+compatibility examples from another application. Unknown fields, including fields absent
 from the current handler schema, are errors. No handler grants authority.
 
 ## Every models.toml field
@@ -270,7 +449,7 @@ Source: [facts.rs](../../crates/ego-cli/src/facts.rs),
 | Path | Type / default |
 | --- | --- |
 | `default_model.PROVIDER` | Full slug belonging to the provider; overrides only that provider's first-run default |
-| `model."PROVIDER/MODEL".capabilities.schema_version` | Required integer `5` |
+| `model."PROVIDER/MODEL".capabilities.schema_version` | Required integer `6`; a file with another version is refused |
 | `...max_context_tokens`, `...max_output_tokens` | Optional positive ceilings; absent stays unknown |
 | `...max_tools` | Optional tool-count ceiling |
 | `...supports_parallel_tool_calls` | Boolean contract fact |
@@ -280,16 +459,17 @@ Source: [facts.rs](../../crates/ego-cli/src/facts.rs),
 | `...default_reasoning_effort` | Optional supported effort; absent unknown |
 | `...cancel` | `unsupported`, `cooperative`, `immediate` |
 | `...cache` | `none`, `short`, `long` |
-| `...transport` | `sse` or `web_socket`; Codex uses WebSocket, with guarded SSE fallback. `auto`, `web_transport`, and `websocket` are not accepted spellings |
+| `...transport` | `sse` or `web_socket`; The subscription transport uses WebSocket, with guarded SSE fallback. `auto`, `web_transport`, and `websocket` are not accepted spellings |
 | `...audio_input` | `unknown` (default), `unsupported`, or `supported_wav`; exact provider/model support is still required |
 | `...image_input` | `"unknown"` default, `"unsupported"`, or supported table below |
 | `model."PROVIDER/MODEL".pricing` | Optional quote table; absence is unpriced, not free |
 | `retired."PROVIDER/MODEL".replacement` | Required replacement slug |
 | `retired."PROVIDER/MODEL".retired` | Required date string; runtime tombstone consultation uses the builtin table |
+| `service_tier."PROVIDER/MODEL"` | `standard` (default) or `fast`, per full model slug. `fast` is refused unless the built-in catalogue has verified fast support and pricing for that slug. `/fast on` and `/fast off` override it for the current session; `ego models` lists verified fast support |
 
 Transport spellings come from
 [`Transport`](../../crates/ego-core/src/generator/capabilities.rs); the
-[Codex mapping](../../crates/ego-ai/src/wire/openai_codex_responses.rs) selects
+The subscription mapping selects
 its transport. A capability declaration is not a switch that changes another
 provider's wire contract.
 
@@ -312,18 +492,49 @@ work has no finite monetary bound, and admitted responses can cross a cap. See
 | Name/path | Purpose |
 | --- | --- |
 | `EGO_HOME` | User state/config root; default `~/.ego` |
+| `EGO_CREDENTIAL_BACKEND` | MCP secret backend: `file` (default) or `native` (explicit OS credential-store opt-in); invalid values fail closed. No automatic import or fallback. |
 | `EGO_MODEL`, `EGO_PROFILE` | Invocation defaults |
 | `OLLAMA_HOST` | Ollama endpoint; default localhost:11434, normalized to `/v1/` |
 | `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL` | API endpoint overrides; provider-owned request paths remain fixed |
+| `GEMINI_BASE_URL` | Loopback HTTP(S) endpoint override for the Gemini wire; provider-owned request paths remain fixed |
+| `OPENROUTER_BASE_URL` | OpenRouter API base override, including its version path; default `https://openrouter.ai/api/v1/` |
 | API key variables | [Provider table](../guides/providers.md) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | An OAuth token environment variable for the `anthropic` provider. Credential order: a stored `ego auth login anthropic` credential, then this variable, then `ANTHROPIC_API_KEY`. With both variables set and no stored login, ego sends the OAuth token, not the API key; unset this variable to use the key |
+| `OPENAI_CODEX_ACCESS_TOKEN` | Externally managed access token for `openai-codex`; takes precedence over the stored login and disables ego-owned refresh |
 | `EGO_LOG`, `EGO_LOG_FILE` | Opt-in diagnostic filtering/destination; see [troubleshooting](../guides/troubleshooting.md) |
 | `VISUAL`, `EDITOR` | External config editor selection |
 | `$EGO_HOME/sessions` | Default durable session store; invocation `--session-dir` can override |
 | `$EGO_HOME/auth.json` | Private provider credentials; never publish or inspect it for troubleshooting output |
+| `$EGO_HOME/secrets/secrets.enc`, `secrets.key` | MCP credentials and independent random local encryption key; keep both owner-only and back them up together. A copied whole profile includes the key and is not protected against its holder. |
 
-Ego does not import `.claude/settings.json` or its permission policy. Trusted
+Ego does not import another application’s settings or permission policy. Trusted
 `.claude/skills` directories are recognized as skill sources, alongside the
 other roots listed in [skills](../integrations/skills.md).
+
+### Externally managed subscription access tokens
+
+Set `OPENAI_CODEX_ACCESS_TOKEN` in the environment of the ego process that
+uses `openai-codex`. For a host-managed ACP connection, put this name and its
+value in that connection's process environment before the host starts
+`ego acp` (the host's `POST /acp/connections` `env` field). Use one process per
+credential identity; this is not a session JSON field or an ACP login token.
+
+A nonblank value takes precedence over `oauth:openai-codex`. Ego does not
+open the stored login, invoke a credential command, or refresh this token.
+The token must contain the subscription account claim used by the existing login
+path. An invalid token fails without a fallback to stored credentials. An
+expired or revoked token that receives HTTP 401/403 ends generation with the
+typed `Refused` authentication failure; the host must obtain a new token and
+start a new process. An unset or whitespace-only value keeps the existing
+stored-login and refresh behavior. Other providers are not affected.
+
+Supply only the access token, never a refresh token. Do not put it in argv,
+config files, session prompts, or diagnostic reports. Credential headers and
+credential debug output are secret-safe; provider error diagnostics mask
+reflected credential values before events and receipts are built. The
+existing environment-secret masking also recognizes this `TOKEN` name for
+tool output and exports. This does not protect against a provider that
+intentionally encodes a secret in its output.
 
 ### Atomic managed batches
 
@@ -378,11 +589,29 @@ exclude_roots = ["/shared/projects/scratch"]
 ```
 
 Only repositories inside the canonical shared root inherit its instructions.
+A symlinked `AGENTS.md` is read when its canonical target resolves. A target
+inside the discovery scope loads like any in-tree file. A target outside it
+(for example `AGENTS.md -> ~/shared/RULES.md`) is an external instruction: it is
+withheld, with a notice naming the target, until the workspace trust answer
+approves that exact target path and SHA-256 digest; a changed target needs a new
+answer. Links in a parent directory, dangling links and link cycles stay
+refused, as do oversize files, import cycles and files past `max_files`.
+To recover, answer the trust question again (or pass `--trust-workspace`), or
+replace the link with a regular file.
 Exclusions follow canonical paths, including symlinks. A missing shared root or
 invalid link refuses instruction discovery; a missing exclusion is inert.
 Project configuration cannot widen this user-owned discovery boundary. Use
 `ego config edit` to edit these keys; the typed `config set` vocabulary does not
 include instruction paths.
+
+### Terminal root grants
+
+A `Session` or `Permanent` answer to the terminal root question takes effect
+when the asking turn ends: ego re-admits the same session in the same process
+with the root. No configuration edit or restart is necessary. `/config roots`
+lists session roots, permanent roots and owner sandbox grants. See
+[permissions](../guides/permissions.md) for the effective-perimeter preview,
+exec reach and ceilings.
 
 ### Revoke a terminal root grant
 
@@ -396,68 +625,89 @@ For a one-file installation and a generic offline example, see the
 [protocol-filter guide](../integrations/protocol-filter.md).
 
 A user can install one reviewed executable that transforms final HTTP generation
-bytes for one provider. This is opt-in user configuration in
+bytes. A root `[protocol_filter]` table supplies the global fallback. A
+provider `[auth.example.protocol_filter]` table replaces that fallback, and
+`enabled = false` on the provider entry opts out. Exactly one executable is
+selected; no chain runs. Both tables are opt-in user configuration in
 `$EGO_HOME/config.toml`; other layers cannot declare a filter:
 
 ```toml
 [auth.example.protocol_filter]
 command = "/absolute/path/to/my-filter"
-identity_headers = ["x-request-identity"]
-timeout_ms = 1000
+timeout_ms = 10000
 enabled = true
 ```
 
 Install the one executable at that absolute path and make it executable. A script
 must name its interpreter with a valid shebang. Python is optional; Ego requires
 no addon runtime. Remove this table or set `enabled = false` to disable the filter.
-Restart a session to load changed configuration. Ego ships no provider identity
+Restart a session to load changed configuration. The filter timeout defaults
+to 10000 ms and accepts 1–30000 ms per child exchange; a separate generation
+deadline and cancellation still apply. Ego ships no provider identity
 algorithm and makes no subscription compatibility claim.
 
-Version 1 includes journal-backed, write-once session variables. Stdin carries
+Version 1 hello also carries `generation_role` and the actual encoder/decoder
+`wire_format` name. Optional bounded `notices` use the local renderer with
+`εgo filter:`; headless diagnostics use stderr and JSONL has a separate transient
+`filter_notice` event. Standard ACP has no notice projection. An explicit `reject: true` output prevents dispatch or
+stops further response content without retry or bypass. See the guide for
+strict rejection shapes and limits. Version 1 includes journal-backed, write-once session variables. Stdin carries
 `state: {revision, values}` and stdout requires `expected_revision` and
 `state_writes`. New values are persisted before HTTP dispatch; a failed write,
 stale revision or attempted replacement fails closed. The same session retains
 values on resume or continue; new sessions and executable paths have separate
 state. See [session variable examples and limits](../integrations/protocol-filter.md#capture-a-session-variable-once).
 
-For each actual generation attempt Ego starts the executable without a shell or
-arguments for a bounded request exchange, then starts a persistent response
-process. It transforms incoming bytes before provider decoding, including tool
-arguments. The response process uses sequenced JSON lines and a final EOF
-exchange; the timeout applies to each exchange, excluding provider idle time.
+For each actual generation attempt Ego starts one executable without a shell
+or arguments and asks which direction it needs. The hello contains no body.
+The executable replies with independent `request` and `response` booleans;
+both booleans are required. A missing or invalid declaration fails before
+dispatch. A requested body exchange and the streamed
+response frames use this same process. Unselected directions pass through
+without sending their body bytes to the executable. Filtered response frames
+include a final EOF exchange; the timeout applies to each exchange, excluding
+provider idle time.
 See the [response contract](../integrations/protocol-filter.md#response-stream-exchange). CLI and ACP use the
 same generation path. Preflight, login, refresh, discovery and MCP do not invoke
 it. Version 1 rejects WebSocket mappings that rewrite their outbound body.
 
-Stdin contains one JSON object:
+The first newline-delimited stdin object is the hello:
 
 ```json
-{"version":1,"direction":"request","provider":"example","model":"model","session_id":"uuid","generation_id":"uuid","attempt_id":"uuid","body_base64":"e30=","state":{"revision":0,"values":{}}}
+{"version":1,"direction":"hello","provider":"example","model":"model","session_id":"uuid","generation_id":"uuid","attempt_id":"uuid","turn_index":0}
+```
+
+The executable flushes `{"version":1,"request":true,"response":false}` for a
+request-only policy. Only if `request` is true, the next line is:
+
+```json
+{"version":1,"direction":"request","provider":"example","model":"model","session_id":"uuid","generation_id":"uuid","attempt_id":"uuid","turn_index":0,"body_base64":"e30=","state":{"revision":0,"values":{}}}
 ```
 
 `body_base64` is the exact normally encoded request body. `session_id` is the
 active session UUID supplied by the journal owner. Attempt
 and generation UUIDs come from the admitted attempt. There is no inferred first
 prompt or previous-response field. An addon that requires these fields must
-refuse unsupported requests. The filter returns exactly one JSON object:
+refuse unsupported requests. The filter flushes exactly one JSON object line for each requested exchange:
 
 ```json
 {"version":1,"body_base64":"eyJleGFtcGxlIjp0cnVlfQ==","identity_headers":[{"name":"x-request-identity","value":"example"}],"expected_revision":0,"state_writes":{}}
 ```
 
 Unknown fields, duplicate fields, trailing output, missing fields and other
-versions fail. Ego sends returned bytes unchanged and applies only declared
-identity headers, replacing existing public values by name. Ego retains its
-credential headers. Authentication, cookies, routing, framing, content negotiation,
-protocol-version and beta headers are forbidden even if allowlisted. Header names
-are case insensitive; duplicate output names fail. Values must be ASCII HTTP
+versions fail. This v1 startup contract replaces the earlier one-shot v1
+exchange; old executables must be adapted before they can run. Ego sends returned bytes unchanged and applies only declared
+headers, replacing existing values by name, including credentials. A
+replacement credential value is treated as a public header by Ego. The selected
+executable can emit beta or routing headers without a separate allowlist. Header names are case
+insensitive; duplicate output names fail. Values must be ASCII HTTP
 field values, at most 4096 bytes. Names are limited to 128 bytes, with at most
 16 headers. The HTTP transport derives framing and request admission digests from
 the final body. Cache-prefix observations use the transformed bytes.
 
 Input/output bodies are limited to 16 MiB. Each JSON envelope is limited to
-22,435,160 bytes including base64 expansion. The command timeout is 1..1000 ms
-(default 1000), further constrained by the run deadline. Process-tree cleanup
+22,435,160 bytes including base64 expansion. The command timeout is `timeout_ms`, 1–30000 ms
+(default 10000) per child exchange, further constrained by the run deadline. Process-tree cleanup
 adds a bounded grace. Child stdout is bounded; stderr is discarded. Cancellation,
 timeout, command failure and invalid output stop generation before HTTP dispatch;
 Ego never silently falls back to the unfiltered request.
@@ -469,3 +719,31 @@ sensitive. Unix children receive only a fixed `/usr/bin:/bin` PATH;
 Windows children receive OS bootstrap paths. Do not put credentials in the
 executable path or in addon diagnostics. Environment isolation does not prevent
 trusted code from reading files or making its own network requests.
+
+## Generation loop limits
+
+Ego accepts at most 128 tool calls per response, including at most 8 calls with
+identical tool names and normalized JSON arguments. It accepts at most 4,096
+calls across one turn. Exceeding a limit stops the generation and refuses every
+call in that response before dispatch; earlier completed responses keep their
+effects. The diagnostic is a typed `invalid` error and the headless run exits 7 with structured reason `guard`.
+
+Repeating the same tool and normalized JSON arguments in another response of
+the same turn gives the model a loop warning on occurrence 3, advising a blocking
+wait or backoff. Occurrence 8 with an unchanged result stops the turn. A changed model-visible
+result resets that fingerprint count as progress; the total turn budget still
+bounds polling with ever-changing results. Normalization ignores JSON whitespace and object
+key order, including nested objects; string contents and array order remain
+significant. These call limits are fixed and reset for the next user turn.
+
+Use `max_output_tokens = 16384` in configuration or
+`--max-output-tokens 16384` to replace the 32,768-token response default.
+The supported model maximum still caps an explicit setting. Provider mappings
+send the ceiling using their supported wire field. The subscription Responses
+mapping has no server-side output-limit field; the tool-call limits still apply.
+
+Tool arguments containing an exact ASCII `<|controlDIGITS|>` model token are
+refused before dispatch, including JSON-escaped spellings. This uses the same
+typed local guard outcome (exit 7, structured reason `guard`). Similar ordinary
+punctuation and model narration are preserved. Token rejection covers the whole
+response, so no sibling call from that response executes.

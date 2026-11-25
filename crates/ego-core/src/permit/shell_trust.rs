@@ -24,6 +24,19 @@ fn trusted_path(path: &Path) -> bool {
 
 /// Require host-observed executables before shell syntax can establish read-only authority.
 pub fn trusted_read_only(spec: &SpawnSpec) -> bool {
+    proven_read_only(spec, false)
+}
+
+/// [`trusted_read_only`] for a run whose sandbox refuses credential and control
+/// files at the operating system: content readers (`cat`, `head`, `wc`,
+/// `grep`...) and repository inspection (`git status|log|diff|show|config --get`)
+/// qualify too, so a read-only question is not asked. The caller owns the
+/// guarantee that the sandbox is in force.
+pub fn sandboxed_read_only(spec: &SpawnSpec) -> bool {
+    proven_read_only(spec, true)
+}
+
+fn proven_read_only(spec: &SpawnSpec, sandboxed: bool) -> bool {
     let Some(identity) = spec.identity().filter(|identity| identity.complete()) else {
         return false;
     };
@@ -43,7 +56,11 @@ pub fn trusted_read_only(spec: &SpawnSpec) -> bool {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    let observation = super::observe(&argv);
+    let observation = if sandboxed {
+        super::observe_sandboxed(&argv)
+    } else {
+        super::observe(&argv)
+    };
     if !observation.complete || !observation.read_only {
         return false;
     }
@@ -56,11 +73,12 @@ pub fn trusted_read_only(spec: &SpawnSpec) -> bool {
             Some("cat" | "head" | "tail" | "wc" | "sed" | "rg" | "grep")
         )
     };
-    if argv.first().is_some_and(|program| reads_content(program))
-        || observation
-            .programs
-            .iter()
-            .any(|program| reads_content(program))
+    if !sandboxed
+        && (argv.first().is_some_and(|program| reads_content(program))
+            || observation
+                .programs
+                .iter()
+                .any(|program| reads_content(program)))
     {
         return false;
     }
@@ -99,10 +117,13 @@ fn trusted_inner(program: &str, spec: &SpawnSpec, identity: &ExecutionIdentity) 
         return false;
     };
     for root in std::env::split_paths(&value) {
-        // An earlier workspace, relative, empty or untrusted root invalidates
-        // the proof even when capture found no executable there at that instant.
+        // Capture resolved the first executable. The process adapter repeats
+        // that resolution before spawn, including earlier untrusted roots.
         if !trusted_path(&root) {
-            return false;
+            if !root.is_absolute() {
+                return false;
+            }
+            continue;
         }
         if let Some(file) = identity
             .files

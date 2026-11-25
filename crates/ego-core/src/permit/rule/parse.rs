@@ -1,12 +1,18 @@
 //! Splitting `head(pattern)` apart, and every way that can fail.
 //!
-//! [`Rule::parse`](super::Rule::parse) is the single grammar entry point,
-//! shared by flags, configuration and frontmatter.
+//! the design notes §1, §2
+//! and §"Failure semantics". There is exactly one entry point —
+//! [`Rule::parse`](super::Rule::parse) — because a second one is how the
+//! flags path and the frontmatter path start disagreeing about what a rule
+//! means.
 
 use std::fmt;
 
-/// Rule heads name effects, not tools, so adding a tool does not silently create a new hole in
-/// effect coverage.
+/// The effect a rule names. Never a tool.
+///
+/// A tool-named grammar's coverage is a function of the tool inventory, so
+/// every new tool is a silent hole in every rule the operator ever wrote —
+/// and the hole is invisible, because the rule still reads correctly. §2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Head {
     Read,
@@ -21,8 +27,11 @@ pub enum Head {
 impl Head {
     /// Every head the grammar publishes, in the order the documents list them.
     ///
-    /// All three had fallen behind — two of them said `exec` could not match and one said
-    /// `net` and `tool` were still refused, months after [`OPERATIONS`] said otherwise —
+    /// Public for one reason: `CLI.md` §4.5, `docs/18`'s existing-surfaces
+    /// table and this module's own header all describe *which* heads enforce,
+    /// and prose cannot be held to a private table. All three had fallen
+    /// behind — two of them said `exec` could not match and one said `net` and
+    /// `tool` were still refused, months after [`OPERATIONS`] said otherwise —
     /// because nothing read the table on their behalf. Something does now.
     pub const ALL: &'static [Head] = HEADS;
 
@@ -64,9 +73,17 @@ impl Head {
     }
 }
 
-/// Explicit build enforceability by head. `None` means a producer exists; a reason names the
-/// missing producer otherwise. Keep this data-driven so a future head cannot load as a vacuous
-/// boundary.
+/// Whether this build produces operations of each head's shape, and what
+/// would supply the ones it does not (§6a).
+///
+/// **Data, not a `match`**, so the refusal in [`Unenforceable`] is derived and
+/// a head costs one entry. `None` means an operation of that shape exists
+/// today; `Some(awaiting)` names the thing whose arrival changes that.
+///
+/// The grammar publishes seven heads and this workspace currently produces all
+/// seven operation shapes. The table stays explicit so a future grammar head
+/// cannot load before the build has an operation it can match: a vacuous rule
+/// is indistinguishable from a boundary that works to its operator.
 const OPERATIONS: &[(Head, Option<&str>)] = &[
     (Head::Read, None),
     // `None` again, and the round trip is the mechanism working rather than
@@ -77,7 +94,7 @@ const OPERATIONS: &[(Head, Option<&str>)] = &[
     // which is the vacuous boundary two paragraphs up. `WriteTool` now
     // constructs one, so the entry flips back, and nothing else did: no rule
     // was rewritten and no ID recomputed. Which side this entry is on is
-    // decided by `ego-tools/tests/tools.rs`, the only crate that can see both
+    // decided by `ego-tools/tests/it/tools.rs`, the only crate that can see both
     // this table and `builtins()`.
     (Head::Write, None),
     (Head::List, None),
@@ -87,8 +104,12 @@ const OPERATIONS: &[(Head, Option<&str>)] = &[
     (Head::Tool, None),
 ];
 
-/// A well-formed but unenforceable rule. It retains a stable grammar identity; missing
-/// operation producers are not parse errors.
+/// A well-formed rule this build cannot enforce (§6a).
+///
+/// Deliberately **not** a [`RuleParseError`]. The grammar is complete and this
+/// rule is a valid sentence in it; what is missing is an operation to match.
+/// Saying "parse error" would be a temporary lie about a permanent grammar,
+/// and it would churn the rule's ID on the day the head became usable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Unenforceable {
     /// The rule as it canonically renders, so the message names what the
@@ -131,8 +152,13 @@ impl fmt::Display for Head {
     }
 }
 
-/// Unknown heads fail with an explanation. Do not alias `bash` to `exec`: duplicate spellings
-/// would either render unexpectedly under one ID or survive revocation under different IDs.
+/// What to tell an operator who wrote a head that does not exist.
+///
+/// The error is where the teaching goes, which is why `bash(...)` is a hard
+/// error rather than an alias for `exec(...)`. An alias is a second spelling,
+/// and §5's whole job is that there are none — either the two share an ID,
+/// and `rules ls` renders one of them back as something the operator did not
+/// write, or they do not, and `revoke` on one leaves the other standing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeadHint {
     /// The name is a tool, and this is the effect that tool performs.
@@ -244,8 +270,10 @@ pub enum RuleParseError {
         rule: String,
         hint: Option<HeadHint>,
     },
-    /// Refuse a bare head and name the explicit wildcard form, such as `exec(*)`, rather than
-    /// introducing a second spelling.
+    /// A real head with no parentheses. `exec` alone would mean "any argv",
+    /// which is a real thing to want and is spelled `exec(*)`; two spellings
+    /// of one predicate is what §5 exists to prevent, so the shorter one is
+    /// refused and names the longer.
     MissingPattern { head: Head, rule: String },
     /// Not `head(pattern)` at all.
     Malformed(String),

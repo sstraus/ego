@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io::{Read as _, Write as _};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
@@ -185,7 +186,7 @@ async fn measure_cached(
                     evidence.clone(),
                     cancel.clone(),
                     limits,
-                    local_nonloopback(),
+                    nonloopback_addresses(),
                 )
                 .await
             {
@@ -434,106 +435,152 @@ async fn probe_offline(
     evidence: ProbeEvidence,
     cancel: CancelToken,
     limits: ExecLimits,
-    nonloopback: Option<std::net::IpAddr>,
+    nonloopback: impl IntoIterator<Item = IpAddr>,
 ) -> bool {
-    let network_suite = |name: &'static str| ProbeSuite {
-        name,
+    let network = OfflineProbe {
+        backend,
+        evidence,
+        cancel,
+        limits,
         cwd,
-        root: cwd.as_path(),
     };
     if !probe(
-        backend.clone(),
-        evidence.clone(),
-        cancel.clone(),
+        network.backend.clone(),
+        network.evidence.clone(),
+        network.cancel.clone(),
         limits,
-        &network_suite("offline.launch-control"),
+        &network.suite("offline.launch-control"),
         vec!["/usr/bin/true".into()],
     )
     .await
     {
         return false;
     }
-    let Some(nonloopback) = nonloopback else {
+    let addresses: Vec<_> = nonloopback.into_iter().collect();
+    if addresses.is_empty() {
         return record_control_failure(
-            &evidence,
+            &network.evidence,
             "offline.nonloopback.control".into(),
             cwd.as_path(),
             "no non-loopback route to bind a probe listener".into(),
         );
-    };
-    let sockets = match bind_offline_sockets(nonloopback) {
-        Ok(sockets) => sockets,
-        Err((name, error)) => {
-            return record_control_failure(
-                &evidence,
-                format!("offline.{name}.control"),
-                cwd.as_path(),
-                format!("bind failed: {error}"),
-            );
+    }
+
+    // Keep skipped addresses out of the selected address's evidence. If no
+    // address pairs, keep the failures to explain the refusal.
+    let failures = ProbeLog::default();
+    let selected = select_nonloopback(addresses, |address, timeout| {
+        let mut candidate = network.clone();
+        candidate.evidence.log = Arc::new(ProbeLog::default());
+        let selected_log = network.evidence.log.clone();
+        let failures = &failures;
+        async move {
+            let controls = candidate.controls(address, NONLOOPBACK, timeout).await;
+            let records = candidate.evidence.log.snapshot();
+            if controls.is_some() {
+                selected_log.extend(&records);
+            } else {
+                failures.extend(&records);
+            }
+            controls
         }
-    };
-    let baseline: Arc<dyn Backend> = Arc::new(super::null::NullBackend);
-    paired_tcp(
-        &sockets.tcp_loopback,
-        backend.clone(),
-        baseline.clone(),
-        evidence.clone(),
-        cancel.clone(),
-        limits,
-        &network_suite("offline.tcp-loopback"),
-    )
-    .await
-        && paired_udp(
-            &sockets.udp_loopback,
-            backend.clone(),
-            baseline.clone(),
-            evidence.clone(),
-            cancel.clone(),
-            limits,
-            &network_suite("offline.udp-loopback"),
-        )
-        .await
-        && paired_tcp(
-            &sockets.tcp_nonloopback,
-            backend.clone(),
-            baseline.clone(),
-            evidence.clone(),
-            cancel.clone(),
-            limits,
-            &network_suite("offline.tcp-nonloopback"),
-        )
-        .await
-        && paired_udp(
-            &sockets.udp_nonloopback,
-            backend,
-            baseline,
-            evidence,
-            cancel,
-            limits,
-            &network_suite("offline.udp-nonloopback"),
-        )
-        .await
-}
-
-struct OfflineSockets {
-    tcp_loopback: std::net::TcpListener,
-    udp_loopback: std::net::UdpSocket,
-    tcp_nonloopback: std::net::TcpListener,
-    udp_nonloopback: std::net::UdpSocket,
-}
-
-/// Binds the four receivers, naming the first that fails.
-fn bind_offline_sockets(
-    nonloopback: std::net::IpAddr,
-) -> Result<OfflineSockets, (&'static str, std::io::Error)> {
-    use std::net::{TcpListener, UdpSocket};
-
-    Ok(OfflineSockets {
-        tcp_loopback: TcpListener::bind(("127.0.0.1", 0)).map_err(|e| ("tcp-loopback", e))?,
-        udp_loopback: UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| ("udp-loopback", e))?,
-        tcp_nonloopback: TcpListener::bind((nonloopback, 0)).map_err(|e| ("tcp-nonloopback", e))?,
-        udp_nonloopback: UdpSocket::bind((nonloopback, 0)).map_err(|e| ("udp-nonloopback", e))?,
     })
+    .await;
+    let Some(nonloopback) = selected else {
+        network.evidence.log.extend(&failures.snapshot());
+        return false;
+    };
+    let Some(loopback) = network
+        .controls(Ipv4Addr::LOCALHOST.into(), LOOPBACK, PROBE_TIMEOUT)
+        .await
+    else {
+        return false;
+    };
+    network.isolated(loopback, LOOPBACK).await && network.isolated(nonloopback, NONLOOPBACK).await
+}
+
+#[derive(Clone)]
+struct OfflineProbe<'a> {
+    backend: Arc<dyn Backend>,
+    evidence: ProbeEvidence,
+    cancel: CancelToken,
+    limits: ExecLimits,
+    cwd: &'a CanonPath,
+}
+
+#[derive(Clone, Copy)]
+struct NetworkSuites {
+    tcp: &'static str,
+    udp: &'static str,
+}
+
+const LOOPBACK: NetworkSuites = NetworkSuites {
+    tcp: "offline.tcp-loopback",
+    udp: "offline.udp-loopback",
+};
+const NONLOOPBACK: NetworkSuites = NetworkSuites {
+    tcp: "offline.tcp-nonloopback",
+    udp: "offline.udp-nonloopback",
+};
+
+struct NetworkControls {
+    tcp: tokio::net::TcpListener,
+    udp: tokio::net::UdpSocket,
+}
+
+impl OfflineProbe<'_> {
+    fn suite<'a>(&'a self, name: &'a str) -> ProbeSuite<'a> {
+        ProbeSuite {
+            name,
+            cwd: self.cwd,
+            root: self.cwd.as_path(),
+        }
+    }
+
+    async fn controls(
+        &self,
+        address: IpAddr,
+        suites: NetworkSuites,
+        timeout: Duration,
+    ) -> Option<NetworkControls> {
+        if self.cancel.is_cancelled() {
+            return None;
+        }
+        let tcp_suite = self.suite(suites.tcp);
+        let udp_suite = self.suite(suites.udp);
+        let tcp = std::net::TcpListener::bind((address, 0))
+            .and_then(|socket| {
+                socket.set_nonblocking(true)?;
+                tokio::net::TcpListener::from_std(socket)
+            })
+            .map_err(|error| self.control_error(&tcp_suite, format!("bind failed: {error}")))
+            .ok()?;
+        let udp = std::net::UdpSocket::bind((address, 0))
+            .and_then(|socket| {
+                socket.set_nonblocking(true)?;
+                tokio::net::UdpSocket::from_std(socket)
+            })
+            .map_err(|error| self.control_error(&udp_suite, format!("bind failed: {error}")))
+            .ok()?;
+
+        let (tcp_ok, udp_ok) = tokio::join!(
+            self.tcp_control(&tcp, &tcp_suite, timeout),
+            self.udp_control(&udp, &udp_suite, timeout),
+        );
+        (tcp_ok && udp_ok).then_some(NetworkControls { tcp, udp })
+    }
+
+    fn control_error(&self, suite: &ProbeSuite<'_>, reason: String) -> bool {
+        record_control_failure(&self.evidence, suite.control_name(), suite.root, reason)
+    }
+
+    async fn isolated(&self, controls: NetworkControls, suites: NetworkSuites) -> bool {
+        self.tcp_isolated(controls.tcp, &self.suite(suites.tcp))
+            .await
+            && self
+                .udp_isolated(controls.udp, &self.suite(suites.udp))
+                .await
+    }
 }
 
 /// Records why the unconfined half of the offline probe could not run, so a
@@ -553,210 +600,289 @@ fn record_control_failure(
     false
 }
 
-fn local_nonloopback() -> Option<std::net::IpAddr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?;
-    let address = socket.local_addr().ok()?.ip();
-    (!address.is_loopback()).then_some(address)
-}
+fn nonloopback_addresses() -> Vec<IpAddr> {
+    use nix::net::if_::InterfaceFlags;
 
-async fn paired_tcp(
-    listener: &std::net::TcpListener,
-    backend: Arc<dyn Backend>,
-    baseline: Arc<dyn Backend>,
-    evidence: ProbeEvidence,
-    cancel: CancelToken,
-    limits: ExecLimits,
-    suite: &ProbeSuite<'_>,
-) -> bool {
-    use std::io::Read as _;
-
-    let control = suite.control_name();
-    let endpoint = match listener.local_addr() {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            return record_control_failure(
-                &evidence,
-                control,
-                suite.root,
-                format!("listener address unavailable: {error}"),
-            );
-        }
+    let Ok(interfaces) = nix::ifaddrs::getifaddrs() else {
+        return Vec::new();
     };
-    if let Err(error) = listener.set_nonblocking(true) {
-        return record_control_failure(
-            &evidence,
-            control,
-            suite.root,
-            format!("listener configuration failed: {error}"),
-        );
-    }
-    let sentinel = sentinel(endpoint);
-    let receiver_failure = |reason: String| {
-        evidence.log.record(ProbeRecord {
-            suite: format!("{control}.receiver"),
-            root: suite.root.to_path_buf(),
-            argv: network_probe_argv("tcp", endpoint, &sentinel)
-                .iter()
-                .map(|argument| argument.to_string_lossy().into_owned())
-                .collect(),
-            outcome: reason,
-        });
-        false
-    };
-    if !probe(
-        baseline,
-        evidence.clone(),
-        cancel.clone(),
-        limits,
-        &suite.renamed(&control),
-        network_probe_argv("tcp", endpoint, &sentinel),
-    )
-    .await
-    {
-        return false;
-    }
-    let baseline_deadline = std::time::Instant::now() + Duration::from_millis(250);
-    let mut stream = loop {
-        match listener.accept() {
-            Ok((stream, _)) => break stream,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    && std::time::Instant::now() < baseline_deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            Err(error) => return receiver_failure(format!("accept failed: {error}")),
-        }
-    };
-    if stream.set_nonblocking(false).is_err()
-        || stream
-            .set_read_timeout(Some(Duration::from_millis(250)))
-            .is_err()
-    {
-        return receiver_failure("receiver socket configuration failed".into());
-    }
-    let mut received = vec![0_u8; sentinel.len()];
-    if let Err(error) = stream.read_exact(&mut received) {
-        return receiver_failure(format!("sentinel read failed: {error}"));
-    }
-    if received != sentinel.as_bytes() {
-        return receiver_failure("sentinel mismatch".into());
-    }
-    if !probe_network_denied(
-        backend,
-        evidence,
-        cancel,
-        limits,
-        suite,
-        network_probe_argv("tcp", endpoint, &sentinel),
-    )
-    .await
-    {
-        return false;
-    }
-    let denied_deadline = std::time::Instant::now() + Duration::from_millis(100);
-    loop {
-        match listener.accept() {
-            Ok(_) => return false,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::WouldBlock
-                    && std::time::Instant::now() < denied_deadline =>
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return true,
-            Err(_) => return false,
-        }
-    }
-}
-
-async fn paired_udp(
-    socket: &std::net::UdpSocket,
-    backend: Arc<dyn Backend>,
-    baseline: Arc<dyn Backend>,
-    evidence: ProbeEvidence,
-    cancel: CancelToken,
-    limits: ExecLimits,
-    suite: &ProbeSuite<'_>,
-) -> bool {
-    let control = suite.control_name();
-    let endpoint = match socket.local_addr() {
-        Ok(endpoint) => endpoint,
-        Err(error) => {
-            return record_control_failure(
-                &evidence,
-                control,
-                suite.root,
-                format!("socket address unavailable: {error}"),
-            );
-        }
-    };
-    let sentinel = sentinel(endpoint);
-    let receiver_failure = |reason: String| {
-        evidence.log.record(ProbeRecord {
-            suite: format!("{control}.receiver"),
-            root: suite.root.to_path_buf(),
-            argv: network_probe_argv("udp", endpoint, &sentinel)
-                .iter()
-                .map(|argument| argument.to_string_lossy().into_owned())
-                .collect(),
-            outcome: reason,
-        });
-        false
-    };
-    if !probe(
-        baseline,
-        evidence.clone(),
-        cancel.clone(),
-        limits,
-        &suite.renamed(&control),
-        network_probe_argv("udp", endpoint, &sentinel),
-    )
-    .await
-    {
-        return false;
-    }
-    let mut received = [0_u8; 128];
-    if socket
-        .set_read_timeout(Some(Duration::from_millis(250)))
-        .is_err()
-    {
-        return receiver_failure("receiver socket configuration failed".into());
-    }
-    let (received_len, _) = match socket.recv_from(&mut received) {
-        Ok(received) => received,
-        Err(error) => return receiver_failure(format!("sentinel receive failed: {error}")),
-    };
-    if received[..received_len] != sentinel.as_bytes()[..] {
-        return receiver_failure("sentinel mismatch".into());
-    }
-    // UDP send success only means the local kernel accepted the datagram.
-    // A network namespace may discard it without reporting an error. The
-    // paired host receiver is the authority for delivery, not the send result.
-    match probe_result(
-        backend,
-        evidence,
-        cancel,
-        limits,
-        suite,
-        network_probe_argv("udp", endpoint, &sentinel),
-    )
-    .await
-    {
-        Ok(()) => {}
-        Err(reason) if reason == "exit 125" || reason == "exit 101" => {}
-        Err(_) => return false,
-    }
-    socket
-        .set_read_timeout(Some(Duration::from_millis(100)))
-        .is_ok()
-        && socket.recv_from(&mut received).is_err_and(|error| {
-            matches!(
-                error.kind(),
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-            )
+    let mut ranked = interfaces
+        .filter(|interface| {
+            interface.flags.contains(InterfaceFlags::IFF_UP)
+                && !interface.flags.contains(InterfaceFlags::IFF_LOOPBACK)
         })
+        .filter_map(|interface| {
+            // The offline probe uses IPv4 endpoints for both address classes.
+            let address = interface.address?.as_sockaddr_in()?.ip();
+            (!address.is_loopback() && !address.is_unspecified()).then_some((
+                interface.flags.contains(InterfaceFlags::IFF_POINTOPOINT),
+                IpAddr::from(address),
+            ))
+        })
+        .collect::<Vec<_>>();
+    // A point-to-point address may be visible locally but fail its round trip.
+    ranked.sort_unstable();
+    let mut seen = std::collections::HashSet::new();
+    ranked
+        .into_iter()
+        .filter_map(|(_, address)| seen.insert(address).then_some(address))
+        .collect()
+}
+
+async fn select_nonloopback<T, F>(
+    addresses: Vec<IpAddr>,
+    mut control: impl FnMut(IpAddr, Duration) -> F,
+) -> Option<T>
+where
+    F: Future<Output = Option<T>>,
+{
+    let deadline = tokio::time::Instant::now() + PROBE_TIMEOUT;
+    let mut addresses = addresses.into_iter();
+    while let Some(address) = addresses.next() {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let timeout = remaining / u32::try_from(addresses.len() + 1).unwrap_or(u32::MAX);
+        if timeout < Duration::from_millis(1) {
+            break;
+        }
+        if let Some(ready) = control(address, timeout).await {
+            return Some(ready);
+        }
+    }
+    None
+}
+
+impl OfflineProbe<'_> {
+    async fn tcp_control(
+        &self,
+        listener: &tokio::net::TcpListener,
+        suite: &ProbeSuite<'_>,
+        timeout: Duration,
+    ) -> bool {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let endpoint = match listener.local_addr() {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                return self.control_error(suite, format!("socket address unavailable: {error}"));
+            }
+        };
+        let sentinel = sentinel(endpoint);
+        let receive = async {
+            let (mut stream, _) = listener.accept().await?;
+            let mut received = vec![0; sentinel.len()];
+            stream.read_exact(&mut received).await?;
+            if received != sentinel.as_bytes() {
+                return Err(std::io::Error::other("sentinel mismatch"));
+            }
+            stream.write_all(&received).await
+        };
+        self.control_exchange("tcp", endpoint, &sentinel, suite, timeout, receive)
+            .await
+    }
+
+    async fn udp_control(
+        &self,
+        socket: &tokio::net::UdpSocket,
+        suite: &ProbeSuite<'_>,
+        timeout: Duration,
+    ) -> bool {
+        let endpoint = match socket.local_addr() {
+            Ok(endpoint) => endpoint,
+            Err(error) => {
+                return self.control_error(suite, format!("socket address unavailable: {error}"));
+            }
+        };
+        let sentinel = sentinel(endpoint);
+        let receive = async {
+            let mut received = [0_u8; 128];
+            let (len, sender) = socket.recv_from(&mut received).await?;
+            if &received[..len] != sentinel.as_bytes() {
+                return Err(std::io::Error::other("sentinel mismatch"));
+            }
+            let written = socket.send_to(&received[..len], sender).await?;
+            if written != len {
+                return Err(std::io::Error::other("incomplete sentinel acknowledgement"));
+            }
+            Ok(())
+        };
+        self.control_exchange("udp", endpoint, &sentinel, suite, timeout, receive)
+            .await
+    }
+
+    async fn control_exchange(
+        &self,
+        protocol: &str,
+        endpoint: SocketAddr,
+        sentinel: &str,
+        suite: &ProbeSuite<'_>,
+        timeout: Duration,
+        receive: impl Future<Output = std::io::Result<()>>,
+    ) -> bool {
+        let control = suite.control_name();
+        let argv = network_probe_argv(protocol, endpoint, sentinel);
+        let control_suite = suite.renamed(&control);
+        let sending = probe_result_with_output(
+            Arc::new(super::null::NullBackend),
+            self.evidence.clone(),
+            self.cancel.clone(),
+            self.limits,
+            &control_suite,
+            argv.clone(),
+            ProbeOutput::Control(timeout),
+        );
+        tokio::pin!(sending);
+        let exchanged = tokio::select! {
+            biased;
+            received = tokio::time::timeout(timeout, receive) => {
+                match (received, sending.await) {
+                    (Ok(Ok(())), Ok(())) => return true,
+                    (Ok(Ok(())), Err(error)) => format!("sender did not confirm acknowledgement: {error}"),
+                    (Ok(Err(error)), _) => format!("sentinel exchange failed: {error}"),
+                    (Err(_), _) => "sentinel exchange timed out".into(),
+                }
+            }
+            result = &mut sending => format!("sender exited before acknowledgement: {result:?}"),
+        };
+        self.evidence.log.record(ProbeRecord {
+            suite: format!("{control}.receiver"),
+            root: suite.root.to_path_buf(),
+            argv: argv
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect(),
+            outcome: exchanged,
+        });
+        false
+    }
+
+    async fn tcp_isolated(
+        &self,
+        listener: tokio::net::TcpListener,
+        suite: &ProbeSuite<'_>,
+    ) -> bool {
+        let Ok(endpoint) = listener.local_addr() else {
+            return false;
+        };
+        if !probe_network_denied(
+            self.backend.clone(),
+            self.evidence.clone(),
+            self.cancel.clone(),
+            self.limits,
+            suite,
+            network_probe_argv("tcp", endpoint, &sentinel(endpoint)),
+        )
+        .await
+        {
+            return false;
+        }
+        tokio::time::timeout(Duration::from_millis(100), listener.accept())
+            .await
+            .is_err()
+    }
+
+    async fn udp_isolated(&self, socket: tokio::net::UdpSocket, suite: &ProbeSuite<'_>) -> bool {
+        let Ok(endpoint) = socket.local_addr() else {
+            return false;
+        };
+        let nonce = SessionId::new().to_string();
+        #[cfg(target_os = "linux")]
+        let isolation_input = match linux_network_namespace() {
+            Ok(namespace) => format!("{namespace} {nonce}"),
+            Err(error) => {
+                return record_control_failure(
+                    &self.evidence,
+                    suite.name.into(),
+                    suite.root,
+                    format!("host network namespace unavailable: {error}"),
+                );
+            }
+        };
+        #[cfg(target_os = "macos")]
+        let isolation_input = nonce.clone();
+        // A quiet socket is inconclusive. Require the controlled child to
+        // report positive evidence of isolation.
+        let proof = udp_isolation_proof(endpoint, &nonce);
+        let limits = ExecLimits {
+            preview_bytes: self.limits.preview_bytes().max(1024),
+            ..self.limits
+        };
+        if probe_result_with_output(
+            self.backend.clone(),
+            self.evidence.clone(),
+            self.cancel.clone(),
+            limits,
+            suite,
+            network_probe_argv("udp-isolation", endpoint, &isolation_input),
+            ProbeOutput::RequiredStdoutLine(&proof),
+        )
+        .await
+        .is_err()
+        {
+            return false;
+        }
+        // Check the kernel queue directly, without depending on reactor
+        // readiness or waiting for a time window to prove non-delivery.
+        match socket
+            .into_std()
+            .and_then(|socket| socket.recv_from(&mut [0; 128]))
+        {
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => true,
+            result => record_control_failure(
+                &self.evidence,
+                suite.name.into(),
+                suite.root,
+                format!("UDP isolation contradicted by receiver: {result:?}"),
+            ),
+        }
+    }
+}
+
+fn udp_isolation_proof(endpoint: SocketAddr, nonce: &str) -> String {
+    format!("ego-udp-isolation-confirmed:{endpoint}:{nonce}")
+}
+
+#[cfg(target_os = "linux")]
+fn linux_network_namespace() -> std::io::Result<String> {
+    fs::read_link("/proc/self/ns/net")?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| std::io::Error::other("network namespace identity is not UTF-8"))
+}
+
+#[cfg(target_os = "linux")]
+fn udp_isolation_proven(host_namespace: &str) -> bool {
+    // Bubblewrap mounts a private procfs and drops all capabilities. A
+    // distinct namespace with only loopback cannot reach any host endpoint.
+    linux_network_namespace().is_ok_and(|namespace| namespace != host_namespace)
+        && fs::read_to_string("/proc/self/status").is_ok_and(|status| {
+            status
+                .lines()
+                .filter_map(|line| line.strip_prefix("CapEff:"))
+                .any(|value| u64::from_str_radix(value.trim(), 16) == Ok(0))
+        })
+        && fs::read_to_string("/proc/net/dev").is_ok_and(|devices| {
+            let mut interfaces = devices.lines().skip(2);
+            interfaces.next().is_some_and(|line| {
+                line.split_once(':')
+                    .is_some_and(|(name, _)| name.trim() == "lo")
+            }) && interfaces.next().is_none()
+        })
+}
+
+#[cfg(target_os = "macos")]
+fn udp_isolation_proven(endpoint: std::net::SocketAddr, sentinel: &str) -> bool {
+    udp_probe_socket(endpoint)
+        .and_then(|socket| socket.send_to(sentinel.as_bytes(), endpoint))
+        .is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied)
+}
+
+fn udp_probe_socket(endpoint: std::net::SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    let bind = if endpoint.is_ipv4() {
+        "0.0.0.0:0"
+    } else {
+        "[::]:0"
+    };
+    std::net::UdpSocket::bind(bind)
 }
 
 fn sentinel(endpoint: std::net::SocketAddr) -> String {
@@ -792,11 +918,13 @@ fn network_probe_argv(
 }
 
 const NETWORK_PROBE_TOKEN: &str = "__ego_internal_network_probe_v1";
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Dispatch the fixed controlled network probe before the ordinary CLI starts.
 ///
-/// `Some(true)` means the sentinel was delivered, `Some(false)` that it was
-/// not, and `None` that these arguments are not the probe envelope at all.
+/// `Some(true)` means the operation established its requested evidence.
+/// `Some(false)` means the probe could not establish it, and `None` means
+/// these arguments are outside the probe envelope.
 /// Reporting the outcome rather than an exit code is what lets the libtest
 /// host run the very same dispatcher and assert on it: choosing a process exit
 /// status is the binary's job, not this library's.
@@ -804,8 +932,8 @@ pub fn dispatch_network_probe<I>(arguments: I) -> Option<bool>
 where
     I: IntoIterator<Item = OsString>,
 {
-    use std::io::Write as _;
-    use std::net::{TcpStream, UdpSocket};
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpStream;
 
     let mut arguments = arguments.into_iter();
     let _executable = arguments.next()?;
@@ -828,36 +956,61 @@ where
             .ok()?
             .parse::<std::net::SocketAddr>()
             .ok()?;
-        let sentinel = arguments.next()?.into_string().ok()?.into_bytes();
-        if arguments.next().is_some() || sentinel.is_empty() {
+        let input = arguments.next()?.into_string().ok()?;
+        if arguments.next().is_some() || input.is_empty() {
             return None;
         }
+        if protocol == "udp-isolation" {
+            #[cfg(target_os = "linux")]
+            let (host_namespace, nonce) = input.split_once(' ')?;
+            #[cfg(target_os = "linux")]
+            let isolated = udp_isolation_proven(host_namespace);
+            #[cfg(target_os = "macos")]
+            let (nonce, isolated) = (input.as_str(), udp_isolation_proven(endpoint, &input));
+            if !isolated || nonce.parse::<SessionId>().is_err() {
+                return None;
+            }
+            // The libtest host may have written its test name without a newline.
+            println!("\n{}", udp_isolation_proof(endpoint, nonce));
+            let sent = udp_probe_socket(endpoint)
+                .and_then(|socket| socket.send_to(nonce.as_bytes(), endpoint));
+            #[cfg(target_os = "macos")]
+            if !sent.is_err_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied) {
+                return None;
+            }
+            #[cfg(target_os = "linux")]
+            drop(sent);
+            return Some(());
+        }
+        let sentinel = input.into_bytes();
         match protocol.as_str() {
             "tcp" => TcpStream::connect(endpoint)
-                .and_then(|mut stream| stream.write_all(&sentinel))
+                .and_then(|mut stream| {
+                    stream.set_read_timeout(Some(PROBE_TIMEOUT))?;
+                    stream.write_all(&sentinel)?;
+                    let mut acknowledged = vec![0_u8; sentinel.len()];
+                    stream.read_exact(&mut acknowledged)?;
+                    if acknowledged != sentinel {
+                        return Err(std::io::Error::other("sentinel acknowledgement mismatch"));
+                    }
+                    Ok(())
+                })
                 .ok(),
-            "udp" => {
-                let bind = if endpoint.is_ipv4() {
-                    "0.0.0.0:0"
-                } else {
-                    "[::]:0"
-                };
-                UdpSocket::bind(bind)
-                    .and_then(|socket| {
-                        let written = socket.send_to(&sentinel, endpoint)?;
-                        if written == sentinel.len() {
-                            // On macOS a process that closes its last UDP
-                            // socket immediately after `send_to` can exit
-                            // before a non-loopback local delivery becomes
-                            // observable by the paired receiver.
-                            std::thread::sleep(Duration::from_millis(50));
-                        }
-                        Ok(written)
-                    })
-                    .ok()
-                    .filter(|written| *written == sentinel.len())
-                    .map(|_| ())
-            }
+            "udp" => udp_probe_socket(endpoint)
+                .and_then(|socket| {
+                    let written = socket.send_to(&sentinel, endpoint)?;
+                    if written != sentinel.len() {
+                        return Err(std::io::Error::other("incomplete sentinel send"));
+                    }
+                    socket.set_read_timeout(Some(PROBE_TIMEOUT))?;
+                    let mut acknowledged = vec![0_u8; sentinel.len() + 1];
+                    let (len, peer) = socket.recv_from(&mut acknowledged)?;
+                    if peer != endpoint || acknowledged[..len] != sentinel {
+                        return Err(std::io::Error::other("sentinel acknowledgement mismatch"));
+                    }
+                    Ok(())
+                })
+                .ok(),
             _ => None,
         }
     })();
@@ -933,9 +1086,16 @@ fn fixture_marker(path: &Path) -> Option<String> {
 fn sweep_stale_fixtures(workspace: &CanonPath) -> std::io::Result<()> {
     let entries = match fs::read_dir(workspace.as_path()) {
         Ok(entries) => entries,
-        // A workspace can disappear after policy resolution. No fixture can
-        // remain there; keep the existing empty-capability fallback contract.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        // A missing or non-directory workspace cannot contain stale fixtures.
+        // Let measurement retain the actual setup cause in its refusal evidence.
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Ok(());
+        }
         Err(error) => return Err(error),
     };
     for entry in entries.flatten() {
@@ -1346,6 +1506,23 @@ async fn probe_result(
     suite: &ProbeSuite<'_>,
     argv: Vec<OsString>,
 ) -> Result<(), String> {
+    let output = if positive_filesystem_control(suite.name) {
+        ProbeOutput::FailureStderr
+    } else {
+        ProbeOutput::Status
+    };
+    probe_result_with_output(backend, evidence, cancel, limits, suite, argv, output).await
+}
+
+async fn probe_result_with_output(
+    backend: Arc<dyn Backend>,
+    evidence: ProbeEvidence,
+    cancel: CancelToken,
+    limits: ExecLimits,
+    suite: &ProbeSuite<'_>,
+    argv: Vec<OsString>,
+    output: ProbeOutput<'_>,
+) -> Result<(), String> {
     let attempted = argv
         .iter()
         .map(|argument| argument.to_string_lossy().into_owned())
@@ -1357,7 +1534,7 @@ async fn probe_result(
         limits,
         suite.cwd,
         argv,
-        positive_filesystem_control(suite.name),
+        output,
     )
     .await;
     evidence.log.record(ProbeRecord {
@@ -1390,6 +1567,14 @@ fn probe_outcome(error: &ego_core::permit::ToolError) -> String {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ProbeOutput<'a> {
+    Status,
+    Control(Duration),
+    FailureStderr,
+    RequiredStdoutLine(&'a str),
+}
+
 async fn attempt(
     backend: Arc<dyn Backend>,
     evidence: SessionEvidenceStore,
@@ -1397,7 +1582,7 @@ async fn attempt(
     limits: ExecLimits,
     cwd: &CanonPath,
     argv: Vec<OsString>,
-    retain_stderr: bool,
+    output: ProbeOutput<'_>,
 ) -> Result<(), String> {
     let Some(argv) = argv
         .into_iter()
@@ -1456,7 +1641,11 @@ async fn attempt(
         "cwd": cwd.to_string(),
         // Probe success is a capability observation, not a latency target.
         // A short deadline can turn scheduler contention into a false refusal.
-        "timeout_ms": Duration::from_secs(30).as_millis() as u64,
+        "timeout_ms": match output {
+            ProbeOutput::Control(timeout) => timeout,
+            _ => PROBE_TIMEOUT,
+        }
+        .as_millis() as u64,
     })) else {
         return Err("not attempted: probe arguments did not serialise".to_owned());
     };
@@ -1469,10 +1658,9 @@ async fn attempt(
     tools
         .execute(&policy, tool.as_ref(), authorized, None)
         .await
-        .map(|_| ())
         .map_err(|error| {
             let mut outcome = probe_outcome(&error);
-            if retain_stderr
+            if matches!(output, ProbeOutput::FailureStderr)
                 && let ego_core::permit::ToolError::Process(
                     ProcessError::Exit { result, .. } | ProcessError::Signal { result, .. },
                 ) = &error
@@ -1495,6 +1683,26 @@ async fn attempt(
                 outcome.push_str(&stderr);
             }
             outcome
+        })
+        .and_then(|execution| {
+            if let ProbeOutput::RequiredStdoutLine(expected) = output
+                && !matches!(
+                    execution,
+                    ego_core::mcp::ToolExecution::Complete(result)
+                        if result.content.iter().any(|block| {
+                            matches!(
+                                block.provenance(),
+                                ego_core::permit::ToolOutputProvenance::Process {
+                                    stream: ego_core::permit::StreamProvenance::Stdout,
+                                    ..
+                                }
+                            ) && block.text.lines().any(|line| line == expected)
+                        })
+                )
+            {
+                return Err("UDP isolation proof missing from child stdout".into());
+            }
+            Ok(())
         })
 }
 
@@ -1529,6 +1737,10 @@ fn validate_probe_scope(policy: &RunConfinement) -> Result<(), ProcessError> {
     Ok(())
 }
 
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[path = "probe_udp_tests.rs"]
+mod udp_tests;
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1544,13 +1756,75 @@ mod tests {
         cached_capabilities,
     };
 
+    // Catches: the first address's control failure prevents trying a usable address.
+    #[tokio::test]
+    async fn offline_tries_another_address_after_an_incomplete_control() {
+        let skipped = "192.0.2.1".parse().expect("first address");
+        let usable = "192.0.2.2".parse().expect("second address");
+        let mut attempted = Vec::new();
+        let selected = super::select_nonloopback(vec![skipped, usable], |address, _| {
+            attempted.push(address);
+            std::future::ready((address == usable).then_some(address))
+        })
+        .await;
+        assert_eq!(selected, Some(usable));
+        assert_eq!(attempted, [skipped, usable]);
+    }
+
+    // Catches: an absent datagram and a bare successful exit grant offline capability.
+    #[tokio::test]
+    async fn paired_udp_requires_evidence_of_confinement() {
+        struct NoEvidence;
+
+        impl Backend for NoEvidence {
+            fn identity(&self) -> BackendIdentity {
+                BackendIdentity::new("no-udp-evidence", "v1")
+            }
+
+            fn maximum_demonstrable_caps(&self) -> ExecCaps {
+                ExecCaps::NO_IP_NETWORK
+            }
+
+            fn launch_prefix(&self) -> LaunchPrefix {
+                LaunchPrefix {
+                    program: Some("/usr/bin/true".into()),
+                    args_before_target: Vec::new(),
+                }
+            }
+        }
+
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = CanonPath::new(workspace.path().canonicalize().expect("absolute workspace"));
+        let network = super::OfflineProbe {
+            backend: Arc::new(NoEvidence),
+            evidence: super::probe_evidence().expect("evidence"),
+            cancel: ego_core::turn::CancelToken::new(),
+            limits: crate::exec::ExecLimits::default(),
+            cwd: &cwd,
+        };
+        let suite = network.suite("offline.udp-loopback");
+        let socket = tokio::net::UdpSocket::bind(("127.0.0.1", 0))
+            .await
+            .expect("UDP receiver");
+        assert!(
+            network
+                .udp_control(&socket, &suite, super::PROBE_TIMEOUT)
+                .await,
+            "positive UDP control did not complete",
+        );
+        assert!(
+            !network.udp_isolated(socket, &suite).await,
+            "bare exit supplied no UDP isolation evidence",
+        );
+    }
+
     // Catches: a read-only workspace reaches a write probe and reports an internal touch failure.
     #[test]
     fn workspace_read_root_reports_actionable_conflict() {
         use ego_core::permit::{ProfileRoot, RootAccess};
 
         let workspace = CanonPath::new("/parent/workspace");
-        for frozen in ["/parent/workspace", "/parent"] {
+        for frozen in ["/parent"] {
             let policy = RunConfinement::new(Confinement::Workspace, false, workspace.clone())
                 .unwrap()
                 .with_roots(vec![
@@ -1585,6 +1859,7 @@ mod tests {
         use ego_core::permit::{ProfileRoot, RootAccess};
 
         for (level, frozen) in [
+            (Confinement::Workspace, "/parent/workspace"),
             (Confinement::Workspace, "/parent/workspace/frozen"),
             (Confinement::Workspace, "/parent"),
             (Confinement::Ro, "/parent/workspace"),
@@ -1670,7 +1945,7 @@ mod tests {
             evidence,
             ego_core::turn::CancelToken::new(),
             crate::exec::ExecLimits::default(),
-            super::local_nonloopback(),
+            super::nonloopback_addresses(),
         ));
         assert!(!denied, "a wrapper failure cannot prove offline");
     }
@@ -1698,21 +1973,22 @@ mod tests {
     }
 
     // Catches: a failed bind returns false with no record, or names the wrong socket.
-    #[test]
-    fn offline_records_which_bind_failed() {
+    #[tokio::test]
+    async fn offline_records_which_bind_failed() {
         let workspace = tempfile::tempdir().expect("workspace");
         let cwd = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
         let evidence = super::probe_evidence().expect("evidence");
         // 192.0.2.1 is TEST-NET-1: no local interface owns it, so binding fails.
         let unowned: std::net::IpAddr = "192.0.2.1".parse().unwrap();
-        let denied = futures::executor::block_on(super::probe_offline(
+        let denied = super::probe_offline(
             Arc::new(super::super::null::NullBackend),
             &cwd,
             evidence.clone(),
             ego_core::turn::CancelToken::new(),
             crate::exec::ExecLimits::default(),
             Some(unowned),
-        ));
+        )
+        .await;
         assert!(!denied);
         let failure = evidence.log.host_control_failure().expect("a record");
         assert!(
@@ -1763,7 +2039,7 @@ mod tests {
             crate::exec::ExecLimits::default(),
             &cwd,
             vec![OsString::from("/bin/sleep"), OsString::from("3")],
-            false,
+            super::ProbeOutput::Status,
         ));
 
         assert!(
@@ -1989,5 +2265,95 @@ mod tests {
             .expect("a failed OnceCell initialization remains retryable");
         assert_eq!(retried.capabilities, ExecCaps::NO_IP_NETWORK);
         assert_eq!(cached_fact(cell.as_ref()), Some(ExecCaps::NO_IP_NETWORK));
+    }
+
+    // Catches: a skipped address's failed control stays in the evidence, so a confined refusal is blamed on the host.
+    #[tokio::test]
+    async fn skipped_address_does_not_turn_a_confined_refusal_into_a_host_failure() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let cwd = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+        let evidence = super::probe_evidence().expect("evidence");
+        // 192.0.2.1 is TEST-NET-1: no interface owns it, so its control cannot bind.
+        let unowned: std::net::IpAddr = "192.0.2.1".parse().unwrap();
+        let addresses = std::iter::once(unowned).chain(super::nonloopback_addresses());
+        // A wrapper that never runs the target proves nothing, so admission must be refused.
+        struct Wrapper;
+
+        impl Backend for Wrapper {
+            fn identity(&self) -> BackendIdentity {
+                BackendIdentity::new("true-wrapper", "v1")
+            }
+
+            fn maximum_demonstrable_caps(&self) -> ExecCaps {
+                ExecCaps::NO_IP_NETWORK
+            }
+
+            fn launch_prefix(&self) -> LaunchPrefix {
+                LaunchPrefix {
+                    program: Some("/usr/bin/true".into()),
+                    args_before_target: Vec::new(),
+                }
+            }
+        }
+
+        let admitted = super::probe_offline(
+            Arc::new(Wrapper),
+            &cwd,
+            evidence.clone(),
+            ego_core::turn::CancelToken::new(),
+            crate::exec::ExecLimits::default(),
+            addresses,
+        )
+        .await;
+        assert!(
+            !admitted,
+            "a wrapper that proves nothing was admitted as offline"
+        );
+        let records = evidence.log.snapshot();
+        if !records.iter().any(|record| {
+            record.suite == "offline.udp-nonloopback.control" && record.outcome == "ok"
+        }) {
+            eprintln!("note: no local address paired on this host; selection not exercised");
+            return;
+        }
+        assert_eq!(
+            evidence.log.host_control_failure(),
+            None,
+            "the skipped address's bind failure leaked into the selected evidence",
+        );
+    }
+
+    // Catches: every candidate gets the whole shared budget, or an exhausted budget keeps looping.
+    #[tokio::test]
+    async fn address_selection_splits_one_budget_and_fails_closed() {
+        let addresses: Vec<std::net::IpAddr> = (1..=3)
+            .map(|last| format!("192.0.2.{last}").parse().unwrap())
+            .collect();
+        let mut slices = Vec::new();
+        let selected = super::select_nonloopback(addresses, |_, timeout| {
+            slices.push(timeout);
+            std::future::ready(None::<()>)
+        })
+        .await;
+        assert_eq!(selected, None, "no working address must select nothing");
+        assert_eq!(slices.len(), 3, "every address is tried");
+        assert!(
+            slices[0] <= super::PROBE_TIMEOUT / 3,
+            "first slice {:?}",
+            slices[0]
+        );
+        assert!(slices.iter().all(|slice| *slice <= super::PROBE_TIMEOUT));
+        // Exhausted budget: with too many addresses the slice drops below 1 ms and the loop stops.
+        let many: Vec<std::net::IpAddr> = (0..60_000_u32)
+            .map(|n| std::net::Ipv4Addr::from(0xC000_0200 + n).into())
+            .collect();
+        let mut tried = 0_u32;
+        let none = super::select_nonloopback(many, |_, _| {
+            tried += 1;
+            std::future::ready(None::<()>)
+        })
+        .await;
+        assert_eq!(none, None);
+        assert!(tried < 60_000, "budget exhaustion did not stop the loop");
     }
 }

@@ -76,6 +76,98 @@ impl JudgeTaskContext {
             agent_reason,
             recent_calls,
             roots,
+            repository: Vec::new(),
+            precedents: Vec::new(),
         }
     }
+
+    /// Add what the judge needs to recognise ordinary work in this repository.
+    pub fn with_development(
+        mut self,
+        workspace: &std::path::Path,
+        precedents: Vec<String>,
+    ) -> Self {
+        self.repository = repository_profile(workspace);
+        self.precedents = precedents;
+        self
+    }
+}
+
+const BUILD_MARKERS: &[(&str, &str)] = &[
+    ("Cargo.toml", "Rust (cargo)"),
+    (
+        "package.json",
+        "JavaScript or TypeScript (npm-compatible scripts)",
+    ),
+    ("pnpm-lock.yaml", "pnpm"),
+    ("yarn.lock", "yarn"),
+    ("go.mod", "Go"),
+    ("Package.swift", "Swift package"),
+    ("pyproject.toml", "Python"),
+    ("Makefile", "make"),
+    ("justfile", "just"),
+    ("CMakeLists.txt", "CMake"),
+];
+
+/// Detected stacks, same-repository worktrees and the project instruction
+/// summary. Reads only names and the head of one instruction file.
+pub(crate) fn repository_profile(workspace: &std::path::Path) -> Vec<String> {
+    use std::io::Read as _;
+    let mut lines = Vec::new();
+    let tools: Vec<&str> = BUILD_MARKERS
+        .iter()
+        .filter(|(file, _)| workspace.join(file).exists())
+        .map(|(_, tool)| *tool)
+        .collect();
+    if !tools.is_empty() {
+        lines.push(format!("stacks and build tools: {}", tools.join(", ")));
+    }
+    let git = workspace.join(".git");
+    let common = if git.is_file() {
+        std::fs::read_to_string(&git)
+            .ok()
+            .and_then(|text| {
+                text.strip_prefix("gitdir:")
+                    .map(|dir| dir.trim().to_owned())
+            })
+            .and_then(|dir| {
+                std::path::Path::new(&dir)
+                    .ancestors()
+                    .find(|path| path.file_name().is_some_and(|name| name == "worktrees"))
+                    .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+            })
+    } else {
+        Some(git)
+    };
+    if let Some(common) = common {
+        let mut worktrees = vec![
+            common
+                .parent()
+                .map_or_else(String::new, |main| main.display().to_string()),
+        ];
+        if let Ok(entries) = std::fs::read_dir(common.join("worktrees")) {
+            for entry in entries.flatten().take(32) {
+                if let Ok(text) = std::fs::read_to_string(entry.path().join("gitdir"))
+                    && let Some(dir) = std::path::Path::new(text.trim()).parent()
+                {
+                    worktrees.push(dir.display().to_string());
+                }
+            }
+        }
+        worktrees.retain(|path| !path.is_empty());
+        lines.push(format!(
+            "worktrees of this repository (one workspace): {}",
+            worktrees.join(", ")
+        ));
+    }
+    for name in ["AGENTS.md", "CLAUDE.md"] {
+        let mut head = String::new();
+        if let Ok(file) = std::fs::File::open(workspace.join(name))
+            && file.take(2048).read_to_string(&mut head).is_ok()
+        {
+            lines.push(format!("project instructions ({name}, start): {head}"));
+            break;
+        }
+    }
+    lines
 }

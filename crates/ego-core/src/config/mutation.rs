@@ -17,6 +17,24 @@ use super::vocabulary::{ManagedConfigKey, ManagedConfigValue, UserConfigTarget};
 /// One complete, atomic change to the user configuration authority.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserConfigMutation {
+    /// Compare and publish one whole deployment authority under the existing lock.
+    ProviderInstance {
+        id: super::ProviderInstanceId,
+        expected: Option<super::ProviderInstance>,
+        replacement: Option<super::ProviderInstance>,
+    },
+    /// Insert a new stable account identity without replacing any existing ID.
+    InsertConnection {
+        id: String,
+        connection: super::ConnectionConfig,
+    },
+    /// Assign stable numbers to existing accounts under the user-config lock.
+    NumberAccounts,
+    /// Delete an unchanged account identity, leaving its number reserved.
+    RemoveConnection {
+        id: String,
+        expected: super::ConnectionConfig,
+    },
     /// Add/update or remove one root under the adapter's atomic lock.
     Root {
         target: UserConfigTarget,
@@ -82,7 +100,24 @@ impl UserConfigMutation {
     /// This runs before the adapter acquires a lock or reads the file.
     pub fn validate(&self) -> Result<(), UserConfigError> {
         match self {
-            Self::Root { .. } | Self::GrantRoot { .. } => Ok(()),
+            Self::ProviderInstance {
+                expected,
+                replacement,
+                ..
+            } => {
+                for instance in expected.iter().chain(replacement.iter()) {
+                    instance.validate().map_err(UserConfigError::new)?;
+                }
+                Ok(())
+            }
+            Self::RemoveConnection {
+                id,
+                expected: connection,
+            }
+            | Self::InsertConnection { id, connection } => {
+                connection.validate(id).map_err(UserConfigError::new)
+            }
+            Self::Root { .. } | Self::GrantRoot { .. } | Self::NumberAccounts => Ok(()),
             Self::ManagedSet { target, key, value } => {
                 validate_managed_target_key(target, key.clone())?;
                 if !managed_value_matches_key(key.clone(), value) {
@@ -161,7 +196,11 @@ impl UserConfigMutation {
             | Self::McpDeleteUserEntry { target, .. }
             | Self::Rules { target, .. }
             | Self::RevokeRule { target, .. } => target.clone(),
-            Self::ModelAndThinking { .. }
+            Self::ProviderInstance { .. }
+            | Self::InsertConnection { .. }
+            | Self::NumberAccounts
+            | Self::RemoveConnection { .. }
+            | Self::ModelAndThinking { .. }
             | Self::Statusline { .. }
             | Self::McpInsertUserTombstone { .. } => UserConfigTarget::Base,
         }
@@ -170,6 +209,22 @@ impl UserConfigMutation {
     /// Canonical facts returned after this mutation succeeds.
     pub fn facts(&self) -> UserConfigMutationFacts {
         match self {
+            Self::ProviderInstance {
+                id, replacement, ..
+            } => UserConfigMutationFacts::ProviderInstance {
+                id: id.clone(),
+                removed: replacement.is_none(),
+            },
+            Self::InsertConnection { id, connection } => {
+                UserConfigMutationFacts::ConnectionInserted {
+                    id: id.clone(),
+                    connection: connection.clone(),
+                }
+            }
+            Self::RemoveConnection { id, .. } => {
+                UserConfigMutationFacts::ConnectionRemoved { id: id.clone() }
+            }
+            Self::NumberAccounts => UserConfigMutationFacts::AccountsNumbered,
             Self::GrantRoot { root, .. } => UserConfigMutationFacts::Root {
                 path: root.path.clone(),
                 access: Some(root.access),
@@ -257,6 +312,10 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
                 ManagedConfigValue::ExecEnvAllowlist(_)
             )
             | (ManagedConfigKey::Network, ManagedConfigValue::Network(_))
+            | (
+                ManagedConfigKey::WebPrivateNetwork,
+                ManagedConfigValue::WebPrivateNetwork(_)
+            )
             | (ManagedConfigKey::Budget, ManagedConfigValue::Budget(_))
             | (ManagedConfigKey::Bare, ManagedConfigValue::Bare(_))
             | (
@@ -264,6 +323,51 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
                 ManagedConfigValue::Keybindings(_)
             )
             | (ManagedConfigKey::Vim, ManagedConfigValue::Vim(_))
+            | (ManagedConfigKey::Memory, ManagedConfigValue::Memory(_))
+            | (ManagedConfigKey::Tools, ManagedConfigValue::Tools(_))
+            | (
+                ManagedConfigKey::Checkpoints,
+                ManagedConfigValue::Checkpoints(_)
+            )
+            | (
+                ManagedConfigKey::SessionsCompress,
+                ManagedConfigValue::SessionsCompress(_)
+            )
+            | (ManagedConfigKey::Cache, ManagedConfigValue::Cache(_))
+            | (
+                ManagedConfigKey::CompactionIdleMarginSeconds,
+                ManagedConfigValue::CompactionIdleMarginSeconds(_)
+            )
+            | (
+                ManagedConfigKey::CompactionIdleThreshold,
+                ManagedConfigValue::CompactionIdleThreshold(_)
+            )
+            | (
+                ManagedConfigKey::InstructionsMaxFiles,
+                ManagedConfigValue::InstructionsMaxFiles(_)
+            )
+            | (ManagedConfigKey::Lsp, ManagedConfigValue::Lsp(_))
+            | (
+                ManagedConfigKey::CompactionHeadless,
+                ManagedConfigValue::CompactionHeadless(_)
+            )
+            | (
+                ManagedConfigKey::DoctorNetwork,
+                ManagedConfigValue::DoctorNetwork(_)
+            )
+            | (ManagedConfigKey::McpTasks, ManagedConfigValue::McpTasks(_))
+            | (
+                ManagedConfigKey::RecapEnabled,
+                ManagedConfigValue::RecapEnabled(_)
+            )
+            | (
+                ManagedConfigKey::RecapAfterMinutes,
+                ManagedConfigValue::RecapAfterMinutes(_)
+            )
+            | (
+                ManagedConfigKey::CompactionIdle,
+                ManagedConfigValue::CompactionIdle(_)
+            )
             | (
                 ManagedConfigKey::PermissionsJudge,
                 ManagedConfigValue::PermissionsJudge(_)
@@ -282,6 +386,18 @@ fn managed_value_matches_key(key: ManagedConfigKey, value: &ManagedConfigValue) 
 /// Canonical description of the successfully requested user-config change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UserConfigMutationFacts {
+    ProviderInstance {
+        id: super::ProviderInstanceId,
+        removed: bool,
+    },
+    AccountsNumbered,
+    ConnectionRemoved {
+        id: String,
+    },
+    ConnectionInserted {
+        id: String,
+        connection: super::ConnectionConfig,
+    },
     Root {
         path: std::path::PathBuf,
         access: Option<crate::permit::RootAccess>,
@@ -323,6 +439,8 @@ pub enum UserConfigMutationFacts {
         request: Box<UserConfigMutationFacts>,
         before: RuleSnapshot,
         after: RuleSnapshot,
+        /// Base user authority inherited when a first profile block is created.
+        inherited: Option<Box<RuleSnapshot>>,
     },
 }
 
@@ -403,6 +521,14 @@ pub struct UserConfigMutationResult {
 }
 
 impl UserConfigMutationResult {
+    /// Base user authority captured under the same lock as the rule transaction.
+    pub fn inherited_rule_snapshot(&self) -> Option<&RuleSnapshot> {
+        match &self.facts {
+            UserConfigMutationFacts::RuleTransaction { inherited, .. } => inherited.as_deref(),
+            _ => None,
+        }
+    }
+
     /// The requested rule mutation and its atomic stored snapshots.
     pub fn rule_transaction(
         &self,
@@ -412,6 +538,7 @@ impl UserConfigMutationResult {
                 request,
                 before,
                 after,
+                ..
             } => Some((request, before, after)),
             _ => None,
         }

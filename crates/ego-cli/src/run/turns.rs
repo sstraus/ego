@@ -24,6 +24,11 @@ pub(super) enum Driver<'a> {
         /// Run after each turn: the screen holds the last block back until it
         /// knows no more is coming, and between turns is when it knows.
         between: &'a (dyn Fn() + Send + Sync),
+        /// Continue only the same session's root-admission boundary.
+        resume_after_root: Option<ego_core::event::id::TurnId>,
+        root_transition: RootTransitionSlot,
+        /// The opening argv, stdin or agent-file prompt is consumed only once.
+        seed_opening_prompt: bool,
     },
 }
 
@@ -70,6 +75,7 @@ pub(super) fn run_trust(
         home,
         diagnostics,
         args.trust_workspace,
+        args.trust_development_programs,
         selected.as_deref(),
         |context| match driver {
             Driver::Interactive { seat, .. } if seat.has_human() => Some(seat.trust(root, context)),
@@ -107,8 +113,20 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
             self.width().saturating_sub(4),
         )
     }
+    fn action_help_details(&self) -> String {
+        crate::repl::render_action_help_details(
+            &crate::repl::actions::ActionRegistry::final_surface(),
+            self.width().saturating_sub(4),
+        )
+    }
     fn key_hints(&self) -> String {
         crate::repl::render_key_hints(
+            &crate::repl::actions::ActionRegistry::final_surface(),
+            self.width(),
+        )
+    }
+    fn startup_key_hints(&self) -> String {
+        crate::repl::render_startup_key_hints(
             &crate::repl::actions::ActionRegistry::final_surface(),
             self.width(),
         )
@@ -123,10 +141,21 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     fn next_inspection(&self) -> futures::future::BoxFuture<'_, repl::HostCommand> {
         Box::pin(futures::future::pending())
     }
+    /// Read one line, or `None` when the seat stays idle until `deadline`.
+    /// Seats without an idle period never time out.
+    fn read_before(&self, _deadline: std::time::Instant) -> Option<repl::Line> {
+        Some(self.read())
+    }
     /// Wake an idle read without replacing the composer draft.
     fn wake_background_exec(&self) {}
     fn busy(&self) {}
+    /// Mark native compaction work without presenting it as a model reply.
+    fn compacting(&self) {
+        self.busy();
+    }
     fn idle(&self) {}
+    /// Report `message` as the host error state until the next turn starts.
+    fn hold_error(&self, _message: &str) {}
     /// How long the current or last turn waited on a modal.
     fn modal_wait(&self) -> std::time::Duration {
         std::time::Duration::ZERO
@@ -165,16 +194,16 @@ pub trait InteractiveSeat: Reads + std::fmt::Debug + Send + Sync {
     /// Select an existing session through the terminal owner.
     fn pick_session(
         &self,
-        _sessions: Vec<ego_core::store::session_store::SessionMeta>,
-    ) -> Option<SessionId> {
-        None
+        _source: crate::catalogue::ResumePicker,
+    ) -> crate::catalogue::SessionPick {
+        crate::catalogue::SessionPick::Cancelled
     }
     /// Switch the terminal and its draft namespace after publication.
     fn activate_session(&self, _target: SessionId) -> bool {
         false
     }
     fn trust(&self, workspace: &Path, context: &str) -> Trust;
-    /// Acknowledge the Windows host's lack of confinement for this workspace.
+    /// Acknowledge, once for this user, the Windows host's lack of confinement.
     /// Test and non-human seats deny unless they explicitly own this authority.
     fn acknowledge_windows_unconfined(&self, _workspace: &Path) -> bool {
         false
@@ -204,63 +233,289 @@ impl HumanApprover for SeatApprover {
     }
 }
 
+/// The standing answer of an owner who set `deny_prompts`: nobody watches the
+/// terminal, so every permission question is refused at once. The refusal
+/// carries words, which makes it the tool result the model reads; the turn
+/// continues instead of waiting on a prompt.
+#[derive(Debug)]
+struct PromptDenier;
+
+const DENIED_WITHOUT_PROMPT: &str = "nobody is available to approve it, because this \
+     session denies every call that needs a permission prompt (deny_prompts). Continue \
+     without this call, or report the authority you need.";
+
+impl HumanApprover for PromptDenier {
+    fn decide<'a>(
+        &'a self,
+        _item: ItemId,
+        _request: &'a PermissionRequest,
+    ) -> futures::future::BoxFuture<'a, PermissionDecision> {
+        Box::pin(futures::future::ready(
+            PermissionDecision::DenyWithInstruction {
+                instruction: DENIED_WITHOUT_PROMPT.to_owned(),
+            },
+        ))
+    }
+}
+
+/// The final permission party of an interactive seat: the human, or the
+/// owner's `deny_prompts` answer in place of the prompt. `None` without a human.
+pub(super) fn seat_human(
+    seat: &Arc<dyn InteractiveSeat>,
+    deny_prompts: bool,
+) -> Option<Arc<dyn HumanApprover>> {
+    if !seat.has_human() {
+        return None;
+    }
+    Some(if deny_prompts {
+        Arc::new(PromptDenier)
+    } else {
+        Arc::new(SeatApprover {
+            seat: Arc::clone(seat),
+        })
+    })
+}
+
 /// The native terminal's session-only path authority. Command permission and
 /// sandbox widening use the same terminal owner but retain separate decisions.
 pub(super) struct SeatSandboxGrants {
     seat: Arc<dyn InteractiveSeat>,
     grants: Mutex<Vec<ego_core::permit::SandboxGrant>>,
+    /// Grants a person kept for this workspace, shared with ACP sessions.
+    store: Option<(Arc<dyn ego_acp::sandbox::SandboxGrantStore>, PathBuf)>,
+    /// Deny rules in force at session start, consulted before asking.
+    rules: ego_core::config::Ruleset,
+    /// Paths the person kept blocked during this session.
+    blocked: Mutex<Vec<ego_core::permit::SandboxGrant>>,
 }
 
 impl SeatSandboxGrants {
+    /// `None` without a human, and with `deny_prompts`: the refusal then stays
+    /// the command's result instead of a question nobody answers.
     pub(super) fn for_seat(
         seat: Arc<dyn InteractiveSeat>,
+        store: Option<(Arc<dyn ego_acp::sandbox::SandboxGrantStore>, PathBuf)>,
+        rules: ego_core::config::Ruleset,
+        deny_prompts: bool,
     ) -> Option<Arc<dyn ego_core::permit::SandboxGrantPort>> {
-        seat.has_human().then(|| {
+        (seat.has_human() && !deny_prompts).then(|| {
             Arc::new(Self {
                 seat,
                 grants: Mutex::new(Vec::new()),
+                store,
+                rules,
+                blocked: Mutex::new(Vec::new()),
             }) as Arc<dyn ego_core::permit::SandboxGrantPort>
         })
+    }
+
+    /// Kept blocked, by a stored deny rule or by an answer earlier in this session.
+    fn kept_blocked(&self, grant: &ego_core::permit::SandboxGrant) -> bool {
+        let workspace = self
+            .store
+            .as_ref()
+            .map_or(std::path::Path::new("/"), |(_, workspace)| {
+                workspace.as_path()
+            });
+        self.blocked
+            .lock()
+            .expect("session blocked sandbox paths")
+            .iter()
+            .any(|blocked| blocked.covers(&grant.path, grant.access))
+            || self.rules.denies_sandbox(grant, workspace)
+    }
+
+    fn keep_for_session(&self, grant: &ego_core::permit::SandboxGrant) {
+        let mut grants = self.grants.lock().expect("session sandbox grants");
+        if !grants.contains(grant) {
+            grants.push(grant.clone());
+        }
     }
 }
 
 impl ego_core::permit::SandboxGrantPort for SeatSandboxGrants {
     fn granted(&self) -> Vec<ego_core::permit::SandboxGrant> {
-        self.grants.lock().expect("session sandbox grants").clone()
+        let mut granted = self
+            .store
+            .as_ref()
+            .map(|(store, workspace)| store.load(workspace))
+            .unwrap_or_default();
+        for grant in self.grants.lock().expect("session sandbox grants").iter() {
+            if !granted.contains(grant) {
+                granted.push(grant.clone());
+            }
+        }
+        granted
     }
 
     fn ask<'a>(
         &'a self,
         grant: &'a ego_core::permit::SandboxGrant,
         command: &'a str,
-    ) -> futures::future::BoxFuture<'a, bool> {
+    ) -> futures::future::BoxFuture<'a, ego_core::permit::RefusalAnswer> {
+        use ego_core::permit::RefusalAnswer;
         Box::pin(async move {
+            if self.kept_blocked(grant) {
+                return RefusalAnswer::Deny;
+            }
             let request = PermissionRequest::sandbox_grant(grant, command);
-            if !matches!(
-                self.seat.permission_future(&request).await,
-                PermissionDecision::Allow
-            ) {
-                return false;
+            match self.seat.permission_future(&request).await {
+                PermissionDecision::Allow => {
+                    self.keep_for_session(grant);
+                    RefusalAnswer::Session
+                }
+                PermissionDecision::AllowAlways if self.store.is_some() => RefusalAnswer::Always,
+                PermissionDecision::DenyAlways => {
+                    self.blocked
+                        .lock()
+                        .expect("session blocked sandbox paths")
+                        .push(grant.clone());
+                    RefusalAnswer::Deny
+                }
+                _ => RefusalAnswer::Deny,
             }
-            let mut grants = self.grants.lock().expect("session sandbox grants");
-            if !grants.contains(grant) {
-                grants.push(grant.clone());
-            }
-            true
         })
     }
 }
 
-/// The native terminal is the only seat that may save a refused root.
+/// Only the interactive driver which owns this process can consume this slot.
+pub(super) type RootTransitionSlot = Arc<Mutex<Option<ego_core::turn::RootTransitionApproval>>>;
+
+pub(super) fn take_root_transition(
+    slot: &RootTransitionSlot,
+    continuation: Option<TurnId>,
+) -> Result<Option<ego_core::turn::RootTransitionApproval>, String> {
+    let approval = slot
+        .lock()
+        .map_err(|_| "root transition slot poisoned")?
+        .take();
+    if continuation.is_some() && approval.is_none() {
+        return Err("same-turn root continuation has no measured approval".into());
+    }
+    Ok(approval)
+}
+
+pub(super) struct RootTransitionContext {
+    pub(super) confinement: RunConfinement,
+    pub(super) previous: ExecObservation,
+    pub(super) session_roots: Vec<ego_core::permit::ProfileRoot>,
+    pub(super) evidence: SessionEvidenceStore,
+    pub(super) cancel: CancelToken,
+    pub(super) deadline: Option<std::time::Instant>,
+    pub(super) slot: RootTransitionSlot,
+}
+
+struct MeasuredRootChoice {
+    observation: ExecObservation,
+    approval: ego_core::turn::RootTransitionApproval,
+}
+
+struct RootChoiceMeasurements {
+    session: MeasuredRootChoice,
+    permanent: MeasuredRootChoice,
+}
+
+impl RootTransitionContext {
+    async fn measure(
+        &self,
+        session: SessionId,
+        item: ItemId,
+        request: &ego_core::turn::RootGrantRequest,
+        proposed: &RunConfinement,
+    ) -> Result<MeasuredRootChoice, String> {
+        if self.cancel.is_cancelled() {
+            return Err("root transition measurement cancelled".into());
+        }
+        let (_, observation, _) = effect_scope(
+            proposed,
+            &self.evidence,
+            &self.cancel,
+            self.deadline,
+            None,
+            None,
+        )
+        .await
+        .map_err(|error| error.exit_reason().to_owned())?;
+        let approval = ego_core::turn::RootTransitionApproval::approved(
+            session,
+            item,
+            request,
+            self.previous.clone(),
+            observation.clone(),
+        )?;
+        Ok(MeasuredRootChoice {
+            observation,
+            approval,
+        })
+    }
+}
+
+/// Reapply the durable session receipts just as fresh-process re-admission
+/// does. A configured Permanent root precedes those receipts; a new Session
+/// receipt follows them. Do not replace this assembly with set equivalence:
+/// order is part of the measured policy digest.
+fn root_choice_confinements(
+    proposed: &Effective,
+    confinement: &RunConfinement,
+    session_roots: &[ego_core::permit::ProfileRoot],
+    request: &ego_core::turn::RootGrantRequest,
+) -> Result<(RunConfinement, RunConfinement), String> {
+    let requested = ego_core::permit::ProfileRoot::new(request.path.clone(), request.access);
+    let mut session_grants = session_roots.to_vec();
+    if !session_grants.contains(&requested) {
+        session_grants.push(requested.clone());
+    }
+    let mut session_effective = proposed.clone();
+    let session = super::execution::assemble_session_roots(
+        &mut session_effective,
+        &session_grants,
+        confinement.workspace(),
+        |_| {},
+    )
+    .map_err(|error| error.0)?;
+    if !session.contains(&requested) {
+        return Err("session root is outside the final admitted ceiling".into());
+    }
+    let mut permanent_effective = proposed.clone();
+    let mut permanent = super::execution::assemble_session_roots(
+        &mut permanent_effective,
+        session_roots,
+        confinement.workspace(),
+        |_| {},
+    )
+    .map_err(|error| error.0)?;
+    if !permanent.contains(&requested) {
+        return Err("permanent root is outside the final admitted ceiling".into());
+    }
+    // The real permanent publication adds a committed terminal receipt.
+    for root in &mut permanent {
+        if *root == requested {
+            *root = root.clone().with_terminal_write();
+        }
+    }
+    Ok((
+        confinement.clone().with_roots(session),
+        confinement.clone().with_roots(permanent),
+    ))
+}
+
+/// The connected human seat may save a refused root.
 pub(super) struct SeatRootGrants {
+    pub(super) resume_turn: bool,
+    pub(super) transition: Option<RootTransitionContext>,
     pub(super) elicitor: Arc<dyn Elicitor>,
     pub(super) effective: Effective,
     pub(super) workspace: CanonPath,
     pub(super) target: UserConfigTarget,
+    pub(super) rule_writer: Option<Arc<dyn ego_acp::permission::PermissionRuleWriter>>,
     pub(super) store_root: PathBuf,
 }
 
 impl ego_core::turn::RootGrantPort for SeatRootGrants {
+    fn supports_readmission(&self) -> bool {
+        self.resume_turn
+    }
+
     fn ask<'a>(
         &'a self,
         session: SessionId,
@@ -270,39 +525,137 @@ impl ego_core::turn::RootGrantPort for SeatRootGrants {
         use ego_core::question::{QuestionMode, QuestionOption, QuestionRequest};
         use ego_core::turn::RootGrantChoice;
         Box::pin(async move {
-            let path = std::fs::canonicalize(request.path.as_path())
-                .map(CanonPath::new)
-                .map_err(|error| format!("root path changed or disappeared: {error}"))?;
+            if let Some(context) = &self.transition {
+                // An unanswered, denied or superseded question cannot retain trust.
+                context
+                    .slot
+                    .lock()
+                    .map_err(|_| "root transition slot poisoned")?
+                    .take();
+            }
+            let path = ego_core::permit::resolve_root(
+                request.path.as_path(),
+                request.access,
+                &ego_tools::fs::OsFs,
+            )
+            .map_err(|error| format!("root path changed or disappeared: {error}"))?;
             if path != request.path {
                 return Err("root path changed since the refused operation".into());
             }
+            let grant = ego_core::permit::SandboxGrant::new(
+                path.clone(),
+                match request.access {
+                    ego_core::permit::RootAccess::Read => ego_core::permit::SandboxAccess::Read,
+                    ego_core::permit::RootAccess::ReadWrite => {
+                        ego_core::permit::SandboxAccess::Write
+                    }
+                },
+            );
+            if let Some(writer) = &self.rule_writer
+                && writer.denies_sandbox(&grant, self.workspace.as_path())?
+            {
+                return Ok(RootGrantChoice::Deny);
+            }
             let mut proposed = self.effective.clone();
+            // A root removed from disk since admission (a deleted adjacent
+            // checkout) has no reach left; it must not block this question.
+            proposed.roots.retain(|root| {
+                root.path != path.as_path()
+                    && !(root.path.is_absolute() && matches!(root.path.try_exists(), Ok(false)))
+            });
             proposed.roots.push(ego_core::permit::RootCfg {
                 consent: None,
                 path: path.as_path().to_path_buf(),
                 access: request.access,
             });
-            super::profile_roots::admit(&proposed, &self.workspace)?;
-            let shown_path = ego_core::permit::terminal_safe(&request.path.to_string());
-            let question = QuestionRequest::new(
-                format!(
-                    "{} may not {} {}: outside the workspace. Exact canonical root: {} ({}). If this root is a directory, a sandboxed command can read its descendants, including credentials. Choose Deny, Session, or Permanent. Neither grant applies in this process; exit, then run ego resume {}.",
-                    ego_core::permit::terminal_safe(&request.tool),
-                    request.operation,
-                    shown_path,
-                    shown_path,
-                    request.access.as_str(),
-                    session,
-                ),
-                QuestionMode::Single,
-                vec![
-                    QuestionOption::new("deny", "Deny"),
-                    QuestionOption::new("session", "Session"),
-                    QuestionOption::new("permanent", "Permanent"),
-                ],
-                false,
+            let admitted = super::profile_roots::admit(&proposed, &self.workspace)?;
+            if !admitted
+                .iter()
+                .any(|root| root.path() == &path && root.access() == request.access)
+            {
+                return Err("root is outside the admitted ceiling".into());
+            }
+            let measured = if self.resume_turn && request.continuation.is_some() {
+                let context = self
+                    .transition
+                    .as_ref()
+                    .ok_or("same-turn root approval requires measured execution authority")?;
+                let (session_policy, permanent_policy) = root_choice_confinements(
+                    &proposed,
+                    &context.confinement,
+                    &context.session_roots,
+                    &request,
+                )?;
+                let session_choice = context
+                    .measure(session, item, &request, &session_policy)
+                    .await?;
+                let permanent = context
+                    .measure(session, item, &request, &permanent_policy)
+                    .await?;
+                Some(RootChoiceMeasurements {
+                    session: session_choice,
+                    permanent,
+                })
+            } else {
+                None
+            };
+            let shown_path = ego_core::permit::terminal_safe(&path.to_string());
+            let access = match request.access {
+                ego_core::permit::RootAccess::Read => "read-only",
+                ego_core::permit::RootAccess::ReadWrite => "read and write",
+            };
+            let mut prompt = format!(
+                "Allow {access} access?\nPath: {shown_path}\nRequested by: {}\nApplies after safe session re-admission; existing access stays unchanged. Native execution authorization and exec_paths are unchanged.",
+                ego_core::permit::terminal_safe(&request.tool),
             );
-            let choice = match self.elicitor.elicit(item, question).await {
+            if path.as_path().is_dir() {
+                prompt
+                    .push_str("\nIncludes all files below this directory, including any credentials stored there.");
+            }
+            if request.access == ego_core::permit::RootAccess::ReadWrite {
+                prompt.push_str("\nWrite access can change instruction files and Git controls used by later commands.");
+                if cfg!(target_os = "linux") {
+                    prompt.push_str("\nFor confined Linux child processes, a read-write root also carries executable reach under both Landlock and the namespace backend; native exec authorization remains separate.");
+                }
+            }
+            if let Some(measured) = &measured {
+                // Keep the exact root/access consequences beside the answer
+                // controls even when complete measurements use scrollback.
+                let root_summary = std::mem::take(&mut prompt);
+                let context = self.transition.as_ref().expect("measured root context");
+                if context.previous == measured.session.observation
+                    && context.previous == measured.permanent.observation
+                {
+                    prompt.push_str("Measured execution policy is unchanged for both choices.");
+                } else {
+                    let previous = serde_json::to_string(&context.previous)
+                        .map_err(|error| error.to_string())?;
+                    prompt.push_str(&format!(
+                        "This approval also covers only this pending action's measured execution transition for the selected duration.\nPrevious: {}",
+                        ego_core::permit::terminal_safe(&previous),
+                    ));
+                    for (duration, choice) in [
+                        ("Session", &measured.session),
+                        ("Permanent", &measured.permanent),
+                    ] {
+                        let proposed = serde_json::to_string(&choice.observation)
+                            .map_err(|error| error.to_string())?;
+                        prompt.push_str(&format!(
+                            "\nProposed: {duration}: {}",
+                            ego_core::permit::terminal_safe(&proposed)
+                        ));
+                    }
+                }
+                prompt.push_str("\nRe-admission remeasures the proposed authority and matches both observations; any drift refuses. Saved roots do not grant reusable backend trust.\n\n");
+                prompt.push_str(&root_summary);
+            }
+            let options = vec![
+                QuestionOption::new("deny", "Keep blocked (remembered for this root)"),
+                QuestionOption::new("session", "Session (this conversation only)"),
+                QuestionOption::new("permanent", "Permanent (save for future sessions)"),
+            ];
+            let question = QuestionRequest::new(prompt, QuestionMode::Single, options, false);
+            let choice = match self.elicitor.confirm_root(item, question).await {
                 Ok(QuestionOutcome::Answered(QuestionAnswer::Single(answer))) => {
                     match answer.as_str() {
                         "session" => RootGrantChoice::Session,
@@ -311,11 +664,47 @@ impl ego_core::turn::RootGrantPort for SeatRootGrants {
                             session,
                             store: self.store_root.clone(),
                         }),
+                        "deny" => {
+                            let writer = self
+                                .rule_writer
+                                .as_ref()
+                                .ok_or("user rule store is unavailable")?;
+                            let plan =
+                                ego_core::config::rule_management::RememberPlan::for_sandbox_path(
+                                    &grant,
+                                )
+                                .ok_or("this root cannot be named by a deny rule")?;
+                            writer
+                                .remember(ego_core::config::ManagedRuleEffect::Deny, plan)
+                                .await?;
+                            RootGrantChoice::Deny
+                        }
                         _ => RootGrantChoice::Deny,
                     }
                 }
                 _ => RootGrantChoice::Deny,
             };
+            if let Some(measured) = measured {
+                let context = self.transition.as_ref().expect("measured root context");
+                if context.cancel.is_cancelled()
+                    || context
+                        .deadline
+                        .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+                {
+                    return Err("root transition approval cancelled or expired".into());
+                }
+                let selected = match &choice {
+                    RootGrantChoice::Session => Some(measured.session.approval),
+                    RootGrantChoice::Permanent(_) => Some(measured.permanent.approval),
+                    RootGrantChoice::Deny => None,
+                };
+                if let Some(approval) = selected {
+                    *context
+                        .slot
+                        .lock()
+                        .map_err(|_| "root transition slot poisoned")? = Some(approval);
+                }
+            }
             Ok(choice)
         })
     }
@@ -325,9 +714,12 @@ impl ego_core::turn::RootGrantPort for SeatRootGrants {
         consent: &'a ego_core::permit::PermanentRootConsent,
     ) -> futures::future::BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
-            let path = std::fs::canonicalize(consent.root.path().as_path())
-                .map(CanonPath::new)
-                .map_err(|error| format!("root path changed or disappeared: {error}"))?;
+            let path = ego_core::permit::resolve_root(
+                consent.root.path().as_path(),
+                consent.root.access(),
+                &ego_tools::fs::OsFs,
+            )
+            .map_err(|error| format!("root path changed or disappeared: {error}"))?;
             if &path != consent.root.path() {
                 return Err("root path changed after terminal approval".into());
             }
@@ -369,6 +761,7 @@ pub(super) struct Turns<'a> {
 
 enum TurnStart {
     Checkpoint,
+    Queued,
     Prompt {
         text: String,
         images: Vec<ImageRef>,
@@ -385,6 +778,17 @@ enum TurnStart {
 }
 
 impl Turns<'_> {
+    /// Continue prompts already durably accepted by this run's sole receiver.
+    pub(super) async fn drive_queued<'session: 'turn, 'turn>(
+        &self,
+        loop_: &mut TurnLoop<'session, 'turn>,
+        cancel: &CancelToken,
+        diagnostics: &dyn Diagnostics,
+    ) -> (RunTermination, Value) {
+        self.drive_from(loop_, TurnStart::Queued, cancel, diagnostics)
+            .await
+    }
+
     pub(super) async fn drive_with_images<'session: 'turn, 'turn>(
         &self,
         loop_: &mut TurnLoop<'session, 'turn>,
@@ -545,6 +949,18 @@ impl Turns<'_> {
             let before_turns = loop_.state().turns.len();
             loop_.set_turn_allowance(self.max_turns.map(|max| max.saturating_sub(taken)));
             let outcome = match next {
+                TurnStart::Queued => {
+                    self.one_running(
+                        Box::pin(async {
+                            loop_.run_queued_turn().await.map(|outcome| {
+                                outcome
+                                    .expect("queued drive starts only with durable pending input")
+                            })
+                        }),
+                        cancel,
+                    )
+                    .await
+                }
                 TurnStart::Checkpoint => {
                     self.one_running(Box::pin(loop_.continue_checkpoint()), cancel)
                         .await
@@ -579,6 +995,11 @@ impl Turns<'_> {
                 Ok(outcome) => outcome,
                 Err(termination) => return (termination, self.answer(&loop_.state())),
             };
+            if loop_.root_readmission().is_some() {
+                // Not an ACP hold, a failed task, or a completed turn. The
+                // native driver replaces the epoch before the next generation.
+                return (RunTermination::Done, self.answer(&loop_.state()));
+            }
             taken = taken.saturating_add(
                 u32::try_from(loop_.state().turns.len().saturating_sub(before_turns))
                     .unwrap_or(u32::MAX)
@@ -594,7 +1015,11 @@ impl Turns<'_> {
                 return (RunTermination::MaxTurns, self.answer(&loop_.state()));
             }
 
-            if let Some(pending) = loop_.state().pending_question() {
+            // A requested hold was durably recorded by the turn boundary;
+            // pending input must not hide that control acknowledgement.
+            if outcome.exit_reason != ego_core::event::domain::ExitReason::Paused
+                && let Some(pending) = loop_.state().pending_question()
+            {
                 return (
                     RunTermination::QuestionRequired {
                         question: Box::new(QuestionReport::from_request(
@@ -773,7 +1198,7 @@ impl Turns<'_> {
         }
     }
 
-    /// The final assistant message used as the completion `result`.
+    /// The last assistant message, as `CLI.md` §4.1's `result`.
     fn answer(&self, state: &SessionState) -> Value {
         Value::String(last_assistant_message(state))
     }
@@ -817,8 +1242,12 @@ async fn process_signal() -> CancelCause {
     CancelCause::User
 }
 
-/// Read the final assistant text from reduced durable state, not a second streaming
-/// accumulator. No assistant message yields an empty result string.
+/// The text of the last assistant message in the session.
+///
+/// Read from `SessionState` rather than accumulated while streaming: the state
+/// is the fold of the durable log, so what is reported is what was written
+/// down. An empty string when the run produced no assistant message — §4.1's
+/// `result` is a string, and a run that said nothing said the empty thing.
 pub(super) fn last_assistant_message(state: &SessionState) -> String {
     state
         .items
@@ -842,6 +1271,7 @@ mod deadline_tests {
             denied: None,
             skill: None,
             provider_failure: None,
+            guard_failure: None,
             usage_error: None,
         }
     }
@@ -921,5 +1351,594 @@ mod deadline_tests {
             )
             .await;
         assert!(matches!(result, Err(RunTermination::TimedOut)));
+    }
+}
+
+#[cfg(test)]
+mod root_grant_ceiling_tests {
+    use super::*;
+    use ego_core::permit::{RootAccess, RootCfg};
+    use ego_core::turn::{RootGrantChoice, RootGrantPort, RootGrantRequest};
+    use std::sync::Mutex;
+
+    /// Answers every question with Session and keeps the prompts it saw.
+    #[derive(Default)]
+    struct Owner(Mutex<Vec<String>>);
+
+    impl Elicitor for Owner {
+        fn elicit<'a>(
+            &'a self,
+            _question: ItemId,
+            request: ego_core::question::QuestionRequest,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<QuestionOutcome, ego_core::question::ElicitorError>,
+        > {
+            self.0.lock().unwrap().push(request.prompt);
+            Box::pin(async {
+                Ok(QuestionOutcome::Answered(QuestionAnswer::Single(
+                    "session".into(),
+                )))
+            })
+        }
+    }
+
+    // Catches: the native same-turn host silently falling back to an
+    // unmeasured root-only answer when its measurement binding is missing.
+    #[tokio::test]
+    async fn same_turn_root_question_refuses_missing_measurement_before_asking() {
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("workspace");
+        let outside = tree.path().join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let owner = Arc::new(Owner::default());
+        let seat = SeatRootGrants {
+            resume_turn: true,
+            transition: None,
+            elicitor: owner.clone(),
+            effective: ego_core::config::resolve(&[], Trust::Untrusted, None).unwrap(),
+            workspace: canon(&workspace),
+            target: UserConfigTarget::Base,
+            rule_writer: None,
+            store_root: tree.path().join("store"),
+        };
+        let answer = seat
+            .ask(
+                SessionId::new(),
+                ItemId::new(),
+                RootGrantRequest {
+                    continuation: Some(TurnId::new()),
+                    tool: "read".into(),
+                    operation: ego_core::permit::OpName::Read,
+                    path: canon(&outside),
+                    access: RootAccess::Read,
+                },
+            )
+            .await;
+        assert!(
+            answer
+                .unwrap_err()
+                .contains("requires measured execution authority")
+        );
+        assert!(
+            owner.0.lock().unwrap().is_empty(),
+            "an unmeasured question reached the owner"
+        );
+    }
+
+    // Catches: a root refusal asks again after the owner kept it blocked.
+    #[tokio::test]
+    async fn root_keep_blocked_survives_a_new_seat() {
+        struct DenyOwner(std::sync::atomic::AtomicUsize);
+        impl Elicitor for DenyOwner {
+            fn elicit<'a>(
+                &'a self,
+                _: ItemId,
+                request: ego_core::question::QuestionRequest,
+            ) -> futures::future::BoxFuture<
+                'a,
+                Result<QuestionOutcome, ego_core::question::ElicitorError>,
+            > {
+                let deny = request
+                    .options
+                    .iter()
+                    .find(|option| option.id == "deny")
+                    .unwrap();
+                assert_eq!(deny.label, "Keep blocked (remembered for this root)");
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(QuestionOutcome::Answered(QuestionAnswer::Single(
+                        "deny".into(),
+                    )))
+                })
+            }
+        }
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("workspace");
+        let outside = tree.path().join("outside");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let owner = Arc::new(DenyOwner(std::sync::atomic::AtomicUsize::new(0)));
+        let writer = Arc::new(crate::acp_permission::CliAcpPermissionRules::new(
+            tree.path().join("config.toml"),
+            UserConfigTarget::Base,
+        ));
+        let make = || SeatRootGrants {
+            resume_turn: false,
+            transition: None,
+            elicitor: owner.clone(),
+            effective: ego_core::config::resolve(&[], ego_core::config::Trust::Untrusted, None)
+                .unwrap(),
+            workspace: canon(&workspace),
+            target: UserConfigTarget::Base,
+            rule_writer: Some(writer.clone()),
+            store_root: tree.path().join("store"),
+        };
+        let request = || RootGrantRequest {
+            continuation: None,
+            tool: "write".into(),
+            operation: ego_core::permit::OpName::Write,
+            path: canon(&outside),
+            access: RootAccess::ReadWrite,
+        };
+        assert_eq!(
+            make()
+                .ask(SessionId::new(), ItemId::new(), request())
+                .await
+                .unwrap(),
+            RootGrantChoice::Deny
+        );
+        assert_eq!(
+            make()
+                .ask(SessionId::new(), ItemId::new(), request())
+                .await
+                .unwrap(),
+            RootGrantChoice::Deny
+        );
+        assert_eq!(owner.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    // Catches: Keep blocked saves only to disk, so the next yolo/off capture
+    // authorizes the same external write without asking the root seat.
+    #[tokio::test]
+    async fn root_keep_blocked_binds_next_yolo_capture_for_base_and_profile() {
+        use ego_core::permit::{Classification, PolicyDenied};
+        use ego_core::turn::GenerationPolicySource;
+
+        struct KeepBlocked(std::sync::atomic::AtomicUsize);
+        impl Elicitor for KeepBlocked {
+            fn elicit<'a>(
+                &'a self,
+                _: ItemId,
+                _: ego_core::question::QuestionRequest,
+            ) -> futures::future::BoxFuture<
+                'a,
+                Result<QuestionOutcome, ego_core::question::ElicitorError>,
+            > {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(QuestionOutcome::Answered(QuestionAnswer::Single(
+                        "deny".into(),
+                    )))
+                })
+            }
+        }
+        struct NoAuto;
+        impl PreflightPort for NoAuto {
+            fn validate_auto(&self) -> Result<(), PolicyControlError> {
+                unreachable!()
+            }
+        }
+
+        let profile =
+            UserConfigTarget::Profile(ego_core::config::ProfileName::parse("work").unwrap());
+        for (target, inherited) in [
+            (UserConfigTarget::Base, false),
+            (profile.clone(), false),
+            (profile, true),
+        ] {
+            let tree = tempfile::tempdir().unwrap();
+            let workspace = tree.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let external = tree.path().join("notes.md");
+            std::fs::write(&external, b"original").unwrap();
+            let captured = tree.path().join("captured.md");
+            let administered = tree.path().join("administered.md");
+            std::fs::write(&captured, b"captured").unwrap();
+            std::fs::write(&administered, b"administered").unwrap();
+            let path = tree.path().join("config.toml");
+            let table = if target == UserConfigTarget::Base || inherited {
+                "permissions"
+            } else {
+                "profile.work.permissions"
+            };
+            let mut user_text = format!(
+                "[{table}]\ndeny=[{:?}]\n",
+                format!(
+                    "write({})",
+                    ego_core::permit::rule::PathPattern::from_path(
+                        canon(&captured).as_path(),
+                        false
+                    )
+                    .unwrap()
+                )
+            );
+            if inherited {
+                user_text.push_str("\n[profile.work]\n");
+            }
+            std::fs::write(&path, &user_text).unwrap();
+            let system_text = format!(
+                "[permissions]\ndeny=[{:?}]\n",
+                format!(
+                    "write({})",
+                    ego_core::permit::rule::PathPattern::from_path(
+                        canon(&administered).as_path(),
+                        false
+                    )
+                    .unwrap()
+                )
+            );
+            let layers = vec![
+                ConfigLayer::parse(Source::System, &system_text).unwrap(),
+                ConfigLayer::parse(Source::User, &user_text).unwrap(),
+            ];
+            let selected_profile = match &target {
+                UserConfigTarget::Base => None,
+                UserConfigTarget::Profile(name) => Some((name.to_string(), Source::Flags)),
+            };
+            let effective = resolve_selected(
+                &layers,
+                Trust::Untrusted,
+                selected_profile
+                    .as_ref()
+                    .map(|(name, source)| (name.as_str(), *source)),
+            )
+            .unwrap();
+            let selection =
+                GenerationPolicySelection::new(Mode::Default, effective.permissions.clone());
+            let resolver = Arc::new(super::super::composition::FrozenRuleResolver::new(
+                layers,
+                Trust::Untrusted,
+                selected_profile,
+                selection.clone(),
+            ));
+            let writer = Arc::new(
+                crate::acp_permission::CliAcpPermissionRules::new(path.clone(), target.clone())
+                    .with_live_policy(selection.clone(), resolver.clone()),
+            );
+            let owner = Arc::new(KeepBlocked(std::sync::atomic::AtomicUsize::new(0)));
+            let seat = SeatRootGrants {
+                resume_turn: false,
+                transition: None,
+                elicitor: owner.clone(),
+                effective,
+                workspace: canon(&workspace),
+                target: target.clone(),
+                rule_writer: Some(writer),
+                store_root: tree.path().join("store"),
+            };
+            assert_eq!(
+                seat.ask(
+                    SessionId::new(),
+                    ItemId::new(),
+                    RootGrantRequest {
+                        continuation: None,
+                        tool: "write".into(),
+                        operation: ego_core::permit::OpName::Write,
+                        path: canon(&external),
+                        access: RootAccess::ReadWrite,
+                    }
+                )
+                .await
+                .unwrap(),
+                RootGrantChoice::Deny
+            );
+            let store = Arc::new(ego_tools::config::OsUserConfigStore::new(
+                Arc::new(ego_tools::store::OsIo),
+                path,
+            ));
+            assert_eq!(store.rule_snapshot(target.clone()).unwrap().deny.len(), 2);
+            if target != UserConfigTarget::Base {
+                assert_eq!(
+                    store
+                        .rule_snapshot(UserConfigTarget::Base)
+                        .unwrap()
+                        .deny
+                        .len(),
+                    usize::from(inherited)
+                );
+            }
+            let application =
+                PolicyApplicationOwner::new(selection.clone(), store, Arc::new(NoAuto), resolver);
+            application
+                .apply(PolicyControlRequest::SetMode(Mode::Yolo))
+                .unwrap();
+            let confinement =
+                RunConfinement::new(Confinement::Off, false, canon(&workspace)).unwrap();
+            let source = CliGenerationPolicySource::new(selection, canon(&workspace), None)
+                .with_read_perimeter(&confinement);
+            let policy = source.capture().unwrap().policy();
+            for (file, from) in [
+                (&external, Source::User),
+                (&captured, Source::User),
+                (&administered, Source::System),
+            ] {
+                let call = PreparedCall::new(
+                    "write",
+                    Op::Write {
+                        path: canon(file),
+                        change: Change::Whole(b"changed".to_vec()),
+                    },
+                );
+                assert!(
+                    matches!(policy.classify(call), Classification::Settled(Err(PolicyDenied::Denied { from: actual, .. })) if actual == from)
+                );
+            }
+            assert_eq!(std::fs::read(&external).unwrap(), b"original");
+            assert_eq!(std::fs::read(&captured).unwrap(), b"captured");
+            assert_eq!(std::fs::read(&administered).unwrap(), b"administered");
+            assert_eq!(owner.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        }
+    }
+
+    fn canon(path: &std::path::Path) -> CanonPath {
+        CanonPath::new(std::fs::canonicalize(path).unwrap())
+    }
+
+    // Catches: an owner approval admits a root outside the system ceiling,
+    // or widens a read-only ceiling to read-write, because the seat asks the
+    // owner before it checks the ceiling.
+    #[tokio::test]
+    async fn session_path_grant_cannot_widen_parent_or_bypass_system_ceiling() {
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("workspace");
+        let allowed = tree.path().join("allowed");
+        let child = allowed.join("child");
+        let sibling = tree.path().join("sibling");
+        for dir in [&workspace, &child, &sibling] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mut effective =
+            ego_core::config::resolve(&[], ego_core::config::Trust::Untrusted, None).unwrap();
+        effective.root_ceilings = vec![vec![RootCfg {
+            consent: None,
+            path: canon(&allowed).as_path().to_path_buf(),
+            access: RootAccess::Read,
+        }]];
+        let owner = Arc::new(Owner::default());
+        let seat = SeatRootGrants {
+            resume_turn: false,
+            transition: None,
+            elicitor: owner.clone(),
+            effective,
+            workspace: canon(&workspace),
+            target: ego_core::config::UserConfigTarget::Base,
+            rule_writer: None,
+            store_root: tree.path().join("store"),
+        };
+        let ask = |path: &std::path::Path, access| {
+            seat.ask(
+                SessionId::new(),
+                ItemId::new(),
+                RootGrantRequest {
+                    continuation: None,
+                    tool: "read".into(),
+                    operation: ego_core::permit::OpName::Read,
+                    path: canon(path),
+                    access,
+                },
+            )
+        };
+
+        let outside = ask(&sibling, RootAccess::Read).await;
+        let parent = ask(tree.path(), RootAccess::Read).await;
+        let widened = ask(&child, RootAccess::ReadWrite).await;
+        assert!(outside.is_err(), "sibling outside the ceiling: {outside:?}");
+        assert!(parent.is_err(), "parent of the ceiling: {parent:?}");
+        assert!(
+            widened.is_err(),
+            "read-write under a read ceiling: {widened:?}"
+        );
+        assert!(owner.0.lock().unwrap().is_empty(), "the owner was asked");
+
+        let inside = ask(&child, RootAccess::Read).await;
+        assert_eq!(inside, Ok(RootGrantChoice::Session));
+        let prompts = owner.0.lock().unwrap();
+        assert_eq!(prompts.len(), 1);
+        assert!(
+            prompts[0].contains("Allow read-only access?"),
+            "{}",
+            prompts[0]
+        );
+        assert!(
+            prompts[0].contains("Native execution authorization and exec_paths are unchanged."),
+            "{}",
+            prompts[0]
+        );
+        assert!(
+            prompts[0].contains("including any credentials stored there"),
+            "{}",
+            prompts[0]
+        );
+        assert!(!prompts[0].contains("Write access"), "{}", prompts[0]);
+    }
+}
+
+#[cfg(test)]
+mod root_transition_tests {
+    use super::*;
+    use ego_core::permit::{
+        BackendIdentity, ExecutionPolicy, PolicyDigest, ProfileRoot, RootAccess,
+    };
+    use ego_core::turn::{RootGrantRequest, RootTransitionApproval};
+
+    // Catches: measuring [session A, permanent B] before approval while the
+    // actual unchanged re-admission assembles [permanent B, session A].
+    #[test]
+    fn root_choice_proposals_use_actual_session_restore_order_for_both_durations() {
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("workspace");
+        let a = tree.path().join("session-a");
+        let b = tree.path().join("requested-b");
+        for path in [&workspace, &a, &b] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let canon = |path: &Path| CanonPath::new(std::fs::canonicalize(path).unwrap());
+        let workspace = canon(&workspace);
+        let a = canon(&a);
+        let b = canon(&b);
+        let grant_a = ProfileRoot::new(a.clone(), RootAccess::Read);
+        let base = ego_core::config::resolve(&[], Trust::Untrusted, None).unwrap();
+        let mut current = base.clone();
+        let current_roots = super::super::execution::assemble_session_roots(
+            &mut current,
+            std::slice::from_ref(&grant_a),
+            &workspace,
+            |_| {},
+        )
+        .unwrap();
+        let confinement = RunConfinement::new(Confinement::Workspace, false, workspace.clone())
+            .unwrap()
+            .with_roots(current_roots);
+        let configured_b = ego_core::permit::RootCfg {
+            path: b.as_path().to_path_buf(),
+            access: RootAccess::Read,
+            consent: None,
+        };
+        let mut proposed = current;
+        proposed.roots.push(configured_b.clone());
+        let request = RootGrantRequest {
+            continuation: Some(TurnId::new()),
+            tool: "read".into(),
+            operation: ego_core::permit::OpName::Read,
+            path: b.clone(),
+            access: RootAccess::Read,
+        };
+        let (session, permanent) = root_choice_confinements(
+            &proposed,
+            &confinement,
+            std::slice::from_ref(&grant_a),
+            &request,
+        )
+        .unwrap();
+        let paths = |policy: &RunConfinement| {
+            policy
+                .roots()
+                .iter()
+                .map(|root| root.path().clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(paths(&session), vec![a.clone(), b.clone()]);
+        assert_eq!(paths(&permanent), vec![b.clone(), a.clone()]);
+        // Fresh config contains B, not the process-restored session root A.
+        let mut actual = base;
+        actual.roots.push(configured_b);
+        let actual = super::super::execution::assemble_session_roots(
+            &mut actual,
+            &[grant_a],
+            &workspace,
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(permanent.roots(), actual.as_slice());
+    }
+
+    // Catches: displaying an approval which final session-root assembly
+    // already rejects because durable receipts require conflicting access.
+    #[test]
+    fn root_choice_proposals_refuse_conflicting_durable_access_before_asking() {
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("workspace");
+        let outside = tree.path().join("outside");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        let workspace = CanonPath::new(std::fs::canonicalize(workspace).unwrap());
+        let outside = CanonPath::new(std::fs::canonicalize(outside).unwrap());
+        let old = ProfileRoot::new(outside.clone(), RootAccess::Read);
+        let mut proposed = ego_core::config::resolve(&[], Trust::Untrusted, None).unwrap();
+        proposed.roots.push(ego_core::permit::RootCfg {
+            path: outside.as_path().to_path_buf(),
+            access: RootAccess::ReadWrite,
+            consent: None,
+        });
+        let request = RootGrantRequest {
+            continuation: Some(TurnId::new()),
+            tool: "write".into(),
+            operation: ego_core::permit::OpName::Write,
+            path: outside.clone(),
+            access: RootAccess::ReadWrite,
+        };
+        let confinement = RunConfinement::new(Confinement::Workspace, false, workspace)
+            .unwrap()
+            .with_roots(vec![old.clone()]);
+        assert!(
+            root_choice_confinements(&proposed, &confinement, &[old], &request).is_err(),
+            "the final assembly cannot honor both existing read and requested write receipts"
+        );
+    }
+
+    // Catches: reusing the root answer on a second re-admission. This calls
+    // the same native handoff boundary the driver uses, not Option directly.
+    #[test]
+    fn root_transition_handoff_consumes_approval_once_and_refuses_missing_receipt() {
+        let request = RootGrantRequest {
+            continuation: Some(TurnId::new()),
+            tool: "read".into(),
+            operation: ego_core::permit::OpName::Read,
+            path: CanonPath::new("/outside/exact"),
+            access: RootAccess::Read,
+        };
+        let root = ProfileRoot::new(request.path.clone(), request.access);
+        let base = RunConfinement::new(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+        )
+        .unwrap();
+        let observed = |policy: &RunConfinement, backend, digit: &str| {
+            ExecObservation::new(
+                BackendIdentity::new(backend, "1"),
+                Confinement::Workspace.required_caps(),
+                PolicyDigest::try_from(digit.repeat(64)).unwrap(),
+            )
+            .with_policy(ExecutionPolicy::capture(policy, Vec::new()))
+        };
+        let previous = observed(&base, "bwrap", "1");
+        let proposed = observed(&base.with_roots(vec![root.clone()]), "landlock", "2");
+        let session = SessionId::new();
+        let item = ItemId::new();
+        let slot: RootTransitionSlot = Arc::new(Mutex::new(Some(
+            RootTransitionApproval::approved(
+                session,
+                item,
+                &request,
+                previous.clone(),
+                proposed.clone(),
+            )
+            .unwrap(),
+        )));
+        let shared = Arc::clone(&slot);
+        take_root_transition(&slot, Some(request.continuation.unwrap()))
+            .unwrap()
+            .unwrap()
+            .consume(
+                session,
+                Some(request.continuation.unwrap()),
+                Some((request.continuation.unwrap(), item)),
+                &previous,
+                &proposed,
+                &[root],
+            )
+            .unwrap();
+        assert!(take_root_transition(&shared, Some(request.continuation.unwrap())).is_err());
+        assert!(
+            take_root_transition(
+                &RootTransitionSlot::default(),
+                Some(request.continuation.unwrap())
+            )
+            .is_err()
+        );
+        assert!(take_root_transition(&shared, None).unwrap().is_none());
     }
 }

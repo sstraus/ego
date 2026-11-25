@@ -1,6 +1,6 @@
 //! Fresh per-operation MCP lifecycles bound to guarded transport authority.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsString;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -22,9 +22,9 @@ use ego_core::permit::{
     ToolError, ToolResult,
 };
 use ego_core::suspension::{
-    ContinuationError, ContinuationJournal, ContinuationRecord, ContinuationState,
-    GuardedMcpResume, McpResumeContext, OpenedContinuation, PreparedResume, ResumeFloor,
-    ResumeKeySource,
+    ClaimedContinuation, ContinuationError, ContinuationJournal, ContinuationRecord,
+    ContinuationState, GuardedMcpResume, McpResumeContext, OpenedContinuation, PreparedResume,
+    ResumeFloor, ResumeKeySource,
 };
 use ego_core::turn::{
     GenerationPolicyCaptureStore, GenerationPolicyDigest, GenerationPolicySnapshot, ToolEffectPorts,
@@ -38,7 +38,7 @@ use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::client::{MCP_PROTOCOL_REVISION, current_client_capabilities};
+use crate::client::{MCP_PROTOCOL_REVISION, client_capabilities};
 use crate::dynamic::{McpCollapsedBootstrap, McpOperation, McpOperationFactory};
 use crate::http::AdmittedMcpHttpProfile;
 use crate::registry::{
@@ -52,8 +52,15 @@ use crate::{
     PreparedMcpHttpCall,
 };
 
+#[path = "image_projection.rs"]
+mod image_projection;
+#[cfg(test)]
+#[path = "image_projection_tests.rs"]
+mod image_projection_tests;
 #[path = "session_stdio_operation.rs"]
 mod session_stdio_operation;
+#[path = "task_operation.rs"]
+mod task_operation;
 
 #[derive(Clone, Copy)]
 struct OperationLimits {
@@ -102,6 +109,8 @@ pub struct McpHttpOperationFactory {
     continuations: Arc<McpContinuationOwner>,
     limits: OperationLimits,
     collapsed: Option<CollapsedSchemaAdmission>,
+    /// Declare MCP Tasks to this server (an HTTP session only).
+    tasks: bool,
 }
 
 /// Exact immutable registry capture lookup owned by continuation recovery.
@@ -120,6 +129,7 @@ pub struct McpContinuationOwner {
     keys: Arc<dyn ResumeKeySource>,
     clock: Arc<dyn Clock>,
     pinned: Mutex<BTreeMap<String, PinnedContinuation>>,
+    acknowledged: Mutex<HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -143,6 +153,7 @@ impl McpContinuationOwner {
             keys,
             clock,
             pinned: Mutex::new(BTreeMap::new()),
+            acknowledged: Mutex::new(HashSet::new()),
         }
     }
 
@@ -215,7 +226,19 @@ impl McpContinuationOwner {
         };
         let schema = serde_json::to_vec(&binding)
             .map_err(|_| continuation(ContinuationError::InvalidRecord))?;
+        let session = context
+            .runtime()
+            .hook_state()
+            .journal()
+            .session_id()
+            .map_err(|error| authority(error.to_string()))?;
+        let item = context
+            .causality()
+            .item_id()
+            .ok_or_else(|| authority("MCP input request has no owning tool item"))?;
         let id = continuation_id(
+            session,
+            item,
             &envelope,
             &required,
             &schema,
@@ -300,6 +323,9 @@ impl McpContinuationOwner {
         effects: ToolEffectPorts<'turn>,
     ) -> Result<ToolExecution, McpError> {
         let pending = self.journal.load(id).map_err(continuation)?;
+        if pending.state() == ContinuationState::Claimed {
+            return Err(unpublished_claim());
+        }
         validate_recorded_answer(&pending, raw_answer)?;
         let policy_digest = pending.generation_policy_digest().clone();
         let pinned = self.capture_for(id, pending.capture())?;
@@ -330,6 +356,14 @@ impl McpContinuationOwner {
             accepted.fingerprints(),
             accepted.original_parameters(),
         )?;
+        // Initial admission observed the spawn before sealing its authority.
+        // Reobserve it through the current run's process port before matching
+        // the grant, so changed executables still fail closed.
+        let call = effects.observe_processes(call).map_err(|error| {
+            authority(format!(
+                "MCP continuation could not observe the executable: {error}"
+            ))
+        })?;
         let opened = accepted
             .open(call, &current_fingerprints, &floor, now, self.keys.as_ref())
             .map_err(continuation)?;
@@ -340,7 +374,14 @@ impl McpContinuationOwner {
             HookLifecycle::ElicitationResult,
             id,
         )
-        .await?;
+        .await
+        .map_err(|error| {
+            if error.failure() == McpFailure::Cancelled {
+                error.mark_cancelled_before_claim()
+            } else {
+                error
+            }
+        })?;
         let original_causality = original_tool_causality(&runtime, &causality)?;
         let claim_time = self.clock.now();
         let (authorized, successor) = admission.into_retry_authorized_with_successor(
@@ -359,13 +400,9 @@ impl McpContinuationOwner {
             effects.bind_mcp_resume(authorized, successor, Some(successor_context));
         let generation: Arc<str> = Arc::from(capture.generation());
         match factory.execute(server, call, &guarded, generation).await {
-            Ok(execution) => {
-                self.journal
-                    .settle(claimed, ContinuationState::Completed)
-                    .map_err(|_| settlement_failure(DeliveryCertainty::DefinitelySent))?;
-                self.cleanup_terminal(id, &policy_digest);
-                Ok(execution)
-            }
+            // The session owns the masked result or successor question. Keep
+            // this claim fenced until the session durably publishes it.
+            Ok(execution) => Ok(execution),
             Err(error) => {
                 let message = error.to_string();
                 let delivery = error.delivery().unwrap_or(DeliveryCertainty::PossiblySent);
@@ -405,11 +442,40 @@ impl McpContinuationOwner {
         let _ = self.policy_captures.delete(id, digest);
     }
 
+    fn acknowledge_publication(
+        &self,
+        publication: &ego_core::state::ForeignQuestionPublication,
+    ) -> Result<(), ContinuationError> {
+        let id = publication.continuation_id();
+        let mut acknowledged = self.acknowledged.lock().map_err(|_| {
+            ContinuationError::Unavailable("MCP publication lock is unavailable".into())
+        })?;
+        if acknowledged.contains(id) {
+            return Ok(());
+        }
+        let record = self.journal.load(id)?;
+        let digest = record.generation_policy_digest().clone();
+        match record.state() {
+            ContinuationState::Claimed => {
+                let claim = ClaimedContinuation::recover_published(record, publication)?;
+                self.journal.settle(claim, ContinuationState::Completed)?;
+            }
+            ContinuationState::Completed => {}
+            _ => return Err(ContinuationError::InvalidTransition),
+        }
+        self.cleanup_terminal(id, &digest);
+        acknowledged.insert(id.to_owned());
+        Ok(())
+    }
+
     fn load_pending_record(&self, id: &str) -> Result<ContinuationRecord, McpError> {
         let record = self
             .journal
             .load(id)
             .map_err(|_| authority("MCP pending continuation record is unavailable"))?;
+        if record.state() == ContinuationState::Claimed {
+            return Err(unpublished_claim());
+        }
         if !matches!(
             record.state(),
             ContinuationState::Pending | ContinuationState::Accepted
@@ -525,6 +591,12 @@ impl McpContinuationOwner {
             .dispatch(Producer::Main, occurrence)
             .await
             .map_err(|error| hook_failure(error.to_string()))?;
+        if runtime.hook_state().cancel_token().is_cancelled() {
+            return Err(McpError::new(
+                McpFailure::Cancelled,
+                "run cancelled during MCP hook",
+            ));
+        }
         if !result.decision().is_continue() || !result.is_durable() {
             return Err(hook_failure(format!(
                 "{} hook blocked or settled uncertain",
@@ -551,16 +623,41 @@ impl<'session, 'turn> McpForeignQuestionPort<'session, 'turn> {
         floor: ResumeFloor,
         effects: ToolEffectPorts<'turn>,
     ) -> Self {
-        Self {
+        let port = Self {
             owner,
             runtime,
             floor,
             effects,
+        };
+        port.reconcile_publications(None);
+        port
+    }
+
+    fn reconcile_publications(&self, only: Option<&str>) {
+        let publications = self.runtime.hook_state().inspect(|state| {
+            state
+                .foreign_question_publications()
+                .filter(|publication| only.is_none_or(|id| publication.continuation_id() == id))
+                .collect::<Vec<_>>()
+        });
+        match publications {
+            Ok(publications) => {
+                for publication in &publications {
+                    if let Err(error) = self.owner.acknowledge_publication(publication) {
+                        tracing::warn!(%error, "could not settle an already published MCP continuation");
+                    }
+                }
+            }
+            Err(error) => tracing::warn!(%error, "could not read durable MCP publications"),
         }
     }
 }
 
 impl ForeignQuestionPort for McpForeignQuestionPort<'_, '_> {
+    fn acknowledge_publication(&self, continuation_id: &str) {
+        self.reconcile_publications(Some(continuation_id));
+    }
+
     fn cancel(&self, continuation_id: &str) -> Result<(), String> {
         let record = self
             .owner
@@ -581,7 +678,8 @@ impl ForeignQuestionPort for McpForeignQuestionPort<'_, '_> {
         continuation_id: &'a str,
         canonical_json: &'a str,
         causality: HookCausality,
-    ) -> futures::future::BoxFuture<'a, Result<ToolExecution, String>> {
+    ) -> futures::future::BoxFuture<'a, Result<ToolExecution, ego_core::mcp::ForeignQuestionError>>
+    {
         let owner = Arc::clone(&self.owner);
         let runtime = self.runtime.clone();
         let floor = self.floor.clone();
@@ -597,7 +695,13 @@ impl ForeignQuestionPort for McpForeignQuestionPort<'_, '_> {
                     effects,
                 )
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| {
+                    if error.cancelled_before_claim() {
+                        ego_core::mcp::ForeignQuestionError::CancelledBeforeClaim
+                    } else {
+                        ego_core::mcp::ForeignQuestionError::Failed(error.to_string())
+                    }
+                })
         })
     }
 }
@@ -682,13 +786,17 @@ impl McpResumeAdmission {
 }
 
 fn continuation_id(
+    session: ego_core::event::id::SessionId,
+    item: ego_core::event::id::ItemId,
     envelope: &ego_core::permit::McpPreparedEnvelope,
     required: &crate::McpMappedInput,
     schema: &[u8],
     used_rounds: u8,
 ) -> String {
     let mut digest = Sha256::new();
-    digest.update(b"ego:mcp:continuation:v2\0");
+    digest.update(b"ego:mcp:continuation:v3\0");
+    digest.update(session.to_string().as_bytes());
+    digest.update(item.to_string().as_bytes());
     digest.update([used_rounds]);
     digest.update(envelope.subject().server().as_bytes());
     digest.update([0]);
@@ -723,7 +831,15 @@ impl McpHttpOperationFactory {
             continuations,
             limits: OperationLimits::new(max_sse_event_size, timeout)?,
             collapsed: None,
+            tasks: false,
         })
+    }
+
+    /// Declare the MCP Tasks extension to this server and track the tasks it starts.
+    #[must_use]
+    pub fn with_tasks(mut self, tasks: bool) -> Self {
+        self.tasks = tasks;
+        self
     }
 
     pub(crate) fn runtime(
@@ -741,6 +857,7 @@ impl McpHttpOperationFactory {
                 bootstrap,
                 admission,
             }),
+            tasks: false,
         })
     }
 }
@@ -1017,7 +1134,8 @@ impl McpOperationFactory for McpAcpOperationFactory {
                     "selected ACP MCP transport changed",
                 )));
             }
-            let request = operation_request(&envelope).map_err(mcp_execution_error)?;
+            let request = operation_request(&envelope, io.tool_call_correlation_id())
+                .map_err(mcp_execution_error)?;
             let claim = io
                 .claim_mcp_acp(call)
                 .map_err(|error| mcp_execution_error(error.into()))?;
@@ -1034,7 +1152,7 @@ impl McpOperationFactory for McpAcpOperationFactory {
             let deadline = Instant::now()
                 .checked_add(self.limits.timeout)
                 .ok_or_else(|| execution_error("ACP MCP operation deadline overflowed"))?;
-            let mut invoke = Box::pin(request.invoke(&mut client));
+            let mut invoke = Box::pin(request.invoke(&mut client, None));
             let outcome = loop {
                 if io.is_cancelled() {
                     cancellation.cancel();
@@ -1206,39 +1324,55 @@ async fn execute_http(
     if envelope.transport() != &transport || envelope.transport_fingerprint() != fingerprint {
         return Err(authority("selected MCP HTTP transport fingerprint changed"));
     }
-    let request = operation_request(&envelope)?;
+    let request = operation_request(&envelope, io.tool_call_correlation_id())?;
     let expected_wire_params = request.wire_params()?;
     let claim = io.claim_mcp_http(call).map_err(McpError::from)?;
     if claim.envelope() != &envelope {
         return Err(authority("guarded MCP HTTP claim changed its envelope"));
     }
-    let broker = Arc::new(SplitMcpHttpEffects::new(
-        claim,
-        server.clone(),
-        profile.fingerprint(),
-        route,
-        envelope.clone(),
-        expected_wire_params,
-        admission
-            .authorization_headers(None, Instant::now() + factory.limits.timeout)
-            .await?,
-        admission.oauth_session().cloned(),
-    ));
+    let broker = Arc::new(
+        SplitMcpHttpEffects::new(
+            claim,
+            server.clone(),
+            profile.fingerprint(),
+            route,
+            envelope.clone(),
+            expected_wire_params,
+            admission
+                .authorization_headers(None, Instant::now() + factory.limits.timeout)
+                .await?,
+            admission.oauth_session().cloned(),
+        )
+        .with_tasks(factory.tasks),
+    );
     let effects: Arc<dyn McpHttpEffects> = broker.clone();
-    let mut client =
-        McpClient::connect_http(server, config.clone(), factory.limits.options()?, effects)?
-            .with_identity_retry(Arc::clone(&factory.identity_retry));
+    let mut client = McpClient::connect_http(
+        server,
+        config.clone(),
+        factory.limits.options()?.with_tasks(factory.tasks),
+        effects,
+    )?
+    .with_identity_retry(Arc::clone(&factory.identity_retry));
     if let Err(error) = client.discover().await {
         let _ = client.settle().await;
         return Err(error);
     }
-    let outcome = request.invoke(&mut client).await;
+    let outcome = request.invoke(&mut client, io.egress_filter()).await;
     let settlement = client.settle().await;
     let outcome = outcome?;
     settlement?;
     let selected = broker
         .selected_settlement()?
         .ok_or_else(|| protocol("selected MCP HTTP operation was not settled"))?;
+    if let OperationOutcome::TaskCreated(task) = &outcome {
+        return Ok(task_operation::task_started(
+            task,
+            &envelope,
+            config,
+            admission,
+            factory.limits,
+        ));
+    }
     let schema = tool_schema_command(
         &outcome,
         &envelope,
@@ -1290,7 +1424,7 @@ async fn execute_stdio(
             "selected MCP stdio transport fingerprint changed",
         ));
     }
-    let request = operation_request(&envelope)?;
+    let request = operation_request(&envelope, io.tool_call_correlation_id())?;
     let duplex = io.guarded_duplex(call).await.map_err(McpError::from)?;
     let effects: Box<dyn McpDuplexEffects> = Box::new(ClaimedDuplexEffects {
         server: server.clone(),
@@ -1302,7 +1436,7 @@ async fn execute_stdio(
         let _ = client.settle().await;
         return Err(error);
     }
-    let outcome = request.invoke(&mut client).await;
+    let outcome = request.invoke(&mut client, None).await;
     let settlement = client.settle().await;
     let outcome = outcome?;
     let settlement = settlement?;
@@ -1392,7 +1526,7 @@ async fn execute_http_hook(
 fn hook_operation_request(
     envelope: &ego_core::permit::McpPreparedEnvelope,
 ) -> Result<OperationRequest, McpError> {
-    let request = operation_request(envelope)?;
+    let request = operation_request(envelope, None)?;
     if !matches!(&request, OperationRequest::Tool(_)) {
         return Err(authority("MCP hook operation is not a tool call"));
     }
@@ -1458,7 +1592,7 @@ async fn invoke_in_scope(
     scope: &EffectScope,
 ) -> Result<OperationOutcome, McpError> {
     let cancellation = client.cancellation();
-    let mut invoke = Box::pin(request.invoke(client));
+    let mut invoke = Box::pin(request.invoke(client, None));
     loop {
         tokio::select! {
             outcome = &mut invoke => return outcome,
@@ -1542,10 +1676,14 @@ impl OperationRequest {
         .map_err(McpError::from)
     }
 
-    async fn invoke(self, client: &mut McpClient) -> Result<OperationOutcome, McpError> {
+    async fn invoke(
+        self,
+        client: &mut McpClient,
+        egress: Option<&dyn ego_core::egress::EgressFilter>,
+    ) -> Result<OperationOutcome, McpError> {
         match self {
             Self::Tool(params) => client
-                .call_tool_once(params)
+                .call_tool_once(params, egress)
                 .await
                 .map(|outcome| map_manual(outcome, CompleteResult::Tool)),
             Self::Resource(params) => client
@@ -1562,6 +1700,7 @@ impl OperationRequest {
 
 fn operation_request(
     envelope: &ego_core::permit::McpPreparedEnvelope,
+    correlation_id: Option<&str>,
 ) -> Result<OperationRequest, McpError> {
     let parameters: Value = serde_json::from_slice(envelope.parameters())?;
     let arguments = parameters.as_object().cloned().ok_or_else(|| {
@@ -1570,16 +1709,31 @@ fn operation_request(
             "captured MCP operation parameters are not an object",
         )
     })?;
+    let (request_state, input_responses) = match envelope.resume_parameters() {
+        Some((state, responses)) => (
+            Some(state.to_owned()),
+            Some(serde_json::from_value::<rmcp::model::InputResponses>(
+                responses.clone(),
+            )?),
+        ),
+        None => (None, None),
+    };
     match (envelope.operation(), envelope.subject()) {
         (McpOperationKind::CallTool, McpSubject::Tool { name, .. }) => {
-            // Generate once before guarded HTTP validation. The client traces
-            // this body-free UUID; TUIC retains it as client_call_id. No parent
-            // intent is invented when the caller supplied no such authority.
+            // The turn owner derives durable identity before guarded HTTP
+            // validation. Hooks have no durable tool item and keep a fresh id.
+            // TUIC retains this body-free value as client_call_id.
             let mut params = serde_json::to_value(
                 CallToolRequestParams::new(name.clone()).with_arguments(arguments),
             )?;
-            params["_meta"] = serde_json::json!({"tuic/call_id": uuid::Uuid::now_v7().to_string()});
-            Ok(OperationRequest::Tool(serde_json::from_value(params)?))
+            let id = correlation_id
+                .map(str::to_owned)
+                .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+            params["_meta"] = serde_json::json!({"tuic/call_id": id});
+            let mut params: CallToolRequestParams = serde_json::from_value(params)?;
+            params.request_state = request_state;
+            params.input_responses = input_responses;
+            Ok(OperationRequest::Tool(params))
         }
         (McpOperationKind::ReadResource, McpSubject::Resource { uri, .. }) => {
             if !arguments.is_empty() {
@@ -1588,14 +1742,16 @@ fn operation_request(
                     "resources/read does not accept captured arguments",
                 ));
             }
-            Ok(OperationRequest::Resource(ReadResourceRequestParams::new(
-                uri.clone(),
-            )))
+            let mut params = ReadResourceRequestParams::new(uri.clone());
+            params.request_state = request_state;
+            params.input_responses = input_responses;
+            Ok(OperationRequest::Resource(params))
         }
         (McpOperationKind::GetPrompt, McpSubject::Prompt { name, .. }) => {
-            Ok(OperationRequest::Prompt(
-                GetPromptRequestParams::new(name.clone()).with_arguments(arguments),
-            ))
+            let mut params = GetPromptRequestParams::new(name.clone()).with_arguments(arguments);
+            params.request_state = request_state;
+            params.input_responses = input_responses;
+            Ok(OperationRequest::Prompt(params))
         }
         _ => Err(authority(
             "captured MCP operation subject does not match method",
@@ -1612,6 +1768,7 @@ enum CompleteResult {
 enum OperationOutcome {
     Complete(CompleteResult),
     InputRequired(crate::McpMappedInput),
+    TaskCreated(Box<rmcp::model::Task>),
 }
 
 fn map_manual<T>(
@@ -1621,6 +1778,7 @@ fn map_manual<T>(
     match outcome {
         McpManualOutcome::Complete(result) => OperationOutcome::Complete(complete(result)),
         McpManualOutcome::InputRequired(required) => OperationOutcome::InputRequired(*required),
+        McpManualOutcome::TaskCreated(task) => OperationOutcome::TaskCreated(task),
     }
 }
 
@@ -1643,72 +1801,106 @@ fn tool_schema_command(
     let OperationOutcome::Complete(CompleteResult::Tool(result)) = outcome else {
         return Ok(None);
     };
-    let (requested_name, structured_content) = if name == collapsed.bootstrap.lookup_name() {
+    if name == collapsed.bootstrap.lookup_name() {
         let content = schema_lookup_content(result)?;
         let parameters: Value = serde_json::from_slice(envelope.parameters())?;
-        (collapsed.bootstrap.requested_name(&parameters)?, content)
-    } else {
-        let Some(definition) = search_inline_definition(result)? else {
-            return Ok(None);
-        };
-        definition
-    };
-    Ok(Some(McpToolSchemaCommand::new(
+        return Ok(Some(McpToolSchemaCommand::new(
+            server_admission,
+            generation.to_string(),
+            envelope.admission().clone(),
+            collapsed.bootstrap.requested_name(&parameters)?,
+            content,
+        )));
+    }
+    let definitions = search_inline_definitions(result)?;
+    if definitions.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(McpToolSchemaCommand::from_definitions(
         server_admission,
         generation.to_string(),
         envelope.admission().clone(),
-        requested_name,
-        structured_content,
+        definitions,
     )))
 }
 
-/// One top hit can carry a complete definition without a second discovery round.
-/// This limits admitted inline data, not the server's existing summary results.
+/// Bound complete inline definitions, not the server's summary results.
 const INLINE_SEARCH_SCHEMA_MAX_BYTES: usize = 16 * 1024;
+const INLINE_SEARCH_SCHEMAS_MAX_BYTES: usize = 32 * 1024;
 
-fn search_inline_definition(result: &CallToolResult) -> Result<Option<(String, Value)>, McpError> {
-    if result.is_error == Some(true)
-        || !result
-            .result_type
-            .as_ref()
-            .is_some_and(rmcp::model::ResultType::is_complete)
-    {
-        return Ok(None);
-    }
+pub(super) fn search_inline_definitions(
+    result: &CallToolResult,
+) -> Result<Vec<(String, Value)>, McpError> {
     // Summary-only servers may return prose; only complete JSON definitions opt in.
     let content = match schema_lookup_content(result) {
         Ok(content) => content,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(Vec::new()),
     };
-    let Some(top) = content.get("top_schema") else {
-        return Ok(None);
-    };
-    if top.get("inputSchema").is_none() {
-        return Ok(None);
+    let mut candidates = Vec::new();
+    if let Some(top) = content.get("top_schema") {
+        let top_name = content
+            .get("results")
+            .and_then(Value::as_array)
+            .and_then(|hits| hits.first())
+            .and_then(|hit| hit.get("name"))
+            .and_then(Value::as_str);
+        if top
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| Some(name) == top_name)
+        {
+            candidates.push(top);
+        } else {
+            tracing::warn!(
+                "collapsed search top_schema dropped: name does not match the top result; use get_tool_schema for the intended tool, retrying unchanged will not help"
+            );
+        }
     }
-    if serde_json::to_vec(top)?.len() > INLINE_SEARCH_SCHEMA_MAX_BYTES {
-        return Err(protocol(
-            "collapsed search inline schema exceeds 16384-byte cap; use get_tool_schema",
-        ));
+    if let Some(schemas) = content.get("schemas") {
+        if let Some(schemas) = schemas.as_array() {
+            candidates.extend(schemas);
+        } else {
+            tracing::warn!(
+                "collapsed search schemas dropped: expected an array of complete tool definitions; use get_tool_schema, retrying unchanged will not help"
+            );
+        }
     }
-    let name = top
-        .get("name")
-        .and_then(Value::as_str)
-        .filter(|name| !name.trim().is_empty())
-        .ok_or_else(|| protocol("collapsed search inline schema has no tool name"))?;
-    let top_name = content
-        .get("results")
-        .and_then(Value::as_array)
-        .and_then(|hits| hits.first())
-        .and_then(|hit| hit.get("name"))
-        .and_then(Value::as_str);
-    if top_name != Some(name) {
-        return Err(protocol(
-            "collapsed search inline schema does not match the top result",
-        ));
+    let mut definitions = Vec::new();
+    let mut names = std::collections::BTreeSet::new();
+    let mut total_bytes = 0;
+    for definition in candidates {
+        let admission = (|| {
+            let bytes = serde_json::to_vec(definition)?.len();
+            if bytes > INLINE_SEARCH_SCHEMA_MAX_BYTES {
+                return Err(protocol("inline schema exceeds 16384-byte cap"));
+            }
+            let name = definition
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| protocol("inline schema has no tool name"))?;
+            if !names.insert(name.to_owned()) {
+                return Err(protocol("duplicate inline schema name"));
+            }
+            // Use the exact strict lookup parser and policy before creating a command.
+            crate::McpCollapsedCatalogue::reconcile_structured_content(
+                None,
+                name,
+                definition.clone(),
+            )?;
+            if total_bytes + bytes > INLINE_SEARCH_SCHEMAS_MAX_BYTES {
+                return Err(protocol("inline schemas exceed 32768-byte total cap"));
+            }
+            total_bytes += bytes;
+            Ok(name.to_owned())
+        })();
+        match admission {
+            Ok(name) => definitions.push((name, definition.clone())),
+            Err(error) => {
+                tracing::warn!(%error, "collapsed search inline schema dropped; use get_tool_schema for the intended tool, retrying unchanged will not help")
+            }
+        }
     }
-    // Preserve the complete definition, including optional MCP tool metadata.
-    Ok(Some((name.to_owned(), top.clone())))
+    Ok(definitions)
 }
 
 fn schema_lookup_content(result: &CallToolResult) -> Result<Value, McpError> {
@@ -1765,28 +1957,44 @@ async fn project_outcome(
                 .await
                 .map(ToolExecution::InputRequired)
         }
+        OperationOutcome::TaskCreated(_) => Err(McpError::new(
+            McpFailure::Protocol,
+            "a task answer reached a transport that does not support MCP Tasks",
+        )),
         OperationOutcome::Complete(result) => {
-            let projected = project_complete(result)?;
-            let evidence = io
-                .store_evidence(&projected.evidence)
-                .map_err(|error| McpError::new(McpFailure::Transport, error.to_string()))?;
-            let foreign = ForeignResult::new(
-                envelope.subject().server(),
-                envelope.subject().operation_name(),
-                InvocationDigest::from_bytes(envelope.parameters()),
-                envelope.admission().clone(),
-                projected.result_type,
-                projected.ttl_ms,
-                projected.cache_scope,
-                projected.content,
-                evidence,
-                delivery,
-                cancellation,
-            )
-            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
-            Ok(ToolExecution::Complete(ToolResult::from_foreign(foreign)))
+            project_complete_result(result, envelope, io, delivery, cancellation)
+                .map(ToolExecution::Complete)
         }
     }
+}
+
+fn project_complete_result(
+    result: CompleteResult,
+    envelope: &ego_core::permit::McpPreparedEnvelope,
+    io: &dyn GuardedIo<'_>,
+    delivery: DeliveryCertainty,
+    cancellation: CancellationClassification,
+) -> Result<ToolResult, McpError> {
+    let projected = project_complete(result, &|bytes| io.store_evidence(bytes))?;
+    let evidence = io
+        .store_evidence(&projected.evidence)
+        .map_err(|error| McpError::new(McpFailure::Transport, error.to_string()))?;
+    let foreign = ForeignResult::new(
+        envelope.subject().server(),
+        envelope.subject().operation_name(),
+        InvocationDigest::from_bytes(envelope.parameters()),
+        envelope.admission().clone(),
+        projected.result_type,
+        projected.ttl_ms,
+        projected.cache_scope,
+        projected.content,
+        evidence,
+        delivery,
+        cancellation,
+    )
+    .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?
+    .with_tool_error(projected.tool_error);
+    Ok(ToolResult::from_foreign(foreign))
 }
 
 struct CompleteProjection {
@@ -1795,9 +2003,14 @@ struct CompleteProjection {
     ttl_ms: Option<u64>,
     cache_scope: Option<CoreCacheScope>,
     content: Vec<ForeignContent>,
+    tool_error: bool,
 }
 
-fn project_complete(result: CompleteResult) -> Result<CompleteProjection, McpError> {
+fn project_complete(
+    result: CompleteResult,
+    publish: &dyn Fn(&[u8]) -> Result<ego_core::store::evidence::EvidenceRef, ToolError>,
+) -> Result<CompleteProjection, McpError> {
+    let mut images = image_projection::ImageProjection::new(publish);
     match result {
         CompleteResult::Tool(result) => {
             let result_type = project_result_type(result.result_type.as_ref())?;
@@ -1805,7 +2018,7 @@ fn project_complete(result: CompleteResult) -> Result<CompleteProjection, McpErr
             let mut content = result
                 .content
                 .iter()
-                .map(project_content_block)
+                .map(|block| project_content_block(block, &mut images))
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(structured) = &result.structured_content {
                 let bytes = serde_json::to_vec(structured)?;
@@ -1817,6 +2030,7 @@ fn project_complete(result: CompleteResult) -> Result<CompleteProjection, McpErr
                 ttl_ms: None,
                 cache_scope: None,
                 content,
+                tool_error: result.is_error == Some(true),
             })
         }
         CompleteResult::Resource(result) => {
@@ -1825,7 +2039,7 @@ fn project_complete(result: CompleteResult) -> Result<CompleteProjection, McpErr
             let content = result
                 .contents
                 .iter()
-                .map(project_serialized_content)
+                .map(|block| project_serialized_content(block, &mut images))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(CompleteProjection {
                 evidence,
@@ -1833,6 +2047,7 @@ fn project_complete(result: CompleteResult) -> Result<CompleteProjection, McpErr
                 ttl_ms: result.ttl_ms,
                 cache_scope: map_cache_scope(result.cache_scope)?,
                 content,
+                tool_error: false,
             })
         }
         CompleteResult::Prompt(result) => {
@@ -1841,7 +2056,7 @@ fn project_complete(result: CompleteResult) -> Result<CompleteProjection, McpErr
             let content = result
                 .messages
                 .iter()
-                .map(|message| project_content_block(&message.content))
+                .map(|message| project_content_block(&message.content, &mut images))
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(CompleteProjection {
                 evidence,
@@ -1849,6 +2064,7 @@ fn project_complete(result: CompleteResult) -> Result<CompleteProjection, McpErr
                 ttl_ms: None,
                 cache_scope: None,
                 content,
+                tool_error: false,
             })
         }
     }
@@ -1862,15 +2078,24 @@ fn project_result_type(value: Option<&rmcp::model::ResultType>) -> Result<String
         .ok_or_else(|| protocol("selected MCP resultType is not a string"))
 }
 
-fn project_content_block(block: &ContentBlock) -> Result<ForeignContent, McpError> {
+fn project_content_block(
+    block: &ContentBlock,
+    images: &mut image_projection::ImageProjection<'_>,
+) -> Result<ForeignContent, McpError> {
     if let Some(text) = block.as_text() {
         return Ok(ForeignContent::text(text.text.clone()));
     }
-    project_serialized_content(block)
+    project_serialized_content(block, images)
 }
 
-fn project_serialized_content(value: &impl Serialize) -> Result<ForeignContent, McpError> {
+fn project_serialized_content(
+    value: &impl Serialize,
+    images: &mut image_projection::ImageProjection<'_>,
+) -> Result<ForeignContent, McpError> {
     let value = serde_json::to_value(value)?;
+    if value.get("type").and_then(Value::as_str) == Some("image") {
+        return Ok(images.project(&value));
+    }
     if let Some(text) = value.get("text").and_then(Value::as_str) {
         return Ok(ForeignContent::text(text.to_owned()));
     }
@@ -1935,6 +2160,8 @@ struct SplitMcpHttpEffects {
     expected_wire_params: Value,
     headers: Arc<[HttpHeader]>,
     oauth: Option<Arc<crate::oauth::McpOAuthSession>>,
+    /// The session declared MCP Tasks, so its per-request metadata says so.
+    tasks: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1970,7 +2197,13 @@ impl SplitMcpHttpEffects {
             expected_wire_params,
             headers: headers.into(),
             oauth,
+            tasks: false,
         }
+    }
+
+    fn with_tasks(mut self, tasks: bool) -> Self {
+        self.tasks = tasks;
+        self
     }
 
     fn selected_settlement(&self) -> Result<Option<McpHttpSettlement>, McpError> {
@@ -2016,7 +2249,7 @@ impl SplitMcpHttpEffects {
             || body.get("id").is_none()
             || body.get("method").and_then(Value::as_str)
                 != Some(self.envelope.operation().method())
-            || !selected_wire_params_match(params, &self.expected_wire_params)
+            || !selected_wire_params_match(params, &self.expected_wire_params, self.tasks)
         {
             return Err(authority("selected MCP HTTP method or parameters changed"));
         }
@@ -2086,7 +2319,7 @@ impl SplitMcpHttpEffects {
     }
 }
 
-fn selected_wire_params_match(mut actual: Value, expected: &Value) -> bool {
+fn selected_wire_params_match(mut actual: Value, expected: &Value, tasks: bool) -> bool {
     let Some(params) = actual.as_object_mut() else {
         return false;
     };
@@ -2099,7 +2332,7 @@ fn selected_wire_params_match(mut actual: Value, expected: &Value) -> bool {
     if !progress.is_u64() && !progress.as_str().is_some_and(|value| !value.is_empty()) {
         return false;
     }
-    let Ok(capabilities) = serde_json::to_value(current_client_capabilities()) else {
+    let Ok(capabilities) = serde_json::to_value(client_capabilities(tasks)) else {
         return false;
     };
     let mut expected_metadata = serde_json::json!({
@@ -2385,10 +2618,7 @@ fn prepare_error(message: impl Into<String>) -> ToolError {
 }
 
 fn execution_error(message: impl Into<String>) -> ToolError {
-    ToolError::foreign(
-        format!("MCP execution failed: {}", message.into()),
-        DeliveryCertainty::DefinitelyUnsent,
-    )
+    ToolError::foreign(message.into(), DeliveryCertainty::DefinitelyUnsent)
 }
 
 fn mcp_prepare_error(error: McpError) -> ToolError {
@@ -2397,7 +2627,7 @@ fn mcp_prepare_error(error: McpError) -> ToolError {
 
 fn mcp_execution_error(error: McpError) -> ToolError {
     let delivery = error.delivery().unwrap_or(DeliveryCertainty::PossiblySent);
-    ToolError::foreign(format!("MCP execution failed: {error}"), delivery)
+    ToolError::foreign(error.to_string(), delivery)
 }
 
 fn continuation(error: ContinuationError) -> McpError {
@@ -2409,6 +2639,17 @@ fn settlement_failure(delivery: DeliveryCertainty) -> McpError {
         McpFailure::Authority,
         "MCP continuation terminal state could not be durably recorded",
         delivery,
+    )
+}
+
+fn unpublished_claim() -> McpError {
+    // DEFERRED (2026-11-23): a durable claim with no published outcome stays
+    // Claimed. Recovery has no transition to Uncertain or Failed for this
+    // cut, and fail_pending only accepts Pending.
+    McpError::with_delivery(
+        McpFailure::Authority,
+        "MCP continuation was claimed but has no recorded outcome and may have been sent. Retrying unchanged cannot help. Check the server for the operation's outcome before issuing a new call.",
+        DeliveryCertainty::PossiblySent,
     )
 }
 
@@ -2427,6 +2668,21 @@ fn protocol(message: impl Into<String>) -> McpError {
 #[cfg(test)]
 mod stdio_fingerprint_tests {
     use super::*;
+
+    // Catches: the projection drops the server's `isError` flag, so a TUIC error
+    // answer (b-019 `project_required`) reaches the turn as a successful call.
+    #[test]
+    fn complete_tool_projection_keeps_the_server_error_flag() {
+        for (is_error, expected) in [(Some(true), true), (Some(false), false), (None, false)] {
+            let mut result = CallToolResult::success(vec![ContentBlock::text(
+                r#"{"error":"project_required: register an authoritative project before reporting progress"}"#,
+            )]);
+            result.is_error = is_error;
+            let projected =
+                project_complete(CompleteResult::Tool(result), &|_| unreachable!()).unwrap();
+            assert_eq!(projected.tool_error, expected, "{is_error:?}");
+        }
+    }
 
     fn inline_search_result(content: Value) -> CallToolResult {
         let mut result = CallToolResult::success(vec![]);
@@ -2451,8 +2707,10 @@ mod stdio_fingerprint_tests {
             inline_search_result(content.clone()),
             CallToolResult::success(vec![ContentBlock::text(content.to_string())]),
         ] {
-            let (name, definition) = search_inline_definition(&result)
+            let (name, definition) = search_inline_definitions(&result)
                 .unwrap()
+                .into_iter()
+                .next()
                 .expect("TUIC search alone must supply the admission definition");
             assert_eq!(name, "needle");
             assert_eq!(definition, content["top_schema"]);
@@ -2481,10 +2739,7 @@ mod stdio_fingerprint_tests {
     #[test]
     fn collapsed_search_inline_schema_rejects_excess_bytes() {
         let top = serde_json::json!({"name":"weather","description":"x".repeat(INLINE_SEARCH_SCHEMA_MAX_BYTES),"inputSchema":{"type":"object"}});
-        let error =
-            search_inline_definition(&inline_search_result(serde_json::json!({"results":[{"name":"weather","summary":"Weather"}],"top_schema":top})))
-                .unwrap_err();
-        assert!(error.to_string().contains("16384-byte cap"));
+        assert!(search_inline_definitions(&inline_search_result(serde_json::json!({"results":[{"name":"weather","summary":"Weather"}],"top_schema":top}))).unwrap().is_empty());
     }
 
     /// Catches: a summary or a non-top schema grants dispatcher authority.
@@ -2494,10 +2749,10 @@ mod stdio_fingerprint_tests {
             {"name":"weather","summary":"Weather"},
             {"name":"calendar","description":"Calendar","inputSchema":{"type":"object"}}
         ]}));
-        assert!(search_inline_definition(&result).unwrap().is_none());
+        assert!(search_inline_definitions(&result).unwrap().is_empty());
         let prose =
             CallToolResult::success(vec![ContentBlock::text("weather: current conditions")]);
-        assert!(search_inline_definition(&prose).unwrap().is_none());
+        assert!(search_inline_definitions(&prose).unwrap().is_empty());
     }
 
     /// Catches: the byte cap rejects a definition that fits exactly.
@@ -2510,10 +2765,7 @@ mod stdio_fingerprint_tests {
         let result = inline_search_result(
             serde_json::json!({"results":[{"name":"weather","summary":"Weather"}],"top_schema":top}),
         );
-        assert_eq!(
-            search_inline_definition(&result).unwrap().unwrap().0,
-            "weather"
-        );
+        assert_eq!(search_inline_definitions(&result).unwrap()[0].0, "weather");
     }
 
     // Catches: a sibling schema for a non-top hit grants unintended authority.
@@ -2522,7 +2774,11 @@ mod stdio_fingerprint_tests {
         let mut content: Value = tuic_search_content();
         for results in [serde_json::json!([]), serde_json::json!([{"name":"other"}])] {
             content["results"] = results;
-            assert!(search_inline_definition(&inline_search_result(content.clone())).is_err());
+            assert!(
+                search_inline_definitions(&inline_search_result(content.clone()))
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 
@@ -2532,10 +2788,10 @@ mod stdio_fingerprint_tests {
         let content: Value = tuic_search_content();
         let mut failed = inline_search_result(content.clone());
         failed.is_error = Some(true);
-        assert!(search_inline_definition(&failed).unwrap().is_none());
+        assert!(search_inline_definitions(&failed).unwrap().is_empty());
         let mut incomplete = inline_search_result(content);
         incomplete.result_type = None;
-        assert!(search_inline_definition(&incomplete).unwrap().is_none());
+        assert!(search_inline_definitions(&incomplete).unwrap().is_empty());
     }
 
     // Catches: inline admission strips optional metadata before schema validation.
@@ -2543,8 +2799,10 @@ mod stdio_fingerprint_tests {
     fn collapsed_search_inline_schema_preserves_optional_metadata() {
         let mut content: Value = tuic_search_content();
         content["top_schema"]["annotations"] = serde_json::json!({"readOnlyHint":true});
-        let (_, definition) = search_inline_definition(&inline_search_result(content.clone()))
+        let (_, definition) = search_inline_definitions(&inline_search_result(content.clone()))
             .unwrap()
+            .into_iter()
+            .next()
             .unwrap();
         assert_eq!(definition, content["top_schema"]);
     }
@@ -2731,7 +2989,7 @@ mod stdio_fingerprint_tests {
                 "progressToken": 7
             }
         });
-        assert!(selected_wire_params_match(actual.clone(), &expected));
+        assert!(selected_wire_params_match(actual.clone(), &expected, false));
 
         for changed in [
             {
@@ -2757,7 +3015,7 @@ mod stdio_fingerprint_tests {
             },
         ] {
             assert!(
-                !selected_wire_params_match(changed.clone(), &expected),
+                !selected_wire_params_match(changed.clone(), &expected, false),
                 "changed selected HTTP authority was accepted: {changed}"
             );
         }

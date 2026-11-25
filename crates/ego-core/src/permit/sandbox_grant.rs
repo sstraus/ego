@@ -64,17 +64,39 @@ impl fmt::Display for SandboxGrant {
     }
 }
 
+/// What a person answered to a refusal: the three remedies every refusal offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusalAnswer {
+    /// Keep it blocked.
+    Deny,
+    /// Allow for this session only.
+    Session,
+    /// Allow for this session and keep the grant for the workspace.
+    Always,
+}
+
+impl RefusalAnswer {
+    /// Whether the refused access is now allowed for the session.
+    pub const fn allows(self) -> bool {
+        !matches!(self, Self::Deny)
+    }
+}
+
 /// The host seat that answers sandbox denials for one run.
 pub trait SandboxGrantPort: Send + Sync {
     /// Every grant currently in force for this run: the session's answers and
     /// whatever the user stored for the workspace.
     fn granted(&self) -> Vec<SandboxGrant>;
 
-    /// Ask the human whether `request` may be added to the sandbox. `true`
-    /// means the port has recorded the grant, and the next [`Self::granted`]
-    /// includes it; anything else, including a failed transport, is `false`.
-    /// Show `command`, the exact command line that runs again if allowed.
-    fn ask<'a>(&'a self, request: &'a SandboxGrant, command: &'a str) -> BoxFuture<'a, bool>;
+    /// Ask the human whether `request` may be added to the sandbox. An allowing
+    /// answer means the port has recorded the grant, and the next
+    /// [`Self::granted`] includes it; a failed transport is [`RefusalAnswer::Deny`].
+    /// Show `command`, the exact refused command. An approval never replays it.
+    fn ask<'a>(
+        &'a self,
+        request: &'a SandboxGrant,
+        command: &'a str,
+    ) -> BoxFuture<'a, RefusalAnswer>;
 }
 
 #[cfg(test)]

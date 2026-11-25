@@ -1,10 +1,15 @@
 //! `ego usage` and the shared human rendering used by `/usage`.
 
+mod context;
+mod estimate;
+
 use chrono::{Local, TimeZone};
 use ego_core::cost::Money;
 use ego_core::run::RunTermination;
 use ego_core::state::ContextWindow;
-use ego_core::usage::{CostBreakdown, UsageLine, UsagePeriod, UsageReport, UsageReportService};
+use ego_core::usage::{
+    CostBreakdown, EstimateBasis, UsageLine, UsagePeriod, UsageReport, UsageReportService,
+};
 use ego_tools::clock::SystemClock;
 
 use crate::cli::{UsageArgs, UsageError};
@@ -43,12 +48,26 @@ async fn report_workspace(args: &UsageArgs) -> Result<UsageReport, RunTerminatio
         session::store_root(args.session_dir.as_ref()).map_err(usage)?,
     );
     let store = session::jsonl(store_root, root.clone());
-    let metadata =
-        catalogue::listing(&store, &root, false).map_err(|error| RunTermination::Failed {
-            message: format!("the session store could not be listed: {error}"),
-        })?;
+    let metadata = match &args.session {
+        Some(id) => store.readable_meta(id).map(|meta| {
+            meta.filter(|meta| meta.workspace_root == root)
+                .into_iter()
+                .collect()
+        }),
+        None => catalogue::listing(&store, &root, false),
+    }
+    .map_err(|error| RunTermination::Failed {
+        message: format!("the session store could not be listed: {error}"),
+    })?;
     let clock = SystemClock;
-    let mut report = UsageReportService::new(&store, &clock)
+    let estimator =
+        crate::config::ego_home().map(|home| estimate::CachedTableEstimator::open(home, &clock));
+    let service = UsageReportService::new(&store, &clock);
+    let service = match &estimator {
+        Some(estimator) => service.with_estimator(estimator),
+        None => service,
+    };
+    let mut report = service
         .report(&metadata, args.period)
         .await
         .map_err(|error| RunTermination::Failed {
@@ -64,6 +83,7 @@ async fn report_workspace(args: &UsageArgs) -> Result<UsageReport, RunTerminatio
     {
         report.provider_limits = current_openrouter_limits().await.into_iter().collect();
     }
+    report.rate_limits = crate::quota::current();
     Ok(report)
 }
 
@@ -158,7 +178,12 @@ where
     };
     let mut cells = vec![COLUMNS.map(str::to_owned).to_vec()];
     for session in &report.sessions {
-        let id = session.session.to_string();
+        let full_id = session.session.to_string();
+        let id = if width.is_some() {
+            full_id.rsplit('-').next().unwrap_or(&full_id).to_owned()
+        } else {
+            full_id
+        };
         let model = session
             .model
             .clone()
@@ -177,16 +202,20 @@ where
         local_stamp(zone, report.as_of.as_millis())
     )];
     rows.extend(context.map(context_line));
-    let table = aligned(&cells);
-    if width.is_some_and(|width| table.iter().any(|row| row.chars().count() > width)) {
-        // Keep the full identity, but do not let it push accounting cells off-screen.
-        for row in cells.iter().skip(1) {
-            rows.push(format!("session {} · model {}", row[0], row[1]));
-            rows.extend(aligned(&[cells[0][2..].to_vec(), row[2..].to_vec()]));
-        }
+    if let Some(width) = width {
+        // Cost and token counts precede optional descriptive fields. Full
+        // identities remain available through `ego usage --json`.
+        let order = [0, 7, 3, 4, 5, 6, 1, 2];
+        let compact = cells
+            .iter()
+            .map(|row| order.iter().map(|index| row[*index].clone()).collect())
+            .collect();
+        rows.extend(crate::render::table::plain_table_with_width(compact, width));
+        rows.push("ego usage --json — full session identities and accounting detail".into());
     } else {
-        rows.extend(table);
+        rows.extend(aligned(&cells));
     }
+    rows.extend(context::lines(report));
     rows.push(String::new());
     rows.join("\n")
 }
@@ -247,6 +276,8 @@ fn spent(line: &UsageLine) -> bool {
         || !line.cost.unknown.is_empty()
         || !line.cost.subscription_equivalent.is_empty()
         || !line.cost.subscription_unknown.is_empty()
+        || !line.cost.estimated.is_empty()
+        || !line.cost.estimate_unavailable.is_empty()
 }
 
 fn row(session: &str, model: &str, role: &str, line: &UsageLine) -> Vec<String> {
@@ -273,29 +304,7 @@ fn row(session: &str, model: &str, role: &str, line: &UsageLine) -> Vec<String> 
 /// The last column is never padded: trailing spaces are invisible and a reader
 /// that splits on whitespace should not have to strip them.
 fn aligned(cells: &[Vec<String>]) -> Vec<String> {
-    let mut widths = vec![0usize; COLUMNS.len()];
-    for row in cells {
-        for (index, cell) in row.iter().enumerate() {
-            widths[index] = widths[index].max(cell.chars().count());
-        }
-    }
-    cells
-        .iter()
-        .map(|row| {
-            let last = row.len() - 1;
-            row.iter()
-                .enumerate()
-                .map(|(index, cell)| {
-                    if index == last {
-                        cell.clone()
-                    } else {
-                        format!("{cell:<width$}", width = widths[index])
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("  ")
-        })
-        .collect()
+    crate::render::table::plain_table_with_width(cells.to_vec(), usize::MAX)
 }
 
 /// One compact cost cell.
@@ -316,6 +325,16 @@ fn cost_text(cost: &CostBreakdown) -> String {
         (false, true) => vec![known],
         (false, false) => vec![format!("{known} +unknown")],
     };
+    parts.extend(cost.estimated.iter().map(|estimate| {
+        let label = match estimate.basis {
+            EstimateBasis::RequestTime { .. } => "request-time table",
+            EstimateBasis::CurrentTable { .. } => "current-table estimate",
+        };
+        format!("~{} estimated ({label})", money_text(&estimate.amount))
+    }));
+    if !cost.estimate_unavailable.is_empty() {
+        parts.push("estimate unavailable".to_owned());
+    }
     parts.extend(cost.subscription_equivalent.iter().map(|amount| {
         let text = format!(
             "{} subscription-equivalent (standard API)",
@@ -386,6 +405,7 @@ mod text_red {
             period: UsagePeriod::All,
             sessions: Vec::new(),
             provider_limits: Vec::new(),
+            rate_limits: Vec::new(),
             totals: UsageLines {
                 main: empty(),
                 judge: empty(),
@@ -404,6 +424,8 @@ mod text_red {
             unknown: Vec::new(),
             subscription_equivalent: Vec::new(),
             subscription_unknown: Vec::new(),
+            estimated: Vec::new(),
+            estimate_unavailable: Vec::new(),
         }
     }
 
@@ -416,6 +438,8 @@ mod text_red {
             unknown: Vec::new(),
             subscription_equivalent: Vec::new(),
             subscription_unknown: Vec::new(),
+            estimated: Vec::new(),
+            estimate_unavailable: Vec::new(),
         }
     }
 
@@ -458,6 +482,8 @@ mod text_red {
             unknown: vec![UnknownCost::NoPricingQuote],
             subscription_equivalent: Vec::new(),
             subscription_unknown: Vec::new(),
+            estimated: Vec::new(),
+            estimate_unavailable: Vec::new(),
         };
         assert_eq!(cost_text(&unpriced), "unknown");
     }
@@ -470,6 +496,7 @@ mod text_red {
             let mut lines = report.totals.clone();
             lines.main = line(cost);
             report.sessions.push(ego_core::usage::SessionUsage {
+                prompt_cache: None,
                 session: "00000000-0000-0000-0000-000000000001"
                     .parse()
                     .expect("session id"),
@@ -478,6 +505,7 @@ mod text_red {
                 context: None,
                 context_capacity: None,
                 provider_limits: None,
+                context_attribution: Default::default(),
                 lines,
             });
             let text = render_text(&report, false, None);
@@ -546,7 +574,99 @@ mod text_red {
             serde_json::to_string(&report(1_790_662_411_741, usd(156_247, 8))).expect("serialise");
         assert_eq!(
             json,
-            r#"{"v":4,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}}}}"#
+            r#"{"v":6,"as_of":1790662411741,"period":{"kind":"all"},"sessions":[],"totals":{"main":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"judge":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"goal_check":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"compaction":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"subagent":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"hook":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}},"total":{"usage":{"uncached_input_tokens":0,"cache_read_tokens":0,"cache_write_tokens":0,"cache_write_extended_tokens":0,"output_tokens":0,"reasoning_tokens":0},"cost":{"known":[{"amount":"0.00156247","currency":"USD"}],"unknown":[],"subscription_equivalent":[],"subscription_unknown":[]}}},"rate_limits":[]}"#
         );
+    }
+    // Catches: human output swaps request/result estimates or drops duplicate source and provenance.
+    #[test]
+    fn tool_context_text_and_json_preserve_the_same_estimates_and_source_links() {
+        let mut report = report(0, none());
+        let mut value = serde_json::json!({
+            "session": "00000000-0000-0000-0000-000000000001",
+            "model": "fixture",
+            "context_attribution": {
+                "source": "durable_tool_events",
+                "provenance": "utf8_bytes_div_4_ceil",
+                "scope": "local_session_requests_in_report_period",
+                "unmatched_results": 1,
+                "tools": [{
+                    "tool": "read", "request_estimated_tokens": 7,
+                    "result_estimated_tokens": 19, "duplicate_read_estimated_tokens": 26,
+                    "calls": [{
+                        "item": "00000000-0000-0000-0000-000000000002",
+                        "request_seq": 8, "request_bytes": 25, "request_estimated_tokens": 7,
+                        "result": {"seq": 9, "bytes": 73, "estimated_tokens": 19,
+                            "provenance": "builtin", "ok": true, "duplicate_of_request_seq": 3}
+                    }]
+                }]
+            }
+        });
+        value["lines"] = serde_json::to_value(&report.totals).unwrap();
+        report.sessions.push(serde_json::from_value(value).unwrap());
+        let before = serde_json::to_value(&report).unwrap();
+        let text = render_text(&report, false, None);
+        assert!(
+            text.contains("read: request ~7 result ~19 duplicate-read ~26 tokens"),
+            "{text}"
+        );
+        assert!(text.contains("source=durable_tool_events provenance=utf8_bytes_div_4_ceil scope=local_session_requests_in_report_period"), "{text}");
+        assert!(text.contains("request-seq:8 25 bytes ~7 tokens; result-seq:9 73 bytes ~19 tokens provenance=builtin ok=true duplicate-of=request-seq:3"), "{text}");
+        assert!(
+            text.contains("unmatched results: 1 (not attributed)"),
+            "{text}"
+        );
+        assert!(text.contains("Not billing or provider occupancy"), "{text}");
+        assert_eq!(serde_json::to_value(&report).unwrap(), before);
+    }
+    // Catches: one publication surface omits or renames the shared quota contract.
+    #[test]
+    fn observed_limits_appear_in_report_status_line_and_acp() {
+        use crate::repl::status::{
+            SeatFacts, SelectionFacts, StatusLine, StatusSegmentName, StatusTemplate,
+            SurfaceSnapshot,
+        };
+        use ego_core::config::{Mode, ModelRef, Trust};
+        use ego_core::generator::types::ThinkingLevel;
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../ego-ai/tests/fixtures/subscription_quota/contract.json"
+        ))
+        .unwrap();
+        let limits: Vec<ego_core::quota::RateLimits> =
+            serde_json::from_value(fixture["rate_limits"].clone()).unwrap();
+        let mut report = report(0, none());
+        report.rate_limits = limits.clone();
+        let json = serde_json::to_value(report).unwrap();
+        assert_eq!(json["v"], 6);
+        assert_eq!(json["rate_limits"], fixture["rate_limits"]);
+        let mut snapshot = SurfaceSnapshot::from_state(
+            ego_core::event::id::SessionId::new(),
+            &ego_core::state::SessionState::default(),
+            SelectionFacts::new(
+                ModelRef("anthropic/example".into()),
+                ThinkingLevel::Low,
+                Mode::Default,
+            ),
+            SeatFacts::new(
+                ego_core::state::QueueStatus::default(),
+                0,
+                "/workspace",
+                Trust::Trusted,
+            ),
+            None,
+        );
+        snapshot.rate_limits = limits.clone();
+        let line = StatusLine::render(&snapshot, &[StatusSegmentName::RateLimits], 240);
+        assert!(line.text().contains("seven_day 82"));
+        let (_, error) = StatusTemplate::new(
+            "{{ rate_limits[0].windows[0].used_percentage }}\n{{ prompt }}".into(),
+        )
+        .render(&snapshot, &[], 240);
+        assert!(error.is_none());
+        let input: serde_json::Value =
+            serde_json::from_slice(&crate::status_provider::command_input(&limits).unwrap())
+                .unwrap();
+        assert_eq!(input["rate_limits"], fixture["rate_limits"]);
+        let acp = serde_json::to_value(ego_acp::project::rate_limits_v1(&limits)).unwrap();
+        assert_eq!(acp["_meta"]["ego"]["rate_limits"], fixture["rate_limits"]);
     }
 }

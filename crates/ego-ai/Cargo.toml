@@ -7,6 +7,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+aws-credential-types = "1.3"
+aws-sigv4 = { version = "1.6", features = ["sign-http"] }
+percent-encoding = "2.3"
+time = { version = "0.3", features = ["parsing"] }
 httpdate = "1.0.3"
 ego-core.workspace = true
 futures = "0.3.34"
@@ -19,7 +23,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 # bytes ego must not reinterpret — a tool call's arguments, a rate that must
 # never touch an `f64` — and a build that dropped the unrelated dependency
 # supplying the feature would stop compiling for a reason unrelated to either.
-serde_json = { version = "1.0.151", features = ["raw_value"] }
+serde_json = { version = "1.0.151", features = ["raw_value", "preserve_order"] }
 tracing = "0.1.44"
 url = "2.5.8"
 [lints]

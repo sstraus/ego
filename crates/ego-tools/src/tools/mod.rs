@@ -1,33 +1,34 @@
-//! The builtins: `read`, `glob`, `grep`, `write`, `edit`, `exec`, and
-//! `read_tool_result`.
+//! Twelve builtins: `read`, `glob`, `grep`, `write`, `edit`, `notebook_edit`,
+//! `exec`, `exec_cancel`, `exec_monitor`, `exec_status`, `read_tool_result`, and
+//! `web_fetch`.
+//! `web_search_external` is added when its backend is configured, and `image_gen` when
+//! `OPENAI_API_KEY` is set.
 //!
-//! Each builtin prepares its exact operations. Listing, searching and
-//! reading are separate authorities; a glob request must not authorize
-//! reading every byte under its root.
+//! See the design notes and
+//! the design notes.
+//! Listing, searching and reading prepare distinct authorities: a `glob` that
+//! prepared `Op::Read` over its root would gain access to every byte after
+//! asking only for names.
 //!
-//! Write prepares a mutating operation and therefore exercises mode floors
-//! and write rules, unlike purely observational filesystem tools.
+//! `write` declares a mutation. `edit` declares both a read and a write of the
+//! same file; policy must authorize both effects before execution. See
+//! the design notes.
 //!
-//! `edit` is the fifth and it is also not one more of the same. It is the only
-//! one that prepares *two* operations for one call — a `Read` and a `Write` of
-//! the same file, because it genuinely performs both — so it is the first call
-//! in this tree that can observe that `classify` and `scope_of` treat a call's
-//! ops as a conjunction. Both were written that way for it and neither had ever
-//! been exercised.
-//!
-//! None of the filesystem tools holds an `Fs`. They receive a `GuardedIo`,
-//! which re-resolves and re-checks every path before touching it. `exec` and
-//! `read_tool_result` cross their own guarded ports instead: `GuardedExec` and
-//! the session evidence store.
+//! Filesystem tools receive `GuardedIo`, not an unrestricted `Fs`; the guarded
+//! filesystem re-resolves and re-checks paths before touching them. Process,
+//! evidence and web operations use the corresponding guarded ports.
 
 mod edit;
 mod exec;
 mod exec_cancel;
+mod exec_monitor;
 mod exec_status;
 mod glob;
 mod grep;
+mod image_gen;
 mod notebook_edit;
 mod read;
+mod read_pdf;
 mod read_tool_result;
 mod web;
 mod write;
@@ -35,15 +36,17 @@ mod write;
 pub use edit::{EditParams, EditTool};
 pub use exec::{ExecParams, ExecTool};
 pub use exec_cancel::{ExecCancelParams, ExecCancelTool};
+pub use exec_monitor::{ExecMonitorParams, ExecMonitorTool};
 pub use exec_status::{ExecStatusParams, ExecStatusTool};
 pub use glob::{GlobParams, GlobTool};
 pub use grep::{GrepParams, GrepTool};
+pub use image_gen::{ImageGen, ImageGenParams, SubscriptionAccess, SubscriptionRoute};
 pub use notebook_edit::{NotebookEditParams, NotebookEditTool};
 pub use read::{ReadParams, ReadTool};
 pub use read_tool_result::{ReadToolResult, ReadToolResultParams};
 pub use web::{
     ExaSearch, HostedWebSearch, SearchBackend, WebFetch, WebFetchParams, WebSearch,
-    WebSearchParams, selected_web_search,
+    WebSearchParams, default_web_search, selected_web_search,
 };
 pub use write::{WriteParams, WriteTool};
 
@@ -51,17 +54,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ego_core::permit::{
-    CanonPath, Op, PrepareCtx, PreparedCall, ScanLimits, ScanRequest, Tool, ToolError, Typed,
+    CanonPath, FsError, Op, PrepareCtx, PreparedCall, ScanLimits, ScanRequest, Tool, ToolError,
+    Typed, names_alternate_stream,
 };
 
 /// Directory names a builtin traversal does not descend into.
 ///
 /// A usability default and **not a security boundary**: a path inside one of
-/// these is refused by the permit exactly like any other, and this list is
+/// these is subject to the same permit checks as any other. This list is
 /// never consulted when deciding whether something is in scope.
 pub const SKIP_DIRS: [&str; 3] = [".git", "target", "node_modules"];
 
-/// The seven, ready to hand to `Tools::new`.
+/// Twelve builtins plus configured web search, with inherited exec environment.
+/// Ready to hand to `Tools::new`.
 pub fn builtins() -> Vec<Arc<dyn Tool>> {
     builtins_with_environment(ego_core::permit::EnvPolicy::Inherited)
 }
@@ -77,12 +82,16 @@ pub fn builtins_with_environment(environment: ego_core::permit::EnvPolicy) -> Ve
         Arc::new(Typed(NotebookEditTool)),
         Arc::new(Typed(ExecTool::with_environment(environment))),
         Arc::new(Typed(ExecCancelTool)),
+        Arc::new(Typed(ExecMonitorTool)),
         Arc::new(Typed(ExecStatusTool)),
         Arc::new(Typed(ReadToolResult)),
         Arc::new(Typed(WebFetch)),
     ];
     if let Some(search) = WebSearch::from_environment() {
         tools.push(Arc::new(Typed(search)));
+    }
+    if let Some(image) = ImageGen::from_environment() {
+        tools.push(Arc::new(Typed(image)));
     }
     tools
 }
@@ -101,6 +110,12 @@ fn resolve(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPath, ToolError> {
     } else {
         ctx.cwd.as_path().join(named)
     };
+    if names_alternate_stream(&joined) {
+        return Err(FsError::StreamName {
+            path: CanonPath::new(&joined),
+        }
+        .into());
+    }
     Ok(ctx.resolver.canonicalize(&joined)?)
 }
 
@@ -125,6 +140,12 @@ pub(crate) fn resolve_target(ctx: &PrepareCtx<'_>, path: &str) -> Result<CanonPa
     } else {
         ctx.cwd.as_path().join(named)
     };
+    if names_alternate_stream(&joined) {
+        return Err(FsError::StreamName {
+            path: CanonPath::new(&joined),
+        }
+        .into());
+    }
     // Already there: resolve it whole, so a symlinked target is judged as
     // the file the bytes would actually reach.
     if let Ok(existing) = ctx.resolver.canonicalize(&joined) {

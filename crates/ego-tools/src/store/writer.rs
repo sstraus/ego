@@ -1,14 +1,17 @@
 //! Opening a session for writing: lease, repair, resume — in that order.
 //!
-//! Opening composes lease acquisition, recovery and replay. Snapshot writes
-//! remain separate: checkpoints are taken after state reduction, not as an
-//! unconditional side effect of opening.
+//! See the design notes. The five
+//! durable-store pieces (`recover`, `resume`, the lease, and the two snapshot
+//! APIs) were each correct and each uncalled; this is the composition of the
+//! three that belong to opening. Snapshot writing is deliberately not here —
+//! a snapshot is a checkpoint taken after events are applied, not something
+//! an open does.
 //!
 //! ## Why repair is not opt-in
 //!
 //! Whether a crash happened is not observable from outside the store, so
 //! "recover if damaged" is not a decision a caller can make; it can only
-//! guess, and the common guess is to forget. `crates/ego-tools/tests/resume.rs`
+//! guess, and the common guess is to forget. `crates/ego-tools/tests/it/resume.rs`
 //! measures what forgetting costs: appending to a torn log splices a complete
 //! record onto a partial one, `valid_prefix` rejects that line and everything
 //! behind it, and the next recovery discards every append made since the
@@ -315,9 +318,37 @@ impl SessionBlobSource for SessionWriter<'_> {
 }
 
 impl JsonlStore {
-    /// The writer lease lives beside event, manifest and snapshot files.
+    /// The per-session writer lease, alongside `events.jsonl`,
+    /// `manifest.json` and `snapshot.json` (`ARCHITECTURE.md` §5).
     pub(super) fn lease_path(&self, id: &SessionId) -> PathBuf {
         self.session_dir(id).join("lease")
+    }
+
+    /// Take the queued-turn lease of `id` (`CLI.md` §2, `resume --queue`).
+    ///
+    /// A second lock file beside the writer lease, and not the writer lease
+    /// itself: a queued invocation must hold its place while the turn's own
+    /// open takes the writer lease in the same process. Contention is
+    /// [`LeaseError::LeaseHeld`]; a crashed holder's lock is released by the
+    /// kernel, so `lease.is_alive` only governs the stale-but-locked case.
+    pub fn acquire_queue_lease(
+        &self,
+        id: &SessionId,
+        lease: LeaseInputs<'_>,
+    ) -> Result<Lease, LeaseError> {
+        Lease::acquire(
+            &self.session_dir(id).join("queue"),
+            lease.pid,
+            lease.now,
+            lease.stale_after,
+            lease.is_alive,
+        )
+    }
+
+    /// Whether some process holds `id`'s writer lease right now. Never takes
+    /// or creates the lease.
+    pub fn writer_lease_held(&self, id: &SessionId) -> std::io::Result<bool> {
+        super::lease::is_held(&self.lease_path(id))
     }
 
     /// Take the writer lease on `id`, repair whatever a crash left behind,
@@ -347,11 +378,13 @@ impl JsonlStore {
         id: &SessionId,
         lease: LeaseInputs<'_>,
     ) -> Result<OpenSession<'_>, OpenError> {
+        let now = lease.now;
         let opened = self.open_candidate(id, lease)?;
         opened
             .writer
             .publish_pid_index()
             .map_err(|error| OpenError::Lease(LeaseError::Io(error)))?;
+        ego_core::session_lifecycle::SessionLifecycleStore::note_opened(self, *id, now);
         Ok(opened)
     }
 
@@ -370,6 +403,8 @@ impl JsonlStore {
             lease.is_alive,
         )
         .map_err(OpenError::Lease)?;
+        // A cold session goes back to plain files before any replay or append.
+        self.restore_plain_session(id).map_err(OpenError::Recover)?;
 
         let snapshot_revision = self
             .io

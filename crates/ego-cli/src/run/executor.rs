@@ -22,10 +22,10 @@ use super::*;
 /// Retries an ACP turn spends on a transient provider failure that showed
 /// nothing, before it settles as a known failure.
 ///
-/// operator decision 2026-10-05 (regression): a human watching an AI chat is
+/// the project decision 2026-10-05: a human watching an AI chat is
 /// served better by six visible retries with backoff than by a turn that dies
-/// on the first overload. A headless `ego run` keeps `--retry 0` by default,
-/// because a script owns its own retry policy and reads exit 4 for it.
+/// on the first overload. A headless `ego run` uses two finite retries by
+/// default; a script can select `--retry 0` and own recovery after exit 4.
 pub(super) const ACP_PROVIDER_RETRIES: u32 = crate::cli::INTERACTIVE_PROVIDER_RETRIES;
 
 pub(super) fn public_result_artifact(
@@ -84,10 +84,14 @@ pub(super) fn settlement(termination: RunTermination) -> Result<RunSettlement, R
         // it was asked to go. It is a settlement, and the one the host that
         // asked for it is waiting to read.
         RunTermination::Paused => Ok(RunSettlement::Paused),
-        RunTermination::QuestionRequired { question } => Err(RunExecutorError::new(format!(
-            "question {} still requires an answer",
-            question.as_ref().id
-        ))),
+        // Pending input is a known boundary, not an ambiguous execution.
+        // Keep the diagnostic and durable question available for explicit resume.
+        RunTermination::QuestionRequired { question } => Ok(RunSettlement::Interrupted {
+            diagnostic: Some(format!(
+                "question {} still requires an answer",
+                question.as_ref().id
+            )),
+        }),
         termination => Err(run_executor_error(termination)),
     }
 }
@@ -193,6 +197,7 @@ pub struct CliRunExecutor {
     pub(super) store: Arc<JsonlStore>,
     pub(super) concurrency: Option<Arc<Semaphore>>,
     pub(super) frozen: Option<Arc<config::FrozenRunConfig>>,
+    pub(super) acp_controls: Option<Arc<crate::acp_controls::AcpSessionControls>>,
     pub(super) artifacts: Option<Arc<dyn RunArtifactStore>>,
     pub(super) admission: Arc<EvidenceAdmissionService>,
     pub(super) child_authority: Option<Arc<ChildAuthorityCeiling>>,
@@ -202,6 +207,12 @@ pub struct CliRunExecutor {
 
 #[derive(Clone)]
 pub(super) struct ChildAuthorityCeiling {
+    connection: Option<String>,
+    live_selection: Option<Arc<model::GenerationSelection>>,
+    connections: BTreeMap<String, ego_core::config::ConnectionConfig>,
+    parent_model: Option<ModelRef>,
+    instance_routes: BTreeSet<String>,
+    refresh_commands: BTreeMap<String, String>,
     mode: Mode,
     sandbox: Confinement,
     offline: bool,
@@ -212,6 +223,25 @@ pub(super) struct ChildAuthorityCeiling {
 impl ChildAuthorityCeiling {
     pub(super) fn from_parent(effective: &Effective, confinement: &RunConfinement) -> Self {
         Self {
+            connection: effective.connection.clone(),
+            live_selection: None,
+            connections: effective.connections.clone(),
+            parent_model: effective.model.clone(),
+            refresh_commands: effective
+                .auth
+                .iter()
+                .filter_map(|(route, auth)| {
+                    auth.credential_command
+                        .as_ref()
+                        .map(|command| (route.clone(), command.clone()))
+                })
+                .collect(),
+            instance_routes: effective
+                .providers
+                .instances
+                .keys()
+                .map(|id| id.as_str().to_owned())
+                .collect(),
             mode: effective.mode.unwrap_or(Mode::Default),
             sandbox: effective.sandbox.unwrap_or_default(),
             offline: confinement.offline(),
@@ -220,7 +250,143 @@ impl ChildAuthorityCeiling {
         }
     }
 
+    fn inherit_selections(&self, selections: RunSelections) -> Result<RunSelections, String> {
+        let connection = self
+            .live_connection()
+            .map(|(id, _)| id)
+            .or(self.connection.as_deref());
+        if let Some(requested) = selections.connection()
+            && Some(requested) != connection
+        {
+            return Err("child connection differs from the parent account".to_owned());
+        }
+        Ok(selections.with_connection(connection.map(str::to_owned)))
+    }
+
+    fn cross_provider_route<'a>(&self, selections: &'a RunSelections) -> Option<&'a str> {
+        let (route, _) = selections.model()?.0.split_once('/')?;
+        let parent = self
+            .live_connection()
+            .map(|(_, account)| account)
+            .or_else(|| {
+                self.connection
+                    .as_ref()
+                    .and_then(|id| self.connections.get(id))
+            });
+        let active = self
+            .live_selection
+            .as_ref()
+            .and_then(|selection| selection.snapshot().ok());
+        let parent_vendor = parent.map(|account| account.vendor.as_str()).or_else(|| {
+            active
+                .as_ref()
+                .map(|selection| &selection.identity)
+                .or(self.parent_model.as_ref())
+                .and_then(|model| model.0.split_once('/'))
+                .map(|(route, _)| crate::auth::connection_vendor(route))
+        });
+        parent_vendor
+            .is_some_and(|vendor| vendor != crate::auth::connection_vendor(route))
+            .then_some(route)
+    }
+
+    /// Seal the credential slot and OAuth refresh source, not secrets or display text.
+    fn credential_binding(&self, id: &str, account: &ego_core::config::ConnectionConfig) -> String {
+        let route = crate::auth::connection_route(account);
+        let refresh = (account.access == ego_core::config::ConnectionAccess::Oauth).then(|| {
+            crate::auth::connection_refresh_source(
+                &route,
+                self.refresh_commands.get(&route).map(String::as_str),
+                config::ego_home().as_deref(),
+            )
+        });
+        crate::auth::connection_binding(id, account, refresh.as_ref())
+    }
+
+    fn verify_recorded_account(&self, selections: &RunSelections) -> Result<(), String> {
+        let Some(binding) = selections.connection_binding() else {
+            return Ok(());
+        };
+        let id = selections
+            .connection()
+            .ok_or("credential binding has no account ID")?;
+        let account = self
+            .live_connection()
+            .filter(|(live_id, _)| *live_id == id)
+            .map(|(_, account)| account)
+            .or_else(|| self.connections.get(id));
+        if !account.is_some_and(|account| self.credential_binding(id, account) == binding) {
+            return Err(crate::auth::CHANGED_CONNECTION_BINDING.into());
+        }
+        Ok(())
+    }
+
+    fn check_inherited_route(&self, selections: &RunSelections) -> Result<(), String> {
+        let account = self
+            .live_connection()
+            .map(|(_, account)| account)
+            .or_else(|| {
+                self.connection
+                    .as_ref()
+                    .and_then(|id| self.connections.get(id))
+            });
+        if let (Some(account), Some((route, _))) = (
+            account,
+            selections.model().and_then(|model| model.0.split_once('/')),
+        ) && !self.instance_routes.contains(route)
+            && crate::auth::connection_route(account) != route
+        {
+            return Err(format!(
+                "the inherited account cannot serve child route {route}; select a model on its admitted route"
+            ));
+        }
+        Ok(())
+    }
+
+    fn alternate_connection(
+        &self,
+        selections: &RunSelections,
+    ) -> Result<Option<(&str, &ego_core::config::ConnectionConfig)>, String> {
+        let Some(route) = self.cross_provider_route(selections) else {
+            return Ok(None);
+        };
+        if self.instance_routes.contains(route) {
+            return Err(format!(
+                "configured route {route} cannot be rebound by a cross-provider task"
+            ));
+        }
+        let mut accounts = self.connections.iter().filter(|(_, account)| {
+            account.vendor == crate::auth::connection_vendor(route)
+                && crate::auth::connection_route(account) == route
+        });
+        let Some((id, account)) = accounts.next() else {
+            return Err(format!(
+                "no saved account for child route {route}; configure one with 'ego auth login {route}' before retrying"
+            ));
+        };
+        if accounts.next().is_some() {
+            return Err(format!(
+                "multiple saved accounts for child route {route}; a native task requires an unambiguous account for that route"
+            ));
+        }
+        if selections.connection().is_some_and(|pinned| pinned != id) {
+            return Err(format!(
+                "saved child account for {route} changed; start a new task instead of rebinding this task"
+            ));
+        }
+        Ok(Some((id.as_str(), account)))
+    }
+
+    fn live_connection(&self) -> Option<(&str, &ego_core::config::ConnectionConfig)> {
+        self.live_selection.as_ref()?.live_connection()
+    }
+
     pub(super) fn admit(&self, effective: &Effective, offline: bool) -> Result<(), String> {
+        if effective.connection != self.connection
+            || self.connection.is_none() && would_select_named_account(effective)?
+        {
+            return Err("child connection differs from the parent account".to_owned());
+        }
         let mode = effective.mode.unwrap_or(Mode::Default);
         if !mode_is_no_wider(mode, self.mode) {
             return Err(format!(
@@ -304,6 +470,7 @@ pub(crate) fn protocol_effective(
 /// launch line owns, so a host that named nothing gets exactly the session it
 /// got before these flags existed ([`SessionShape::default`]).
 pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -> Args {
+    let exclusive = shape.exclusive_read_only;
     Args {
         worktree: None,
         read_only_dir: shape.read_only_dir,
@@ -312,6 +479,8 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         attach: Vec::new(),
         stdin: crate::cli::Stdin::Ambient,
         model: None,
+        connection: None,
+        account: None,
         offline: false,
         proxy: None,
         sandbox: None,
@@ -321,12 +490,17 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         append_system: shape.append_system,
         output_style: shape.output_style,
         instructions: shape.instructions,
-        bare: shape.bare,
+        bare: shape.bare || exclusive,
+        no_hooks: shape.no_hooks || exclusive,
         trust_workspace: false,
+        trust_development_programs: false,
         mode: None,
         allow: shape.allow,
         deny: shape.deny,
         answers: Vec::new(),
+        accept_authority_delta: false,
+        queue: false,
+        fork_for_prompt: false,
         session: SessionChoice::New,
         session_dir,
         artifact_dir: None,
@@ -340,15 +514,22 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         budget: None,
         max_output_tokens: None,
         goal: None,
-        goal_turns: 20,
+        goal_turns: None,
         no_context_tool: false,
         context_clear: false,
         context_interval: 10,
         goal_check_command: None,
         max_turns: None,
         timeout: None,
-        tools: shape.tools,
+        // The empty builtin list wins over configuration; ACP host MCP admission is separate.
+        tools: if exclusive {
+            Some(Vec::new())
+        } else {
+            shape.tools
+        },
         mcp: Vec::new(),
+        mcp_only: false,
+        allow_dirs: Vec::new(),
         directory: None,
         set: Vec::new(),
         profile: shape.profile,
@@ -358,6 +539,10 @@ pub(crate) fn protocol_args(session_dir: Option<PathBuf>, shape: SessionShape) -
         no_color: false,
         plain: false,
         vim: false,
+        memory: false,
+        no_session_compression: false,
+        no_checkpoints: false,
+        exclusive_read_only: exclusive,
     }
 }
 
@@ -499,9 +684,15 @@ impl CliCompactionCommand {
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
         let source_admission = latest_main_admission(&records);
         let source_catalogue = compaction_source_catalogue(&records, source_admission)?;
-        let args = compaction_source_args(self.args.clone(), source_admission);
+        let connection = self
+            .store
+            .selected_connection(&source_id)
+            .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        let args =
+            compaction_source_args(self.args.clone(), source_admission, connection.as_deref());
         let settings = settings(&args, |_| Trust::Untrusted, &Stderr)
             .map_err(|error| CompactionError::Internal(error.to_string()))?;
+        admit_compaction_connection(&args, &settings.effective)?;
         let Materials {
             system,
             registry,
@@ -564,6 +755,7 @@ impl CliCompactionCommand {
                 session_id: source_id,
                 confinement: &confinement,
                 effective: &effective,
+                connection_binding: None,
                 slug,
                 cancel: &cancel,
                 run_deadline,
@@ -582,7 +774,8 @@ impl CliCompactionCommand {
         let mode = effective.mode.unwrap_or(Mode::Default);
         let policy_selection = GenerationPolicySelection::new(mode, effective.permissions.clone());
         let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
-            CliGenerationPolicySource::new(policy_selection, CanonPath::new(&root), None),
+            CliGenerationPolicySource::new(policy_selection, CanonPath::new(&root), None)
+                .with_root_ceilings(super::profile_roots::write_ceilings(&effective).0),
         );
         let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
         let gate = SharedBudgetGate::new(budget::gate(
@@ -705,7 +898,9 @@ fn compaction_source_catalogue(
 fn compaction_source_args(
     mut args: Args,
     source_admission: Option<&ego_core::evidence::GenerationAdmissionEvidence>,
+    connection: Option<&str>,
 ) -> Args {
+    args.connection = connection.map(str::to_owned);
     if let Some(admission) = source_admission {
         args.model = Some(admission.target().canonical_model().0.clone());
     }
@@ -717,6 +912,35 @@ fn compaction_source_args(
         );
     }
     args
+}
+
+/// Use the same account policy as generation: unrelated vendors cannot be adopted.
+fn would_select_named_account(effective: &Effective) -> Result<bool, String> {
+    let vendor = effective.model.as_ref().map(|model| {
+        let route = model
+            .0
+            .split_once('/')
+            .map_or(model.0.as_str(), |(route, _)| route);
+        crate::auth::connection_vendor(route)
+    });
+    ego_core::config::select_connection(
+        &effective.connections,
+        effective.connection.as_deref(),
+        vendor,
+    )
+    .map(|selected| selected.is_some())
+}
+
+fn admit_compaction_connection(args: &Args, effective: &Effective) -> Result<(), CompactionError> {
+    if args.connection.is_none()
+        && would_select_named_account(effective).map_err(CompactionError::Internal)?
+    {
+        return Err(CompactionError::Internal(
+            "source session has no durable connection binding; cannot compact with named accounts"
+                .to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 struct CliCompactionPreparation<'a> {
@@ -784,6 +1008,9 @@ impl CliRunExecutor {
         let artifacts: Arc<dyn RunArtifactStore> = self.store.clone();
         executor.artifacts = Some(artifacts);
         executor.child = true;
+        executor.acp_controls = None;
+        // The top-level ceiling counts client runs; a child runs inside its parent's permit.
+        executor.concurrency = None;
         executor
     }
 
@@ -793,11 +1020,126 @@ impl CliRunExecutor {
         confinement: &RunConfinement,
     ) -> Self {
         let mut executor = self.for_children();
+        executor.args.connection = effective.connection.clone();
         executor.child_authority = Some(Arc::new(ChildAuthorityCeiling::from_parent(
             effective,
             confinement,
         )));
         executor
+    }
+
+    /// Bind derived runs to the account admitted by generation preflight, including
+    /// an implicit single match which is not present in the resolved configuration.
+    pub(super) fn with_pinned_child_authority(
+        &self,
+        effective: &Effective,
+        confinement: &RunConfinement,
+        connection: Option<&str>,
+    ) -> Self {
+        let mut parent = effective.clone();
+        parent.connection = connection.map(str::to_owned);
+        self.with_child_authority(&parent, confinement)
+    }
+
+    pub(super) fn with_live_child_selection(
+        mut self,
+        selection: Arc<model::GenerationSelection>,
+    ) -> Self {
+        if let Some(authority) = &mut self.child_authority {
+            Arc::make_mut(authority).live_selection = Some(selection);
+        }
+        self
+    }
+
+    /// Use the live pin only for a request admitted with its exact ID. A child
+    /// already started keeps its frozen ceiling; an unstarted durable request
+    /// without an account inherits the current pin, as on resume.
+    fn bind_child_connection(
+        &self,
+        connection: Option<&str>,
+        trust: Option<Trust>,
+    ) -> Result<Option<Self>, String> {
+        let Some(authority) = self.child_authority.as_deref() else {
+            return Ok(None);
+        };
+        let Some((id, account)) = authority
+            .live_connection()
+            .filter(|(id, _)| Some(*id) == connection)
+        else {
+            return Ok(None);
+        };
+        self.bind_child_account(authority, id, account, trust)
+            .map(Some)
+    }
+
+    fn bind_child_account(
+        &self,
+        authority: &ChildAuthorityCeiling,
+        id: &str,
+        account: &ego_core::config::ConnectionConfig,
+        trust: Option<Trust>,
+    ) -> Result<Self, String> {
+        let frozen = self
+            .frozen
+            .as_deref()
+            .ok_or_else(|| "child has no frozen parent configuration".to_owned())?;
+        let mut executor = self.clone();
+        executor.frozen = Some(Arc::new(frozen.with_admitted_connection(
+            id,
+            account,
+            trust.unwrap_or_else(|| frozen.trust()),
+        )));
+        executor.args.connection = Some(id.to_owned());
+        let mut ceiling = authority.clone();
+        ceiling.connection = Some(id.to_owned());
+        ceiling.live_selection = None;
+        executor.child_authority = Some(Arc::new(ceiling));
+        Ok(executor)
+    }
+
+    pub(super) fn child_profile_executor(&self) -> Result<Option<Self>, String> {
+        let connection = self
+            .child_authority
+            .as_deref()
+            .and_then(ChildAuthorityCeiling::live_connection)
+            .map(|(id, _)| id);
+        self.bind_child_connection(connection, None)
+    }
+
+    pub(super) fn admit_child_selections(
+        &self,
+        selections: RunSelections,
+        account: ego_core::subagent::ChildAccountAdmission,
+    ) -> Result<RunSelections, String> {
+        let authority = self
+            .child_authority
+            .as_deref()
+            .ok_or_else(|| "child has no parent account authority".to_owned())?;
+        use ego_core::subagent::ChildAccountAdmission::{
+            ExplicitNativeRecovery, ImplicitNative, Inherit,
+        };
+        authority.verify_recorded_account(&selections)?;
+        if account == ImplicitNative && authority.cross_provider_route(&selections).is_some() {
+            return Err(
+                "a native task must explicitly select a model to use another provider".into(),
+            );
+        }
+        if account != Inherit
+            && let Some((id, selected)) = authority.alternate_connection(&selections)?
+        {
+            let binding = authority.credential_binding(id, selected);
+            if account == ExplicitNativeRecovery
+                && (selections.connection().is_none()
+                    || selections.connection_binding() != Some(binding.as_str()))
+            {
+                return Err("durable cross-provider task has no matching credential binding; start a new task".into());
+            }
+            return Ok(selections.with_connection_binding(id.to_owned(), binding));
+        }
+        if account != Inherit {
+            authority.check_inherited_route(&selections)?;
+        }
+        authority.inherit_selections(selections)
     }
 
     pub(super) fn admit_child_authority(
@@ -826,6 +1168,7 @@ impl CliRunExecutor {
             store,
             concurrency: None,
             frozen: None,
+            acp_controls: None,
             artifacts: None,
             admission,
             child_authority: None,
@@ -834,12 +1177,21 @@ impl CliRunExecutor {
         }
     }
 
+    pub(crate) fn with_acp_controls(
+        mut self,
+        controls: Arc<crate::acp_controls::AcpSessionControls>,
+    ) -> Self {
+        self.acp_controls = Some(controls);
+        self
+    }
+
     /// Compose the fixed MCP deployment policy.
     ///
     /// An explicit thinking ceiling is already complete policy metadata. Only
     /// an absent ceiling needs catalogue facts to resolve the model default;
     /// actual generation still resolves and validates current model facts at
     /// its ordinary preflight boundary.
+    #[cfg(test)]
     pub(crate) fn for_mcp(
         root: ego_core::run::RunRoot,
         session_dir: Option<PathBuf>,
@@ -855,6 +1207,34 @@ impl CliRunExecutor {
             &args,
             Trust::Untrusted,
         )?);
+        Self::for_mcp_captured(
+            root,
+            args.session_dir.clone(),
+            store,
+            artifacts,
+            max_concurrent_runs,
+            admission,
+            catalogue,
+            frozen,
+        )
+    }
+
+    /// Keep protocol policy and subsequent run preparation on one captured authority.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "protocol composition passes existing independent ports and captured authority"
+    )]
+    pub(crate) fn for_mcp_captured(
+        root: ego_core::run::RunRoot,
+        session_dir: Option<PathBuf>,
+        store: Arc<JsonlStore>,
+        artifacts: Arc<dyn RunArtifactStore>,
+        max_concurrent_runs: NonZeroUsize,
+        admission: Arc<EvidenceAdmissionService>,
+        catalogue: Option<&ego_ai::catalogue::ModelCatalogueSnapshot>,
+        frozen: Arc<config::FrozenRunConfig>,
+    ) -> Result<(Self, CliMcpRunPolicy), UsageError> {
+        let args = protocol_args(session_dir, SessionShape::default());
         let effective = frozen.resolve(&args)?;
         let model = effective.model.clone().ok_or_else(|| {
             UsageError("mcp-server requires an effective configured model".to_owned())
@@ -900,6 +1280,7 @@ impl CliRunExecutor {
                 store,
                 concurrency: Some(Arc::new(Semaphore::new(max_concurrent_runs.get()))),
                 frozen: Some(frozen),
+                acp_controls: None,
                 artifacts: Some(artifacts),
                 admission,
                 child_authority: None,
@@ -973,18 +1354,64 @@ impl RunExecutor for CliRunExecutor {
                 }
                 None => None,
             };
+            let connection = request.selections.connection();
+            let trust = request.selections.trust();
+            if let Some(authority) = self.child_authority.as_deref() {
+                authority
+                    .verify_recorded_account(&request.selections)
+                    .map_err(RunExecutorError::new)?;
+            }
+            let bound = if let Some(authority) = self.child_authority.as_deref()
+                && matches!(request.origin, ego_core::run::RunOrigin::Subagent { .. })
+                && connection.is_some()
+                && connection
+                    != authority
+                        .live_connection()
+                        .map(|(id, _)| id)
+                        .or(authority.connection.as_deref())
+            {
+                let (id, account) = authority
+                    .alternate_connection(&request.selections)
+                    .map_err(RunExecutorError::new)?
+                    .ok_or_else(|| {
+                        RunExecutorError::new("child account was not admitted for this model")
+                    })?;
+                let binding = authority.credential_binding(id, account);
+                if request.selections.connection_binding() != Some(binding.as_str()) {
+                    return Err(RunExecutorError::new(
+                        "child account has no matching admitted credential binding",
+                    ));
+                }
+                Some(
+                    self.bind_child_account(authority, id, account, trust)
+                        .map_err(RunExecutorError::new)?,
+                )
+            } else {
+                self.bind_child_connection(connection, trust)
+                    .map_err(RunExecutorError::new)?
+            };
+            let executor = bound.as_ref().unwrap_or(self);
+            let capture = match &executor.acp_controls {
+                Some(controls) => controls
+                    .execution_config(request)
+                    .map_err(|error| RunExecutorError::new(error.to_string()))?,
+                None => None,
+            }
+            .or_else(|| executor.frozen.clone());
+            let mut child_executor = executor.for_children();
+            child_executor.frozen = capture.clone();
             CliPrepared::prepare(
-                self.args.clone(),
-                Arc::clone(&self.store),
-                self.artifacts.clone(),
+                executor.args.clone(),
+                Arc::clone(&executor.store),
+                executor.artifacts.clone(),
                 request,
                 permit,
-                self.frozen.as_deref(),
+                capture.as_deref(),
                 PreparedExecutionRuntime {
-                    admission: Arc::clone(&self.admission),
-                    child_executor: Arc::new(self.for_children()),
-                    child_authority: self.child_authority.clone(),
-                    child: self.child,
+                    admission: Arc::clone(&executor.admission),
+                    child_executor: Arc::new(child_executor),
+                    child_authority: executor.child_authority.clone(),
+                    child: executor.child,
                 },
             )
             .await
@@ -1100,10 +1527,13 @@ impl RunExecutor for CliRunExecutor {
 }
 
 #[cfg(test)]
-mod defaults_tests;
+mod captured_instance_tests;
 
 #[cfg(test)]
-mod settlement_tests {
+mod defaults_107_tests;
+
+#[cfg(test)]
+mod settlement_301_tests {
     use super::*;
 
     // Catches: widening known-failure settlement to include a lost exchange.
@@ -1159,6 +1589,185 @@ mod settlement_tests {
 }
 
 #[cfg(test)]
+mod derived_connection_tests {
+    use super::*;
+
+    fn user_accounts() -> Sourced<ConfigLayer> {
+        ConfigLayer::parse(
+            Source::User,
+            r#"
+connection = "A"
+[connections.A]
+name = "Default account"
+vendor = "anthropic"
+access = "oauth"
+[connections.B]
+name = "Selected account"
+vendor = "anthropic"
+access = "oauth"
+"#,
+        )
+        .unwrap()
+    }
+
+    fn parent() -> (Effective, RunConfinement) {
+        let effective = ego_core::config::resolve(
+            &[
+                user_accounts(),
+                ConfigLayer::parse(Source::Flags, "connection = 'B'").unwrap(),
+            ],
+            Trust::Untrusted,
+            None,
+        )
+        .unwrap();
+        let confinement = RunConfinement::new(
+            effective.sandbox.unwrap_or_default(),
+            false,
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+        )
+        .unwrap();
+        (effective, confinement)
+    }
+
+    // Catches: a protocol child keeps unbound protocol args and selects default A.
+    #[test]
+    fn protocol_children_use_the_prepared_parent_account() {
+        let tree = tempfile::tempdir().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        let store = Arc::new(JsonlStore::new(root.join("sessions"), root, Box::new(OsIo)));
+        let mut executor = CliRunExecutor::for_acp(
+            None,
+            SessionShape::default(),
+            store,
+            Arc::new(EvidenceAdmissionService::new()),
+        );
+        executor.frozen = Some(Arc::new(config::FrozenRunConfig::from_layers(
+            vec![user_accounts()],
+            &executor.args,
+            Trust::Untrusted,
+        )));
+        let default = executor
+            .frozen
+            .as_ref()
+            .unwrap()
+            .resolve(&executor.args)
+            .unwrap();
+        assert_eq!(default.connection.as_deref(), Some("A"));
+        let (effective, confinement) = parent();
+        let child = executor.with_child_authority(&effective, &confinement);
+        assert_eq!(child.args.connection.as_deref(), Some("B"));
+        assert_eq!(child.for_children().args.connection.as_deref(), Some("B"));
+        let resolved = child.frozen.as_ref().unwrap().resolve(&child.args).unwrap();
+        assert_eq!(resolved.connection.as_deref(), Some("B"));
+        child.admit_child_authority(&resolved, false).unwrap();
+        let mut wrong_account = effective.clone();
+        wrong_account.connection = Some("A".to_owned());
+        assert!(child.admit_child_authority(&wrong_account, false).is_err());
+    }
+
+    // Catches: an implicit parent pin is lost because effective.connection is still None.
+    #[test]
+    fn implicit_single_match_reaches_child_request_authority() {
+        let layer = ConfigLayer::parse(
+            Source::User,
+            r#"
+[connections.B]
+name = "Only account"
+vendor = "anthropic"
+access = "oauth"
+"#,
+        )
+        .unwrap();
+        let effective = ego_core::config::resolve(&[layer], Trust::Untrusted, None).unwrap();
+        assert_eq!(effective.connection, None);
+        let pinned =
+            ego_core::config::select_connection(&effective.connections, None, Some("anthropic"))
+                .unwrap()
+                .unwrap()
+                .0;
+        let tree = tempfile::tempdir().unwrap();
+        let root = tree.path().canonicalize().unwrap();
+        let store = Arc::new(JsonlStore::new(
+            root.join("sessions"),
+            root.clone(),
+            Box::new(OsIo),
+        ));
+        let executor = CliRunExecutor::for_acp(
+            None,
+            SessionShape::default(),
+            store,
+            Arc::new(EvidenceAdmissionService::new()),
+        );
+        let confinement = RunConfinement::new(
+            effective.sandbox.unwrap_or_default(),
+            false,
+            CanonPath::new(root),
+        )
+        .unwrap();
+        let child = executor.with_pinned_child_authority(&effective, &confinement, Some(pinned));
+        let admitted = child
+            .admit_child_selections(
+                RunSelections::empty(),
+                ego_core::subagent::ChildAccountAdmission::Inherit,
+            )
+            .unwrap();
+        assert_eq!(admitted.connection(), Some("B"));
+        assert_eq!(child.args.connection.as_deref(), Some("B"));
+    }
+
+    // Catches: a child invents an account binding for an unbound parent.
+    #[test]
+    fn unbound_parent_does_not_grant_a_named_child_account() {
+        let (mut unbound, confinement) = parent();
+        unbound.connection = None;
+        unbound.connections.clear();
+        let authority = ChildAuthorityCeiling::from_parent(&unbound, &confinement);
+        assert!(
+            authority
+                .inherit_selections(RunSelections::empty().with_connection(Some("A".to_owned())))
+                .is_err()
+        );
+        assert_eq!(
+            authority
+                .inherit_selections(RunSelections::empty())
+                .unwrap()
+                .connection(),
+            None
+        );
+        // A fresh config can have a single implicit match without a default ID.
+        let mut newly_named = parent().0;
+        newly_named.connection = None;
+        newly_named.connections.remove("A");
+        assert!(authority.admit(&newly_named, false).is_err());
+        authority.admit(&unbound, false).unwrap();
+        // An unrelated vendor's account cannot be adopted and must not disable legacy children.
+        newly_named.model = Some(ModelRef("openai/gpt-6-luna".into()));
+        authority.admit(&newly_named, false).unwrap();
+        newly_named.model = Some(ModelRef("ollama".into()));
+        authority.admit(&newly_named, false).unwrap();
+    }
+
+    // Catches: cold compaction keeps a caller account instead of restoring durable B.
+    #[test]
+    fn cold_compaction_restores_only_the_durable_connection() {
+        let mut args = protocol_args(None, SessionShape::default());
+        args.connection = Some("A".to_owned());
+        let bound = compaction_source_args(args.clone(), None, Some("B"));
+        assert_eq!(bound.connection.as_deref(), Some("B"));
+        let unbound = compaction_source_args(args, None, None);
+        assert_eq!(unbound.connection, None);
+        let (mut effective, _) = parent();
+        assert!(admit_compaction_connection(&unbound, &effective).is_err());
+        assert!(admit_compaction_connection(&bound, &effective).is_ok());
+        effective.connection = None;
+        effective.model = Some(ModelRef("openai/gpt-6-luna".into()));
+        assert!(admit_compaction_connection(&unbound, &effective).is_ok());
+        effective.connections.clear();
+        assert!(admit_compaction_connection(&unbound, &effective).is_ok());
+    }
+}
+
+#[cfg(test)]
 mod sandbox_ceiling_tests {
     use super::*;
     // Catches: a strict child is rejected under Adaptive, or Adaptive escapes a strict parent.
@@ -1167,9 +1776,12 @@ mod sandbox_ceiling_tests {
         let mut parent =
             ego_core::config::resolve(&[], ego_core::config::Trust::Trusted, None).unwrap();
         parent.sandbox = Some(Confinement::Adaptive);
-        let policy =
-            RunConfinement::new(Confinement::Adaptive, false, CanonPath::new("/workspace"))
-                .unwrap();
+        let policy = RunConfinement::new(
+            Confinement::Adaptive,
+            false,
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+        )
+        .unwrap();
         let ceiling = ChildAuthorityCeiling::from_parent(&parent, &policy);
         for level in [Confinement::Ro, Confinement::Workspace] {
             let mut child = parent.clone();
@@ -1177,7 +1789,12 @@ mod sandbox_ceiling_tests {
             ceiling.admit(&child, false).unwrap();
             let strict = ChildAuthorityCeiling::from_parent(
                 &child,
-                &RunConfinement::new(level, false, CanonPath::new("/workspace")).unwrap(),
+                &RunConfinement::new(
+                    level,
+                    false,
+                    CanonPath::new(crate::ai_test_support::native("/workspace")),
+                )
+                .unwrap(),
             );
             assert!(strict.admit(&parent, false).is_err());
         }

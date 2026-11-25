@@ -1,9 +1,12 @@
 //! The process.
 //!
-//! Short on purpose. The only thing that happens here which cannot happen anywhere else
-//! is the last line: a `u8` from
-//! [`RunTermination::exit_code`](ego_core::run::RunTermination::exit_code) becoming the
-//! status the shell sees.
+//! Short on purpose. The only thing that happens here which cannot happen
+//! anywhere else is the last line: a `u8` from
+//! [`RunTermination::exit_code`](ego_core::run::RunTermination::exit_code)
+//! becoming the status the shell sees. That mapping lives in `ego-core` and is
+//! never re-derived here — `CLI.md` §4.3 is one table, and a second copy in a
+//! binary would be a second chance to disagree with an ACP host about what
+//! "budget" exits with.
 
 use ego_cli::cli::{self, Invocation};
 use ego_cli::output::{self, Stdout};
@@ -33,6 +36,12 @@ pub(crate) fn main() -> std::process::ExitCode {
         return exit;
     }
 
+    // The exclusive read-only policy replaces this process under a cleared environment before any
+    // thread exists.
+    if let Some(exit) = ego_cli::exclusive_env::enforce(std::env::args().collect()) {
+        return exit;
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -49,10 +58,15 @@ pub(crate) fn main() -> std::process::ExitCode {
 
 async fn ordinary_main() -> (std::process::ExitCode, bool) {
     let cancel = CancelToken::new();
-    let out = Stdout::new(cancel.clone());
     let evidence = std::sync::Arc::new(EvidenceAdmissionService::new());
 
     let mut invocation = cli::parse(std::env::args().collect());
+    let no_color = matches!(
+        &invocation,
+        Ok(Invocation::Run(args) | Invocation::Resume(args) | Invocation::Interactive(args))
+            if args.no_color
+    );
+    let out = Stdout::with_no_color(cancel.clone(), no_color);
     if let Ok(Invocation::Run(args) | Invocation::Resume(args) | Invocation::Interactive(args)) =
         &mut invocation
     {
@@ -92,20 +106,54 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
     {
         invocation = Err(cli::UsageError(message));
     }
+    // Before preflight and every session read: a queued turn is admitted
+    // against the session as the previous writer left it. The place in the
+    // queue is held until the process exits. It waits before the checkout
+    // lease below: the owner of a --worktree session holds that lease for its
+    // whole life, so taking it first would refuse instead of waiting.
+    let mut _queued_turn = None;
+    let mut queue_refusal = None;
+    if let Ok(Invocation::Resume(args)) = &mut invocation
+        && args.queue
+    {
+        let mut waiting = Box::pin(ego_cli::queue::wait_for_turn(args));
+        let waited = tokio::select! {
+            biased;
+            cause = run::stop_signal(None) => {
+                cancel.cancel(cause);
+                Err(run::cancelled_termination(&cancel))
+            }
+            waited = &mut waiting => waited,
+        };
+        match waited {
+            Ok(turn) => _queued_turn = Some(turn),
+            Err(termination) => queue_refusal = Some(termination),
+        }
+    }
     // Keep the checkout lease through session shutdown. A resumed standalone
     // checkout acquires the same lease; cleanup cannot race an owned process.
     let mut _worktree_lease = None;
-    if let Ok(Invocation::Run(args) | Invocation::Resume(args) | Invocation::Interactive(args)) =
-        &mut invocation
+    if queue_refusal.is_none()
+        && _queued_turn.is_none()
+        && let Ok(Invocation::Run(args) | Invocation::Resume(args) | Invocation::Interactive(args)) =
+            &mut invocation
     {
         match ego_cli::worktree::launch(args) {
             Ok(lease) => _worktree_lease = lease,
-            Err(message) => invocation = Err(cli::UsageError(message)),
+            Err(message) => invocation = Err(cli::UsageError(message.to_string())),
         }
     }
+    let fork_refusal = match &mut invocation {
+        Ok(Invocation::Resume(args)) if args.fork_for_prompt => {
+            run::publish_resume_fork(args, &out).await.err()
+        }
+        _ => None,
+    };
     let mut ci_preflight = match &invocation {
         Ok(Invocation::Run(args) | Invocation::Resume(args))
-            if args.profile.as_deref() == Some("ci") =>
+            if args.profile.as_deref() == Some("ci")
+                && queue_refusal.is_none()
+                && fork_refusal.is_none() =>
         {
             Some(run::preflight_ci(args, &cancel).await)
         }
@@ -132,6 +180,23 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
         }
     } else {
         match invocation {
+            Ok(Invocation::BuildRecipes(action)) => {
+                let termination = match ego_cli::build_recipes::execute(&action) {
+                    Ok(text) => {
+                        out.line(&text);
+                        RunTermination::Done
+                    }
+                    Err(message) => RunTermination::Failed { message },
+                };
+                Ended {
+                    termination,
+                    session: ego_core::event::id::SessionId::new(),
+                    state: ego_core::state::SessionState::default(),
+                    result: serde_json::Value::String(String::new()),
+                    selected_session: None,
+                    mcp_errors: Vec::new(),
+                }
+            }
             Ok(Invocation::Worktree(action)) => {
                 let termination = match ego_cli::worktree::execute(&action) {
                     Ok(receipt) => {
@@ -269,6 +334,7 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
             },
             Ok(Invocation::Rm(args)) => run::rm(&args, &out).await,
             Ok(Invocation::Fork(args)) => run::fork(&args, &out).await,
+            Ok(Invocation::Rewind(args)) => run::rewind(&args, &out).await,
             Ok(Invocation::Compact(args)) => {
                 run::compact(&args, &out, std::sync::Arc::clone(&evidence)).await
             }
@@ -372,8 +438,11 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
                 selected_session: None,
                 mcp_errors: Vec::new(),
             },
-            // Help and version are successful stdout answers, not usage errors. Write
-            // clap's complete text without appending another newline.
+            // `--help` and `--version`. On **stdout** and exit 0, because the
+            // question was answered: `CLI.md` §4.3's exit 2 is a usage error, and
+            // asking what a command does is not misusing it. The text is written
+            // whole rather than through `out.line`, which appends a newline clap's
+            // rendering already has.
             Ok(Invocation::Answered(text)) => {
                 out.write(&text);
                 Ended {
@@ -396,7 +465,12 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
             }
             Ok(Invocation::Run(args) | Invocation::Resume(args)) => {
                 let json = args.output == cli::Output::Json;
-                let ended = match ci_preflight.take() {
+                let refused = queue_refusal
+                    .take()
+                    .or(fork_refusal)
+                    .map(Err)
+                    .or_else(|| ci_preflight.take());
+                let ended = match refused {
                     Some(Err(termination)) => Ended {
                         termination,
                         session: ego_core::event::id::SessionId::new(),
@@ -449,7 +523,7 @@ async fn ordinary_main() -> (std::process::ExitCode, bool) {
         }
     };
 
-    run::diagnose(&ended.termination, out.broken());
+    run::diagnose(&ended.termination, &out);
     let acp_stopped = is_acp && matches!(ended.termination, RunTermination::Signalled(_));
     (
         std::process::ExitCode::from(ended.termination.exit_code()),

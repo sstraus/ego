@@ -27,7 +27,7 @@ The pair `(session, id)` identifies an event across repeated exports. Sequence
 gaps are normal: internal events are omitted. Sequence, not timestamp, orders
 records. Never use item identity to deduplicate different events.
 
-`event` reuses ego's public projection (`CLI.md`, public JSONL output):
+`event` reuses ego's [public event projection](schemas.md#public-event-stream-version-21):
 `item_started`, `item_delta`, `item_completed`, `turn_completed`, usage and
 other public facts. A completed `user_message` holds the user prompt; a completed
 `agent_message` holds the full answer. Deltas are incremental previews: replace
@@ -71,9 +71,18 @@ This avoids mixing branch histories. Readers need no private store paths.
 be combined with `--sanitize` or `--file`. Use stdout redirection to save a
 snapshot. The command is local-only and requires no model or service access.
 
-## Compatibility
+## Compatibility and fixture
 
 Readers must skip unknown record and payload kinds and ignore added fields.
 Reject unsupported header versions instead of guessing semantics. New optional
 fields and new kinds are additive within v1; incompatible interpretation changes
 require a new transcript version. The embedded public schema has its own version.
+
+`crates/ego-cli/tests/fixtures/transcript-v1.jsonl` is recorded from the real CLI
+against the scripted loopback provider by the transcript contract test. It
+contains the root snapshot and compaction-successor export, each with its own
+header. Between these snapshots the test observes a new operator goal through
+follow; the successor therefore derives from that newer goal, not the older goal
+in the root snapshot.
+The capture procedure and assertions are in `crates/ego-cli/tests/it/transcript.rs`.
+No paid API or live external service is used.

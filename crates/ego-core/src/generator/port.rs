@@ -1,5 +1,6 @@
 //! The `Generator` port: the one seam `ego-core` uses to talk to a model.
 //!
+//! See `ARCHITECTURE.md` §2 ("ports belong to the consumer") and §3.1.
 //! `ego-ai` implements this trait; `ego-core` never opens a socket itself.
 
 use std::fmt;
@@ -22,6 +23,8 @@ use crate::state::Usage;
 /// not a design choice.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum AiEvent {
+    /// Sanitized local policy diagnostic. Never assistant content or history.
+    FilterNotice { text: String },
     /// Local preparation must be acknowledged by the session owner before send.
     #[serde(skip)]
     FilterState(super::filter_state::FilterStateExchange),
@@ -59,12 +62,24 @@ pub enum AiEvent {
     /// [`ReasoningDelta`](Self::ReasoningDelta). No separate boundary event
     /// and no index field — ordering is already `ItemState::seq`'s.
     ReasoningState(ReasoningState),
-    /// A fully assembled model tool call. `ego-ai` joins streamed JSON fragments before core
-    /// receives complete arguments.
+    /// The model decided to call a tool, with fully assembled arguments.
+    /// Provider streams typically deliver a tool call's arguments as JSON
+    /// fragments; assembling those fragments into one JSON string is
+    /// `ego-ai`'s job (`WireFormat::parse_stream`, ARCH §3.1) — by the time
+    /// an `AiEvent` reaches `ego-core`, `args` is complete.
     ToolCall {
         call_id: String,
         name: String,
         args: String,
+    },
+    /// A model call rejected by the shared post-adapter trust boundary.
+    /// It retains its exact provider identity for a failed tool result, but
+    /// must never be looked up in the executable tool catalogue.
+    ToolCallRejected {
+        call_id: String,
+        name: String,
+        args: String,
+        message: String,
     },
     /// Incremental usage for this generation.
     ///
@@ -98,10 +113,14 @@ pub enum AiEvent {
     /// `saturating_add` and folded into a context-occupancy proxy, and a
     /// currency figure has no business in either.
     ///
-    /// All provider-reported cost decoders feed this event. Wire units and
-    /// field names are normalized before crossing the port; metering retains
-    /// [`ProviderCostRevision`](crate::cost::ProviderCostRevision) attribution.
-    /// Adding another decoder must not change this interface.
+    /// This is the one landing site for every provider that states a cost.
+    /// OpenRouter's `usage.cost` and xAI's `usage.cost_in_usd_ticks` differ
+    /// in the unit, the field name and the decoder that reads them; they do
+    /// not differ past this port, and nothing downstream of it can tell which
+    /// produced a given figure except by reading the
+    /// [`ProviderCostRevision`](crate::cost::ProviderCostRevision) that the
+    /// *metering* carries. Adding a third decoder must not change this file.
+    /// See the design notes §8.
     ProviderCost { cost: Money },
     /// The transport's reading of whether the request bytes reached the
     /// provider.
@@ -112,6 +131,8 @@ pub enum AiEvent {
     /// report would never arrive and a retry would double-bill.
     /// `AttemptStream` folds these monotonically.
     DeliveryObserved(DeliveryCertainty),
+    /// Local adapter evidence of the actual dispatch, retained only in settlement.
+    CacheTransportObserved(crate::usage::CacheTransport),
     /// The generation reached a terminal state.
     Stop(StopReason),
     /// The provider reported an error mid-stream.
@@ -144,6 +165,10 @@ pub enum AiEvent {
         cause: String,
         /// The provider's `Retry-After`, when it stated one in seconds.
         retry_after: Option<std::time::Duration>,
+        /// The provider said it is out of capacity or limiting the rate: HTTP
+        /// 429, 503 or 529, or a typed overload or rate-limit code. Such a
+        /// refusal clears in minutes; any other failure retries in seconds.
+        capacity: bool,
     },
 }
 
@@ -172,8 +197,29 @@ impl std::error::Error for RequestExpressibilityError {}
 /// `Http`, credentials and the provider table. The dependency arrow is
 /// `ego-ai -> ego-core`, never the reverse.
 pub trait Generator: Send + Sync {
+    /// Lifetime actually selected by this request mapping; unknown is the default.
+    fn prompt_cache_policy(&self, _req: &GenRequest) -> crate::usage::PromptCachePolicy {
+        crate::usage::PromptCachePolicy::default()
+    }
+
+    /// Opaque actual-request identity for passive cache-lifetime learning.
+    /// A mapping without a continuity proof does not participate.
+    fn cache_request_identity(
+        &self,
+        _req: &GenRequest,
+        _previous_input_items: Option<usize>,
+    ) -> Option<crate::usage::CacheRequestIdentity> {
+        None
+    }
+
     /// Whether this resolved provider owns a native hosted search contract.
     fn supports_web_search(&self) -> bool {
+        false
+    }
+
+    /// Whether published endpoint and exact-model facts admit search by default.
+    /// Encoding support alone is insufficient; unknown routes remain opt-in.
+    fn supports_default_web_search(&self, _model: &str) -> bool {
         false
     }
 

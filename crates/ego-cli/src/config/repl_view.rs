@@ -8,6 +8,23 @@ pub(crate) fn repl_text(
     layers: &[Sourced<ConfigLayer>],
     perimeter: &crate::perimeter::Perimeter,
 ) -> String {
+    render_config(effective, layers, perimeter, false)
+}
+
+pub(crate) fn repl_details(
+    effective: &Effective,
+    layers: &[Sourced<ConfigLayer>],
+    perimeter: &crate::perimeter::Perimeter,
+) -> String {
+    render_config(effective, layers, perimeter, true)
+}
+
+fn render_config(
+    effective: &Effective,
+    layers: &[Sourced<ConfigLayer>],
+    perimeter: &crate::perimeter::Perimeter,
+    details: bool,
+) -> String {
     let mut lines =
         vec!["Configuration (startup snapshot; saved edits apply to future sessions)".into()];
     let profile = effective
@@ -30,7 +47,8 @@ pub(crate) fn repl_text(
             .iter()
             .position(|source| *source == layer.source)
     });
-    for (section, key) in [
+    let mut table = vec![vec!["Setting".into(), "Value".into(), "Source".into()]];
+    for (_section, key) in [
         ("Model", "model"),
         ("Model", "thinking"),
         ("Mode", "mode"),
@@ -41,9 +59,6 @@ pub(crate) fn repl_text(
         ("Perimeter", "exec.env_allowlist"),
         ("Budget", "budget"),
     ] {
-        if matches!(key, "model" | "mode" | "sandbox" | "roots" | "budget") {
-            lines.push(section.into());
-        }
         let declarations = declarations(key, profile, &ordered);
         if declarations.is_empty() {
             let value = match key {
@@ -56,7 +71,7 @@ pub(crate) fn repl_text(
                 "roots" => "see admitted perimeter below".into(),
                 _ => "<unset>".into(),
             };
-            lines.push(format!("  {key}\t{value}\tdefault"));
+            table.push(vec![key.into(), value, "default".into()]);
         }
         for (index, (value, origin)) in declarations.iter().enumerate() {
             // Money and token ceilings are independent: a token declaration cannot override money.
@@ -80,12 +95,20 @@ pub(crate) fn repl_text(
             let warning = winning.map_or_else(String::new, |(_, winner)| {
                 format!("; overridden by {winner}")
             });
-            lines.push(format!(
-                "  {key}\t{}\t{origin}{warning}",
-                super::escape_field(&value.to_toml())
-            ));
+            if details || winning.is_none() {
+                table.push(vec![
+                    key.into(),
+                    super::escape_field(&value.to_toml()),
+                    format!("{origin}{warning}"),
+                ]);
+            }
         }
     }
+    lines.extend(if details {
+        crate::render::table::plain_table_with_width(table, usize::MAX)
+    } else {
+        crate::render::table::plain_table(table)
+    });
     lines.push(format!(
         "  effective mode\t{}",
         effective
@@ -111,7 +134,31 @@ pub(crate) fn repl_text(
             "  system max_mode\t{maximum}\tsystem (binding ceiling)"
         ));
     }
-    lines.push(perimeter.text());
+    if details {
+        lines.push(perimeter.text());
+        if let Some(model) = &effective.model {
+            let provider = model
+                .0
+                .split_once('/')
+                .map_or(model.0.as_str(), |(provider, _)| provider);
+            if let Some((filter, origin)) = crate::model::selected_protocol_filter(
+                &effective.auth,
+                effective.protocol_filter.as_ref(),
+                provider,
+            ) {
+                lines.push(format!(
+                    "  protocol_filter\t{}\t{origin}\t{}",
+                    if filter.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    ego_core::permit::terminal_safe(&filter.command.display().to_string())
+                ));
+            }
+        }
+    }
+    lines.push("/config details — all declarations; /config perimeter — admitted reach".into());
     lines.extend(effective.discarded.iter().map(ToString::to_string));
     lines.push("Save defaults: /config set KEY TOML_VALUE (user base layer); live controls: /model /thinking /mode".into());
     lines.join("\n")
@@ -258,6 +305,32 @@ mod tests {
     use ego_core::config::{Trust, resolve, resolve_selected};
     use ego_core::permit::{CanonPath, RunConfinement};
 
+    // Catches: the full-details route omits the selected disabled filter command.
+    #[test]
+    fn config_details_keeps_full_provider_filter_command() {
+        let scratch = tempfile::tempdir().unwrap();
+        let global = scratch.path().join("global");
+        let provider = scratch.path().join("provider-command");
+        let layers = vec![ConfigLayer::parse(Source::User, &format!("model='openai/model'\n[protocol_filter]\ncommand='{}'\n[auth.openai.protocol_filter]\ncommand='{}'\nenabled=false", global.display(), provider.display())).unwrap()];
+        let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+        let confinement = RunConfinement::new(
+            ego_core::permit::Confinement::Off,
+            false,
+            CanonPath::new("/workspace"),
+        )
+        .unwrap();
+        let perimeter = crate::perimeter::Perimeter::session(&confinement, &effective, &[]);
+        let shown = repl_details(&effective, &layers, &perimeter);
+        assert!(
+            shown.contains(&format!(
+                "protocol_filter\tdisabled\tprovider\t{}",
+                provider.display()
+            )),
+            "{shown}"
+        );
+        assert!(!shown.contains(&global.display().to_string()));
+    }
+
     // Catches: a flag/profile override looks like an applied user default, or independent budget axes erase each other.
     #[test]
     fn config_repl_names_overrides_and_keeps_independent_ceiling_axes() {
@@ -275,15 +348,13 @@ mod tests {
         )
         .unwrap();
         let perimeter = crate::perimeter::Perimeter::session(&confinement, &effective, &[]);
-        let text = repl_text(&effective, &layers, &perimeter);
-        for section in [
-            "\nModel\n",
-            "\nMode\n",
-            "\nSandbox\n",
-            "\nPerimeter\n",
-            "\nBudget\n",
-        ] {
-            assert!(text.contains(section), "{text}");
+        let text = repl_details(&effective, &layers, &perimeter);
+        for setting in ["model", "mode", "sandbox", "roots", "budget"] {
+            assert!(
+                text.lines()
+                    .any(|row| row.split_whitespace().next() == Some(setting)),
+                "{text}"
+            );
         }
         assert!(text.contains("user; overridden by flags"), "{text}");
         assert!(
@@ -298,7 +369,7 @@ mod tests {
         );
         let budget = text
             .lines()
-            .filter(|line| line.starts_with("  budget\t"))
+            .filter(|line| line.split_whitespace().next() == Some("budget"))
             .collect::<Vec<_>>();
         assert_eq!(budget.len(), 2);
         assert!(
@@ -324,7 +395,7 @@ mod tests {
         )
         .unwrap();
         let perimeter = crate::perimeter::Perimeter::session(&confinement, &effective, &[]);
-        let text = repl_text(&effective, &layers, &perimeter);
+        let text = repl_details(&effective, &layers, &perimeter);
         assert!(!text.contains("ollama/ignored"));
         assert!(text.contains("budget overridden by system ceiling"));
         assert!(text.contains("tokens=5000"));

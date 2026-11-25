@@ -1,15 +1,17 @@
 //! The `openai-codex-responses` wire format: `POST /codex/responses`, streamed.
 //!
-//! The ChatGPT/Codex subscription backend, not Platform `api.openai.com`.
-//! The body uses Responses fields (`input`, `instructions`, `reasoning.effort`);
-//! the path and identity headers belong to the Codex backend.
+//! ChatGPT/Codex subscription backend, not Platform `api.openai.com`. Pi names
+//! this shape separately from `openai-responses` (the design notes
+//! §4.1). The body is Responses (`input`, `instructions`, `reasoning.effort`);
+//! the path and identity headers are Codex's.
 
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use ego_core::generator::port::AiEvent;
 use ego_core::generator::types::{
-    ContentBlock, ErrorKind, GenRequest, Message, Role, StopReason, ThinkingLevel,
+    ContentBlock, ErrorKind, GenRequest, HostedSearch, Message, Role, StopReason, ThinkingLevel,
 };
 use ego_core::state::Usage;
 use futures::stream::BoxStream;
@@ -27,6 +29,20 @@ use super::{RequestRefused, RequestTarget, WireFormat};
 pub struct OpenAiCodexResponses;
 
 impl WireFormat for OpenAiCodexResponses {
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn supports_default_web_search(
+        &self,
+        _model: &str,
+        base: &url::Url,
+        _credential: &crate::provider::ResolvedCredential,
+        _strategy: &crate::provider::CredentialStrategy,
+    ) -> bool {
+        base.as_str() == crate::provider::OPENAI_CODEX_BASE
+    }
+
     fn websocket(&self) -> bool {
         true
     }
@@ -39,12 +55,36 @@ impl WireFormat for OpenAiCodexResponses {
         build_request(target, req).map_err(RequestRefused::from)
     }
 
+    fn cache_request_identity(
+        &self,
+        body: &[u8],
+        scope: String,
+        previous_input_items: Option<usize>,
+    ) -> Option<ego_core::usage::CacheRequestIdentity> {
+        super::cache::responses_request_identity(body, scope, previous_input_items)
+    }
+
     fn decode(
         &self,
         response: Result<HttpResponse, HttpError>,
         cost: Option<Arc<dyn ProviderCost>>,
     ) -> BoxStream<'static, AiEvent> {
-        decode(response, cost)
+        self.decode_generation(response, cost, None)
+    }
+
+    fn decode_generation(
+        &self,
+        response: Result<HttpResponse, HttpError>,
+        _cost: Option<Arc<dyn ProviderCost>>,
+        search: Option<HostedSearch>,
+    ) -> BoxStream<'static, AiEvent> {
+        super::decode_response(
+            response,
+            Box::new(StreamDecoder {
+                search_limit: search.map(|search| search.max_requests),
+                ..StreamDecoder::default()
+            }),
+        )
     }
 }
 
@@ -103,12 +143,25 @@ struct WireReasoning {
 }
 
 #[derive(Debug, Serialize)]
-struct WireTool<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    name: &'a str,
-    description: &'a str,
-    parameters: &'a Value,
+#[serde(untagged)]
+enum WireTool<'a> {
+    Function {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: &'a str,
+        description: &'a str,
+        parameters: &'a Value,
+        /// Always `false`. Omitting it makes the Responses endpoint normalise
+        /// the schema to strict mode, which moves every optional property
+        /// into `required`; the model then sends fields the tool forbids.
+        /// https://developers.openai.com/api/docs/guides/migrate-to-responses
+        strict: bool,
+    },
+    WebSearch {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        external_web_access: bool,
+    },
 }
 
 fn reasoning_effort(level: ThinkingLevel) -> &'static str {
@@ -122,6 +175,12 @@ fn reasoning_effort(level: ThinkingLevel) -> &'static str {
         ThinkingLevel::Max => "max",
     }
 }
+
+/// The constant `instructions` sent with any system text. GPT-6.2 Sol never
+/// reads the `instructions` field from the prompt cache, so the variable system
+/// text goes in the first input item, where the cached prefix covers it. See
+/// the design notes.
+pub const CODEX_INSTRUCTIONS: &str = "Follow the developer message at the start of the input.";
 
 fn system_instructions(messages: &[Message]) -> Option<String> {
     let text: Vec<&str> = messages
@@ -148,8 +207,11 @@ fn input_items(messages: &[Message]) -> Result<Vec<Value>, Inexpressible> {
         }
         for block in &message.content {
             match block {
-                ContentBlock::ProviderContent { .. } => {
-                    return Err(Inexpressible::ReasoningStateNotCarriable);
+                ContentBlock::ProviderContent { state, .. } => {
+                    items.push(
+                        super::responses_search::replay(state, "openai-codex-responses")
+                            .ok_or(Inexpressible::ReasoningStateNotCarriable)?,
+                    );
                 }
                 ContentBlock::Reasoning { state } => {
                     if state.dialect != "openai-codex-responses" {
@@ -208,26 +270,59 @@ fn input_items(messages: &[Message]) -> Result<Vec<Value>, Inexpressible> {
 }
 
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
+    encode(req).map(|(body, _)| body)
+}
+
+/// The body and its routing key. The key covers the model, the leading
+/// developer item and the tools: the prefix that new sessions share.
+fn encode(req: &GenRequest) -> Result<(Vec<u8>, Option<String>), Inexpressible> {
     if super::request_has_audio(req) {
         return Err(Inexpressible::AudioNotSupported);
     }
-    let tools: Vec<WireTool<'_>> = req
+    let mut tools: Vec<WireTool<'_>> = req
         .tools
         .iter()
-        .map(|tool| WireTool {
+        .filter(|tool| req.web_search.is_none() || tool.name != "web_search")
+        .map(|tool| WireTool::Function {
             kind: "function",
             name: &tool.name,
             description: &tool.description,
             parameters: &tool.parameters,
+            strict: false,
         })
         .collect();
+    if let Some(search) = req.web_search {
+        // This route has no established individual-search count field.
+        // Cached defaults: https://learn.chatgpt.com/docs/web-search.md,
+        // checked 2026-11-16. Explicit selection retains live access.
+        tools.push(WireTool::WebSearch {
+            kind: "web_search",
+            external_web_access: search.allow_live_access,
+        });
+    }
+    let system = system_instructions(req.messages.messages());
+    let mut input = input_items(req.messages.messages())?;
+    if let Some(text) = &system {
+        input.insert(
+            0,
+            serde_json::json!({
+                "type": "message",
+                "role": "developer",
+                "content": [{ "type": "input_text", "text": text }],
+            }),
+        );
+    }
+    let stable_prefix =
+        serde_json::to_vec(&(&req.model, system.is_some().then(|| &input[0]), &tools))
+            .expect("Codex stable prefix serialises");
+    let key = super::cache::prefix_routing_key(req, "openai-codex", &stable_prefix);
     let wire = WireRequest {
         model: &req.model,
         stream: true,
         store: false,
-        prompt_cache_key: super::cache::routing_key(req, "openai-codex"),
-        instructions: system_instructions(req.messages.messages()),
-        input: input_items(req.messages.messages())?,
+        prompt_cache_key: key.clone(),
+        instructions: system.is_some().then(|| CODEX_INSTRUCTIONS.to_owned()),
+        input,
         parallel_tool_calls: (!tools.is_empty()).then_some(req.parallel_tool_calls),
         tools,
         include: ["reasoning.encrypted_content"],
@@ -235,17 +330,22 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
             effort: reasoning_effort(req.thinking),
         },
     };
-    Ok(serde_json::to_vec(&wire).expect("WireRequest serialises"))
+    Ok((
+        serde_json::to_vec(&wire).expect("WireRequest serialises"),
+        key,
+    ))
 }
 
 pub fn build_request(
     target: &RequestTarget<'_>,
     req: &GenRequest,
 ) -> Result<HttpRequest, Inexpressible> {
-    let mut request = target.post_json(PATH, request_body(req)?);
-    // ChatGPT uses the Responses session header for cache affinity, in addition
-    // to the body's prompt_cache_key. Keep both pinned to the same lineage.
-    if let Some(key) = super::cache::routing_key(req, "openai-codex") {
+    let (body, key) = encode(req)?;
+    let mut request = target.post_json(PATH, body);
+    // ChatGPT routes the cache by the session header, not by the body key:
+    // both carry the prefix key so that new sessions reuse the cached prefix.
+    // The ego session identity stays in the journal and the socket binding.
+    if let Some(key) = key {
         request
             .headers
             .retain(|header| !header.name().eq_ignore_ascii_case("session-id"));
@@ -272,13 +372,6 @@ pub fn build_request(
         ));
     }
     Ok(request)
-}
-
-fn decode(
-    response: Result<HttpResponse, HttpError>,
-    _cost: Option<Arc<dyn ProviderCost>>,
-) -> BoxStream<'static, AiEvent> {
-    super::decode_response(response, Box::new(StreamDecoder::default()))
 }
 
 #[derive(Debug, Deserialize)]
@@ -386,6 +479,9 @@ struct PartialToolCall {
 
 #[derive(Debug, Default)]
 struct StreamDecoder {
+    search: super::responses_search::SearchItems,
+    search_limit: Option<NonZeroU32>,
+    search_cutoff: bool,
     sse: SseDecoder,
     calls: BTreeMap<String, PartialToolCall>,
     finish_reason: Option<StopReason>,
@@ -401,6 +497,14 @@ impl super::StreamSink for StreamDecoder {
     fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent> {
         StreamDecoder::finish(*self, transport)
     }
+
+    fn stop_reading(&self) -> bool {
+        self.search_cutoff
+    }
+
+    fn usage_incoherent(&self) -> bool {
+        self.usage_incoherent
+    }
 }
 
 impl StreamDecoder {
@@ -408,6 +512,9 @@ impl StreamDecoder {
         let mut out = Vec::new();
         for frame in self.sse.push(chunk) {
             self.consume(&frame, &mut out);
+            if self.search_cutoff {
+                break;
+            }
         }
         out
     }
@@ -416,15 +523,6 @@ impl StreamDecoder {
         let mut out = Vec::new();
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
-        }
-        if self.usage_incoherent {
-            out.push(AiEvent::Error {
-                message: "the provider's prompt cache breakdown was larger than \
-                          the prompt it broke down, so no usage figure could be \
-                          trusted; this generation settles at its bound"
-                    .to_string(),
-                kind: ErrorKind::Unclassified,
-            });
         }
         self.flush_calls(&mut out);
         if let Some(usage) = self.usage.take() {
@@ -470,6 +568,13 @@ impl StreamDecoder {
                 return;
             }
         };
+        if self
+            .search
+            .capture(frame, "openai-codex-responses", out, self.search_limit)
+        {
+            self.search_cutoff = true;
+            return;
+        }
         match event.kind.as_str() {
             "response.output_text.delta" => {
                 if let Some(text) = event.delta.filter(|text| !text.is_empty()) {
@@ -487,6 +592,7 @@ impl StreamDecoder {
                     && let Some(encrypted) = item.encrypted_content
                 {
                     out.push(AiEvent::ReasoningState(ego_core::generator::types::ReasoningState {
+                        connection: None,
                         dialect: "openai-codex-responses".into(),
                         blob: serde_json::json!({"type":"reasoning", "id":item.id, "encrypted_content":encrypted, "summary":item.summary}).to_string(),
                     }));
@@ -523,7 +629,10 @@ impl StreamDecoder {
             "response.completed" => {
                 if let Some(usage) = event.response.as_ref().and_then(|done| done.usage.as_ref()) {
                     match map_usage(usage) {
-                        Some(usage) => self.usage = Some(usage),
+                        Some(mut usage) => {
+                            usage.web_search_requests = self.search.observed();
+                            self.usage = Some(usage);
+                        }
                         None => self.usage_incoherent = true,
                     }
                 }
@@ -537,13 +646,13 @@ impl StreamDecoder {
                     "incomplete" => self.finish_reason = Some(StopReason::Length),
                     "failed" | "cancelled" => {
                         let error = event.response.and_then(|done| done.error);
-                        let kind = super::classify_stream_code(
+                        let class = super::classify_stream_code(
                             error.as_ref().and_then(|error| error.code.as_deref()),
                         );
                         let message = error.and_then(|error| error.message).unwrap_or_else(|| {
                             format!("the Codex backend reported response status {status}")
                         });
-                        out.extend(super::streamed_failure(message, kind));
+                        out.extend(super::streamed_failure(message, class));
                         self.finish_reason = Some(StopReason::Error);
                     }
                     _ if !self.calls.is_empty() => self.finish_reason = Some(StopReason::ToolUse),
@@ -559,7 +668,7 @@ impl StreamDecoder {
                     .as_ref()
                     .and_then(|error| error.code.clone())
                     .or(event.code);
-                let kind = super::classify_stream_code(code.as_deref());
+                let class = super::classify_stream_code(code.as_deref());
                 let message = error
                     .and_then(|error| error.message)
                     .or(event.message)
@@ -567,7 +676,7 @@ impl StreamDecoder {
                         Some(code) => format!("the Codex backend reported streamed error {code}"),
                         None => "the Codex backend reported response.failed".to_string(),
                     });
-                out.extend(super::streamed_failure(message, kind));
+                out.extend(super::streamed_failure(message, class));
                 self.finish_reason = Some(StopReason::Error);
             }
             _ => {}
@@ -575,23 +684,10 @@ impl StreamDecoder {
     }
 
     fn flush_calls(&mut self, out: &mut Vec<AiEvent>) {
-        for (index, call) in std::mem::take(&mut self.calls).into_iter().enumerate() {
-            let Some(id) = call.1.id.filter(|id| !id.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!(
-                        "Codex streamed a function_call at slot {index} with no call_id"
-                    ),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
-            let Some(name) = call.1.name.filter(|name| !name.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!("Codex streamed a function_call {id} with no name"),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
+        // Absent identities pass on empty; the shared stage decides.
+        for call in std::mem::take(&mut self.calls) {
+            let id = call.1.id.unwrap_or_default();
+            let name = call.1.name.unwrap_or_default();
             out.push(AiEvent::ToolCall {
                 call_id: id,
                 name,

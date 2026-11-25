@@ -30,6 +30,10 @@ pub struct BackgroundTaskAuthority {
     pub tools: BTreeSet<String>,
     pub mode: crate::config::Mode,
     pub model: Option<crate::config::ModelRef>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub model_explicit: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<crate::generator::types::ThinkingLevel>,
     pub policy: crate::turn::GenerationPolicyDigest,
 }
 
@@ -242,9 +246,17 @@ impl ChildResultEvidence {
 /// wired through a seven-argument constructor that needed
 /// `#[allow(clippy::too_many_arguments)]` to compile.
 ///
-/// These operations share one host-process boundary: the parent's journal,
-/// blobs, artifacts and configuration. Splitting them into ports that cannot
-/// vary independently would add indirection without substitutability.
+/// `AGENTS.md`'s hexagonal rule admits a port at a *proven external boundary*.
+/// None of the six was one: they did not vary independently, no second adapter
+/// ever implemented one without the others, and every fake implemented all of
+/// them together. Six names bought no substitutability and cost four extra
+/// `Arc<dyn>` indirections plus an argument list long enough to trip a lint.
+/// The boundary that is real is this one — the host process holding the
+/// parent's journal, blobs, artifacts and configuration — and it is named once.
+///
+/// The rule of thumb this enacts, recorded in
+/// the design notes: one
+/// real implementation and one fake is not a boundary, it is a function.
 pub trait ChildHost: Send + Sync {
     /// The parent's durable record of one subagent invocation.
     fn read_journal(
@@ -277,7 +289,17 @@ pub trait ChildHost: Send + Sync {
         &self,
         request: &ChildRequest,
         bindings: &RunExecutionBindings,
+        account: ChildAccountAdmission,
     ) -> Result<(RunSelections, RunExecutionBindings), String>;
+}
+
+/// A cross-provider account can only be selected by a fresh explicit native task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChildAccountAdmission {
+    Inherit,
+    ImplicitNative,
+    ExplicitNativeLaunch,
+    ExplicitNativeRecovery,
 }
 
 pub struct ChildServicePorts {
@@ -478,6 +500,9 @@ impl ChildRunService {
                 root,
                 bindings,
                 ports,
+                explicit_native_model: None,
+                native_background: false,
+                task_policy_matches: true,
                 active: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -487,13 +512,18 @@ impl ChildRunService {
         &self,
         parent_run: RunId,
         sink_factory: Option<Arc<dyn crate::run::EventSinkFactory>>,
+        control: crate::turn::InteractiveControl,
+        explicit_native_model: Option<crate::config::ModelRef>,
+        task_policy_matches: bool,
     ) -> Self {
         let mut bindings = self
             .inner
             .bindings
             .clone()
             .without_delegation()
-            .with_cancel(crate::turn::CancelToken::new());
+            .with_cancel(crate::turn::CancelToken::new())
+            // A child must never take the parent coordinator's receiver.
+            .with_interactive_control(control);
         if let Some(factory) = sink_factory {
             bindings.sink_factory = factory;
         }
@@ -504,6 +534,9 @@ impl ChildRunService {
                 root: self.inner.root.clone(),
                 bindings,
                 ports: ChildServicePorts::new(parent_run, Arc::clone(&self.inner.ports.host)),
+                explicit_native_model,
+                native_background: true,
+                task_policy_matches,
                 active: Mutex::new(BTreeMap::new()),
             }),
         }
@@ -652,9 +685,7 @@ impl ChildRunService {
         if let Some(profile) = recovery_request.selections.profile().map(str::to_owned) {
             recovery_request = recovery_request.with_requested_profile(profile);
         }
-        let (selections, bindings) = admit_child_authority(&self.inner, &mut recovery_request)?;
         let origin = recovery_request.origin.run_origin(invocation);
-        validate_gate(&self.inner, &bindings)?;
         let spawned = events
             .iter()
             .filter_map(|event| match &event.kind {
@@ -696,6 +727,7 @@ impl ChildRunService {
             });
         }
         if let Some((settled_event, child, terminal)) = settled.first() {
+            validate_gate(&self.inner, &self.inner.bindings)?;
             let child = (*child).ok_or_else(|| ChildServiceError::InvalidDurableState {
                 diagnostic: "settled admitted child has no run identity".into(),
             })?;
@@ -734,6 +766,28 @@ impl ChildRunService {
             }));
         }
         if let Some((spawned_event, child)) = spawned.first() {
+            let bindings = if self.inner.native_background {
+                let snapshot = self
+                    .inner
+                    .controller
+                    .status_by_request(request_id(invocation))
+                    .await
+                    .map_err(controller_error)?;
+                validate_expected_origin(&snapshot, &origin)?;
+                if snapshot.run_id() != *child {
+                    return Err(ChildServiceError::InvalidDurableState {
+                        diagnostic: "child run does not match the durable spawn".into(),
+                    });
+                }
+                if snapshot.settlement().is_some() {
+                    validate_gate(&self.inner, &self.inner.bindings)?;
+                    self.inner.bindings.clone()
+                } else {
+                    admit_child_authority(&self.inner, &mut recovery_request, true)?.1
+                }
+            } else {
+                admit_child_authority(&self.inner, &mut recovery_request, true)?.1
+            };
             recover_active(
                 &self.inner,
                 invocation,
@@ -761,6 +815,12 @@ impl ChildRunService {
         {
             Ok(snapshot) => {
                 validate_expected_origin(&snapshot, &origin)?;
+                let bindings = if self.inner.native_background && snapshot.settlement().is_some() {
+                    validate_gate(&self.inner, &self.inner.bindings)?;
+                    self.inner.bindings.clone()
+                } else {
+                    admit_child_authority(&self.inner, &mut recovery_request, true)?.1
+                };
                 recover_active(
                     &self.inner,
                     invocation,
@@ -795,6 +855,8 @@ impl ChildRunService {
                 }))
             }
             Err(RunError::Store(crate::store::session_store::StoreError::NotFound)) => {
+                let (selections, bindings) =
+                    admit_child_authority(&self.inner, &mut recovery_request, true)?;
                 let prompt = read_task(&self.inner, &task)?;
                 let (child, execution, cancel_key, subscription, _lease) = admit(
                     &self.inner,
@@ -843,6 +905,9 @@ struct Inner {
     root: RunRoot,
     bindings: RunExecutionBindings,
     ports: ChildServicePorts,
+    explicit_native_model: Option<crate::config::ModelRef>,
+    native_background: bool,
+    task_policy_matches: bool,
     active: Mutex<BTreeMap<SubagentInvocationId, ActiveChild>>,
 }
 struct ActiveChild {
@@ -934,7 +999,7 @@ async fn start(
         });
     }
     validate_parent_origin(parent, &request)?;
-    let (selections, bindings) = admit_child_authority(inner, &mut request)?;
+    let (selections, bindings) = admit_child_authority(inner, &mut request, false)?;
     let prompt = read_task(inner, &request.task)?;
     let existing = inner
         .ports
@@ -1027,7 +1092,13 @@ async fn start(
 fn admit_child_authority(
     inner: &Inner,
     request: &mut ChildRequest,
+    recovering: bool,
 ) -> Result<(RunSelections, RunExecutionBindings), ChildServiceError> {
+    if !inner.task_policy_matches {
+        return Err(ChildServiceError::InvalidDurableState {
+            diagnostic: "background task settings differ from this session; start a new session to use the changed settings".into(),
+        });
+    }
     if let Some(profile) = request.requested_profile.as_deref() {
         if profile.is_empty() || inner.ports.host.resolve_profile(profile).is_err() {
             return Err(ChildServiceError::ProfileUnavailable {
@@ -1036,13 +1107,38 @@ fn admit_child_authority(
         }
         request.selections = request.selections.with_profile_name(profile.to_owned());
     }
+    let account = match inner.explicit_native_model.as_ref() {
+        Some(expected) if request.selections.model() != Some(expected) => {
+            return Err(ChildServiceError::InvalidDurableState {
+                diagnostic: "child model does not match the explicit native task request".into(),
+            });
+        }
+        Some(_) if recovering => ChildAccountAdmission::ExplicitNativeRecovery,
+        Some(_) => ChildAccountAdmission::ExplicitNativeLaunch,
+        None if inner.native_background => ChildAccountAdmission::ImplicitNative,
+        None => ChildAccountAdmission::Inherit,
+    };
     let admitted = inner
         .ports
         .host
-        .admit_selections(request, &inner.bindings)
+        .admit_selections(request, &inner.bindings, account)
         .map_err(|diagnostic| ChildServiceError::AuthorityWouldWiden {
             dimension: authority_dimension(&diagnostic),
         })?;
+    if let Some(ceiling) = inner.bindings.model_selection_ceiling() {
+        ceiling
+            .validate(admitted.0.model(), admitted.0.thinking())
+            .map_err(|_| ChildServiceError::AuthorityWouldWiden {
+                dimension: "model or effort".into(),
+            })?;
+    }
+    let admitted = match inner.bindings.model_selection_ceiling() {
+        Some(ceiling) => (
+            admitted.0,
+            admitted.1.with_model_selection_ceiling(ceiling.clone()),
+        ),
+        None => admitted,
+    };
     validate_gate(inner, &admitted.1)?;
     Ok(admitted)
 }

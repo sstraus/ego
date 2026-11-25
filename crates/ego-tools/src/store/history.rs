@@ -255,17 +255,19 @@ impl HistoryIndex {
             if self.store.io.exists(&self.store.session_dir(&id).join("quarantined"))? {
                 return Err(invalid("history source is quarantined"));
             }
-            let current_revision = super::FileRevision::from_metadata(
-                &fs::metadata(self.store.log_path(&id))?,
-            )?;
+            let log_path = self.store.log_path(&id);
+            let metadata = super::cold_read::metadata(&log_path)?
+                .ok_or_else(|| invalid("missing history log"))?;
+            let current_revision = super::FileRevision::from_metadata(&metadata)?;
             if source.revision != format!("{CODEC_VERSION}:{current_revision:?}") {
                 return Err(invalid("history source changed while opening; retry the reference"));
             }
             // The header is also part of source identity, not just the event line.
             use std::io::{BufRead, Read};
-            let file = fs::File::open(self.store.log_path(&id))?;
+            // A cold log is decompressed once for the header and every record.
+            let mut log = super::cold_read::open(&log_path)?;
             let mut header = Vec::new();
-            std::io::BufReader::new(file.take(16384)).read_until(b'\n', &mut header)?;
+            std::io::BufReader::new((&mut log).take(16384)).read_until(b'\n', &mut header)?;
             if header.last() != Some(&b'\n') || digest(&header[..header.len()-1]) != source.generation {
                 return Err(invalid("stale history source generation"));
             }
@@ -275,7 +277,7 @@ impl HistoryIndex {
             let located = &records[cursor.index];
             if cursor.source.as_ref().is_some_and(|s| s != &located.source) { return Err(invalid("stale history continuation record")); }
             // The index locates bytes; only the exact authoritative record can supply evidence.
-            let raw = self.read_record(id, located.start, located.length)?;
+            let raw = read_record(&mut *log, located.start, located.length)?;
             let actual = format!("{}:{}:{}", source.generation, located.event, digest(&raw));
             if actual != located.source { return Err(invalid("stale history source record")); }
             let StoreLine::Record(record) = decode_line(&raw).map_err(invalid)? else { return Err(invalid("history locator is not a record")); };
@@ -316,16 +318,6 @@ impl HistoryIndex {
             }
         })
     }
-    fn read_record(&self, id: SessionId, start: i64, length: i64) -> Result<Vec<u8>, HistoryError> {
-        use std::io::{Read, Seek, SeekFrom};
-        let mut file = fs::File::open(self.store.log_path(&id))?;
-        file.seek(SeekFrom::Start(u64::try_from(start).map_err(invalid)?))?;
-        let length = usize::try_from(length).map_err(invalid)?;
-        let mut bytes = vec![0; length];
-        file.read_exact(&mut bytes)?;
-        Ok(bytes)
-    }
-
     fn with_index<T>(
         &self,
         action: impl FnOnce(&Connection) -> Result<T, HistoryError>,
@@ -408,10 +400,10 @@ impl HistoryIndex {
             if self.store.io.exists(&directory.join("quarantined"))? {
                 continue;
             }
-            let metadata = match fs::metadata(self.store.log_path(&id)) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(error) => return Err(error.into()),
+            // A cold log is `events.jsonl.zst`: its new inode forces one rebuild,
+            // which reads the decompressed bytes from offset 0.
+            let Some(metadata) = super::cold_read::metadata(&self.store.log_path(&id))? else {
+                continue;
             };
             let key = id.to_string();
             present.insert(key.clone());
@@ -437,7 +429,8 @@ impl HistoryIndex {
             }
             let lock = self.store.open_events_lock(&id).map_err(invalid)?;
             let _guard = lock.read()?;
-            let metadata = fs::metadata(self.store.log_path(&id))?;
+            let metadata = super::cold_read::metadata(&self.store.log_path(&id))?
+                .ok_or_else(|| invalid("missing history log"))?;
             let revision = format!(
                 "{CODEC_VERSION}:{:?}",
                 super::FileRevision::from_metadata(&metadata)?
@@ -679,6 +672,18 @@ fn identity_text(value: &impl Serialize) -> Result<String, HistoryError> {
         serde_json::Value::String(value) => Ok(value),
         _ => Err(invalid("history identity is not a string")),
     }
+}
+fn read_record(
+    log: &mut dyn super::cold_read::ReadSeek,
+    start: i64,
+    length: i64,
+) -> Result<Vec<u8>, HistoryError> {
+    use std::io::SeekFrom;
+    log.seek(SeekFrom::Start(u64::try_from(start).map_err(invalid)?))?;
+    let length = usize::try_from(length).map_err(invalid)?;
+    let mut bytes = vec![0; length];
+    log.read_exact(&mut bytes)?;
+    Ok(bytes)
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))

@@ -526,6 +526,12 @@ async fn discover_oauth(
         ));
     }
     let issuer = validated_identity(&protected.authorization_servers[0])?;
+    if !plaintext_issuer_admitted(&issuer, &configured_resource) {
+        return Err(McpError::new(
+            McpFailure::Authorization,
+            "OAuth issuer moves the credential to plaintext HTTP on another host",
+        ));
+    }
     let profile = initial_profile.admitting(server, &issuer)?;
     let mut as_discovery = normalized_origin(&issuer)?;
     as_discovery.set_path(&format!(
@@ -552,8 +558,8 @@ async fn discover_oauth(
             .audience
             .as_ref()
             .is_some_and(|value| validated_identity(value).ok().as_ref() != Some(&resource))
-        || normalized_origin(&metadata.authorization_endpoint)? != normalized_origin(&issuer)?
-        || normalized_origin(&metadata.token_endpoint)? != normalized_origin(&issuer)?
+        || !endpoint_host_admitted(&metadata.authorization_endpoint, &issuer, config)?
+        || !endpoint_host_admitted(&metadata.token_endpoint, &issuer, config)?
     {
         return Err(McpError::new(
             McpFailure::Authorization,
@@ -567,6 +573,27 @@ async fn discover_oauth(
         scopes: normalized_scopes(protected.scopes_supported)?,
         metadata,
     })
+}
+
+/// An endpoint is admitted on the issuer's origin or on an origin the owner
+/// enrolled for this server (`oauth_hosts`). Discovery metadata alone never
+/// widens the set, so a malicious document cannot redirect the authorization
+/// code, verifier or registration to a host the owner did not name.
+fn endpoint_host_admitted(
+    endpoint: &Url,
+    issuer: &Url,
+    config: &McpHttpConfig,
+) -> Result<bool, McpError> {
+    let origin = normalized_origin(endpoint)?;
+    if origin == normalized_origin(issuer)? {
+        return Ok(true);
+    }
+    for enrolled in &config.oauth_hosts {
+        if normalized_origin(enrolled.as_url())? == origin {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 async fn select_login_client(
@@ -618,12 +645,13 @@ async fn select_login_client(
             let endpoint = metadata.registration_endpoint.as_ref().ok_or_else(|| {
                 McpError::new(McpFailure::Authorization, "issuer does not advertise DCR")
             })?;
-            if normalized_origin(endpoint)? != normalized_origin(issuer)? {
+            if !endpoint_host_admitted(endpoint, issuer, &request.config)? {
                 return Err(McpError::new(
                     McpFailure::Authorization,
                     "DCR endpoint issuer mismatch",
                 ));
             }
+            let registration_profile = as_profile.admitting(&request.server, endpoint)?;
             let body = serde_json::to_vec(&serde_json::json!({
                 "client_name": request.client_metadata.client_name(),
                 "redirect_uris": [request.redirect_uri.as_str()],
@@ -639,7 +667,7 @@ async fn select_login_client(
             )
             .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
             let response = execute(
-                as_profile,
+                &registration_profile,
                 &request.server,
                 McpHttpPurpose::ClientMetadata,
                 endpoint,
@@ -1084,19 +1112,32 @@ fn protected_resource_metadata_url(resource: &Url) -> Result<Url, McpError> {
     Ok(url)
 }
 
+/// A plaintext issuer stays on this machine or on the plaintext host that the
+/// owner configured as the resource; an HTTPS resource never moves the OAuth
+/// exchange to plaintext off this machine.
+fn plaintext_issuer_admitted(issuer: &Url, resource: &Url) -> bool {
+    issuer.scheme() != "http"
+        || is_loopback_host(issuer)
+        || (resource.scheme() == "http" && issuer.host() == resource.host())
+}
+
+fn is_loopback_host(url: &Url) -> bool {
+    url.host_str().is_some_and(|host| {
+        host == "localhost"
+            || host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    })
+}
+
+/// Syntax of an OAuth origin. Every plaintext origin is anchored by
+/// `plaintext_issuer_admitted` or by equality with the issuer or resource.
 fn normalized_origin(url: &Url) -> Result<Url, McpError> {
     if !matches!(url.scheme(), "https" | "http")
         || url.host_str().is_none()
         || !url.username().is_empty()
         || url.password().is_some()
         || url.fragment().is_some()
-        || (url.scheme() == "http"
-            && !url.host_str().is_some_and(|host| {
-                host == "localhost"
-                    || host
-                        .parse::<std::net::IpAddr>()
-                        .is_ok_and(|ip| ip.is_loopback())
-            }))
     {
         return Err(McpError::new(
             McpFailure::Authorization,
@@ -1111,13 +1152,7 @@ fn normalized_origin(url: &Url) -> Result<Url, McpError> {
 }
 
 fn validate_redirect_uri(url: &Url) -> Result<(), McpError> {
-    let loopback = url.host_str().is_some_and(|host| {
-        host == "localhost"
-            || host
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|ip| ip.is_loopback())
-    });
-    if (url.scheme() == "https" || (url.scheme() == "http" && loopback))
+    if (url.scheme() == "https" || (url.scheme() == "http" && is_loopback_host(url)))
         && url.host_str().is_some()
         && url.username().is_empty()
         && url.password().is_none()

@@ -1,4 +1,5 @@
-//! Catalogue service-tier policy. Unknown support fails closed.
+//! Catalogue policy from captured provider documentation, 2026-10-16.
+//! See the design notes Unknown support fails closed.
 
 use ego_core::budget::PricingQuote;
 use ego_core::cost::Amount;
@@ -22,6 +23,11 @@ impl ServiceTier {
 
     pub fn validate(self, slug: &str) -> Result<(), String> {
         if self == Self::Fast && fast_support(slug).is_none() {
+            if slug.contains("claude-opus-4-8") || slug.contains("claude-opus-4.8") {
+                return Err(format!(
+                    "fast is withdrawn for {slug}: Anthropic removes it on 2026-11-30; use Opus 5.5 for fast, or standard"
+                ));
+            }
             return Err(format!(
                 "fast is unavailable for {slug}: the catalogue has no verified fast tier and price; use standard"
             ));
@@ -49,10 +55,8 @@ pub fn fast_support(slug: &str) -> Option<FastSupport> {
         model,
         "gpt-6-astra" | "gpt-6.1-sol" | "gpt-6-sol" | "gpt-6-luna"
     );
-    let anthropic_model = matches!(
-        model,
-        "claude-opus-5-5" | "claude-opus-5" | "claude-opus-4-8"
-    );
+    // Opus 4.8 fast is retired upstream on 2026-11-30 and errors with no fallback.
+    let anthropic_model = matches!(model, "claude-opus-5-5" | "claude-opus-5");
     match provider {
         "openai" | "openai-codex" if openai_model => Some(FastSupport {
             token_price_multiplier: 2,
@@ -90,9 +94,9 @@ pub fn fast_support(slug: &str) -> Option<FastSupport> {
                     )
                 })
                 .or_else(|| {
-                    model.strip_prefix("anthropic/").filter(|m| {
-                        matches!(*m, "claude-opus-5.5" | "claude-opus-5" | "claude-opus-4.8")
-                    })
+                    model
+                        .strip_prefix("anthropic/")
+                        .filter(|m| matches!(*m, "claude-opus-5.5" | "claude-opus-5"))
                 })?;
             Some(FastSupport {
                 token_price_multiplier: 2,
@@ -180,6 +184,7 @@ mod tests {
             cache_write_extended: Some("0.000004".parse().unwrap()),
             output: Some("0.00001".parse().unwrap()),
             web_search: Some("0.01".parse().unwrap()),
+            long_context: Vec::new(),
         };
         let fast = fast_quote(&quote, &fast_support("openai/gpt-6.1-sol").unwrap()).unwrap();
         assert_eq!(fast.uncached_input.unwrap().to_string(), "0.000004");
@@ -200,7 +205,6 @@ mod tests {
             "openai-gpt-6-luna",
             "anthropic-claude-opus-5-5",
             "anthropic-claude-opus-5",
-            "anthropic-claude-opus-4-8",
         ] {
             let capture: serde_json::Value = serde_json::from_slice(
                 &std::fs::read(root.join(format!("{model}-endpoints.json"))).unwrap(),

@@ -111,9 +111,15 @@ impl CliSessionConfinementAdmission {
                 let mut args = crate::run::protocol_args(None, shape);
                 args.sandbox = Some(level);
                 args.ceiling_profile = selected.ceiling_profile().map(str::to_owned);
-                crate::run::read_directory::session_policy(root, &args)
-                    .map_err(|error| read_directory_refusal(&error.to_string()))
-            }?;
+                match self.controls.captured_config(session)? {
+                    Some(capture) => crate::run::captured_session_policy(root, &args, &capture),
+                    None => crate::run::read_directory::session_policy(root, &args),
+                }
+                .map_err(|error| read_directory_refusal(&error.to_string()))
+            };
+            let Some(policy) = measurement_policy(level, ceiling, policy)? else {
+                continue;
+            };
             if !policies
                 .iter()
                 .any(|existing: &ego_core::permit::RunConfinement| {
@@ -240,24 +246,33 @@ impl SessionConfinementAdmission for CliSessionConfinementAdmission {
         let profile = shape.profile.clone();
         let mut args = crate::run::protocol_args(None, shape);
         args.ceiling_profile = ceiling.map(str::to_owned);
-        let resolve = || {
-            let layers =
-                crate::config::layers(root.as_path(), &args, ego_core::config::Trust::Untrusted)?;
-            crate::config::resolve_session_profile(
-                &layers,
-                ego_core::config::Trust::Untrusted,
-                profile
-                    .as_deref()
-                    .map(|name| (name, ego_core::config::Source::Flags)),
-                ceiling,
-                root.as_path(),
-            )
+        args.directory = Some(root.as_path().to_path_buf());
+        let pinned = self
+            .controls
+            .profile_effective(session, profile.as_deref(), ceiling)?;
+        let capture = match self.controls.captured_config(session)? {
+            Some(capture) => capture,
+            None => Arc::new(
+                crate::config::FrozenRunConfig::capture(
+                    root.as_path(),
+                    &args,
+                    ego_core::config::Trust::Untrusted,
+                )
+                .map_err(|error| ControlError::Refused {
+                    control: "profile",
+                    why: error.to_string(),
+                })?,
+            ),
         };
-        let effective =
-            resolve().map_err(|error: crate::cli::UsageError| ControlError::Refused {
-                control: "profile",
-                why: error.to_string(),
-            })?;
+        let effective = match pinned {
+            Some(pinned) => pinned,
+            None => capture
+                .resolve(&args)
+                .map_err(|error| ControlError::Refused {
+                    control: "profile",
+                    why: error.to_string(),
+                })?,
+        };
         let selected = effective.sandbox.unwrap_or_default();
         let sandbox = if selected.within(self.ceiling) {
             selected
@@ -268,8 +283,13 @@ impl SessionConfinementAdmission for CliSessionConfinementAdmission {
             "effective": {"mode": effective.mode.unwrap_or(ego_core::config::Mode::Default),
                 "sandbox": sandbox, "roots": effective.roots, "execPaths": effective.exec_paths},
             "warnings": effective.profile_warnings});
-        self.controls
-            .seed_profile(session, effective, profile, ceiling.map(str::to_owned))?;
+        self.controls.seed_profile(
+            session,
+            effective,
+            profile,
+            ceiling.map(str::to_owned),
+            Some(capture),
+        )?;
         Ok(result)
     }
 
@@ -313,6 +333,23 @@ impl SessionConfinementAdmission for CliSessionConfinementAdmission {
                 (Arc::clone(attempt), future.clone())
             }
             None => {
+                // Every seat needs its account/profile snapshot, even when the
+                // host supplied no optional profile metadata on new or load.
+                let configured = self
+                    .controls
+                    .profile_selections(session, ego_core::run::RunSelections::empty())
+                    .and_then(|selected| {
+                        // A successor may already own its immutable profile snapshot.
+                        // Do not re-resolve it from a subsequently edited config.
+                        if selected.profile().is_some() || selected.ceiling_profile().is_some() {
+                            return Ok(());
+                        }
+                        self.configure_profiles(session, &root, None, None)
+                            .map(|_| ())
+                    });
+                if let Err(error) = configured {
+                    return Box::pin(async move { Err(error) });
+                }
                 let attempt = Arc::new(());
                 let future = initialize_once(
                     Arc::clone(&self.store),
@@ -395,6 +432,23 @@ fn offered(ceiling: Confinement) -> impl Iterator<Item = Confinement> {
     })
 }
 
+/// A failed optional offer is unavailable, not authority to replace the
+/// selected ceiling. Its construction failure must not disable a valid seat.
+fn measurement_policy<E: std::fmt::Display>(
+    candidate: Confinement,
+    ceiling: Confinement,
+    policy: Result<ego_core::permit::RunConfinement, E>,
+) -> Result<Option<ego_core::permit::RunConfinement>, E> {
+    match policy {
+        Ok(policy) => Ok(Some(policy)),
+        Err(error) if candidate != ceiling => {
+            tracing::debug!(%candidate, %error, "an optional ACP confinement policy is unavailable");
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
 /// Measure every confinement a session under `ceiling` may be offered, into
 /// the process-wide capability cache. Safe to run ahead of any session: the
 /// cache holds measurement facts only, and single-flights concurrent callers.
@@ -406,10 +460,13 @@ pub(crate) async fn warm_process_cache(
     for confinement in offered(ceiling) {
         let policy = ego_tools::exec::admit_confinement(confinement, false, CanonPath::new(root))
             .map_err(|error| {
-            ControlError::Internal(format!(
-                "the ACP confinement policy could not be constructed: {error}"
-            ))
-        })?;
+                ControlError::Internal(format!(
+                    "the ACP confinement policy could not be constructed: {error}"
+                ))
+            });
+        let Some(policy) = measurement_policy(confinement, ceiling, policy)? else {
+            continue;
+        };
         RunEffectPorts::diagnostic_capabilities(&policy, cancel.clone(), ExecLimits::default())
             .await
             .map_err(|error| {
@@ -535,6 +592,46 @@ async fn initialize_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches: warmup stops at an invalid optional Adaptive source, or ignores
+    // the same error when Adaptive is the selected ceiling.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn warmup_skips_invalid_optional_policy_but_refuses_selected_policy() {
+        const TEST: &str = "acp_confinement::tests::warmup_skips_invalid_optional_policy_but_refuses_selected_policy";
+        if std::env::var_os("EGO_ISOLATED_WARMUP_TEST").is_none() {
+            let base = tempfile::tempdir().unwrap();
+            let home = base.path().join("home");
+            let root = base.path().join("workspace");
+            std::fs::create_dir(&home).unwrap();
+            std::fs::create_dir(&root).unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--nocapture"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+                .env("HOME", &home)
+                .env("EGO_HOME", &home)
+                .env("TMPDIR", base.path())
+                .env("EGO_ISOLATED_WARMUP_TEST", &root)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{output:?}");
+            return;
+        }
+        let root = std::path::PathBuf::from(std::env::var_os("EGO_ISOLATED_WARMUP_TEST").unwrap());
+        warm_process_cache(Confinement::Off, CancelToken::new(), &root)
+            .await
+            .expect("invalid optional Adaptive must not stop Off warmup");
+        let error = warm_process_cache(Confinement::Adaptive, CancelToken::new(), &root)
+            .await
+            .expect_err("the selected Adaptive policy must still refuse");
+        assert!(
+            error
+                .to_string()
+                .contains("adaptive source crosses a hard write floor"),
+            "{error}"
+        );
+    }
 
     // Catches: warmup and session measurement offer different confinement sets.
     #[test]

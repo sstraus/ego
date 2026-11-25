@@ -21,6 +21,8 @@ pub mod surface;
 /// What Esc leaves in the transcript, whether it stopped a turn or answered a
 /// permission modal.
 pub(crate) const INTERRUPTED_RECEIPT: &str = "Interrupted by user";
+/// A busy-turn steer stopped the turn; its queued message continues the work.
+pub(crate) const QUEUED_CONTINUATION_RECEIPT: &str = "Queued message continues the work";
 
 pub(crate) use policy_controls::PermissionRuleApplication;
 pub(crate) use seat::effective_statusline_template;
@@ -28,7 +30,9 @@ pub(crate) use seat::{BackgroundActivity, BackgroundTaskSurface, Confirmation};
 pub use seat::{
     DraftStash, EditPhase, Seat, StatusSetup, SurfaceEditMode, SurfaceOutput, SurfacePhase,
 };
-pub(crate) use seat::{render_action_help, render_key_hints};
+pub(crate) use seat::{
+    render_action_help, render_action_help_details, render_key_hints, render_startup_key_hints,
+};
 
 use actions::{ActionId, ExportSelection, SkillSurfaceAction};
 use ego_core::skill::AdmittedSkillOperation;
@@ -42,6 +46,11 @@ pub(super) const BUSY_RECALL_COMMAND: &str = "ego:busy-recall";
 pub(super) const BUSY_STEER_COMMAND: &str = "ego:busy-steer";
 pub(super) const BACKGROUND_COMMAND: &str = "ego:background";
 const INTERRUPT_COMMAND: &str = "ego:interrupt";
+/// Busy `Ctrl+C` as a host command: the read stays suspended, so the tty stays
+/// raw while the owner waits for the turn to accept the cancel. Reedline's own
+/// `Ctrl+C` ends the read and restores cooked mode, which echoed keys typed in
+/// that wait and turned their Enter into a newline.
+pub(super) const BUSY_CANCEL_COMMAND: &str = "ego:busy-cancel";
 pub(super) const PASTE_PATH_COMMAND: &str = "ego:paste-path:";
 pub(super) const REMOVE_PASTE_IMAGE_COMMAND: &str = "ego:remove-paste-image";
 pub(super) const CLIPBOARD_PASTE_COMMAND: &str = "ego:clipboard-paste";
@@ -75,8 +84,11 @@ pub enum HostCommand {
     Fast(bool),
     Setup(String),
     Tasks(String),
+    /// A question answered beside the running turn; never part of the history.
+    SideQuestion(String),
     Pins(ego_core::compact::PinCommand),
     Mcp(String),
+    Login(Option<String>),
     McpContext(actions::McpContextCommand),
     Background,
     /// A background process or task outcome is ready; not human-authored input.
@@ -119,10 +131,67 @@ impl HostCommand {
                 let words = arguments.split_whitespace().collect::<Vec<_>>();
                 words.is_empty() || (words.len() == 1 && words[0] != "cancel")
             }
-            Self::Action(ActionId::Config | ActionId::Usage) => true,
-            Self::Config(arguments) => arguments == "perimeter",
+            Self::SideQuestion(_)
+            | Self::Action(
+                ActionId::Config
+                | ActionId::Usage
+                | ActionId::Context
+                | ActionId::Doctor
+                | ActionId::Tools,
+            )
+            | Self::Details(
+                ActionId::Hooks | ActionId::Doctor | ActionId::Tools | ActionId::Help,
+            )
+            | Self::Hooks
+            | Self::Skills(
+                SkillSurfaceAction::List
+                | SkillSurfaceAction::Details
+                | SkillSurfaceAction::Diagnose,
+            )
+            | Self::Pins(ego_core::compact::PinCommand::List)
+            | Self::Policy(PolicyControlRequest::Permission(
+                policy_controls::PermissionInput::List
+                | policy_controls::PermissionInput::Explain { .. },
+            )) => true,
+            Self::Mcp(arguments) => arguments.trim().is_empty(),
+            // Bare provider inventory only; a provider flow is an effecting login.
+            Self::Login(provider) => provider.is_none(),
+            Self::Config(arguments) => {
+                arguments == "perimeter" || arguments == "roots" || arguments == "details"
+            }
             _ => false,
         }
+    }
+
+    /// Commands with explicit concurrent handlers; not all are read-only.
+    pub(crate) fn is_concurrent_native(&self) -> bool {
+        self.is_read_only_inspection()
+            || self.is_root_revocation()
+            || matches!(
+                self,
+                Self::Fast(_)
+                    | Self::ModelSwitch(_)
+                    | Self::Export(_)
+                    | Self::Policy(
+                        PolicyControlRequest::SetMode(_)
+                            | PolicyControlRequest::CycleMode
+                            | PolicyControlRequest::Rule(_)
+                            | PolicyControlRequest::Permission(
+                                policy_controls::PermissionInput::Revoke(_)
+                            )
+                    )
+            )
+            || matches!(self, Self::Config(arguments) if arguments.starts_with("set "))
+            || matches!(self, Self::Tasks(arguments) if matches!(arguments.split_whitespace().collect::<Vec<_>>().as_slice(), ["cancel", _]))
+            || matches!(
+                self,
+                Self::SessionMetadata(
+                    crate::cli::SessionMetadataOperation::Name(_)
+                        | crate::cli::SessionMetadataOperation::Goal(
+                            crate::cli::GoalOperation::Show | crate::cli::GoalOperation::Stop
+                        )
+                )
+            )
     }
 
     fn from_editor(command: String) -> Option<Self> {
@@ -227,6 +296,7 @@ impl Line {
             Signal::Success(text) if text.trim().is_empty() => Self::Blank,
             Signal::Success(text) => Self::bang_from_editor(&text).unwrap_or(Self::Submitted(text)),
             Signal::CtrlC => Self::Interrupted,
+            Signal::HostCommand(command) if command == BUSY_CANCEL_COMMAND => Self::Interrupted,
             Signal::CtrlD => Self::Ended,
             Signal::HostCommand(command) => HostCommand::from_editor(command)
                 .map(Self::HostCommand)
@@ -243,15 +313,34 @@ impl Line {
 /// already been typed, so consulting the buffer first would submit a
 /// half-written prompt as though Enter had been pressed.
 fn answer(asked_for_image: bool, signal: std::io::Result<Signal>) -> Line {
+    answer_reporting(asked_for_image, signal, &mut crate::output::note)
+}
+
+/// [`answer`], naming through `report` the cause of a read that failed.
+fn answer_reporting(
+    asked_for_image: bool,
+    signal: std::io::Result<Signal>,
+    report: &mut dyn FnMut(&str),
+) -> Line {
     if asked_for_image {
         return Line::HostCommand(HostCommand::ClipboardPaste);
     }
     match signal {
         Ok(signal) => Line::of(signal),
         // A read that fails is a terminal that went away: there is no line to
-        // retype and nobody left to retype it.
-        Err(_) => Line::Ended,
+        // retype and nobody left to retype it. The cause is named, because
+        // the session ends with it otherwise unrecorded.
+        Err(error) => {
+            report_input_failure(&error, report);
+            Line::Ended
+        }
     }
+}
+
+/// Name the cause of a terminal read that failed. Every reader reports it
+/// with these words, because the session ends with it otherwise unrecorded.
+fn report_input_failure(error: &std::io::Error, report: &mut dyn FnMut(&str)) {
+    report(&format!("terminal input failed: {error}"));
 }
 
 #[cfg(test)]
@@ -263,6 +352,88 @@ mod tests {
         SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillSourceAuthority,
         SkillSourceLocation,
     };
+
+    // Catches: a model/thinking selection is queued until the turn ends (not in
+    // the concurrent inbox) or is mistaken for a read-only inspection and so
+    // bypasses the lifecycle owner's account, hook and publication ordering.
+    #[test]
+    fn model_selection_is_a_concurrent_control_not_a_read_only_inspection() {
+        let request = crate::model_picker::ModelSwitchRequest::persistent(
+            ego_core::config::ModelRef("ollama/terra".into()),
+            ego_core::generator::types::ThinkingLevel::Off,
+        );
+        let command = HostCommand::ModelSwitch(request);
+        assert!(command.is_concurrent_native());
+        assert!(!command.is_read_only_inspection());
+    }
+
+    // Catches: staged rule controls are mistaken for read-only inspection or
+    // confirmation-owned Remember requests enter the concurrent inbox.
+    #[test]
+    fn permission_admission_separates_staged_edits_from_confirmation() {
+        use policy_controls::PermissionInput;
+        let list = HostCommand::Policy(PolicyControlRequest::Permission(PermissionInput::List));
+        assert!(list.is_read_only_inspection() && list.is_concurrent_native());
+        let rule = crate::cli::managed_rule("exec(git *)").unwrap();
+        for request in [
+            PolicyControlRequest::Rule(ego_core::config::RuleMutation {
+                effect: ego_core::config::ManagedRuleEffect::Allow,
+                rule,
+            }),
+            PolicyControlRequest::Permission(PermissionInput::Revoke(
+                "r1:yhntjjh06f3x".parse().unwrap(),
+            )),
+        ] {
+            let command = HostCommand::Policy(request);
+            assert!(!command.is_read_only_inspection());
+            assert!(command.is_concurrent_native());
+        }
+        use ego_core::permit::{CanonPath, Op, PreparedCall, SandboxAccess, SandboxGrant};
+        let workspace = CanonPath::new("/workspace");
+        let remember = policy_controls::RememberRequest::new(
+            PreparedCall::new(
+                "read",
+                Op::Read {
+                    path: workspace.clone(),
+                },
+            ),
+            ego_core::config::ManagedRuleEffect::Allow,
+            workspace.clone(),
+        );
+        let preview = policy_controls::RememberPreview::presented(
+            ego_core::config::ManagedRuleEffect::Allow,
+            ego_core::config::rule_management::RememberPlan::for_sandbox_path(&SandboxGrant::new(
+                workspace,
+                SandboxAccess::Read,
+            ))
+            .unwrap(),
+        );
+        for input in [
+            PermissionInput::Remember(remember),
+            PermissionInput::ConfirmRemember(preview),
+        ] {
+            let command = HostCommand::Policy(PolicyControlRequest::Permission(input));
+            assert!(!command.is_read_only_inspection());
+            assert!(!command.is_concurrent_native());
+        }
+    }
+
+    // Catches: the provider flow (`/login PROVIDER`) enters the concurrent
+    // inbox with the bare inventory, or the inventory stays queued behind a turn.
+    #[test]
+    fn only_bare_login_inventory_is_a_concurrent_inspection() {
+        let bare = HostCommand::Login(None);
+        assert!(bare.is_read_only_inspection() && bare.is_concurrent_native());
+        let flow = HostCommand::Login(Some("openai-codex".into()));
+        assert!(!flow.is_read_only_inspection() && !flow.is_concurrent_native());
+    }
+
+    // Catches: a side question typed during a turn waits for the turn to end
+    // (not an inspection) or reaches the model as a queued prompt.
+    #[test]
+    fn side_question_is_a_read_only_inspection_during_a_turn() {
+        assert!(HostCommand::SideQuestion("why?".into()).is_read_only_inspection());
+    }
 
     // Catches: a terminal-authored `!` line is sent to the model as prompt text
     // instead of staying on the host-only command path.
@@ -356,6 +527,36 @@ mod tests {
         let broken = Err(std::io::Error::other("the terminal went away"));
 
         assert_eq!(answer(false, broken), Line::Ended);
+    }
+
+    /// Catches: a failed terminal read ends the session with its cause
+    /// discarded, so the exit looks like a silent crash.
+    #[test]
+    fn a_failed_read_names_its_cause_before_ending_the_session() {
+        let broken = Err(std::io::Error::other("the terminal went away"));
+        let mut reported = Vec::new();
+
+        let line = answer_reporting(false, broken, &mut |message| {
+            reported.push(message.to_owned());
+        });
+
+        assert_eq!(line, Line::Ended);
+        assert_eq!(
+            reported,
+            ["terminal input failed: the terminal went away".to_owned()]
+        );
+    }
+
+    /// Catches: a report on every read, not only on a failed one.
+    #[test]
+    fn a_read_that_succeeds_reports_nothing() {
+        let mut reported = Vec::new();
+
+        answer_reporting(false, Ok(Signal::CtrlD), &mut |message| {
+            reported.push(message.to_owned());
+        });
+
+        assert!(reported.is_empty(), "{reported:?}");
     }
 
     /// The one thing that must never be confusable with a refusal: a person

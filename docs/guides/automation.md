@@ -1,5 +1,7 @@
 # Automation and agent files
 
+Read this page in the [hosted user guide](https://ego.tuicommander.com/docs/guides/automation.html).
+
 Headless runs put the harness into a script: an explicit prompt enters, structured
 output and an exit status leave. They never stop to ask for trust or permission.
 Choose the model, instructions, permitted effects, and limits explicitly.
@@ -49,11 +51,144 @@ inside an already-running session. They use the same bounded strict YAML envelop
 but have different lifecycles.
 
 An agent file can use `#!/usr/bin/env -S ego run --file`, standalone `---` YAML
-delimiters, and a Markdown prompt body. Its closed frontmatter keys are `model`,
-`mode`, `sandbox`, `allow` (array), `schema`, and `vars` (declared variable names).
+delimiters, and a Markdown prompt body. The frontmatter must start with
+`version: 1`; a file without it is refused. The other keys are optional:
+
+| Key | Value | Same as |
+| --- | --- | --- |
+| `model` | `provider/model` string | `--model` |
+| `effort` | `off`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max` | `--thinking` |
+| `mode` | `plan`, `default`, `auto`, `accept-edits` or `yolo` | `--mode` |
+| `sandbox` | `ro`, `workspace`, `adaptive` or `off` | `--sandbox` |
+| `allow` | List of permission rules | `--allow` |
+| `deny` | List of permission rules | `--deny` |
+| `schema` | Inline JSON Schema, or `@FILE` relative to the agent file | `--schema` |
+| `vars` | List of variable names used as `{{name}}` in the body | |
+| `tools`, `roots` | Lists; accepted only in named task definitions | |
+
+`ego run --file` refuses `tools` and `roots`; they are tool and root ceilings
+for named task definitions, which also cannot set `allow` or `schema`. Flags on
+the command line override the values in the file.
+
 `ego run --file FILE --var NAME=VALUE` supplies declared variables. The loader
-rejects unknown/duplicate fields and missing/extra variables. An argv prompt and
-`--file` conflict. Variables do not turn text into shell evaluation.
+rejects unknown and duplicate fields, and variables that are declared, used in
+the body and supplied must match exactly. An argv prompt and `--file` conflict,
+and so do `--file` and `-`; piped stdin is appended to the body as a fenced
+block of context. Variables do not turn text into shell evaluation.
+
+A complete example, `fix-tests.ego`:
+
+```markdown
+#!/usr/bin/env -S ego run --file
+---
+version: 1
+model: ollama/gemma4:e4b-mlx
+effort: medium
+mode: accept-edits
+sandbox: workspace
+allow: ["exec(cargo test *)"]
+deny: ["exec(git push *)"]
+schema: "@fix-tests.schema.json"
+vars: [package]
+---
+Run the tests of the {{package}} package, fix any failure, and report the result.
+```
+
+and `fix-tests.schema.json` next to it:
+
+```json
+{"type":"object","required":["passed","summary"],"additionalProperties":false,
+ "properties":{"passed":{"type":"boolean"},"summary":{"type":"string"}}}
+```
+
+```sh
+chmod +x fix-tests.ego
+./fix-tests.ego --var package=my-crate --output json
+```
+
+## Goals
+
+A goal keeps a run working until a check says the objective is met. After each
+completed turn, a separate check without tools compares the objective with the
+session evidence. If the condition is unmet and the agent can still do useful,
+authorized work, ego starts an automatic continuation turn.
+
+```sh
+ego run --goal 'All tests in crates/parser pass' --goal-turns 10 \
+  --allow 'exec(cargo test *)' --output json 'Fix the failing parser tests.'
+```
+
+- `--goal TEXT` sets an operator goal for `ego run`, `ego resume ID` and
+  `ego continue ID`. Interactively, `/goal TEXT` (or `/goal set TEXT`) does the
+  same and starts the first work turn.
+- `--goal-turns N` limits automatic continuation turns. An operator goal has no
+  limit unless you set one; `0` stops before the first automatic turn. The value
+  applies when checks first start and does not change a saved limit. Automatic
+  turns also count toward `--max-turns`.
+- The model can set its own goal with the `goal` tool only when no goal is
+  active, and it cannot replace an active goal. Automatic work on a model-set
+  goal pauses after 20 continuation turns. `/goal resume` grants it 20 more and
+  starts a work turn; `ego resume ID --goal-operation resume` grants them
+  without starting a turn. Neither applies to an operator goal or to a goal
+  that has not paused.
+- There is no extension command: `/goal extend` is refused. To change an
+  objective, set a new operator goal.
+- `/goal show`, `/goal achieve` and `/goal block REASON` inspect or settle the
+  goal; `ego resume ID --goal-operation show|set=TEXT|achieve|resume|block=REASON`
+  does the same without starting a turn.
+
+Five checks in a row that report the same unmet condition block the goal. After
+two continuation turns with no tool call and no new input, ego waits for the next
+inbound event instead of starting another turn.
+
+### Goal check command
+
+By default the check is a model generation, accounted as `goal_check` usage.
+`--goal-check-command` replaces it with a program of your own. Give its argv as
+one JSON array:
+
+```sh
+ego run --goal 'The release build succeeds' \
+  --goal-check-command '["python3", "check_goal.py"]' \
+  --allow 'exec(python3 check_goal.py)' 'Prepare the release build.'
+```
+
+The program receives the objective and the session evidence as JSON on stdin,
+the same text a model check reads. Images and audio never appear as bytes, only
+as descriptors:
+
+```json
+{"image_evidence":{"reference":"SHA256:BYTES","media_type":"png","width":640,"height":480,"available_to_checker":false}}
+{"audio_evidence":{"reference":"SHA256:BYTES","media_type":"wav","available_to_checker":false}}
+```
+
+It writes one JSON object on stdout:
+
+```json
+{"verdict":"continue","reason":"tests in crates/parser/src/lex.rs still fail; fix the tokenizer next"}
+```
+
+| `verdict` | Effect |
+| --- | --- |
+| `achieved` | The goal is achieved. The reason must state the evidence of success |
+| `continue` | The agent has a useful, authorized next action; name it in the reason. Starts a continuation turn |
+| `waiting` | Nothing useful can be done now; the next step depends on work already in flight or an external event, named in the reason. The goal stays active, no turn starts, and the next inbound event resumes work |
+| `needs_operator` | Only a person can unblock the goal (login, approval, decision). The goal blocks at once with the reason; start a new goal after resolving it |
+
+`verdict` and a non-empty `reason` are required; any other field is refused, and
+an invalid answer stops automatic work while the goal stays active. When the
+evidence contains an image descriptor, an `achieved` verdict must also contain
+`"image_dependent": false`, stating that success does not rest on an image the
+check could not see. Otherwise the goal blocks with the reason
+`visual evidence unavailable to the goal check: REASON`. Audio follows the same
+rule with `"audio_dependent": false`.
+
+The command runs under ordinary policy: grant its exact argv with an `--allow`
+rule, or the check fails with `goal check command requires an explicit exec
+grant`. It runs inside the run's confinement, so the script and its inputs must
+be readable there. It has a 60-second limit. Stderr is not part of the verdict;
+when the command fails, the diagnostic shows at most the last 4096 bytes of its
+stderr. Command checks cost no model tokens.
 
 ## CI posture
 
@@ -63,3 +198,8 @@ credential source, and pre-existing absolute session/artifact roots disjoint fro
 each other and the workspace. An admitted outcome publishes one canonical sanitized
 bundle, independently of stdout's JSONL stream. Admission failures publish none.
 Full keys and invariants are in [configuration](../reference/configuration.md).
+
+Sources: [agent-file parser](../../crates/ego-cli/src/agent_file.rs),
+[schema validator](../../crates/ego-cli/src/schema.rs),
+[prompt ownership](../../crates/ego-cli/src/prompt.rs), and
+agent-file tests.

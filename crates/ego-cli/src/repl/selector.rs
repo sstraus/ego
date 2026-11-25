@@ -11,6 +11,10 @@ pub enum SelectorKind {
 pub enum SelectorKey {
     Up,
     Down,
+    Home,
+    End,
+    PageUp(usize),
+    PageDown(usize),
     Number(usize),
     Enter,
     Escape,
@@ -175,6 +179,22 @@ impl Selector {
     pub fn key(&mut self, key: SelectorKey) -> SelectorOutcome {
         let mut selected = None;
         match key {
+            SelectorKey::Home | SelectorKey::End if !self.choices.is_empty() => {
+                self.cursor = if key == SelectorKey::Home {
+                    0
+                } else {
+                    self.choices.len() - 1
+                };
+                self.cursor_active = true;
+            }
+            SelectorKey::PageUp(rows) | SelectorKey::PageDown(rows) if !self.choices.is_empty() => {
+                self.cursor = if matches!(key, SelectorKey::PageUp(_)) {
+                    self.cursor.saturating_sub(rows)
+                } else {
+                    (self.cursor + rows).min(self.choices.len() - 1)
+                };
+                self.cursor_active = true;
+            }
             SelectorKey::Up if !self.choices.is_empty() => {
                 self.cursor = if self.cursor_active {
                     self.cursor.checked_sub(1).unwrap_or(self.choices.len() - 1)
@@ -285,5 +305,34 @@ impl Selector {
                 .find(|(index, _)| self.selected.contains(index))
                 .map(|(_, choice)| choice.label.clone()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Catches: paging wraps at the end, skips the last partial page, or Home/End
+    // selects only the current page boundary rather than the whole list.
+    #[test]
+    fn page_and_boundary_keys_select_rows_across_the_whole_list() {
+        let mut selector = Selector::with_options(
+            SelectorKind::Single,
+            (0..23).map(|i| SelectorOption::new(i.to_string(), format!("row-{i}"))),
+        );
+        for (key, expected) in [
+            (SelectorKey::PageDown(10), "10"),
+            (SelectorKey::PageDown(10), "20"),
+            (SelectorKey::PageDown(10), "22"),
+            (SelectorKey::PageUp(10), "12"),
+            (SelectorKey::Home, "0"),
+            (SelectorKey::PageUp(10), "0"),
+            (SelectorKey::End, "22"),
+        ] {
+            selector.key(key);
+            assert_eq!(selector.current_id(), Some(expected), "{key:?}");
+        }
+        selector.key(SelectorKey::Enter);
+        assert_eq!(selector.result(), Some(&SelectorValue::Single("22".into())));
     }
 }

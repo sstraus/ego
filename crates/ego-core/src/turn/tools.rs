@@ -1,8 +1,10 @@
 //! The tool half of the loop's dependencies: a registry and the raw
 //! filesystem a policy grant is exercised against.
 //!
-//! Keep preparation, authorization and execution separate so the turn can
-//! durably append a permission question between authorization and execution.
+//! Kept as three stages rather than one `run(name, args)` future, for the
+//! reason the design notes gives for rejecting a
+//! `ToolRunner` port: M1 has to append a permission request *between*
+//! authorising and executing, and a single future has no such between.
 
 use serde_json::Value;
 
@@ -45,6 +47,55 @@ impl AdmittedToolSource for EmptyAdmittedToolSource {
     }
 }
 
+const SKILL_DESCRIPTION: &str = "Invoke one admitted skill or read one resource from a live invocation. Choose a skill when its description matches the task. Available skills: ";
+
+/// The model-visible entries of the `skill` tool description.
+pub(crate) fn skill_announcement(catalogue: &crate::skill::SkillCatalogue) -> Vec<Value> {
+    catalogue
+        .announce_for_model()
+        .into_iter()
+        .map(|skill| {
+            serde_json::json!({
+                "name": skill.name,
+                "description": skill.description,
+                "trigger": skill.trigger,
+                "argument_hint": skill.argument_hint,
+                "source": skill.source,
+                "user_invocable": skill.user_invocable,
+                "model_invocable": skill.model_invocable,
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn skill_description(entries: &[Value]) -> String {
+    format!("{SKILL_DESCRIPTION}{}", Value::Array(entries.to_vec()))
+}
+
+/// What the live catalogue admits that the fixed tool description does not
+/// say. Delivered after the history, so the cached tool block stays the same.
+pub(crate) fn skill_changes(frozen: &[Value], live: &[Value]) -> Option<String> {
+    let added: Vec<Value> = live
+        .iter()
+        .filter(|entry| !frozen.contains(entry))
+        .cloned()
+        .collect();
+    let removed: Vec<Value> = frozen
+        .iter()
+        .filter_map(|entry| entry.get("name"))
+        .filter(|name| !live.iter().any(|entry| entry.get("name") == Some(name)))
+        .cloned()
+        .collect();
+    if added.is_empty() && removed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "The skill catalogue changed after the skill tool description of this session was fixed. This list replaces the matching entries of that description. Added or changed: {}. No longer available: {}.",
+        Value::Array(added),
+        Value::Array(removed)
+    ))
+}
+
 pub(crate) struct GenerationToolCatalogue {
     generation: std::sync::Arc<str>,
     registry: Vec<RegisteredTool>,
@@ -54,27 +105,56 @@ pub(crate) struct GenerationToolCatalogue {
 
 impl GenerationToolCatalogue {
     /// Route from the resolved candidate, without changing the inherited registry.
-    pub(crate) fn for_provider(&self, native_search: bool) -> Self {
+    pub(crate) fn for_provider(
+        &self,
+        native_search: bool,
+        default_search: bool,
+        parallel_tool_calls: bool,
+    ) -> Self {
         let (registry, descriptors) = self
             .registry
             .iter()
             .zip(&self.descriptors)
-            .filter_map(|(entry, descriptor)| match entry.as_effect() {
-                Some(tool) if tool.admits_hosted_search() && !native_search => {
-                    tool.local_search_tool().map(|local| {
-                        let entry = RegisteredTool::Effect(local);
-                        let descriptor = entry.descriptor();
-                        (entry, descriptor)
-                    })
-                }
-                _ => Some((entry.clone(), descriptor.clone())),
+            // The batch only helps a provider limited to one call per answer.
+            .filter(|(entry, _)| {
+                !(parallel_tool_calls && matches!(entry, RegisteredTool::Batch(_)))
             })
+            .filter(|(entry, _)| {
+                !entry.as_effect().is_some_and(|tool| {
+                    tool.admits_hosted_search()
+                        && (!native_search || (tool.default_hosted_search() && !default_search))
+                })
+            })
+            .map(|(entry, descriptor)| (entry.clone(), descriptor.clone()))
             .unzip();
         Self {
             generation: self.generation.clone(),
             registry,
             descriptors,
             authority: self.authority.clone(),
+        }
+    }
+
+    /// Send the lineage's recorded skill announcement, not the live one. The
+    /// first generation of a lineage records the live one. Admission still
+    /// uses the live catalogue; [`skill_changes`] reports the difference.
+    pub(crate) fn freeze_skills(&mut self, frozen: &mut Option<Vec<Value>>) {
+        let Some((index, live)) =
+            self.registry
+                .iter()
+                .enumerate()
+                .find_map(|(index, tool)| match tool {
+                    RegisteredTool::Skill(catalogue) => {
+                        Some((index, skill_announcement(catalogue)))
+                    }
+                    _ => None,
+                })
+        else {
+            return;
+        };
+        match frozen {
+            Some(entries) => self.descriptors[index].description = skill_description(entries),
+            None => *frozen = Some(live),
         }
     }
 
@@ -102,6 +182,14 @@ impl GenerationToolCatalogue {
         })
     }
 
+    pub(crate) fn admits_live_hosted_search(&self) -> bool {
+        self.registry.iter().any(|entry| {
+            entry
+                .as_effect()
+                .is_some_and(|tool| tool.admits_hosted_search() && !tool.default_hosted_search())
+        })
+    }
+
     pub(crate) fn authority(&self) -> ToolCaptureAuthority {
         self.authority.clone()
     }
@@ -121,14 +209,14 @@ impl GenerationToolCatalogue {
 /// Human input never acquires an effect tool or enters permission policy.
 pub(crate) enum PreparedToolCall {
     Context(crate::context::ContextRequest),
-    Goal {
-        objective: String,
-    },
+    ModelCatalogue(crate::model_catalogue::CatalogueRequest),
+    Goal(crate::goal::GoalRequest),
     Task(super::task::TaskRequest),
+    Batch(super::batch::BatchRequest),
     Plan(crate::plan::PlanUpdate),
     Effect {
         tool: std::sync::Arc<dyn Tool>,
-        call: PreparedCall,
+        call: Box<PreparedCall>,
         presentation: PermissionPresentationInput,
     },
     HumanInput(crate::question::QuestionRequest),
@@ -139,6 +227,18 @@ pub(crate) enum PreparedToolCall {
     Skill {
         operation: crate::skill::SkillOperation,
         catalogue: std::sync::Arc<crate::skill::SkillCatalogue>,
+    },
+    Memory {
+        store: std::sync::Arc<dyn crate::memory::MemoryStore>,
+        request: crate::memory::MemoryRequest,
+    },
+    CodeIntel {
+        service: std::sync::Arc<dyn crate::code_intel::CodeIntel>,
+        request: crate::code_intel::CodeIntelRequest,
+    },
+    BuildRecipe {
+        store: std::sync::Arc<dyn crate::build_recipe::BuildRecipeStore>,
+        request: crate::build_recipe::LearnRequest,
     },
 }
 
@@ -152,6 +252,7 @@ pub enum ToolBatchError {
 /// Raw external-effect ports bound to a tool call only after authorization.
 #[derive(Clone)]
 pub struct ToolEffectPorts<'a> {
+    egress: Option<std::sync::Arc<dyn crate::egress::EgressFilter + 'a>>,
     fs: &'a dyn Fs,
     process: &'a dyn ProcessExecutor,
     evidence: &'a dyn EvidenceStore,
@@ -163,8 +264,22 @@ pub struct ToolEffectPorts<'a> {
 }
 
 impl<'a> ToolEffectPorts<'a> {
+    /// Reacquire executable observations before admitting a prepared call.
+    pub fn observe_processes(
+        &self,
+        call: PreparedCall,
+    ) -> Result<PreparedCall, crate::permit::ProcessError> {
+        call.observe_processes(self.process)
+    }
+
     pub(crate) fn process(&self) -> &dyn ProcessExecutor {
         self.process
+    }
+
+    /// The run's guarded duplex spawner, for a harness tool that keeps a
+    /// child process across calls (the `lsp` tool's language servers).
+    pub(crate) fn duplex(&self) -> std::sync::Arc<dyn DuplexSpawner> {
+        std::sync::Arc::clone(&self.duplex)
     }
 
     pub(crate) fn detached_status(
@@ -190,7 +305,16 @@ impl<'a> ToolEffectPorts<'a> {
             duplex,
             cancel: None,
             secrets: crate::secrets::SecretValues::default(),
+            egress: None,
         }
+    }
+
+    pub fn with_egress(
+        mut self,
+        filter: Option<std::sync::Arc<dyn crate::egress::EgressFilter + 'a>>,
+    ) -> Self {
+        self.egress = filter;
+        self
     }
 
     /// Bind the adapter's known environment values to result publication.
@@ -223,7 +347,8 @@ impl<'a> ToolEffectPorts<'a> {
             self.duplex,
             Some(GuardedMcpResume::new(resume, context)),
         )
-        .with_cancel(self.cancel);
+        .with_cancel(self.cancel)
+        .with_egress(self.egress);
         (call, guarded)
     }
 
@@ -241,7 +366,8 @@ impl<'a> ToolEffectPorts<'a> {
             self.one_hop,
             self.duplex,
         )
-        .with_cancel(self.cancel);
+        .with_cancel(self.cancel)
+        .with_egress(self.egress);
         (call, guarded)
     }
 
@@ -274,8 +400,14 @@ pub struct Tools<'a> {
     resume: Option<std::sync::Arc<ResumeSealer>>,
     task_context: Option<(String, std::sync::Arc<futures::lock::Mutex<()>>)>,
     pub(super) named_agents: Vec<super::NamedAgent>,
+    pub(super) child_defaults: super::ChildDefaults,
+    /// A forked child keeps the parent's `task` descriptor for an identical
+    /// tool prefix; the loop refuses any call to it.
+    fork_child: bool,
 
     task_tool_ceiling: Option<std::collections::BTreeSet<String>>,
+    /// Whether the host offers batching for this turn.
+    mcp_batch: bool,
 }
 
 impl<'a> Tools<'a> {
@@ -302,7 +434,10 @@ impl<'a> Tools<'a> {
             resume: None,
             task_context: None,
             named_agents: Vec::new(),
+            child_defaults: super::ChildDefaults::default(),
+            fork_child: false,
             task_tool_ceiling: None,
+            mcp_batch: false,
         }
     }
 
@@ -323,7 +458,10 @@ impl<'a> Tools<'a> {
             resume: None,
             task_context: None,
             named_agents: Vec::new(),
+            child_defaults: super::ChildDefaults::default(),
+            fork_child: false,
             task_tool_ceiling: None,
+            mcp_batch: false,
         }
     }
 
@@ -345,13 +483,28 @@ impl<'a> Tools<'a> {
             resume: None,
             task_context: None,
             named_agents: Vec::new(),
+            child_defaults: super::ChildDefaults::default(),
+            fork_child: false,
             task_tool_ceiling: None,
+            mcp_batch: false,
         })
+    }
+
+    /// Offer `mcp_batch` for MCP calls. Owner opt-in; off by default.
+    pub fn with_mcp_batch(mut self, enabled: bool) -> Self {
+        self.mcp_batch = enabled;
+        self
     }
 
     /// Install a read-only catalogue admitted by the host's trust boundary.
     pub fn with_named_agents(mut self, agents: Vec<super::NamedAgent>) -> Self {
         self.named_agents = agents;
+        self
+    }
+
+    /// Install the owner's default model and effort for task children.
+    pub fn with_child_defaults(mut self, defaults: super::ChildDefaults) -> Self {
+        self.child_defaults = defaults;
         self
     }
 
@@ -391,6 +544,12 @@ impl<'a> Tools<'a> {
         self
     }
 
+    pub(crate) fn skill_project_dir(&self) -> Option<&std::path::Path> {
+        self.skill_resource_roots
+            .as_ref()
+            .and_then(crate::skill::SkillResourceRoots::project_dir)
+    }
+
     pub(crate) fn mcp_output_root(&self) -> Option<&CanonPath> {
         self.mcp_output_root.as_ref()
     }
@@ -407,6 +566,83 @@ impl<'a> Tools<'a> {
             run,
             call,
         );
+    }
+
+    /// Replace the model answer of one successful exec call with the projection of
+    /// its enabled recipe. Any doubt keeps the original answer: no recipe
+    /// store, no recipe for this exact argv, an unreadable book or evidence,
+    /// or a [`crate::build_recipe::Fallback`]. The raw blocks never change.
+    async fn project_recipe(&self, args: &str, result: &mut crate::permit::ToolResult) -> bool {
+        #[derive(serde::Deserialize)]
+        struct ExecArgv {
+            argv: Vec<String>,
+        }
+        let Some(store) = self
+            .registry
+            .iter()
+            .find_map(|registered| match registered {
+                RegisteredTool::BuildRecipe(store) => Some(store),
+                _ => None,
+            })
+        else {
+            return false;
+        };
+        let Ok(ExecArgv { argv }) = serde_json::from_str(args) else {
+            return false;
+        };
+        let Ok(book) = crate::build_recipe::read_book(store.as_ref()) else {
+            return false;
+        };
+        let Some(stored) = book.for_argv(&argv) else {
+            return false;
+        };
+        let mut streams = Vec::new();
+        for block in &result.content {
+            let (crate::permit::ToolOutputProvenance::Process { stream, .. }, Some(reference)) =
+                (block.provenance(), block.evidence_reference())
+            else {
+                continue;
+            };
+            let Ok(bytes) =
+                crate::build_recipe::read_complete(self.effects.evidence, reference).await
+            else {
+                return false;
+            };
+            streams.push((*stream, reference.clone(), bytes));
+        }
+        let inputs: Vec<_> = streams
+            .iter()
+            .map(
+                |(stream, reference, bytes)| crate::build_recipe::StreamInput {
+                    stream: *stream,
+                    bytes,
+                    reference,
+                },
+            )
+            .collect();
+        if inputs.is_empty() {
+            return false;
+        }
+        crate::build_recipe::project(stored, &inputs)
+            .is_ok_and(|text| result.set_model_projection(text).is_ok())
+    }
+
+    /// The model answer of one exec call: the enabled recipe's projection when
+    /// there is one, otherwise the built-in compaction of progress output. The
+    /// first run of a build needs no recipe and no external wrapper.
+    ///
+    /// A failed command never takes a recipe (its diagnostics are the answer),
+    /// but its progress lines fold the same way. The exit status stays visible;
+    /// a bounded excerpt may omit earlier diagnostics, which remain in evidence.
+    pub(crate) async fn project_exec(
+        &self,
+        args: &str,
+        result: &mut crate::permit::ToolResult,
+        ok: bool,
+    ) {
+        if !(ok && self.project_recipe(args, result).await) {
+            result.compact_process_progress();
+        }
     }
 
     pub(crate) fn mask_result(&self, result: &mut crate::permit::ToolResult) {
@@ -427,12 +663,13 @@ impl<'a> Tools<'a> {
         serial: std::sync::Arc<futures::lock::Mutex<()>>,
         cancel: super::CancelToken,
         ceiling: Option<std::collections::BTreeSet<String>>,
+        fork: bool,
     ) -> Result<Self, ToolCatalogueError> {
         Ok(Self {
             registry: self
                 .registry
                 .iter()
-                .filter(|entry| !matches!(entry, RegisteredTool::Task))
+                .filter(|entry| fork || !matches!(entry, RegisteredTool::Task))
                 .cloned()
                 .collect(),
             source: std::sync::Arc::new(TaskToolSource {
@@ -445,9 +682,21 @@ impl<'a> Tools<'a> {
             skill_resource_roots: self.skill_resource_roots.clone(),
             resume: self.resume.clone(),
             task_context: Some((name, serial)),
-            named_agents: Vec::new(),
+            named_agents: if fork {
+                self.named_agents.clone()
+            } else {
+                Vec::new()
+            },
+            fork_child: fork,
+            child_defaults: super::ChildDefaults::default(),
             task_tool_ceiling: ceiling,
+            mcp_batch: false,
         })
+    }
+
+    /// Any child of `task`, clean or forked. A child never delegates.
+    pub(crate) fn is_task_child(&self) -> bool {
+        self.task_context.is_some()
     }
 
     pub(crate) fn blob_store(&self) -> &dyn BlobStore {
@@ -462,6 +711,13 @@ impl<'a> Tools<'a> {
         &self.cwd
     }
 
+    pub(super) fn set_egress(
+        &mut self,
+        filter: Option<std::sync::Arc<dyn crate::egress::EgressFilter + 'a>>,
+    ) {
+        self.effects.egress = filter;
+    }
+
     pub(crate) fn effect_ports(&self) -> ToolEffectPorts<'a> {
         self.effects.clone()
     }
@@ -472,12 +728,17 @@ impl<'a> Tools<'a> {
             .find_map(|registered| match registered {
                 RegisteredTool::Skill(catalogue) => Some(std::sync::Arc::clone(catalogue)),
                 RegisteredTool::Context
+                | RegisteredTool::ModelCatalogue
                 | RegisteredTool::Goal
                 | RegisteredTool::Plan
                 | RegisteredTool::Effect(_)
                 | RegisteredTool::HumanInput(_)
                 | RegisteredTool::Task
-                | RegisteredTool::History { .. } => None,
+                | RegisteredTool::History { .. }
+                | RegisteredTool::Memory(_)
+                | RegisteredTool::CodeIntel(_)
+                | RegisteredTool::BuildRecipe(_)
+                | RegisteredTool::Batch(_) => None,
             })
     }
 
@@ -486,11 +747,30 @@ impl<'a> Tools<'a> {
         let mut registry = Vec::with_capacity(self.registry.len() + dynamic.tools().len());
         registry.extend(self.registry.iter().cloned());
         registry.extend(dynamic.tools().iter().cloned());
-        if self.task_context.is_some() {
+        if self.task_context.is_some() && !self.fork_child {
             registry.retain(|tool| !matches!(tool, RegisteredTool::Task));
         }
         if let Some(ceiling) = &self.task_tool_ceiling {
             registry.retain(|tool| ceiling.contains(&tool.descriptor().name));
+        }
+        // Members come only from this capture's dynamic (MCP) entries that
+        // survived the ceilings above, so a batch can never widen the set.
+        let dynamic_names: std::collections::BTreeSet<_> = dynamic
+            .tools()
+            .iter()
+            .map(|tool| tool.descriptor().name)
+            .collect();
+        let members = registry
+            .iter()
+            .filter_map(RegisteredTool::as_effect)
+            .filter(|tool| dynamic_names.contains(&tool.descriptor().name))
+            .cloned()
+            .collect();
+        if let Some(batch) = super::batch::BatchTool::new(members)
+            && self.mcp_batch
+            && self.task_context.is_none()
+        {
+            registry.push(RegisteredTool::Batch(std::sync::Arc::new(batch)));
         }
         validate_distinct(&registry)?;
         let descriptors = registry.iter().map(|tool| self.describe(tool)).collect();
@@ -514,6 +794,16 @@ impl<'a> Tools<'a> {
                     Some(tool) => ceiling.contains(&tool.descriptor().name.as_str()),
                     None => true,
                 });
+            captured.registry = captured
+                .registry
+                .into_iter()
+                .filter_map(|registered| match registered {
+                    RegisteredTool::Batch(batch) => batch
+                        .restricted(|name| ceiling.contains(&name))
+                        .map(|batch| RegisteredTool::Batch(std::sync::Arc::new(batch))),
+                    other => Some(other),
+                })
+                .collect();
             captured.descriptors = captured
                 .registry
                 .iter()
@@ -669,31 +959,21 @@ impl<'a> Tools<'a> {
         match &registered {
             RegisteredTool::Effect(tool) => Ok(PreparedToolCall::Effect {
                 tool: std::sync::Arc::clone(tool),
-                call: self.prepare_params(tool.as_ref(), params.clone())?,
+                call: Box::new(self.prepare_params(tool.as_ref(), params.clone())?),
                 presentation: PermissionPresentationInput::new(params, descriptor.parameters),
             }),
             RegisteredTool::Context => {
                 crate::context::ContextRequest::parse(params).map(PreparedToolCall::Context)
             }
-            RegisteredTool::Plan => serde_json::from_value(params)
-                .map(PreparedToolCall::Plan)
+            RegisteredTool::ModelCatalogue => serde_json::from_value(params)
+                .map(PreparedToolCall::ModelCatalogue)
                 .map_err(|error| error.to_string()),
+            RegisteredTool::Plan => crate::plan::parse_update(params).map(PreparedToolCall::Plan),
             RegisteredTool::Goal => {
-                #[derive(serde::Deserialize)]
-                #[serde(deny_unknown_fields)]
-                struct GoalArgs {
-                    objective: String,
-                }
-                let args: GoalArgs =
-                    serde_json::from_value(params).map_err(|error| error.to_string())?;
-                if args.objective.trim().is_empty() {
-                    return Err("goal objective must not be empty".into());
-                }
-                Ok(PreparedToolCall::Goal {
-                    objective: args.objective,
-                })
+                crate::goal::GoalRequest::parse(params).map(PreparedToolCall::Goal)
             }
             RegisteredTool::Task => super::task::parse(params).map(PreparedToolCall::Task),
+            RegisteredTool::Batch(tool) => tool.parse(params).map(PreparedToolCall::Batch),
             RegisteredTool::History { source, tool } => Ok(PreparedToolCall::History {
                 source: std::sync::Arc::clone(source),
                 request: tool.parse(params)?,
@@ -701,6 +981,27 @@ impl<'a> Tools<'a> {
             RegisteredTool::HumanInput(tool) => {
                 tool.parse(params).map(PreparedToolCall::HumanInput)
             }
+            RegisteredTool::Memory(store) => {
+                crate::memory::MemoryRequest::parse(params).map(|request| {
+                    PreparedToolCall::Memory {
+                        store: std::sync::Arc::clone(store),
+                        request,
+                    }
+                })
+            }
+            RegisteredTool::CodeIntel(service) => {
+                crate::code_intel::CodeIntelRequest::parse(params).map(|request| {
+                    PreparedToolCall::CodeIntel {
+                        service: std::sync::Arc::clone(service),
+                        request,
+                    }
+                })
+            }
+            RegisteredTool::BuildRecipe(store) => crate::build_recipe::LearnRequest::parse(params)
+                .map(|request| PreparedToolCall::BuildRecipe {
+                    store: std::sync::Arc::clone(store),
+                    request,
+                }),
             RegisteredTool::Skill(catalogue) => {
                 let operation: crate::skill::SkillOperation = serde_json::from_value(params)
                     .map_err(|error| format!("skill was called with invalid arguments: {error}"))?;
@@ -771,7 +1072,8 @@ impl<'a> Tools<'a> {
         tool.prepare(params, &ctx)
             .map_err(|err: ToolError| err.to_string())
             .and_then(|call| {
-                call.observe_processes(self.effects.process)
+                self.effects
+                    .observe_processes(call)
                     .map_err(|error| error.to_string())
             })
     }
@@ -779,24 +1081,34 @@ impl<'a> Tools<'a> {
     pub(crate) fn revalidate_processes(
         &self,
         call: &PreparedCall,
+        fresh_approval: bool,
     ) -> Result<(), crate::permit::ProcessError> {
         for op in call.ops() {
             if let Op::Spawn { spec } = op {
-                self.effects.process.revalidate(spec)?;
+                if fresh_approval {
+                    self.effects.process.revalidate_fresh_approval(spec)?;
+                } else {
+                    self.effects.process.revalidate(spec)?;
+                }
             }
         }
         Ok(())
     }
 
     pub(crate) fn refresh_processes(&self, call: PreparedCall) -> Result<PreparedCall, String> {
-        call.observe_processes(self.effects.process)
+        self.effects
+            .observe_processes(call)
             .map_err(|error| error.to_string())
     }
 
     /// Stage two: ask policy what this call may do.
     ///
-    /// Return typed [`Classification`] so callers can distinguish policy
-    /// refusal from tool failure instead of parsing flattened prose.
+    /// Returns the typed [`Classification`], not prose. It used to flatten to
+    /// a `String`, which is the same defect as an `HttpError` flattened one
+    /// layer down: the value already names what it refused, and discarding the
+    /// type at the seam left the loop unable to tell "policy said no" from
+    /// "the tool broke". Those are different outcomes now — see `CLI.md` §4.4
+    /// and the design notes.
     ///
     /// Three outcomes rather than two, and the third is the one the loop must
     /// not collapse: a call nobody in this run can answer is not a call that
@@ -887,6 +1199,32 @@ impl<'a> Tools<'a> {
         authorized: Authorized,
         context: Option<McpResumeContext<'session>>,
     ) -> Result<ToolExecution, ToolError> {
+        let correlation_id = context
+            .as_ref()
+            .map(|context| {
+                let state = context.runtime().hook_state();
+                let session = state
+                    .journal()
+                    .session_id()
+                    .map_err(|_| crate::suspension::ContinuationError::AuthorityMismatch)?;
+                let item = context
+                    .causality()
+                    .item_id()
+                    .ok_or(crate::suspension::ContinuationError::AuthorityMismatch)?;
+                state
+                    .inspect(|state| {
+                        crate::mcp::tool_call_correlation_id(
+                            &session.to_string(),
+                            item,
+                            state
+                                .items
+                                .get(&item)
+                                .and_then(|item| item.call_id.as_deref()),
+                        )
+                    })
+                    .map_err(|_| crate::suspension::ContinuationError::AuthorityMismatch)
+            })
+            .transpose()?;
         let resume = if authorized.call().mcp_envelope().is_some() {
             Some(GuardedMcpResume::deferred(
                 self.resume
@@ -908,7 +1246,9 @@ impl<'a> Tools<'a> {
             std::sync::Arc::clone(&self.effects.one_hop),
             std::sync::Arc::clone(&self.effects.duplex),
             resume,
-        );
+        )
+        .with_egress(self.effects.egress.clone())
+        .with_tool_call_correlation_id(correlation_id);
         tool.execute(call, &guarded).await
     }
 }

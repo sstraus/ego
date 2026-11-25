@@ -1,10 +1,62 @@
-//! Read supplied hosted model facts in builtin, system, then user precedence. Builtins are the
-//! weakest layer and contain no budget prices. Project model files are excluded: a repository
-//! cannot lower its own claimed rate to undercount a spending cap.
+//! `models.toml`: where a hosted model's price and ceilings are *supplied*.
 //!
-//! Capabilities are needed for generation; rates are consulted only when a monetary ceiling
-//! needs them. A run without a quote can retain unknown response cost rather than treating it
-//! as free. The process boundary owns file locations; core owns the fact types.
+//! the design notes §1 forbids this
+//! repository from writing down a hosted price — "a price written from memory
+//! is not a cheaper version of a price, it is a number the budget gate will
+//! trust and that nothing can check" — and says the hosted path "works as soon
+//! as a quote is configured". This module is the *configuring*. Without it
+//! `Catalogue::with_hosted` has no caller and `--model openai/…` can only ever
+//! refuse, which would make the refusal a dead end rather than a contract.
+//!
+//! ## Why its own file, and three layers of it
+//!
+//! Two locations on disk, `/etc/ego/models.toml` then `$EGO_HOME/models.toml`,
+//! with the user's winning — §7's system-then-user order, and pricing is
+//! exactly the fleet fact an administrator states once.
+//!
+//! Below both sits [`BUILTIN`], compiled in. It is there because without it a
+//! machine with a valid `ANTHROPIC_API_KEY` and no files could not run a
+//! hosted model at all: the selected model answered "no capabilities are
+//! configured", which is a true sentence about a product
+//! nobody could start. `docs/decisions/2026-09-07-a-builtin-catalogue-layer-
+//! below-system-and-user.md` amends the ban on built-in facts to allow it,
+//! under three conditions this module enforces: it is the *weakest* layer, it
+//! carries no prices, and it states only what a vendor published.
+//!
+//! **No prices in the builtin layer**, and that is not caution about staleness
+//! — it is §1 of `2026-08-21-what-a-model-resolves-to.md` unchanged. A rate
+//! this repository wrote down is a number the budget gate would trust and
+//! nothing could check. Missing operator rates do not refuse generation;
+//! an unknown response cost stays unknown and is not a free one.
+//!
+//! **The project and project-local layers are not read here, in any posture.**
+//! A repository that could state its own model's price could state a low one,
+//! and a low rate would undercount real spend against a configured cap. It
+//! is a stronger rule than the trust gate, so it is not expressed through it.
+//!
+//! It is a separate file rather than a `[model."…"]` table inside
+//! `config.toml` because `ConfigLayer` is `deny_unknown_fields` over a schema
+//! that mirrors the flags, and a price mirrors no flag: it is a fact about the
+//! world, not an instruction to this run.
+//!
+//! ## Why a run with no money ceiling ignores the prices in it
+//!
+//! the design notes §5 gates every rate
+//! source on a ceiling existing: "none of them is consulted at all unless a
+//! ceiling is configured". This file is the first of the three, so the gate
+//! starts here.
+//!
+//! It looks like a no-op today, because reading an operator's own file leaks
+//! nothing. It is not one. §5's other two sources are a provider pricing
+//! endpoint and a fetched third-party table, and §7's first row — "no fetch is
+//! attempted, offline or not" — is a *property* of the ceiling gate rather
+//! than of the fetch code: an ordinary run contacts nobody but the model
+//! provider. A gate that is only added once there is something to leak
+//! through has already been wrong once.
+//!
+//! It is also honest in its own right. A `MeteringSelected` announcing
+//! `rates: operator` on a run with no ceiling would claim figures were
+//! consulted that nothing consulted.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -34,7 +86,7 @@ const BUILTIN: &str = include_str!("../catalogue/models.toml");
 
 /// The capability rows generated from the pinned models.dev snapshot.
 ///
-/// Written by `scripts/catalogue.py` from
+/// Written by the catalogue generator from
 /// `catalogue/policy.toml` and `catalogue/upstream/models.dev.json`; a row here
 /// is never edited by hand, and a slug that [`BUILTIN`] also states is a build
 /// error ([`builtin`] panics on it).
@@ -48,7 +100,7 @@ const BUILTIN_GENERATED: &str = include_str!("../catalogue/models.generated.toml
 /// refusal names, so a test holds it equal to the `revision =` line in the
 /// file itself — a constant that had drifted would send an operator to the
 /// wrong catalogue.
-pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-10-15";
+pub const BUILTIN_CATALOGUE_REVISION: &str = "2026-11-19";
 
 /// One `models.toml`.
 #[derive(Debug, Default, Deserialize)]
@@ -97,8 +149,11 @@ struct Retired {
 #[serde(deny_unknown_fields)]
 struct Supplied {
     capabilities: ModelCapabilities,
-    /// Prices are optional: capabilities alone can resolve a model for a run
-    /// without a monetary ceiling. Capabilities remain required.
+    /// Optional, per the design notes §3.
+    /// A run that configures no ceiling needs no prices, so a `[model."x"]`
+    /// entry with capabilities alone is a complete entry and resolves.
+    /// Capabilities are not optional beside it, and the asymmetry is the
+    /// ruling's: The pricing rule.
     #[serde(default)]
     pricing: Option<Quote>,
 }
@@ -137,12 +192,17 @@ impl From<Quote> for PricingQuote {
             cache_write: quote.cache_write,
             cache_write_extended: quote.cache_write_extended,
             output: quote.output,
+            long_context: Vec::new(),
         }
     }
 }
 
-/// Return absence only for a missing file. An existing malformed model file is a hard error
-/// naming it, not an empty catalogue.
+/// Read one file, or nothing if it is not there.
+///
+/// A file that exists and cannot be parsed is a hard error naming it (§4.5:
+/// invalid config is never skipped silently). Falling back to "no facts" would
+/// turn a typo in a rate into `HostedModelNotConfigured`, which sends an
+/// operator to look for a file they have already written.
 fn read(path: &Path) -> Result<Facts, UsageError> {
     match std::fs::read_to_string(path) {
         Ok(text) => toml::from_str(&text)
@@ -242,9 +302,14 @@ fn override_paths() -> Vec<String> {
     paths
 }
 
-/// Merge supplied hosted models per slug, with user facts overriding system facts. Capabilities
-/// always resolve; `ceilings` gates rate use. Malformed model files remain errors even when
-/// rates are not needed.
+/// Every supplied hosted model, keyed by slug, user's winning over system's.
+///
+/// `ceilings` decides whether the *prices* come with them. Capabilities always
+/// do — a request needs the model's shape whatever it costs — but the rates
+/// are §5's first source and are consulted only when a ceiling needs them.
+/// The file is read either way, because a malformed `models.toml` is a hard
+/// error at any ceiling: an operator who typed a rate wrong should be told so
+/// rather than have the typo become invisible on runs that do not read it.
 pub fn supplied(ceilings: &Ceilings) -> Result<Vec<(String, HostedModel)>, UsageError> {
     supplied_with_defaults(ceilings).map(|(models, _)| models)
 }
@@ -342,8 +407,10 @@ fn project(
                     // charge either way, and this file is not where that
                     // fact is decided.
                     metering: catalogue::tabulated(),
-                    // Consult operator rates only when the money ceiling needs them. An
-                    // unbounded run resolves capabilities without pricing lookup.
+                    // §5: the first of the three rate sources, and consulted
+                    // only when a ceiling needs one. A run with no money
+                    // ceiling resolves this row with no rates and runs
+                    // unbounded, which is §1's ordinary case.
                     rates: ceilings
                         .needs_rates()
                         .then_some(supplied.pricing)
@@ -378,6 +445,10 @@ mod critic_tests;
 
 #[cfg(test)]
 mod snapshot_tests;
+
+#[cfg(test)]
+#[path = "../tests/contracts/native_search.rs"]
+mod native_search_contract;
 
 #[cfg(test)]
 mod tests {
@@ -567,7 +638,10 @@ transport = "sse"
                     "gemini",
                     "github-copilot",
                     "xai-oauth",
-                    "minimax-oauth"
+                    "minimax-oauth",
+                    "bedrock",
+                    "vertex",
+                    "deepseek"
                 ]
                 .contains(&slug.provider.as_str()),
                 "`{slug}` names a provider whose resolver does not read this file",
@@ -577,8 +651,11 @@ transport = "sse"
 
     /// Every builtin row is priceless, in the literal sense.
     ///
-    /// Compiled capability declarations must not acquire hosted budget prices.
-    /// Such a price would look authoritative without a verifiable rate source.
+    /// The rule this holds is the one that made the amendment safe:
+    /// `2026-08-21-what-a-model-resolves-to.md` §1 forbids this repository
+    /// from writing a hosted price down. A `[model."x".pricing]` block added
+    /// to the compiled-in file would be a rate the budget gate trusts and
+    /// nothing can check, and it would look exactly like the rows beside it.
     #[test]
     fn the_compiled_in_catalogue_states_no_prices() {
         for (slug, supplied) in builtin().model {
@@ -624,6 +701,48 @@ transport = "sse"
 
         assert!(rows.contains_key("openai/gpt-6-sol"));
         assert!(rows.contains_key("openai-codex/gpt-6-sol"));
+    }
+
+    /// DeepSeek's two current models as published on 2026-11-14
+    /// (api-docs.deepseek.com, models & pricing and thinking mode): 1M context,
+    /// 384K (393216) output, the thinking switch plus low/high/max, default
+    /// high, reasoning replayed only in DeepSeek's own dialect.
+    ///
+    /// Catches: a regenerated row that drops `off` (the switch) or offers
+    /// `medium`, which the server silently maps to another level; a missing
+    /// default, which makes every run without `--thinking` fail; parallel tool
+    /// calls claimed without a source; images admitted although this row
+    /// excludes them.
+    #[test]
+    fn deepseek_rows_carry_their_published_facts() {
+        use ThinkingLevel::{High, Low, Max, Off};
+        use ego_core::generator::capabilities::ReasoningCarryover;
+        let rows = builtin().model;
+        for slug in ["deepseek/deepseek-flash", "deepseek/deepseek-v4-pro"] {
+            let row = &rows[slug].capabilities;
+            assert_eq!(row.max_context_tokens, Some(1_048_576), "{slug}");
+            assert_eq!(row.max_output_tokens, Some(393_216), "{slug}");
+            assert_eq!(
+                row.reasoning_efforts,
+                ReasoningEffortSupport::Only([Off, Low, High, Max].into()),
+                "{slug}"
+            );
+            assert_eq!(row.default_reasoning_effort, Some(High), "{slug}");
+            assert_eq!(
+                row.reasoning_carryover,
+                ReasoningCarryover::SameProviderOnly,
+                "{slug}"
+            );
+            assert_eq!(
+                row.reasoning_state_dialect.as_deref(),
+                Some("deepseek-chat"),
+                "{slug}"
+            );
+            assert!(!row.supports_parallel_tool_calls, "{slug}");
+            assert_eq!(row.image_input, ImageInputSupport::Unknown, "{slug}");
+        }
+        // Retired aliases the vendor still serves are not offered.
+        assert!(!rows.contains_key("deepseek/deepseek-v4-flash"));
     }
 
     // Catches: subscription Sol rows lose image support while API rows advertise it.

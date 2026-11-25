@@ -12,14 +12,12 @@ use ego_core::event::domain::CancelCause;
 use ego_core::event::id::DetachedExecId;
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::hook::EffectScope;
-use ego_core::permit::residual::{
-    DECISION_DEADLINE, MAX_DECISIONS_PER_CALL, ResidualDecision, ResidualWriteDesk,
-};
+use ego_core::permit::residual::{ResidualDecision, ResidualWriteDesk};
 use ego_core::permit::{
-    CanonPath, CleanupCertainty, DetachedExecOutcome, DetachedExecSnapshot, DuplexEnd,
-    DuplexSession, DuplexSettlement, ExecCaps, ProcessError, RunConfinement, SandboxAccess,
-    SandboxGrant, SandboxGrantPort, SpawnSpec, StreamProvenance, ToolContentBlock, ToolResult,
-    TransportError, TransportFailure,
+    CanonPath, CleanupCertainty, DetachedExecLines, DetachedExecMonitor, DetachedExecOutcome,
+    DetachedExecSnapshot, DuplexEnd, DuplexSession, DuplexSettlement, ExecCaps, ProcessError,
+    RunConfinement, SandboxAccess, SandboxGrant, SandboxGrantPort, SpawnSpec, StreamProvenance,
+    ToolContentBlock, ToolResult, TransportError, TransportFailure,
 };
 use ego_core::store::evidence::{EvidenceError, EvidenceStore as _, EvidenceWriter};
 use ego_core::turn::CancelToken;
@@ -36,11 +34,8 @@ use tokio_util::compat::{Compat, TokioAsyncReadCompatExt as _, TokioAsyncWriteCo
 use super::ExecLimits;
 use super::backend::{Backend, executable, prefixed_command};
 use super::denial;
+use super::monitor::{self, LineMonitor};
 use super::process_tree::ManagedChild;
-
-/// Questions one command may put to the human before its refusal is final.
-/// Each answer can reveal one more path, so the bound is a few paths, not one.
-const MAX_SANDBOX_QUESTIONS: usize = 3;
 
 const PIPE_CHUNK_BYTES: usize = 16 * 1024;
 const PIPE_CHANNEL_CHUNKS: usize = 4;
@@ -99,6 +94,9 @@ struct ExecutionContext {
 struct LiveOutput {
     stdout: TailBytes,
     stderr: TailBytes,
+    latest: TailBytes,
+    /// The model's subscription and the waker it notifies.
+    monitor: Option<(LineMonitor, Arc<Mutex<Option<BackgroundWake>>>)>,
 }
 
 #[derive(Default)]
@@ -255,6 +253,16 @@ impl RunProcessContext {
         *self.foreground.lock().expect("foreground exec lock")
     }
 
+    pub(crate) fn tracked_output(&self, id: DetachedExecId) -> Option<Vec<u8>> {
+        let entries = self.background.lock().ok()?;
+        let entry = entries.get(&id)?;
+        if entry.promoted || entry.outcome.is_some() {
+            return None;
+        }
+        let output = entry.output.lock().ok()?;
+        Some(output.latest.bytes.clone())
+    }
+
     pub(crate) fn detach_foreground(&self, id: DetachedExecId) -> Result<(), ProcessError> {
         let mut entries = self.background.lock().map_err(|_| {
             ProcessError::Backend("background process registry lock poisoned".into())
@@ -352,6 +360,81 @@ impl RunProcessContext {
         })
     }
 
+    pub(crate) fn monitor_background(
+        &self,
+        id: DetachedExecId,
+        request: DetachedExecMonitor,
+    ) -> Result<(), ProcessError> {
+        let compiled = monitor::compile(&request)?;
+        let entries = self.background.lock().map_err(|_| {
+            ProcessError::Backend("background process registry lock poisoned".into())
+        })?;
+        let entry = entries
+            .get(&id)
+            .filter(|entry| entry.promoted)
+            .ok_or(ProcessError::UnknownBackground { id })?;
+        // The settlement is published under the registry lock, so no line
+        // can arrive for a monitor installed after this check.
+        if entry.outcome.is_some() {
+            return Ok(());
+        }
+        let mut output = entry
+            .output
+            .lock()
+            .map_err(|_| ProcessError::Backend("background output lock poisoned".into()))?;
+        let output = &mut *output;
+        match &mut output.monitor {
+            Some((existing, _)) => existing.retarget(compiled),
+            None => {
+                output.monitor = Some((
+                    LineMonitor::new(compiled, &output.stdout.bytes, &output.stderr.bytes),
+                    Arc::clone(&self.background_waker),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Take queued monitor lines. Once the exec has settled this also ends
+    /// its monitor: no further output can arrive.
+    pub(crate) fn take_background_output(
+        &self,
+        id: DetachedExecId,
+    ) -> Result<Option<DetachedExecLines>, ProcessError> {
+        let entries = self.background.lock().map_err(|_| {
+            ProcessError::Backend("background process registry lock poisoned".into())
+        })?;
+        let Some(entry) = entries.get(&id) else {
+            return Ok(None);
+        };
+        let mut output = entry
+            .output
+            .lock()
+            .map_err(|_| ProcessError::Backend("background output lock poisoned".into()))?;
+        let taken = output
+            .monitor
+            .as_mut()
+            .and_then(|(monitor, _)| monitor.take(id));
+        if entry.outcome.is_some() {
+            output.monitor = None;
+        }
+        Ok(taken)
+    }
+
+    pub(crate) fn background_output_ready(&self, id: DetachedExecId) -> bool {
+        let Ok(entries) = self.background.lock() else {
+            return false;
+        };
+        entries.get(&id).is_some_and(|entry| {
+            entry.output.lock().is_ok_and(|output| {
+                output
+                    .monitor
+                    .as_ref()
+                    .is_some_and(|(monitor, _)| monitor.ready())
+            })
+        })
+    }
+
     pub(crate) fn cancel_background(&self, id: DetachedExecId) -> Result<(), ProcessError> {
         let mut entries = self.background.lock().map_err(|_| {
             ProcessError::Backend("background process registry lock poisoned".into())
@@ -426,20 +509,22 @@ impl RunProcessContext {
             .requirements()
             .check(self.capabilities)
             .map_err(ProcessError::MissingCapabilities)?;
+        // A confined child that exits on a refusal always gets the sandbox
+        // note, with nobody to ask when no seat is attached.
+        let confined = self.confinement.level() != ego_core::permit::Confinement::Off;
         match (&self.sandbox_grants, &self.residual, &handler) {
             (Some(_), _, None) | (_, Some(_), None) => {
                 self.execute_asking(spec, background_cancel, live_output, tracked)
                     .await
             }
+            (None, None, None) if confined => {
+                self.execute_asking(spec, background_cancel, live_output, tracked)
+                    .await
+            }
             _ => {
-                self.spawn_once(
-                    Arc::clone(&self.backend),
-                    spec,
-                    handler,
-                    background_cancel,
-                    live_output,
-                )
-                .await
+                let backend = self.backend_under(&self.repository_grants(), &[])?;
+                self.spawn_once(backend, spec, handler, background_cancel, live_output)
+                    .await
             }
         }
     }
@@ -469,14 +554,8 @@ impl RunProcessContext {
             .map_err(|error| ProcessError::Backend(format!("process task failed: {error}")))?
     }
 
-    /// Run a command, and when stderr hints at a refused absolute path, ask the
-    /// judge, then the human, whether to open that one path.
-    ///
-    /// A human allowance runs the command again, and only after it has exited
-    /// unsuccessfully, so no process of the first attempt is still alive;
-    /// whatever it did before the refusal is not undone, and the human is told
-    /// which path the retry is for. A judge allowance never runs it again: the
-    /// path stays writable for the session and the model decides.
+    /// Serve one refusal after the child exits. A grant affects only a later
+    /// explicit call: a partially executed command is never replayed here.
     async fn execute_asking(
         &self,
         spec: &SpawnSpec,
@@ -484,104 +563,140 @@ impl RunProcessContext {
         live_output: Option<Arc<Mutex<LiveOutput>>>,
         tracked: Option<TrackedExec<'_>>,
     ) -> Result<ToolResult, ProcessError> {
-        let mut questions = 0;
-        let mut decisions = 0;
-        loop {
-            let grants = self
-                .sandbox_grants
-                .as_deref()
-                .filter(|_| !is_promoted(tracked));
-            let judged = self
-                .residual
-                .as_ref()
-                .map_or_else(Vec::new, |desk| desk.grants());
-            let mut granted = grants.map_or_else(Vec::new, SandboxGrantPort::granted);
-            granted.extend(
-                judged
-                    .iter()
-                    .map(|path| SandboxGrant::new(path.clone(), SandboxAccess::Write)),
-            );
-            let backend = self.backend_under(&granted, &judged)?;
-            let (code, mut result) = match self
-                .spawn_once(
-                    backend,
-                    spec,
-                    None,
-                    background_cancel.clone(),
-                    live_output.clone(),
-                )
-                .await
-            {
-                Err(ProcessError::Exit { code, result }) => (code, result),
-                other => return other,
-            };
-            let Some(found) = denial::analyze(spec, &result, &self.confinement, &granted) else {
-                return Err(ProcessError::Exit { code, result });
-            };
-            let outcome = match &found.request {
-                Some(_) if !self.backend.can_widen() => denial::Outcome::CannotWiden,
-                Some(request) => {
-                    let desk = self.residual.as_ref().filter(|_| {
-                        request.access == SandboxAccess::Write
-                            && self.confinement.adaptive_perimeter().is_some()
-                            && background_cancel.is_none()
-                            && decisions < MAX_DECISIONS_PER_CALL
-                    });
-                    let judged_grant = match desk {
-                        Some(desk) => {
-                            decisions += 1;
-                            let evidence = super::residual::evidence(
-                                &found,
-                                request,
-                                &denial::stderr(&result),
-                                &self.confinement,
-                                &judged,
-                            );
-                            let decided = desk.decide(
-                                spec.clone(),
-                                evidence,
-                                super::residual::admissible(self.confinement.clone()),
-                            );
-                            matches!(
-                                tokio::time::timeout(2 * DECISION_DEADLINE, decided).await,
-                                Ok(ResidualDecision::Granted { .. })
-                            )
-                        }
-                        None => false,
-                    };
-                    match grants.filter(|_| !is_promoted(tracked)) {
-                        _ if judged_grant => denial::Outcome::JudgeGranted,
-                        Some(grants) if questions < MAX_SANDBOX_QUESTIONS => {
-                            questions += 1;
-                            match self
-                                .ask_until_cancelled(
-                                    grants,
-                                    request,
-                                    spec,
-                                    background_cancel.as_ref(),
-                                    tracked,
-                                )
-                                .await
-                            {
-                                Some(true) => continue,
-                                Some(false) if is_promoted(tracked) => denial::Outcome::NobodyToAsk,
-                                Some(false) => denial::Outcome::Declined,
-                                None => return Err(ProcessError::Cancelled),
-                            }
-                        }
-                        Some(_) => denial::Outcome::QuestionLimit,
-                        None => denial::Outcome::NobodyToAsk,
-                    }
+        let grants = self
+            .sandbox_grants
+            .as_deref()
+            .filter(|_| !is_promoted(tracked));
+        let judged = self
+            .residual
+            .as_ref()
+            .map_or_else(Vec::new, |desk| desk.grants());
+        let mut granted = grants.map_or_else(Vec::new, SandboxGrantPort::granted);
+        if let Some(desk) = &self.residual {
+            for grant in desk.owner_grants() {
+                if !granted.contains(&grant) {
+                    granted.push(grant);
                 }
-                None => denial::Outcome::NobodyToAsk,
-            };
-            result.content.push(ToolContentBlock::builtin(denial::note(
-                &found,
-                &self.confinement,
-                outcome,
-            )));
-            return Err(ProcessError::Exit { code, result });
+            }
         }
+        // Saved authority is optional. A changed path loses its capability,
+        // not the session's ability to run unrelated work under base confinement.
+        // Never substitute the replacement canonical target; it needs approval.
+        granted.retain(
+            |grant| match super::denial::readmit(grant, &self.confinement) {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, "omitting stale owner sandbox grant");
+                    false
+                }
+            },
+        );
+        for grant in self.repository_grants() {
+            if !granted.contains(&grant) {
+                granted.push(grant);
+            }
+        }
+        granted.extend(
+            judged
+                .iter()
+                .map(|path| SandboxGrant::new(path.clone(), SandboxAccess::Write)),
+        );
+        let backend = self.backend_under(&granted, &judged)?;
+        let (code, mut result) = match self
+            .spawn_once(backend, spec, None, background_cancel.clone(), live_output)
+            .await
+        {
+            Err(ProcessError::Exit { code, result }) => (code, result),
+            other => return other,
+        };
+        for note in denial::hint_notes(&result, &self.confinement) {
+            result.content.push(ToolContentBlock::builtin(note));
+        }
+        let Some(found) = denial::analyze(spec, &result, &self.confinement, &granted) else {
+            return Err(ProcessError::Exit { code, result });
+        };
+        let outcome = match &found.request {
+            Some(_) if !self.backend.can_widen() => denial::Outcome::CannotWiden,
+            Some(request) => {
+                let desk = self.residual.as_ref().filter(|_| {
+                    request.access == SandboxAccess::Write
+                        && !super::maintenance::request(request, &self.confinement)
+                        && self.confinement.adaptive_perimeter().is_some()
+                        && background_cancel.is_none()
+                });
+                let judged_grant = match desk {
+                    Some(desk) => {
+                        let evidence = super::residual::evidence(
+                            &found,
+                            request,
+                            &denial::stderr(&result),
+                            &self.confinement,
+                            &judged,
+                        );
+                        let decided = desk.decide(
+                            spec.clone(),
+                            evidence,
+                            super::residual::admissible(self.confinement.clone()),
+                        );
+                        matches!(
+                            tokio::time::timeout(
+                                desk.limits().deadline().saturating_mul(2),
+                                decided
+                            )
+                            .await,
+                            Ok(ResidualDecision::Granted { .. })
+                        )
+                    }
+                    None => false,
+                };
+                match grants.filter(|_| !is_promoted(tracked)) {
+                    _ if judged_grant => denial::Outcome::JudgeGranted,
+                    Some(grants) => match self
+                        .ask_until_cancelled(
+                            grants,
+                            request,
+                            spec,
+                            background_cancel.as_ref(),
+                            tracked,
+                        )
+                        .await
+                    {
+                        Some(answer) if answer.allows() => {
+                            super::denial::readmit(request, &self.confinement)?;
+                            if let Some(desk) = &self.residual {
+                                if !desk
+                                    .record_owner_answer(
+                                        request.clone(),
+                                        answer == ego_core::permit::RefusalAnswer::Always,
+                                    )
+                                    .await
+                                {
+                                    return Err(ProcessError::Backend(
+                                        "owner grant could not be journaled".into(),
+                                    ));
+                                }
+                            } else if answer == ego_core::permit::RefusalAnswer::Always {
+                                return Err(ProcessError::Backend(
+                                    "permanent root approval is unavailable".into(),
+                                ));
+                            }
+                            denial::Outcome::OwnerGranted
+                        }
+                        Some(_) if is_promoted(tracked) => denial::Outcome::NobodyToAsk,
+                        Some(_) => denial::Outcome::Declined,
+                        None => return Err(ProcessError::Cancelled),
+                    },
+                    None => denial::Outcome::NobodyToAsk,
+                }
+            }
+            None => denial::Outcome::NobodyToAsk,
+        };
+        result.content.push(ToolContentBlock::builtin(denial::note(
+            &found,
+            &self.confinement,
+            outcome,
+        )));
+        Err(ProcessError::Exit { code, result })
     }
 
     /// The person's answer, or `None` when the run was cancelled first: a
@@ -593,7 +708,7 @@ impl RunProcessContext {
         spec: &SpawnSpec,
         background_cancel: Option<&CancelToken>,
         tracked: Option<TrackedExec<'_>>,
-    ) -> Option<bool> {
+    ) -> Option<ego_core::permit::RefusalAnswer> {
         let command = denial::command_line(spec);
         let question = async { grants.ask(request, &command).await };
         tokio::pin!(question);
@@ -607,7 +722,7 @@ impl RunProcessContext {
                 .as_ref()
                 .is_some_and(|(entries, id)| entries.get(id).is_none_or(|entry| entry.promoted))
             {
-                return Poll::Ready(false);
+                return Poll::Ready(ego_core::permit::RefusalAnswer::Deny);
             }
             question.as_mut().poll(cx)
         });
@@ -622,11 +737,37 @@ impl RunProcessContext {
                         return None;
                     }
                     if is_promoted(tracked) {
-                        return Some(false);
+                        return Some(ego_core::permit::RefusalAnswer::Deny);
                     }
                 }
             }
         }
+    }
+
+    /// Checkouts of the workspace repository that the profile admitted at start
+    /// does not hold: a worktree made mid-session. Derived from validated git
+    /// metadata on every spawn, with the access the workspace itself has.
+    pub(super) fn repository_grants(&self) -> Vec<SandboxGrant> {
+        let access = match self.confinement.level() {
+            ego_core::permit::Confinement::Workspace | ego_core::permit::Confinement::Adaptive => {
+                SandboxAccess::Write
+            }
+            ego_core::permit::Confinement::Ro => SandboxAccess::Read,
+            _ => return Vec::new(),
+        };
+        let workspace = self.confinement.workspace();
+        super::same_repository_roots(workspace.as_path())
+            .into_iter()
+            .filter(|path| !path.is_or_under(workspace))
+            .filter(|path| {
+                !self
+                    .confinement
+                    .roots()
+                    .iter()
+                    .any(|root| root.path() == path)
+            })
+            .map(|path| SandboxGrant::new(path, access))
+            .collect()
     }
 
     /// The backend with `granted` added and exec denied under `no_exec`, or
@@ -711,6 +852,7 @@ async fn execute(
         limits,
     } = context;
     let mut command = prefixed_command(backend.launch_prefix(), spec)?;
+    command.envs(backend.launch_env());
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -795,6 +937,7 @@ async fn execute(
         stderr_task,
         status: None,
         descendants_cleaned: false,
+        stopped_descendants: false,
         stdout_pending: None,
         stderr_pending: None,
     };
@@ -820,6 +963,7 @@ async fn execute(
     }
     let RunningProcess {
         status,
+        stopped_descendants,
         stdout_pending,
         stderr_pending,
         ..
@@ -833,7 +977,12 @@ async fn execute(
         }
     };
     let stderr = commit_stream(stderr_pending.expect("stderr reached EOF")).await?;
-    let result = ToolResult::new(vec![stdout, stderr]);
+    let mut result = ToolResult::new(vec![stdout, stderr]);
+    if stopped_descendants {
+        result
+            .content
+            .push(ToolContentBlock::builtin(STOPPED_DESCENDANTS_NOTE));
+    }
     let status = status.expect("loop exits only with process status");
     if !status.success() {
         return Err(status_error(status, result));
@@ -842,12 +991,20 @@ async fn execute(
     Ok(result)
 }
 
+/// The call owns its whole process group, so a detached child cannot outlive
+/// it. Say so, and name the mode that keeps a process running.
+const STOPPED_DESCENDANTS_NOTE: &str = "processes that this command left running \
+     (for example a nohup or & child) were stopped when the command ended; \
+     to keep a process running, start it with exec background=true";
+
 struct RunningProcess {
     child: ManagedChild,
     stdout_task: Option<DrainHandle>,
     stderr_task: Option<DrainHandle>,
     status: Option<ExitStatus>,
     descendants_cleaned: bool,
+    /// A process in the group outlived the child and cleanup stopped it.
+    stopped_descendants: bool,
     stdout_pending: Option<PendingStream>,
     stderr_pending: Option<PendingStream>,
 }
@@ -948,6 +1105,7 @@ impl RunningProcess {
                 .map_err(|error| ProcessError::Backend(error.to_string()))?;
         }
         if self.status.is_some() && !self.descendants_cleaned {
+            self.stopped_descendants = self.child.group_outlived_child().await;
             self.child.cleanup_after_exit(grace).await;
             self.descendants_cleaned = true;
         }
@@ -995,7 +1153,7 @@ async fn spawn_duplex(
     context: Arc<RunProcessContext>,
     spec: SpawnSpec,
 ) -> Result<Box<dyn DuplexSession>, TransportError> {
-    if !context.confinement.admits_mcp_stdio() {
+    if !context.confinement.admits_mcp() {
         return Err(TransportError::definitely_unsent(TransportFailure::Offline));
     }
     if let Err(missing) = context
@@ -1053,6 +1211,7 @@ async fn spawn_duplex(
     }
     let mut command =
         prefixed_command(context.backend.launch_prefix(), &spec).map_err(process_before_spawn)?;
+    command.envs(context.backend.launch_env());
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1127,10 +1286,14 @@ fn detached_outcome(result: Result<ToolResult, ProcessError>) -> DetachedExecOut
         Err(ProcessError::Exit {
             code: Some(code),
             result,
-        }) => DetachedExecOutcome::Exited { code, result },
-        Err(ProcessError::Signal { signal, result }) => {
-            DetachedExecOutcome::Signalled { signal, result }
-        }
+        }) => DetachedExecOutcome::Exited {
+            code,
+            result: *result,
+        },
+        Err(ProcessError::Signal { signal, result }) => DetachedExecOutcome::Signalled {
+            signal,
+            result: *result,
+        },
         Err(ProcessError::Cancelled) => DetachedExecOutcome::Cancelled,
         Err(ProcessError::Timeout { timeout }) => DetachedExecOutcome::TimedOut {
             timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
@@ -1310,6 +1473,18 @@ fn start_duplex_supervisor(
     DuplexSupervisor { control, task }
 }
 
+/// What ended one wait of the duplex supervisor.
+enum DuplexEvent {
+    Cancelled,
+    /// The deadline passed, or the active clock needs a second look.
+    Deadline,
+    Exit(std::io::Result<ExitStatus>),
+    Control(Option<DuplexControl>),
+}
+
+/// Own the child until it exits, is cancelled, is interrupted or reaches its
+/// deadline. Every one of those wakes this task by itself, so a retained child
+/// that has nothing to say costs the process no timer.
 async fn supervise_duplex_child(
     mut child: ManagedChild,
     mut control: mpsc::UnboundedReceiver<DuplexControl>,
@@ -1319,28 +1494,49 @@ async fn supervise_duplex_child(
     grace: Duration,
 ) -> (DuplexEnd, CleanupCertainty) {
     loop {
-        if cancel.is_cancelled() {
-            let complete = child.terminate(grace).await;
-            return (DuplexEnd::Cancelled, cleanup_certainty(complete));
-        }
-        if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
-            let timeout = timeout.expect("checked as present");
-            let complete = child.terminate(grace).await;
-            return (DuplexEnd::TimedOut { timeout }, cleanup_certainty(complete));
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
+        // The active clock stops while the process is suspended, so the
+        // sleep can end early: the deadline is judged again after it.
+        let deadline = async {
+            match timeout {
+                Some(timeout) => {
+                    let remaining = timeout.saturating_sub(started.elapsed());
+                    if !remaining.is_zero() {
+                        tokio::time::sleep(remaining).await;
+                    }
+                }
+                None => std::future::pending::<()>().await,
+            }
+        };
+        // Biased, in the order a finished child is judged: a cancellation or
+        // a passed deadline wins over an exit that happened at the same time.
+        let event = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => DuplexEvent::Cancelled,
+            () = deadline => DuplexEvent::Deadline,
+            status = child.wait() => DuplexEvent::Exit(status),
+            command = control.recv() => DuplexEvent::Control(command),
+        };
+        match event {
+            DuplexEvent::Cancelled => {
+                let complete = child.terminate(grace).await;
+                return (DuplexEnd::Cancelled, cleanup_certainty(complete));
+            }
+            DuplexEvent::Deadline => {
+                let Some(timeout) = timeout.filter(|timeout| started.elapsed() >= *timeout) else {
+                    continue;
+                };
+                let complete = child.terminate(grace).await;
+                return (DuplexEnd::TimedOut { timeout }, cleanup_certainty(complete));
+            }
+            DuplexEvent::Exit(Ok(status)) => {
                 let complete = child.cleanup_after_exit(grace).await;
                 return (duplex_end(status), cleanup_certainty(complete));
             }
-            Ok(None) => {}
-            Err(_) => {
+            DuplexEvent::Exit(Err(_)) => {
                 child.terminate(grace).await;
                 return (DuplexEnd::Failed, CleanupCertainty::Uncertain);
             }
-        }
-        tokio::select! {
-            command = control.recv() => {
+            DuplexEvent::Control(command) => {
                 let complete = child.terminate(grace).await;
                 let end = match command {
                     Some(DuplexControl::Interrupt) => DuplexEnd::Interrupted,
@@ -1348,7 +1544,6 @@ async fn supervise_duplex_child(
                 };
                 return (end, cleanup_certainty(complete));
             }
-            _ = tokio::time::sleep(Duration::from_millis(2)) => {}
         }
     }
 }
@@ -1559,9 +1754,18 @@ fn write_stream(
                             "background output lock poisoned".into(),
                         ))
                     })?;
+                    output.latest.append(&chunk, preview_bytes);
                     match stream {
                         StreamProvenance::Stdout => output.stdout.append(&chunk, preview_bytes),
                         StreamProvenance::Stderr => output.stderr.append(&chunk, preview_bytes),
+                    }
+                    let wake = output.monitor.as_mut().and_then(|(monitor, waker)| {
+                        monitor.push(stream, &chunk).then(|| Arc::clone(waker))
+                    });
+                    // Never call host code under the output lock.
+                    drop(output);
+                    if let Some(waker) = wake {
+                        wake_background(&waker);
                     }
                 }
             }
@@ -1761,11 +1965,27 @@ impl BoundedPreview {
         self.tail.extend_from_slice(bytes);
     }
 
+    /// The retained head and tail. A byte cut that splits a UTF-8 character
+    /// drops the partial character, so text output keeps a text preview; the
+    /// dropped bytes count as omitted because the caller derives that number
+    /// from the retained length.
     fn into_parts(self) -> (Vec<u8>, Vec<u8>) {
-        match self.small {
-            Some(bytes) => (bytes, Vec::new()),
+        let (mut head, mut tail) = match self.small {
+            Some(bytes) => return (bytes, Vec::new()),
             None => (self.head, self.tail),
+        };
+        if let Err(error) = std::str::from_utf8(&head)
+            && error.error_len().is_none()
+        {
+            head.truncate(error.valid_up_to());
         }
+        let continuation = tail
+            .iter()
+            .take(3)
+            .take_while(|byte| (0x80..0xc0).contains(*byte))
+            .count();
+        tail.drain(..continuation);
+        (head, tail)
     }
 }
 
@@ -1773,7 +1993,7 @@ fn status_error(status: ExitStatus, result: ToolResult) -> ProcessError {
     if let Some(code) = status.code() {
         return ProcessError::Exit {
             code: Some(code),
-            result,
+            result: Box::new(result),
         };
     }
     #[cfg(unix)]
@@ -1781,19 +2001,72 @@ fn status_error(status: ExitStatus, result: ToolResult) -> ProcessError {
         use std::os::unix::process::ExitStatusExt as _;
         ProcessError::Signal {
             signal: status.signal(),
-            result,
+            result: Box::new(result),
         }
     }
     #[cfg(not(unix))]
     {
         ProcessError::Signal {
             signal: None,
-            result,
+            result: Box::new(result),
         }
     }
 }
 
 #[cfg(test)]
+mod duplex_tests;
+
+#[cfg(test)]
+mod preview_tests {
+    use ego_core::permit::{ToolOutputEncoding, ToolOutputProvenance};
+    use ego_core::store::evidence::{EvidenceId, EvidenceRef};
+
+    use super::*;
+
+    // Catches: a head or tail cut at a byte offset that splits a UTF-8
+    // character, which turns the whole preview into base64 and skips compact.
+    #[test]
+    fn a_cut_inside_a_multibyte_character_keeps_a_text_preview() {
+        const BUDGET: usize = 64 * 1024;
+        // Byte 32768 (the head cut) is the second byte of the first check
+        // mark; the tail cut falls one byte into another check mark.
+        let mut output = vec![b'a'; BUDGET / 2 - 1];
+        output.extend("✓".repeat(20_000).bytes());
+        let mut preview = BoundedPreview::new(BUDGET);
+        for chunk in output.chunks(PIPE_CHUNK_BYTES) {
+            preview.append(chunk);
+        }
+        let (head, tail) = preview.into_parts();
+        let id = EvidenceId::parse("0".repeat(64)).expect("a SHA-256 shaped id");
+        let block = ToolContentBlock::process_preview(
+            StreamProvenance::Stdout,
+            &head,
+            &tail,
+            EvidenceRef::new(id, output.len() as u64),
+        );
+
+        let ToolOutputProvenance::Process {
+            encoding,
+            omitted_bytes,
+            ..
+        } = block.provenance()
+        else {
+            panic!("a process preview keeps process provenance");
+        };
+        assert_eq!(*encoding, ToolOutputEncoding::Utf8, "{}", &block.text[..80]);
+        // One byte of the head's partial character and two of the tail's.
+        assert_eq!(*omitted_bytes, (output.len() - BUDGET + 3) as u64);
+        assert!(block.text.starts_with(&"a".repeat(BUDGET / 2 - 1)));
+        assert!(block.text.ends_with("✓✓✓"));
+
+        let mut result = ToolResult::new(vec![block]);
+        result.compact_process_progress();
+        assert!(result.model_projection().is_some(), "compact runs on text");
+    }
+}
+
+// Every sandbox question test drives a Unix shell.
+#[cfg(all(test, unix))]
 mod sandbox_question_tests {
     use std::ffi::OsString;
     use std::future::Future;
@@ -1851,12 +2124,16 @@ mod sandbox_question_tests {
             Vec::new()
         }
 
-        fn ask<'a>(&'a self, _: &'a SandboxGrant, _command: &'a str) -> BoxFuture<'a, bool> {
+        fn ask<'a>(
+            &'a self,
+            _: &'a SandboxGrant,
+            _command: &'a str,
+        ) -> BoxFuture<'a, ego_core::permit::RefusalAnswer> {
             self.asked.fetch_add(1, Ordering::SeqCst);
             if self.hang {
                 Box::pin(std::future::pending())
             } else {
-                Box::pin(async { true })
+                Box::pin(async { ego_core::permit::RefusalAnswer::Session })
             }
         }
     }
@@ -1932,6 +2209,75 @@ mod sandbox_question_tests {
         }
     }
 
+    // Catches: replacing an old approved output path disables unrelated commands.
+    #[test]
+    fn stale_owner_path_does_not_block_unrelated_workspace_command() {
+        let mut rig = rig(Arc::new(Widening), false);
+        let approved = std::path::PathBuf::from(&rig.spec.argv()[3]);
+        let replacement = approved.with_file_name("replacement");
+        std::fs::write(&replacement, "replacement").unwrap();
+        let desk = ResidualWriteDesk::new();
+        desk.restore_owner_grants(&[SandboxGrant::new(
+            CanonPath::new(&approved),
+            SandboxAccess::Read,
+        )]);
+        rig.context = rig.context.with_residual_desk(Some(desk));
+        std::fs::remove_file(&approved).unwrap();
+        std::os::unix::fs::symlink(&replacement, &approved).unwrap();
+        let command = SpawnSpec::new(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf ready > unrelated-marker".into(),
+            ],
+            rig.spec.cwd().cloned(),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let outcome = block_on(rig.context.execute(&command));
+        assert!(
+            outcome.is_ok(),
+            "obsolete owner path blocked unrelated command: {outcome:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(command.cwd().unwrap().as_path().join("unrelated-marker"))
+                .unwrap(),
+            "ready"
+        );
+    }
+
+    // Catches: an owner path approval repeats a mutation that already ran.
+    #[test]
+    fn owner_grant_never_replays_partial_command() {
+        let mut rig = rig(Arc::new(Widening), false);
+        rig.spec = SpawnSpec::new(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf x >> marker; printf '%s: Operation not permitted\\n' \"$0\" >&2; exit 1"
+                    .into(),
+                rig.spec.argv()[3].clone(),
+            ],
+            rig.spec.cwd().cloned(),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let outcome = block_on(rig.context.execute(&rig.spec));
+        assert!(
+            matches!(outcome, Err(ProcessError::Exit { .. })),
+            "{outcome:?}"
+        );
+        let marker = rig.spec.cwd().unwrap().as_path().join("marker");
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap(),
+            "x",
+            "owner approval must not replay a partially executed command"
+        );
+        assert_eq!(rig.seat.asked.load(Ordering::SeqCst), 1);
+    }
+
     // Catches: xcode-select's quoted path and parenthesized errno bypass the
     // production sandbox question flow. Fixture is real R3 stderr, 2026-10-28.
     #[test]
@@ -1959,7 +2305,7 @@ mod sandbox_question_tests {
         );
         assert_eq!(
             rig.seat.asked.load(Ordering::SeqCst),
-            MAX_SANDBOX_QUESTIONS,
+            1,
             "recorded xcode-select EPERM must reach the live question port"
         );
     }

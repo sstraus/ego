@@ -52,6 +52,7 @@ pub struct SessionControlState {
     /// unlike them in one way that the type cannot express: its `available`
     /// list is a ceiling the seat may narrow and never widen.
     ///
+    /// the design notes
     pub sandbox: ControlSelect<Confinement>,
 }
 

@@ -45,7 +45,7 @@ async fn execute_inner(
     match &args.action {
         McpAction::Add { name, server } => add(name, server, out, controller).await,
         McpAction::Remove { name } => remove(name, out, controller).await,
-        McpAction::List { json } => list(*json, out, controller).await,
+        McpAction::List { json, mcp } => list(*json, mcp, out, controller).await,
         McpAction::Login { .. } => login(&args.action, out).await,
         McpAction::Reload { name } => reload(name.as_ref(), out, controller).await,
     }
@@ -97,6 +97,9 @@ async fn login_inner(
             "select --client-id ID, --cimd URL, or --dcr".into(),
         )));
     }
+    if let Some(warning) = plaintext_credential_warning(name, &http) {
+        output(&warning);
+    }
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let interaction = ego_tools::mcp::LoopbackOAuthInteraction::bind(*callback_port, deadline)
         .await
@@ -123,12 +126,14 @@ async fn login_inner(
     let effects = Arc::new(ego_tools::mcp::RunMcpHttpEffects::new(Arc::clone(
         scope.ports(),
     )));
-    let credentials = Arc::new(ego_tools::credentials::OsCredentialStore::default());
+    let home = config::ego_home().ok_or_else(|| failed("MCP needs EGO_HOME or HOME".into()))?;
+    let backend =
+        ego_tools::credentials::SelectedCredentialBackend::from_environment(home.join("secrets"))
+            .map_err(|error| usage(UsageError(error.into())))?;
+    let credentials = Arc::new(ego_tools::credentials::OsCredentialStore::new(backend));
     // Serialize refresh transactions across CLI processes; the store port is
     // intentionally opaque and has no compare-and-set operation.
-    let root = config::ego_home()
-        .ok_or_else(|| failed("MCP needs EGO_HOME or HOME".into()))?
-        .join("mcp");
+    let root = home.join("mcp");
     std::fs::create_dir_all(&root)
         .map_err(|_| failed("MCP credential lock directory unavailable".into()))?;
     let file = std::fs::OpenOptions::new()
@@ -204,6 +209,22 @@ async fn login_inner(
         result.resource()
     ));
     Ok(())
+}
+
+/// The once-per-invocation notice for an OAuth credential that crosses the
+/// network unencrypted. The owner selected the server, so it
+/// is admitted; the notice keeps the cost visible.
+pub(crate) fn plaintext_credential_warning(
+    name: &McpServerName,
+    http: &ego_core::config::McpHttpConfig,
+) -> Option<String> {
+    http.sends_credentials_in_plaintext().then(|| {
+        format!(
+            "MCP server '{name}' sends its OAuth credential over plaintext HTTP to {}; \
+             anyone on that network can read it. Use HTTPS to protect it.",
+            http.url.as_url().host_str().unwrap_or_default()
+        )
+    })
 }
 
 struct SessionOAuthInteraction<'a> {
@@ -674,6 +695,7 @@ pub(crate) fn server_state_text(state: McpServerState) -> &'static str {
 
 async fn list(
     json: bool,
+    selectors: &[crate::cli::McpSelector],
     out: &Stdout,
     controller: &Arc<McpRegistryController>,
 ) -> Result<(), RunTermination> {
@@ -685,7 +707,27 @@ async fn list(
         RegistryScope::All,
     )
     .await?;
-    let listing = Listing::from_config(&config, &status);
+    let mut listing = Listing::from_config(&config, &status);
+    if !selectors.is_empty() {
+        let cwd = std::env::current_dir().map_err(|error| RunTermination::Failed {
+            message: format!("the working directory could not be read: {error}"),
+        })?;
+        for (name, server, provenance) in
+            config::selected_mcp(selectors, &config.effective, &cwd).map_err(usage)?
+        {
+            // A `--mcp NAME` of a stored server is already a row.
+            if config.effective.mcp.entry(&name).is_none() {
+                let entry = ResolvedMcpEntry::Configured {
+                    server,
+                    provenance,
+                    enabled: true,
+                };
+                listing
+                    .servers
+                    .push(ServerReport::new(&name, &entry, &status));
+            }
+        }
+    }
     if json {
         let rendered = serde_json::to_string(&listing).map_err(|error| RunTermination::Failed {
             message: format!("the MCP configuration listing could not be rendered: {error}"),
@@ -905,9 +947,11 @@ fn failure_text(failure: McpFailure) -> &'static str {
         McpFailure::Authority => "authority",
         McpFailure::Transport => "transport",
         McpFailure::Protocol => "protocol",
+        McpFailure::ProtocolVersion => "protocol_version",
         McpFailure::Authorization => "authorization",
         McpFailure::Credential => "credential",
         McpFailure::Cancelled => "cancelled",
+        McpFailure::Timeout => "timeout",
     }
 }
 
@@ -956,6 +1000,7 @@ enum ConfigurationReport {
         url: String,
         auth: &'static str,
         allow_insecure_loopback: bool,
+        oauth_hosts: Vec<String>,
     },
     Acp {
         server_id: String,
@@ -982,6 +1027,7 @@ impl ConfigurationReport {
                     McpHttpAuth::Oauth => "oauth",
                 },
                 allow_insecure_loopback: http.allow_insecure_loopback,
+                oauth_hosts: http.oauth_hosts.iter().map(ToString::to_string).collect(),
             },
             McpServerConfig::Acp { server_id } => Self::Acp {
                 server_id: server_id.clone(),
@@ -996,27 +1042,26 @@ pub(crate) fn session_inventory<'a>(
     servers: impl IntoIterator<Item = (&'a McpServerName, bool)>,
 ) -> String {
     let servers = servers.into_iter().collect::<Vec<_>>();
-    let name_width = servers
-        .iter()
-        .map(|(name, _)| name.to_string().len())
-        .max()
-        .unwrap_or(0);
-    let mut rows = vec!["mcp:".to_owned()];
-    rows.extend(servers.into_iter().map(|(name, disabled)| {
-        let state = if disabled {
-            "off (session)"
-        } else {
-            server_status_text(status, name)
-        };
-        let name = name.to_string();
-        format!("  {name:<name_width$}  {state}")
-    }));
-    if rows.len() == 1 {
-        rows[0] = "mcp: no configured servers".to_owned();
+    if servers.is_empty() {
+        return "mcp: no configured servers\n/mcp add NAME --http URL | --stdio -- COMMAND ..."
+            .into();
     }
-    rows.push("/mcp login NAME — authorize and reconnect a server".to_owned());
-    rows.push("/mcp toggle NAME — turn a server on/off for this session".to_owned());
-    rows.push("/mcp add NAME --http URL | /mcp add NAME --stdio -- COMMAND ...".to_owned());
+    let mut table = vec![vec!["Server".into(), "State".into()]];
+    table.extend(servers.into_iter().map(|(name, disabled)| {
+        vec![
+            name.to_string(),
+            if disabled {
+                "off (session)"
+            } else {
+                server_status_text(status, name)
+            }
+            .into(),
+        ]
+    }));
+    let mut rows = vec!["mcp: servers".to_owned()];
+    rows.extend(crate::render::table::plain_table(table));
+    rows.push("/mcp login NAME · /mcp toggle NAME · /mcp add NAME …".into());
+    rows.push("Full configuration: ego mcp ls --json".into());
     rows.join("\n")
 }
 
@@ -1170,7 +1215,6 @@ mod session_presentation_tests {
     fn empty_session_inventory_includes_slash_syntax() {
         let text = session_inventory(&McpRegistryStatus::default(), std::iter::empty());
         assert!(text.contains("mcp: no configured servers"));
-        assert!(text.contains("/mcp toggle NAME"));
         assert!(text.contains("/mcp add NAME"));
     }
 
@@ -1185,7 +1229,7 @@ mod session_presentation_tests {
         );
         let rows = text.lines().collect::<Vec<_>>();
         assert!(!text.contains('\t'));
-        assert_eq!(rows[1].find("off (session)"), rows[2].find("off (session)"));
+        assert_eq!(rows[2].find("off (session)"), rows[3].find("off (session)"));
         assert!(text.contains("/mcp toggle NAME"));
     }
 

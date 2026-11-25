@@ -1,7 +1,10 @@
 //! What this terminal can be told, decided once.
 //!
-//! Renderers read capability fields, not environment variables or hand-built
-//! escapes. [`Capabilities::of`] is the sole capability decision point.
+//! the design notes §1: no
+//! call site reads an environment variable and no call site formats an escape
+//! by hand. Everything a renderer is allowed to do is a field on
+//! [`Capabilities`], and [`Capabilities::of`] is the only function that decides
+//! one.
 //!
 //! The split into [`Terminal`] (what was observed) and [`Capabilities`] (what
 //! follows from it) is what makes the decision testable at all: the inputs are
@@ -30,8 +33,12 @@ pub enum Depth {
 }
 
 /// Which family of OSC sequences this host understands.
-/// Notification spelling and private OSC support are selected together by
-/// host profile. Independent bits could select TUIC sequences on iTerm2.
+///
+/// Not a bitfield of individual sequences: the matrix in the ADR has three
+/// columns because there are three hosts, and the two places they actually
+/// differ — how a notification is spelled, and whether 7770 means anything —
+/// are decided together or not at all. A bitfield would let a caller ask for
+/// TUIC's private protocol on iTerm2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OscProfile {
     /// A pipe, a file, `TERM=dumb`. Nothing is emitted.
@@ -61,8 +68,9 @@ pub struct Terminal<'a> {
     pub flag_no_color: bool,
     /// Explicit append-only, unstyled output.
     pub flag_plain: bool,
-    /// Whether stdout is a terminal; stderr and stdin do not establish output
-    /// capabilities.
+    /// Whether stdout — not stderr, not stdin — is a terminal. Stdout is what
+    /// carries the answer, and `CLI.md` §4.5 makes it the channel that has to
+    /// stay clean when it is not one.
     pub stdout_is_terminal: bool,
     /// Columns, when anything could report them.
     pub columns: Option<usize>,
@@ -148,8 +156,11 @@ pub struct Capabilities {
 }
 
 /// The floor for `width`.
-/// Clamp unusable widths instead of asserting. Zero or tiny dimensions
-/// must not panic or turn layout into one character per line.
+///
+/// A terminal that reports 3 columns, or 0, is not a terminal anybody is
+/// reading; layout that divides by the reported width would either panic or
+/// produce one character per line. Clamping is total where asserting is not,
+/// which the ADR's failure semantics require of layout.
 const MIN_WIDTH: usize = 20;
 
 /// What a pipe gets. Not the terminal's width — a redirected run must produce
@@ -189,16 +200,30 @@ impl Capabilities {
     }
 
     /// Whether OSC 8 is safe here.
-    /// A screen alone does not establish OSC support. Unsupported sequences
-    /// can corrupt visible text, whereas omitting a hyperlink only loses a click.
-    /// Use the capability profile rather than emitting one optimistically.
+    ///
+    /// A screen is necessary and not sufficient. §4 of the ADR rests on "an
+    /// unknown OSC is discarded", and that is true of every host in the matrix
+    /// — but **not** of Apple's Terminal.app, which garbles unknown OSC rather
+    /// than swallowing it. That is not a guess: it is the reason xAI's own
+    /// harness classifies it as a hostile parser and sends it no hyperlink
+    /// (`crates/codegen/xai-grok-pager-render/src/terminal/hyperlinks.rs:8`).
+    ///
+    /// The cost of being wrong is asymmetric, which is what decides it. A
+    /// hyperlink not emitted costs a click; a hyperlink emitted to a parser
+    /// that mangles it costs the line it was on.
     fn hyperlinks(terminal: &Terminal<'_>, osc: OscProfile) -> bool {
         osc != OscProfile::None && terminal.term_program != Some("Apple_Terminal")
     }
 
-    /// Enable OSC 9;4 only on supported iTerm2 versions. Older releases interpret it as a
-    /// desktop notification; an unknown version loses the indicator rather than displaying raw
-    /// control parameters.
+    /// Whether OSC 9;4 is safe here.
+    ///
+    /// iTerm2 gained the progress indicator in 3.6. **Before** 3.6 it read the
+    /// same bytes as an OSC 9 *desktop notification* and displayed the raw
+    /// parameters — `4;1;-1` — as the alert text. So on an older iTerm2 the
+    /// sequence is not ignored, it is rendered, which is exactly what §4 says
+    /// ego does not do. An unparseable or absent version is treated as old:
+    /// the fallback that loses an indicator is preferable to the one that pops
+    /// an alert saying `4;3;0`.
     fn progress(terminal: &Terminal<'_>, osc: OscProfile) -> bool {
         if osc == OscProfile::None {
             return false;
@@ -217,8 +242,11 @@ impl Capabilities {
             .unwrap_or(false)
     }
 
-    /// Structured output receives no terminal rendering capabilities. An SGR escape inside JSON
-    /// would corrupt its protocol.
+    /// What a run that will never be looked at gets: nothing.
+    ///
+    /// Used by `--output json`/`jsonl`/`acp`, where §4.5's "stdout is
+    /// protocol-clean" is not a preference about appearance. A JSON document
+    /// with an SGR inside it is not JSON.
     pub fn plain() -> Self {
         Capabilities {
             depth: Depth::None,
@@ -233,8 +261,13 @@ impl Capabilities {
         self.depth != Depth::None
     }
 
-    /// Screen layout is independent of color. `--no-color` on a terminal still uses its width
-    /// and layout; only output without a screen reproduces plain input.
+    /// Whether anything is being drawn, as opposed to written down.
+    ///
+    /// The distinction §2 rests on. It is deliberately *not* `coloured()`:
+    /// `--no-color` on a real terminal is a person asking for no colour, not a
+    /// person asking for a file — the layout, the tables and the wrap column
+    /// still belong to the window they are looking at. Only a run with no
+    /// screen at all reverts to reproducing its input.
     pub fn on_screen(&self) -> bool {
         self.osc != OscProfile::None
     }
@@ -278,8 +311,9 @@ impl Capabilities {
         {
             return Depth::TrueColor;
         }
-        // Known truecolor hosts can report `TERM_PROGRAM` instead of `COLORTERM`,
-        // including TUIC's `ghostty` value.
+        // Every terminal in the ADR's matrix does truecolour and says so
+        // through `TERM_PROGRAM` when it does not export `COLORTERM` —
+        // including TUIC, which reports `ghostty`.
         if matches!(
             terminal.term_program,
             Some("iTerm.app" | "ghostty" | "WezTerm" | "vscode" | "Apple_Terminal")
@@ -321,8 +355,10 @@ mod tests {
         }
     }
 
-    /// Terminal.app can render unknown OSC bytes as garbage, so it receives no hyperlink
-    /// sequence.
+    /// Apple's Terminal.app does not discard an OSC it does not understand —
+    /// it garbles it, and the garbage lands on the line the link was on. It is
+    /// the one host in the matrix for which §4's "an unknown OSC is discarded"
+    /// is false, so it is the one host that gets no hyperlink.
     #[test]
     fn the_one_parser_that_mangles_what_it_cannot_read_is_sent_no_hyperlink() {
         let apple = Terminal {
@@ -341,8 +377,13 @@ mod tests {
         assert!(Capabilities::of(&rich()).hyperlinks);
     }
 
-    /// Older iTerm2 interprets OSC 9;4 as a notification. Treat an unknown version as
-    /// unsupported rather than risking an alert with raw parameters.
+    /// Before 3.6, iTerm2 read OSC 9;4 as an OSC 9 *notification* and popped an
+    /// alert reading `4;3;0`. So the version is not a nicety here — below it
+    /// the sequence is drawn rather than ignored, which is the one thing §4
+    /// promises ego never does.
+    ///
+    /// Unknown means old. Losing an indicator is a smaller failure than
+    /// showing somebody an alert box containing three semicolons.
     #[test]
     fn iterm_gets_a_progress_indicator_only_where_it_means_progress() {
         let iterm = |version: Option<&'static str>| Terminal {
@@ -370,7 +411,9 @@ mod tests {
         assert!(Capabilities::of(&rich()).progress);
     }
 
-    /// `--no-color` must change emitted bytes, not merely parse successfully.
+    /// The defect this whole module exists to fix: `--no-color` was parsed and
+    /// never read (`cli.rs:382` → `cli.rs:951` → nothing), so `CLI.md` §3.1
+    /// marked **yes** a flag that changed no byte.
     #[test]
     fn the_flag_that_did_nothing_now_decides() {
         assert_eq!(Capabilities::of(&rich()).depth, Depth::TrueColor);
@@ -419,7 +462,9 @@ mod tests {
         assert!(!capabilities.hyperlinks);
     }
 
-    /// Redirected output must not depend on the launching terminal's width.
+    /// §2 of the ADR: a redirected run must produce the same bytes whatever
+    /// terminal launched it. Taking the wrap column from the window would make
+    /// `ego run … > out.md` depend on how wide the window happened to be.
     #[test]
     fn a_pipe_wraps_at_a_fixed_column_not_at_the_windows() {
         let piped = Terminal {
@@ -430,8 +475,9 @@ mod tests {
         assert_eq!(Capabilities::of(&piped).width, PIPE_WIDTH);
     }
 
-    /// Layout divides by width, so unusable reported widths receive a floor
-    /// instead of causing a panic.
+    /// Layout divides by the width. A terminal reporting a width no layout can
+    /// use gets a floor, because the ADR's failure semantics say layout is
+    /// total over its inputs rather than asserted.
     #[test]
     fn an_absurd_width_is_clamped_rather_than_believed() {
         for columns in [0, 1, 7] {
@@ -509,7 +555,8 @@ mod tests {
         assert_eq!(Capabilities::of(&hollow).osc, OscProfile::Standard);
     }
 
-    /// Structured JSON must contain no SGR escape sequences.
+    /// §4.5 is not a preference about appearance: an SGR inside a JSON
+    /// document makes it stop being one.
     #[test]
     fn the_machine_readable_modes_have_nothing_to_negotiate() {
         let plain = Capabilities::plain();

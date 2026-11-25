@@ -5,10 +5,14 @@ mod backend;
 #[cfg(target_os = "linux")]
 mod bwrap;
 mod denial;
+#[cfg(target_os = "macos")]
+mod dev_roots;
 mod editor_process;
-pub(crate) mod identity;
+mod identity;
 #[cfg(target_os = "linux")]
 mod landlock;
+mod maintenance;
+mod monitor;
 mod null;
 #[cfg(target_os = "macos")]
 mod pnpm;
@@ -20,6 +24,7 @@ mod process_tree;
 mod profile;
 mod protocol_session;
 mod residual;
+mod same_repository;
 #[cfg(target_os = "macos")]
 mod seatbelt;
 mod secret_child;
@@ -44,6 +49,7 @@ use null::NullBackend;
 pub use crate::store::SessionEvidenceStore;
 pub use adaptive::admit_confinement;
 pub use protocol_session::{ProtocolChild, start_protocol_session};
+pub use same_repository::same_repository_roots;
 
 /// Conservative setup write preview. This never constructs or launches a backend.
 /// Directory reach that overlaps operator configuration is not proposed, even on
@@ -480,6 +486,10 @@ impl ProcessExecutor for GuardedExec {
     fn revalidate(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
         identity::revalidate(spec)
     }
+
+    fn revalidate_fresh_approval(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
+        identity::revalidate_fresh_approval(spec)
+    }
     fn execute<'a>(
         &'a self,
         spec: &'a SpawnSpec,
@@ -497,6 +507,11 @@ impl ProcessExecutor for GuardedExec {
 
     fn foreground_exec(&self) -> Option<DetachedExecId> {
         self.context.foreground_exec()
+    }
+
+    fn foreground_output(&self) -> Option<Vec<u8>> {
+        let id = self.context.foreground_exec()?;
+        self.session_context().tracked_output(id)
     }
 
     fn detach_foreground(&self, id: DetachedExecId) -> Result<(), ProcessError> {
@@ -520,6 +535,25 @@ impl ProcessExecutor for GuardedExec {
 
     fn cancel_background(&self, id: DetachedExecId) -> Result<(), ProcessError> {
         self.session_context().cancel_background(id)
+    }
+
+    fn monitor_background(
+        &self,
+        id: DetachedExecId,
+        monitor: ego_core::permit::DetachedExecMonitor,
+    ) -> Result<(), ProcessError> {
+        self.session_context().monitor_background(id, monitor)
+    }
+
+    fn take_background_output(
+        &self,
+        id: DetachedExecId,
+    ) -> Result<Option<ego_core::permit::DetachedExecLines>, ProcessError> {
+        self.session_context().take_background_output(id)
+    }
+
+    fn background_output_ready(&self, id: DetachedExecId) -> bool {
+        self.session_context().background_output_ready(id)
     }
 
     fn execute_handler<'a>(
@@ -1044,11 +1078,11 @@ mod tests {
         let initial = RunConfinement::new(
             Confinement::Off,
             false,
-            CanonPath::new("/home/example/Gits"),
+            CanonPath::new("/workspace/ego"),
         )
         .expect("absolute workspace");
         let rooted = initial.clone().with_roots(vec![ProfileRoot::new(
-            CanonPath::new("/home/example/Gits"),
+            CanonPath::new("/workspace/ego"),
             RootAccess::ReadWrite,
         )]);
         let admitted = policy_digest(&initial, &backend).expect("initial digest");
@@ -1061,7 +1095,7 @@ mod tests {
             policy_digest(&initial, &historical_backend)
                 .expect("historical digest")
                 .as_str(),
-            "2b61fd9385e12499ee14ff58305b1b10e895d4547b2aeab988ffcaacffe27fb2"
+            "e4811618aa9bf662033e8e74317b6653b05341d1407f90125287c9c59b820048"
         );
         assert_eq!(
             admitted,

@@ -9,6 +9,7 @@ Third-party material retains its own license.
 
 | Component | Declared license | License text |
 | --- | --- | --- |
+| `vendor/crossterm` | MIT | [`vendor/crossterm/LICENSE`](../vendor/crossterm/LICENSE) |
 | `vendor/reedline` | MIT | [`vendor/reedline/LICENSE`](../vendor/reedline/LICENSE) |
 | `vendor/process-wrap` | Apache-2.0 OR MIT | [`LICENSE-APACHE`](../vendor/process-wrap/LICENSE-APACHE), [`LICENSE-MIT`](../vendor/process-wrap/LICENSE-MIT) |
 | Notebook code derived from nbformat | BSD-3-Clause | [`nbformat.LICENSE`](../crates/ego-tools/src/tools/nbformat.LICENSE) |

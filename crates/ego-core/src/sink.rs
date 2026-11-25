@@ -1,8 +1,10 @@
 //! Where a [`PublicEvent`] goes the moment it becomes durable.
 //!
-//! Live is the contract, not a quality of the implementation: a batch handed over when
-//! the turn ends is a different promise wearing the same flag, and a caller watching
-//! `--output jsonl` for a long tool call would see nothing at all until it finished.
+//! See `CLI.md` §4.2 — "one event per line, **live**". Live is the contract,
+//! not a quality of the implementation: a batch handed over when the turn
+//! ends is a different promise wearing the same flag, and a caller watching
+//! `--output jsonl` for a long tool call would see nothing at all until it
+//! finished.
 //!
 //! ## Why the port is infallible
 //!
@@ -55,8 +57,9 @@ pub trait EventSink: Send + Sync {
 
     /// Take one event, with the reduction it produced.
     ///
-    /// Called only after the event is durable and reduced, so `state` includes
-    /// `event` rather than preceding it.
+    /// Called once per event, after it is durable and after it has been folded
+    /// — so `state` always *includes* `event`, never precedes it. See
+    /// the design notes.
     ///
     /// Most sinks ignore `state`: a line of JSONL is the event and nothing
     /// else. It is here for the consumer that cannot work without it — ACP's
@@ -66,6 +69,20 @@ pub trait EventSink: Send + Sync {
     /// publication is what makes that requirement true by construction instead
     /// of by a caller remembering a doc comment.
     fn publish(&self, event: &PublicEvent, state: &SessionState);
+
+    /// Whether this sink displays transient foreground process progress.
+    fn wants_exec_progress(&self) -> bool {
+        false
+    }
+
+    /// Transient terminal-only progress; never a durable model event.
+    fn exec_progress(
+        &self,
+        _item: crate::event::id::ItemId,
+        _elapsed: std::time::Duration,
+        _output: &[u8],
+    ) {
+    }
 
     /// Transient, attempt-local cache observation for interactive diagnostics.
     /// This is not a public event or a durable accounting record.
@@ -91,6 +108,19 @@ impl<T: EventSink + ?Sized> EventSink for &T {
         (**self).publish(event, state);
     }
 
+    fn wants_exec_progress(&self) -> bool {
+        (**self).wants_exec_progress()
+    }
+
+    fn exec_progress(
+        &self,
+        item: crate::event::id::ItemId,
+        elapsed: std::time::Duration,
+        output: &[u8],
+    ) {
+        (**self).exec_progress(item, elapsed, output)
+    }
+
     fn cache_observed(
         &self,
         prefix: &crate::generator::attempt::CachePrefix,
@@ -102,7 +132,9 @@ impl<T: EventSink + ?Sized> EventSink for &T {
 
 /// A sink that keeps everything, for a caller that wants the batch after all.
 ///
-/// Making it a sink the caller chooses puts the memory it costs on the caller who asked
+/// The batch is not wrong — an ACP host, and `CLI.md` §4.1's single result
+/// object, both want one — it is only wrong as the *sole* path. Making it a
+/// sink the caller chooses puts the memory it costs on the caller who asked
 /// for it, instead of on every session for its whole life.
 #[derive(Debug, Default)]
 pub struct CollectingSink {

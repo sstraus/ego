@@ -1,5 +1,13 @@
-//! Process-owned configuration locations and flag conversion. Core owns parsing and precedence.
-//! Invalid configuration is a hard error naming the key and source, never a skipped layer.
+//! Where the config layers of `CLI.md` §7 live, and how the command line
+//! becomes one of them.
+//!
+//! Only the *locations* are here. Parsing is `ConfigLayer::parse` and
+//! precedence is `config::resolve`, both pure and both in `ego-core`; this
+//! module knows which files to look in and what `EGO_HOME` means, which is
+//! process knowledge and belongs to the process.
+//!
+//! Invalid config is never skipped (§4.5): an unknown key is a hard error
+//! from the layer it was written in, with the key and the source named.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -35,7 +43,7 @@ const SYSTEM_CONFIG: &str = "/etc/ego/config.toml";
 /// that file there deliberately, so saying which one is broken is the help,
 /// not a leak.
 pub(crate) const SYSTEM_CONFIG_DIR: &str = "/etc/ego";
-/// Override the default `~/.ego` user configuration location.
+/// Overrides `~/.ego` for the user layer (`CLI.md` §7).
 const EGO_HOME: &str = "EGO_HOME";
 /// Environment overrides, between the flags and the project layers.
 const ENV_MODEL: &str = "EGO_MODEL";
@@ -216,8 +224,9 @@ async fn execute_inner(
                     out,
                 )?;
             } else if values.is_empty() {
-                // An empty text listing has empty stdout. Explain it on stderr instead
-                // of adding a row that breaks the listing schema.
+                // The ADR fixes an empty text `ls` as empty stdout, so the
+                // explanation goes to the diagnostic channel rather than
+                // becoming a row no reader of this format expects.
                 out.note(&empty_listing(
                     "no user configuration values are set",
                     "ego config set",
@@ -338,13 +347,13 @@ where
         })?;
     let publication = match &result.publication {
         UserConfigPublication::NotPublished => "not_published",
-        UserConfigPublication::PublishedDurably => "published_durably",
+        UserConfigPublication::PublishedDurably => "durable",
         UserConfigPublication::PublishedDurabilityUncertain { diagnostic } => {
             output::note(&format!(
                 "configuration changed, but saving it to disk could not be confirmed: {diagnostic}; a recovery copy remains at {}",
                 candidate_path.display()
             ));
-            "published_durability_uncertain"
+            "durability_uncertain"
         }
     };
     if let Some(warning) = result.candidate_cleanup_warning {
@@ -675,6 +684,13 @@ pub fn auth() -> Result<std::collections::HashMap<String, AuthProviderLayer>, Us
 
 /// System and user selections for commands that cannot admit project configuration.
 pub(crate) fn user_effective() -> Result<Effective, UsageError> {
+    user_effective_with_connection(None)
+}
+
+/// Apply explicit account authority before validating the effective default.
+pub(crate) fn user_effective_with_connection(
+    connection: Option<&str>,
+) -> Result<Effective, UsageError> {
     let mut found = Vec::new();
     if let Some(system) = layer(Source::System, Path::new(SYSTEM_CONFIG))? {
         found.push(system);
@@ -683,6 +699,12 @@ pub(crate) fn user_effective() -> Result<Effective, UsageError> {
         && let Some(user) = layer(Source::User, &home.join("config.toml"))?
     {
         found.push(user);
+    }
+    if let Some(id) = connection {
+        found.push(
+            ConfigLayer::parse(Source::Flags, &format!("connection = {}\n", quote(id)))
+                .map_err(|error| UsageError(error.to_string()))?,
+        );
     }
     resolve(&found, Trust::Untrusted, None).map_err(|err| UsageError(err.to_string()))
 }
@@ -822,8 +844,12 @@ pub(crate) fn mcp_management() -> Result<McpManagementConfig, UsageError> {
     })
 }
 
-/// Read a layer or return absence only when it does not exist. An unreadable existing system
-/// config may carry ceilings and must not be ignored.
+/// Read one layer, or nothing if the file is not there.
+///
+/// A file that exists and cannot be *read* is an error, not an absence: an
+/// unreadable `/etc/ego/config.toml` may be the layer carrying the ceilings,
+/// and running as though an administrator had configured nothing is the
+/// failure mode §4.5 was written against.
 fn layer(source: Source, path: &Path) -> Result<Option<Sourced<ConfigLayer>>, UsageError> {
     match std::fs::read_to_string(path) {
         Ok(text) => ConfigLayer::parse(source, &text)
@@ -942,6 +968,55 @@ impl FrozenRunConfig {
         }
     }
 
+    /// Admit workspace layers at the actual host trust decision without rereading
+    /// the captured machine/environment authority or reconstructing configuration.
+    pub(crate) fn admit_workspace(
+        &self,
+        workspace: &Path,
+        trust: Trust,
+    ) -> Result<Self, UsageError> {
+        let mut admitted = self.clone();
+        admitted
+            .layers
+            .retain(|layer| !matches!(layer.source, Source::Project | Source::Local));
+        if trust == Trust::Trusted {
+            for (source, path) in project_layer_paths(workspace) {
+                if ego_home().is_some_and(|home| same_config_file(&path, &home.join("config.toml")))
+                {
+                    continue;
+                }
+                admitted.layers.extend(layer(source, &path)?);
+            }
+        }
+        admitted.trust = trust;
+        Ok(admitted)
+    }
+
+    /// Add only the exact account admitted by the live picker. A bare child
+    /// discards workspace layers without rereading unrelated user authority.
+    pub(crate) fn with_admitted_connection(
+        &self,
+        id: &str,
+        connection: &ego_core::config::ConnectionConfig,
+        trust: Trust,
+    ) -> Self {
+        let mut captured = self.clone();
+        if trust == Trust::Untrusted {
+            captured
+                .layers
+                .retain(|layer| !matches!(layer.source, Source::Project | Source::Local));
+            captured.trust = trust;
+        }
+        captured.layers.push(Sourced {
+            source: Source::User,
+            value: ConfigLayer {
+                connections: [(id.to_owned(), connection.clone())].into(),
+                ..ConfigLayer::default()
+            },
+        });
+        captured
+    }
+
     /// The posture this capture pinned.
     ///
     /// A child runs at its parent's posture, so this is the answer for every
@@ -977,19 +1052,69 @@ impl FrozenRunConfig {
     ) -> Result<Effective, UsageError> {
         let request_profile = profile(args);
         let selected_profile = request_profile.as_ref().or(self.profile.as_ref());
-        resolve_session_profile(
+        let mut effective = resolve_session_profile(
             layers,
             self.trust,
             selected_profile.map(SelectedProfile::as_resolver_input),
             args.ceiling_profile.as_deref(),
             args.directory.as_deref().unwrap_or(Path::new(".")),
         )
-        .map_err(|error| UsageError(error.to_string()))
+        .map_err(|error| UsageError(error.to_string()))?;
+        apply_account_selector(&mut effective, args)?;
+        Ok(effective)
     }
 
     pub(crate) fn profile(&self) -> Option<&str> {
         self.profile.as_ref().map(SelectedProfile::name)
     }
+}
+
+/// Resolve the human selector exactly once against the already admitted config.
+pub(crate) fn apply_account_selector(
+    effective: &mut Effective,
+    args: &Args,
+) -> Result<(), UsageError> {
+    // An explicitly chosen model may use a different provider than the
+    // configured default account. Only explicit or resumed IDs stay pinned.
+    if args.connection.is_none()
+        && args.model.is_some()
+        && let Some((route, _)) = effective
+            .model
+            .as_ref()
+            .and_then(|model| model.0.split_once('/'))
+        && let Some(connection) = effective
+            .connection
+            .as_ref()
+            .and_then(|id| effective.connections.get(id))
+        && crate::auth::connection_route(connection) != route
+    {
+        effective.connection = None;
+    }
+    if let Some(account) = args.account {
+        let route = effective
+            .model
+            .as_ref()
+            .and_then(|model| model.0.split_once('/'))
+            .map(|(route, _)| route)
+            .ok_or_else(|| {
+                UsageError("--account requires --model PROVIDER/MODEL or a configured model".into())
+            })?;
+        let id = crate::auth::account_id(
+            &effective.account_numbers,
+            &effective.connections,
+            Some(crate::auth::connection_vendor(route)),
+            account.get(),
+        )
+        .map_err(UsageError)?;
+        if args.connection.as_deref().is_some_and(|bound| bound != id) {
+            return Err(UsageError(
+                "the saved session uses another account; start a new session to change accounts"
+                    .into(),
+            ));
+        }
+        effective.connection = Some(id.to_owned());
+    }
+    Ok(())
 }
 
 /// Resolve host profile restrictions before system policy and canonical root admission.
@@ -1047,12 +1172,12 @@ mod profile_ceiling_tests {
 [profile.machine]
 mode="default"
 sandbox="workspace"
-roots=[{{path="{}",access="read"}}]
+roots=[{{path='{}',access="read"}}]
 [profile.repo]
 mode="yolo"
 sandbox="off"
-roots=[{{path="{}",access="read-write"}}]
-exec_paths=["{}","{}"]
+roots=[{{path='{}',access="read-write"}}]
+exec_paths=['{}','{}']
 "#,
                     allowed.path().display(),
                     allowed.path().display(),
@@ -1138,13 +1263,13 @@ roots=[{{path="{}",access="read-write"}}]
 /// provider exists. Input order decides which diagnostic wins; the returned
 /// authority is canonical by server name.
 pub(crate) fn selected_mcp(
-    args: &Args,
+    selectors: &[McpSelector],
     effective: &Effective,
     cwd: &Path,
 ) -> Result<Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>, UsageError> {
-    let mut selected = Vec::with_capacity(args.mcp.len());
+    let mut selected = Vec::with_capacity(selectors.len());
     let mut names = std::collections::BTreeSet::new();
-    for selector in &args.mcp {
+    for selector in selectors {
         let (name, server, provenance) = match selector {
             McpSelector::Named(name) => match effective.mcp.entry(name) {
                 Some(ResolvedMcpEntry::Configured {
@@ -1367,11 +1492,22 @@ fn env_layer() -> Result<Option<Sourced<ConfigLayer>>, UsageError> {
 /// accepted because it came from a flag.
 fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     let mut toml = selection_flags(args.model.as_deref(), args.thinking);
+    if let Some(id) = &args.connection {
+        toml.push_str(&format!("connection = {}\n", quote(id)));
+    }
     if args.bare {
         toml.push_str("bare = true\n");
     }
-    // `--budget` uses ordinary flags-layer resolution. Only the system layer
-    // supplies non-relaxable ceilings, so its clamp must see that same value.
+    if args.memory {
+        toml.push_str("memory = true\n");
+    }
+    if args.no_checkpoints {
+        toml.push_str("checkpoints = false\n");
+    }
+    // `--budget` is the flags layer of the ceiling, not a value parsed on the
+    // side. `2026-08-21-a-run-with-no-ceiling.md` §4: an administrator's
+    // system layer is the only source of non-relaxable ceilings, and it can
+    // only clamp a figure that went through the same resolution it did.
     if let Some(cap) = args.max_output_tokens {
         toml.push_str(&format!("max_output_tokens = {cap}\n"));
     }
@@ -1414,9 +1550,15 @@ fn args_layer(args: &Args) -> Result<Sourced<ConfigLayer>, UsageError> {
     // so the operator reads "the command line: invalid config in flags layer:
     // …" — two names for one place, neither wrong.
     //
-    // Both source name and command-line explanation are intentional: flags have
-    // no source file an operator can open. Changing that presentation belongs
-    // with the shared `Source` display contract, not one diagnostic caller.
+    // Two people have now found this and proposed the same fix: drop one of
+    // the two. Do not, in isolation. The flags layer is the only `Source` an
+    // operator never *writes* — there is no file to open — so the two halves
+    // are not redundant to a reader who does not already know that `flags` and
+    // "the command line" are the same layer. The fix worth making is to give
+    // `Source`'s `Display` a form that reads correctly in a sentence, which
+    // changes every config diagnostic and belongs with `Source::rank` going
+    // public (the design notes
+    // "Consequences"), not with whichever caller noticed it.
     let layer = ConfigLayer::parse(Source::Flags, &toml)
         .map_err(|err| UsageError(format!("the command line: {err}")))?;
     if layer
@@ -1458,7 +1600,7 @@ fn selection_flags(
     toml
 }
 
-/// Select the active profile: explicit `--profile` takes precedence over `EGO_PROFILE`.
+/// The active profile: `--profile` beats `EGO_PROFILE`, per §7's precedence.
 pub(crate) fn profile(args: &Args) -> Option<SelectedProfile> {
     args.profile.clone().map(|name| SelectedProfile {
         name,
@@ -1543,7 +1685,7 @@ pub(crate) fn repl_set_on(
 }
 
 mod repl_view;
-pub(crate) use repl_view::{repl_text, saved_override};
+pub(crate) use repl_view::{repl_details, repl_text, saved_override};
 
 #[cfg(test)]
 mod tests {
@@ -1711,21 +1853,21 @@ mod tests {
         std::fs::create_dir(&ego).expect("profile fixture config directory");
         std::fs::write(
             ego.join("config.toml"),
-            r#"[profile.startup_fixture]
+            r#"[profile.startup_fixture_070]
 model = "startup/model"
 
-[profile.request_fixture]
+[profile.request_fixture_070]
 model = "request/model"
 "#,
         )
         .expect("profile fixture config");
 
-        let startup = run_args("startup_fixture");
+        let startup = run_args("startup_fixture_070");
         let frozen = FrozenRunConfig::capture(workspace, &startup, Trust::Trusted)
             .expect("startup config must be captured");
-        assert_eq!(frozen.profile(), Some("startup_fixture"));
+        assert_eq!(frozen.profile(), Some("startup_fixture_070"));
 
-        let request = run_args("request_fixture");
+        let request = run_args("request_fixture_070");
         let effective = frozen
             .resolve(&request)
             .expect("request profile must resolve");
@@ -1734,7 +1876,7 @@ model = "request/model"
         let active = effective
             .active_profile
             .expect("request profile provenance must be present");
-        assert_eq!(active.name, "request_fixture");
+        assert_eq!(active.name, "request_fixture_070");
         assert_eq!(active.selected_by, Source::Flags);
         assert!(!active.definitions.is_empty());
         assert!(active.definitions.contains(Source::Project));

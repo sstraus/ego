@@ -1,5 +1,6 @@
-//! `ModelCapabilities`: versioned facts required before treating a shared
-//! HTTP shape as equivalent conversation semantics.
+//! `ModelCapabilities`: the versioned record ARCH §3.1 and I5
+//! (the design notes) require before treating a shared HTTP shape
+//! as equivalent conversation semantics.
 //!
 //! A provider row is configuration, not proof two models behave the same in
 //! conversation. `ModelCapabilities` is resolved per generation and checked
@@ -40,6 +41,70 @@ fn images_in(messages: &[Message]) -> Vec<&Image> {
             _ => None,
         })
         .collect()
+}
+
+/// Project external tool evidence for one captured model, without changing the
+/// canonical history. Native attachments reserve their budget and remain strict.
+/// Walking backwards admits the newest fitting images; replacing in place keeps
+/// the surviving images and their host-authored source labels in display order.
+pub(crate) fn project_tool_images(
+    conversation: super::types::Conversation,
+    capabilities: &ModelCapabilities,
+) -> super::types::Conversation {
+    use super::types::Conversation;
+    let mut messages = Vec::<Message>::from(conversation);
+    let native = images_in(&messages)
+        .into_iter()
+        .filter(|image| !image.is_tool_result())
+        .collect::<Vec<_>>();
+    let mut count = native.len();
+    let mut bytes = native.iter().fold(0_u64, |sum, image| {
+        sum.saturating_add(image.bytes().len() as u64)
+    });
+    for block in messages
+        .iter_mut()
+        .rev()
+        .flat_map(|message| message.content.iter_mut().rev())
+    {
+        let ContentBlock::Image { image } = block else {
+            continue;
+        };
+        if !image.is_tool_result() {
+            continue;
+        }
+        let receipt = match &capabilities.image_input {
+            ImageInputSupport::Unknown | ImageInputSupport::Unsupported => {
+                Some("[Tool image unavailable: this model has no supported image input.]")
+            }
+            ImageInputSupport::Supported(limits) => {
+                let max_count = limits
+                    .max_images
+                    .map_or(MAX_IMAGES_PER_PROMPT as u32, NonZeroU32::get)
+                    as usize;
+                let max_bytes = limits
+                    .max_total_bytes
+                    .map_or(MAX_TOTAL_IMAGE_BYTES, NonZeroU64::get);
+                let image_bytes = image.bytes().len() as u64;
+                if !limits.image_gaps(image, 1).is_empty() {
+                    Some(
+                        "[Tool image unavailable: its format or per-image limits are not supported by this model.]",
+                    )
+                } else if count >= max_count || bytes.saturating_add(image_bytes) > max_bytes {
+                    Some(
+                        "[Tool image unavailable: this request's image budget is reserved for native attachments and newer fitting tool images.]",
+                    )
+                } else {
+                    count += 1;
+                    bytes = bytes.saturating_add(image_bytes);
+                    None
+                }
+            }
+        };
+        if let Some(text) = receipt {
+            *block = ContentBlock::Text { text: text.into() };
+        }
+    }
+    Conversation::new(messages).expect("replacing tool images changes no call/result invariant")
 }
 
 /// Per-model image limits, always bounded by the product's absolute limits.
@@ -107,6 +172,46 @@ impl ImageLimits {
             max_height,
             max_pixels,
         })
+    }
+
+    /// The existing strict per-image policy, shared with transient tool projection.
+    fn image_gaps(&self, image: &Image, index: usize) -> Vec<CapabilityGap> {
+        let mut gaps = Vec::new();
+        if !self.accepted_media_types.contains(&image.media_type()) {
+            gaps.push(CapabilityGap::ImageMediaTypeUnsupported {
+                index,
+                media_type: image.media_type(),
+            });
+        }
+        let bytes = image.bytes().len() as u64;
+        let max = self
+            .max_bytes_per_image
+            .map_or(MAX_IMAGE_BYTES, NonZeroU64::get);
+        if bytes > max {
+            gaps.push(CapabilityGap::ImageTooLarge { index, bytes, max });
+        }
+        let max = self.max_width.map_or(MAX_IMAGE_EDGE, NonZeroU32::get);
+        if image.width() > max {
+            gaps.push(CapabilityGap::ImageTooWide {
+                index,
+                width: image.width(),
+                max,
+            });
+        }
+        let max = self.max_height.map_or(MAX_IMAGE_EDGE, NonZeroU32::get);
+        if image.height() > max {
+            gaps.push(CapabilityGap::ImageTooHigh {
+                index,
+                height: image.height(),
+                max,
+            });
+        }
+        let pixels = u64::from(image.width()).saturating_mul(u64::from(image.height()));
+        let max = self.max_pixels.map_or(MAX_IMAGE_PIXELS, NonZeroU64::get);
+        if pixels > max {
+            gaps.push(CapabilityGap::ImageTooManyPixels { index, pixels, max });
+        }
+        gaps
     }
 
     pub fn accepted_media_types(&self) -> &BTreeSet<ImageMediaType> {
@@ -291,7 +396,8 @@ pub enum CancelSemantics {
     Immediate,
 }
 
-/// Prompt/response cache retention settings.
+/// Prompt/response cache retention, pi's `CacheRetention` (the design notes
+/// §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheRetention {
@@ -302,9 +408,16 @@ pub enum CacheRetention {
 
 /// Which [`ThinkingLevel`]s a model accepts on the wire.
 ///
-/// Unknown reasoning support is not unrestricted support. Three states
-/// keep unstated capability knowledge distinct from an explicit supported set
-/// or unrestricted acceptance; absent facts must not widen a request.
+/// Three states rather than an `Option`, decided in
+/// the design notes §4 after Codex refused
+/// the `Option` this repository first proposed. `None` would have had to mean
+/// "nothing stated, so send anything", and an absent field read as a
+/// permissive fact is the mistake
+/// `2026-08-21-what-a-model-resolves-to.md` §4 already refused twice: it is
+/// `/api/show`'s architecture context read as a served ceiling, and `:cloud`'s
+/// `auth: None` read as "not billed". A model that states nothing about
+/// `reasoning_effort` is not a model that accepts every level; it is a model
+/// nobody asked.
 ///
 /// The distinction is load-bearing because the parameter is not advisory.
 /// `reasoning_effort` is always emitted — omitting it selects the schema's
@@ -331,8 +444,9 @@ pub enum ReasoningEffortSupport {
 
 /// The wire transport a generation streams over.
 ///
-/// Codex uses WebSocket; other hosted rows use SSE. Automatic selection is
-/// policy, not a transport, and unsupported spellings must fail during decoding.
+/// Hosted rows can use SSE, WebSocket or native Amazon eventstream framing.
+/// Automatic selection is policy, not a transport, and unsupported spellings
+/// must fail during decoding.
 ///
 /// **A variant is added here when a row produces it** — an implemented
 /// transport, a decoder that frames it, and a generation that resolves to it.
@@ -343,12 +457,17 @@ pub enum ReasoningEffortSupport {
 pub enum Transport {
     Sse,
     WebSocket,
+    /// Native binary streaming; a tool turn can use synchronous JSON over HTTP.
+    AmazonEventStream,
 }
 
-/// Versioned conversation capabilities resolved per generation and persisted in the manifest:
-/// tool/schema limits, concurrency, reasoning carryover, context/output bounds, cancellation,
-/// cache behavior, and transport.
+/// A versioned snapshot of what a model can do in conversation, resolved per
+/// generation and persisted in the run manifest (ARCH §3.1, I5). Every field
+/// here is one the I5 gap explicitly names: tool/schema limits, parallel
+/// tool calls, reasoning-state carryover, context/output ceilings, cancel
+/// semantics, cache behaviour, transport.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ModelCapabilities {
     /// Bumped whenever the field set or its meaning changes, so a persisted
     /// record can be told apart from a stale shape.
@@ -733,6 +852,34 @@ impl ModelCapabilities {
         }
     }
 
+    /// Whether this model accepts the opaque provider state of `block`
+    /// replayed in its history; `true` for every block without such state.
+    /// The one rule both [`request_gaps`](Self::request_gaps) and the turn's
+    /// removal of foreign state apply, so the two cannot disagree.
+    ///
+    /// Provider content is accepted only in the dialect this model states:
+    /// it is the provider's own output item, replayed verbatim, whatever
+    /// [`ReasoningCarryover`] says about reasoning.
+    pub fn accepts_block(&self, block: &ContentBlock) -> bool {
+        match block {
+            ContentBlock::Reasoning { state } => self.accepts_reasoning_state(state),
+            ContentBlock::ProviderContent { state, .. } => {
+                self.reasoning_state_dialect.as_deref() == Some(state.dialect.as_str())
+            }
+            _ => true,
+        }
+    }
+
+    fn accepts_reasoning_state(&self, state: &ReasoningState) -> bool {
+        match self.reasoning_carryover {
+            ReasoningCarryover::Unsupported => false,
+            ReasoningCarryover::SameProviderOnly => {
+                self.reasoning_state_dialect.as_deref() == Some(state.dialect.as_str())
+            }
+            ReasoningCarryover::Portable => true,
+        }
+    }
+
     /// Every way `req` does not fit *this* model — empty means it can be
     /// sent. Checked after the model resolves and before the budget gate
     /// reserves against it: a reservation taken for a request the model will
@@ -779,15 +926,21 @@ impl ModelCapabilities {
                     carried: carried.len(),
                 }),
                 ImageInputSupport::Supported(limits) => {
-                    for (offset, image) in images.iter().enumerate() {
-                        let index = offset + 1;
-                        if !limits.accepted_media_types.contains(&image.media_type()) {
-                            gaps.push(CapabilityGap::ImageMediaTypeUnsupported {
-                                index,
-                                media_type: image.media_type(),
-                            });
-                        }
-                    }
+                    // Preserve native gap ordering: formats, count, bytes, total,
+                    // then dimensions. The same per-image policy projects tool evidence.
+                    let per_image: Vec<_> = images
+                        .iter()
+                        .enumerate()
+                        .flat_map(|(offset, image)| limits.image_gaps(image, offset + 1))
+                        .collect();
+                    gaps.extend(
+                        per_image
+                            .iter()
+                            .filter(|gap| {
+                                matches!(gap, CapabilityGap::ImageMediaTypeUnsupported { .. })
+                            })
+                            .cloned(),
+                    );
                     let max_images = limits
                         .max_images
                         .map_or(MAX_IMAGES_PER_PROMPT as u32, NonZeroU32::get);
@@ -797,22 +950,15 @@ impl ModelCapabilities {
                             max: max_images,
                         });
                     }
-                    let max_per_image = limits
-                        .max_bytes_per_image
-                        .map_or(MAX_IMAGE_BYTES, NonZeroU64::get);
-                    let mut total = 0_u64;
-                    for (offset, image) in images.iter().enumerate() {
-                        let index = offset + 1;
-                        let bytes = u64::try_from(image.bytes().len()).unwrap_or(u64::MAX);
-                        total = total.saturating_add(bytes);
-                        if bytes > max_per_image {
-                            gaps.push(CapabilityGap::ImageTooLarge {
-                                index,
-                                bytes,
-                                max: max_per_image,
-                            });
-                        }
-                    }
+                    gaps.extend(
+                        per_image
+                            .iter()
+                            .filter(|gap| matches!(gap, CapabilityGap::ImageTooLarge { .. }))
+                            .cloned(),
+                    );
+                    let total = images.iter().fold(0_u64, |sum, image| {
+                        sum.saturating_add(image.bytes().len() as u64)
+                    });
                     let max_total = limits
                         .max_total_bytes
                         .map_or(MAX_TOTAL_IMAGE_BYTES, NonZeroU64::get);
@@ -822,35 +968,14 @@ impl ModelCapabilities {
                             max: max_total,
                         });
                     }
-                    let max_width = limits.max_width.map_or(MAX_IMAGE_EDGE, NonZeroU32::get);
-                    let max_height = limits.max_height.map_or(MAX_IMAGE_EDGE, NonZeroU32::get);
-                    let max_pixels = limits.max_pixels.map_or(MAX_IMAGE_PIXELS, NonZeroU64::get);
-                    for (offset, image) in images.iter().enumerate() {
-                        let index = offset + 1;
-                        if image.width() > max_width {
-                            gaps.push(CapabilityGap::ImageTooWide {
-                                index,
-                                width: image.width(),
-                                max: max_width,
-                            });
-                        }
-                        if image.height() > max_height {
-                            gaps.push(CapabilityGap::ImageTooHigh {
-                                index,
-                                height: image.height(),
-                                max: max_height,
-                            });
-                        }
-                        let pixels =
-                            u64::from(image.width()).saturating_mul(u64::from(image.height()));
-                        if pixels > max_pixels {
-                            gaps.push(CapabilityGap::ImageTooManyPixels {
-                                index,
-                                pixels,
-                                max: max_pixels,
-                            });
-                        }
-                    }
+                    gaps.extend(per_image.into_iter().filter(|gap| {
+                        matches!(
+                            gap,
+                            CapabilityGap::ImageTooWide { .. }
+                                | CapabilityGap::ImageTooHigh { .. }
+                                | CapabilityGap::ImageTooManyPixels { .. }
+                        )
+                    }));
                 }
             }
         }
@@ -858,7 +983,10 @@ impl ModelCapabilities {
         // Read off the conversation rather than a field beside it: the state
         // is positional, so the block list is the only place it can live, and
         // a second copy on the request would be the same fact twice.
-        let carried = carried_reasoning(req);
+        let carried: Vec<_> = carried_reasoning(req)
+            .into_iter()
+            .filter(|state| !self.accepts_reasoning_state(state))
+            .collect();
         match self.reasoning_carryover {
             _ if carried.is_empty() => {}
             ReasoningCarryover::Unsupported => {
@@ -872,7 +1000,6 @@ impl ModelCapabilities {
                 let mut reported = BTreeSet::new();
                 for state in &carried {
                     match &self.reasoning_state_dialect {
-                        Some(mine) if *mine == state.dialect => {}
                         _ if !reported.insert(state.dialect.clone()) => {}
                         Some(mine) => gaps.push(CapabilityGap::ReasoningStateDialectMismatch {
                             carried: state.dialect.clone(),
@@ -921,9 +1048,18 @@ impl ModelCapabilities {
         gaps
     }
 
-    /// Report every request incompatibility before fallback. This delegates to the target's
-    /// request-gap check; compatibility depends on the request and target, not the previously
-    /// selected model.
+    /// Every way falling `req` back from a model with these capabilities to a
+    /// model with `target`'s would break — empty means the fallback is safe.
+    /// Never attempt a fallback without checking this first (ARCH §3.1): an
+    /// incompatible switch must be detected and reported, not silently
+    /// attempted.
+    ///
+    /// This is [`request_gaps`](Self::request_gaps) asked of the target, and
+    /// nothing else. The question "does `req` fit `target`" does not depend on
+    /// where `req` was going to go before — which is why `self` is unused, and
+    /// why the two are one function rather than two that can drift apart. The
+    /// name is kept because the *reason to ask* differs, and a call site that
+    /// says `fallback_gaps` is saying which of the two it means.
     pub fn fallback_gaps(
         &self,
         target: &ModelCapabilities,
@@ -962,5 +1098,265 @@ mod tests {
             serde_json::from_str::<Transport>("\"sse\"").expect("sse decodes"),
             Transport::Sse
         );
+    }
+}
+
+#[cfg(test)]
+mod tool_image_projection_tests {
+    use super::*;
+    use crate::generator::types::{Conversation, Message, Role};
+    const PNG_1X1: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 4,
+        0, 0, 0, 181, 28, 12, 2, 0, 0, 0, 11, 73, 68, 65, 84, 120, 218, 99, 100, 248, 15, 0, 1, 5,
+        1, 1, 39, 24, 227, 102, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+    const JPEG_1X1: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67,
+        0, 8, 6, 6, 7, 6, 5, 8, 7, 7, 7, 9, 9, 8, 10, 12, 20, 13, 12, 11, 11, 12, 25, 18, 19, 15,
+        20, 29, 26, 31, 30, 29, 26, 28, 28, 32, 36, 46, 39, 32, 34, 44, 35, 28, 28, 40, 55, 41, 44,
+        48, 49, 52, 52, 52, 31, 39, 57, 61, 56, 50, 60, 46, 51, 52, 50, 255, 192, 0, 17, 8, 0, 1,
+        0, 1, 3, 1, 34, 0, 2, 17, 1, 3, 17, 1, 255, 196, 0, 20, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 255, 196, 0, 20, 16, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 255, 218, 0, 12, 3, 1, 0, 2, 17, 3, 17, 0, 63, 0, 255, 217,
+    ];
+
+    fn crc(bytes: &[u8]) -> u32 {
+        let mut value = 0xffff_ffff_u32;
+        for byte in bytes {
+            value ^= u32::from(*byte);
+            for _ in 0..8 {
+                value = if value & 1 == 1 {
+                    (value >> 1) ^ 0xedb8_8320
+                } else {
+                    value >> 1
+                };
+            }
+        }
+        !value
+    }
+
+    fn large_png(payload: usize) -> Vec<u8> {
+        let mut bytes = PNG_1X1[..PNG_1X1.len() - 12].to_vec();
+        let mut chunk = b"ruSt".to_vec();
+        chunk.resize(chunk.len() + payload, b'x');
+        bytes.extend_from_slice(&((chunk.len() - 4) as u32).to_be_bytes());
+        bytes.extend_from_slice(&chunk);
+        bytes.extend_from_slice(&crc(&chunk).to_be_bytes());
+        bytes.extend_from_slice(&PNG_1X1[PNG_1X1.len() - 12..]);
+        bytes
+    }
+
+    fn caps(image_input: ImageInputSupport) -> ModelCapabilities {
+        let mut caps: ModelCapabilities = serde_json::from_value(serde_json::json!({
+            "schema_version": ModelCapabilities::SCHEMA_VERSION,
+            "max_context_tokens": null, "max_output_tokens": 1024,
+            "max_tools": null, "supports_parallel_tool_calls": false,
+            "reasoning_carryover": "unsupported", "reasoning_efforts": "any",
+            "reasoning_state_dialect": null, "cancel": "cooperative", "cache": "none",
+            "transport": "sse"
+        }))
+        .unwrap();
+        caps.image_input = image_input;
+        caps
+    }
+    fn limits(count: Option<u32>, per_image: Option<u64>, total: Option<u64>) -> ImageInputSupport {
+        ImageInputSupport::Supported(
+            ImageLimits::new(
+                BTreeSet::from([ImageMediaType::Png]),
+                count.and_then(NonZeroU32::new),
+                per_image.and_then(NonZeroU64::new),
+                total.and_then(NonZeroU64::new),
+                None,
+                None,
+                None,
+            )
+            .unwrap(),
+        )
+    }
+    fn image() -> Image {
+        Image::new(PNG_1X1.to_vec(), ImageMediaType::Png).unwrap()
+    }
+    fn conversation(images: impl IntoIterator<Item = Image>) -> Conversation {
+        Conversation::new(vec![Message {
+            role: Role::User,
+            content: images
+                .into_iter()
+                .map(|image| ContentBlock::Image { image })
+                .collect(),
+        }])
+        .unwrap()
+    }
+    fn request(messages: Conversation) -> GenRequest {
+        GenRequest {
+            web_search: None,
+            cache: None,
+            model: "fixture".into(),
+            messages,
+            tools: vec![],
+            thinking: ThinkingLevel::Off,
+            max_output_tokens: Some(64),
+            parallel_tool_calls: false,
+        }
+    }
+    #[test]
+    fn tool_origin_never_changes_image_or_provider_neutral_serialization() {
+        // Catches accidental durable/wire provenance and clone tag loss.
+        let native = image();
+        let tool = native.clone().with_tool_result_origin();
+        assert!(tool.clone().is_tool_result());
+        assert_eq!(native.bytes(), tool.bytes());
+        assert_eq!(
+            serde_json::to_vec(&native).unwrap(),
+            serde_json::to_vec(&tool).unwrap()
+        );
+        let roundtrip: Image = serde_json::from_slice(&serde_json::to_vec(&tool).unwrap()).unwrap();
+        assert!(
+            !roundtrip.is_tool_result(),
+            "history must derive provenance again"
+        );
+        assert_eq!(
+            serde_json::to_vec(&request(conversation([native]))).unwrap(),
+            serde_json::to_vec(&request(conversation([tool]))).unwrap()
+        );
+    }
+    #[test]
+    fn newest_hundred_tool_images_keep_display_order_and_native_reserves_first() {
+        // Catches first-100 truncation and letting tool images evict user input.
+        let canonical =
+            conversation((0..101).map(|n| image().with_text_offset(n).with_tool_result_origin()));
+        let projected = project_tool_images(canonical.clone(), &caps(limits(None, None, None)));
+        let kept = images_in(projected.messages());
+        assert_eq!(kept.len(), 100);
+        assert_eq!(
+            kept.iter()
+                .map(|i| i.text_offset().unwrap())
+                .collect::<Vec<_>>(),
+            (1..101).collect::<Vec<_>>()
+        );
+        assert_eq!(images_in(canonical.messages()).len(), 101);
+        let native = image().with_text_offset(999);
+        let projected = project_tool_images(
+            conversation([
+                image().with_tool_result_origin(),
+                native.clone(),
+                image().with_text_offset(2).with_tool_result_origin(),
+            ]),
+            &caps(limits(Some(2), None, None)),
+        );
+        let kept = images_in(projected.messages());
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0], &native);
+        assert_eq!(kept[1].text_offset(), Some(2));
+    }
+    #[test]
+    fn oversized_tool_image_does_not_poison_fitting_sibling_or_total_budget() {
+        // Catches counting rejected bytes, dropping all siblings, and ignoring
+        // the selected model's 10 MiB per-image ceiling.
+        let huge = Image::new(large_png(10 * 1024 * 1024), ImageMediaType::Png)
+            .unwrap()
+            .with_tool_result_origin();
+        let small = image().with_tool_result_origin();
+        let caps = caps(limits(
+            None,
+            Some(10 * 1024 * 1024),
+            Some(small.bytes().len() as u64),
+        ));
+        let projected = project_tool_images(conversation([small.clone(), huge]), &caps);
+        assert_eq!(images_in(projected.messages()), vec![&small]);
+        let two = project_tool_images(
+            conversation([
+                small.clone().with_text_offset(1),
+                small.clone().with_text_offset(2),
+            ]),
+            &caps,
+        );
+        assert_eq!(images_in(two.messages())[0].text_offset(), Some(2));
+    }
+    #[test]
+    fn tool_dimensions_and_pixels_share_strict_native_policy_without_reordering_gaps() {
+        // Catches dimensions/pixels being forgotten by optional tool projection.
+        let mut bytes = JPEG_1X1.to_vec();
+        let sof = bytes
+            .windows(9)
+            .position(|w| w == [255, 192, 0, 17, 8, 0, 1, 0, 1])
+            .unwrap();
+        bytes[sof + 6] = 2;
+        bytes[sof + 8] = 3;
+        let wide = Image::new(bytes, ImageMediaType::Jpeg).unwrap();
+        assert_eq!((wide.width(), wide.height()), (3, 2));
+        let limits = ImageLimits::new(
+            BTreeSet::from([ImageMediaType::Png, ImageMediaType::Jpeg]),
+            None,
+            None,
+            None,
+            NonZeroU32::new(1),
+            NonZeroU32::new(1),
+            NonZeroU64::new(1),
+        )
+        .unwrap();
+        let caps = caps(ImageInputSupport::Supported(limits));
+        let native = request(conversation([wide.clone()]));
+        assert_eq!(
+            caps.request_gaps(&native),
+            vec![
+                CapabilityGap::ImageTooWide {
+                    index: 1,
+                    width: 3,
+                    max: 1
+                },
+                CapabilityGap::ImageTooHigh {
+                    index: 1,
+                    height: 2,
+                    max: 1
+                },
+                CapabilityGap::ImageTooManyPixels {
+                    index: 1,
+                    pixels: 6,
+                    max: 1
+                }
+            ]
+        );
+        let small = image().with_tool_result_origin();
+        let projected = project_tool_images(
+            conversation([small.clone(), wide.with_tool_result_origin()]),
+            &caps,
+        );
+        assert_eq!(images_in(projected.messages()), vec![&small]);
+    }
+    #[test]
+    fn unsupported_format_leaves_native_attachment_strict() {
+        // Catches MIME/dimension policy divergence and treating native input as
+        // optional evidence. Strict native gap values and order stay unchanged.
+        let mut dimension = ImageLimits::new(
+            BTreeSet::from([ImageMediaType::Png]),
+            None,
+            None,
+            None,
+            NonZeroU32::new(1),
+            NonZeroU32::new(1),
+            NonZeroU64::new(1),
+        )
+        .unwrap();
+        let native = image();
+        let tool = image().with_tool_result_origin();
+        dimension.accepted_media_types = BTreeSet::from([ImageMediaType::Jpeg]);
+        let projected = project_tool_images(
+            conversation([native.clone(), tool]),
+            &caps(ImageInputSupport::Supported(dimension)),
+        );
+        assert_eq!(images_in(projected.messages()), vec![&native]);
+        let unsupported = caps(ImageInputSupport::Unsupported);
+        let projected = project_tool_images(
+            conversation([native.clone(), image().with_tool_result_origin()]),
+            &unsupported,
+        );
+        assert_eq!(images_in(projected.messages()), vec![&native]);
+        assert!(matches!(
+            unsupported.request_gaps(&request(projected)).as_slice(),
+            [CapabilityGap::ImageInputUnsupported {
+                supplied: 1,
+                carried: 0
+            }]
+        ));
     }
 }

@@ -1,6 +1,8 @@
 //! `SessionState` and the pure, sync reducer.
 //!
-//! Session state reduced from durable events.
+//! See `ARCHITECTURE.md` §1: state is a reduction over an append-only event
+//! log, and compaction and forking are events *in* the log rather than
+//! operations *on* it.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -41,8 +43,7 @@ use crate::store::blob::BlobRef;
 /// rates from uncached input — typically a fraction and a premium
 /// respectively — so an `input_tokens` field that silently mixed all three
 /// made the cost of a cached conversation unknowable, and made even the
-/// standard context-occupancy proxy impossible to compute. See the mdkb
-/// decision `ego-acp-usage-verdict`.
+/// standard context-occupancy proxy impossible to compute.
 ///
 /// Used both as one attempt's increment (`AiEvent::Usage`,
 /// `EventKind::UsageUpdated`) and as the session's running totals
@@ -54,9 +55,16 @@ pub struct Usage {
     pub web_search_requests: u64,
     /// Input tokens billed at the full rate — not served from cache.
     ///
-    /// The four usage fields are disjoint. Wires with inclusive prompt usage
-    /// subtract cache categories; wires with exclusive input usage pass it
-    /// through. Provider conformance fixtures check this normalization.
+    /// **The partition direction is this type's, not a wire's**, and the
+    /// wires disagree: OpenAI's `prompt_tokens` *includes* its cache figures
+    /// while Anthropic's `input_tokens` *excludes* them, so the same
+    /// arithmetic applied to both is a silent factor-of-two in one direction
+    /// or the other. Here the four fields are disjoint and this one is what
+    /// is left after the two cache categories are taken out; a mapping that
+    /// receives an already-exclusive figure passes it through, and one that
+    /// receives an inclusive figure subtracts. Asserted per profile by check
+    /// 4 of the design notes
+    /// §9, which is where it can actually fail.
     pub uncached_input_tokens: u64,
     /// Input tokens served from the provider's prompt cache.
     pub cache_read_tokens: u64,
@@ -97,7 +105,7 @@ pub struct Usage {
     /// nothing**, so on that row the split is not merely undeclared but
     /// unrecoverable after the fact. A `0` there would state a measurement
     /// nobody made. The cost of getting this wrong is recorded live in
-    /// `crates/ego-ai/tests/ollama_reasoning.rs`: a turn whose visible answer
+    /// `crates/ego-ai/tests/it/ollama_reasoning.rs`: a turn whose visible answer
     /// was the single character `9` reported 118 output tokens, 117 of them
     /// reasoning, and the daemon reported none of that.
     ///
@@ -118,6 +126,10 @@ pub struct Usage {
     /// spelling a log written before this field existed already has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<u64>,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 fn is_zero(value: &u64) -> bool {
@@ -222,9 +234,15 @@ impl Usage {
 
 /// Whether a session is running, holding, or held.
 ///
-/// `_ego/pause` reports `paused` only once its durable boundary exists.
-/// Before then it reports `pending` while an in-flight provider, permission
-/// or tool effect settles. A boolean cannot express that observable gap.
+/// Three states and not a `bool`, because the middle one is the whole point.
+/// the design notes
+/// requires that `_ego/pause` report `paused` **only** once the durable
+/// boundary exists and report `pending` before then: an indivisible provider,
+/// permission or tool effect that is already in flight settles truthfully
+/// first, and that gap is observable to a host and can outlive a crash. A
+/// boolean would have to answer "is it paused?" with "yes" during a window
+/// where an effect is still running, which is the one thing the contract
+/// forbids saying.
 ///
 /// The request id travels with both states so a host retrying over a
 /// reconnected transport learns what *its own* request achieved. It answers
@@ -265,11 +283,34 @@ impl PauseState {
 }
 
 /// Which hold requests this session has already answered, and with what.
-/// Remember pause/resume answers per `(session, operation, request)`, not
-/// current state: delayed retries must not repeat effects or report prior
-/// success as failure. The index is folded from durable events and is not
-/// pruned. The key covers the current closed body; adding request fields
-/// would require binding those bytes too.
+///
+/// The idempotency key of `_ego/pause` and `_ego/resume`, and the reason
+/// [`PauseState`] alone is not enough: state-based idempotence only holds
+/// while the state has not moved on. Two retries defeat it. A resume whose
+/// answer was lost in transit, re-sent, finds the session already running and
+/// would be told "not paused" — that its request failed, when it succeeded. A
+/// pause re-delivered late, after the host released it, would find the session
+/// running and hold it a second time, on one request the host made once.
+///
+/// So the answer is remembered per request rather than inferred from where the
+/// session ended up. This is not a second store: every entry is folded from
+/// `SessionPaused` and `SessionResumed`, which already carry the request that
+/// asked. The log stays the only authority and this is its index.
+///
+/// The key is `(session, operation, request)`. Session, because the request id
+/// is session-bound at the wire and coupling two logs through a shared id
+/// would let one session refuse work on account of another. Operation,
+/// because a host is entitled to spend one id on a pause and the same id on
+/// the resume that releases it; those are two requests, not one reused. The
+/// ADR's "reuse with different bytes refuses" needs no fingerprint here: the
+/// request body is `v`, `sessionId` and `requestId` and nothing else, so the
+/// key *is* the body. A future field would change that and would have to bring
+/// a fingerprint with it.
+///
+/// It grows and is not pruned, like `generations` below and for the same
+/// reason: an entry that was dropped would be answered as though it had never
+/// arrived, which is the behaviour this type exists to prevent. Holds are
+/// human-paced acts, a handful per session, not per-token records.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HoldReceipts {
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -333,11 +374,23 @@ pub struct TurnState {
     pub completed: bool,
     pub ok: bool,
     pub exit_reason: Option<ExitReason>,
+    #[serde(default)]
+    pub checkpoint_continued: bool,
+    /// Background work this turn started. A user stop of this turn revokes
+    /// only their automatic wakes, never those of earlier turns.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub background_execs: BTreeSet<DetachedExecId>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub background_tasks: BTreeSet<SubagentInvocationId>,
 }
 
 /// What an item is, and therefore who authored it.
 ///
-/// Rebuilding a conversation needs exactly the distinction the public one throws away.
+/// Not [`crate::public::ItemKind`], which answers a different question for a
+/// different audience: that one collapses user and assistant into a single
+/// `Message` (`CLI.md` §4.2) and adds kinds that never become items here.
+/// Rebuilding a conversation needs exactly the distinction the public one
+/// throws away.
 ///
 /// Decided by the first event that touches the item and never revised: an
 /// item's author is settled when it is created. Without it a rebuilt history
@@ -372,6 +425,10 @@ pub struct ItemState {
     pub kind: ItemKind,
     #[serde(default)]
     pub context_command: bool,
+    /// A member of an `mcp_batch` call: a real effect call that no provider
+    /// ever issued, so replay never sends it.
+    #[serde(default)]
+    pub batch_member: Option<ItemId>,
     /// The exact event that admitted this item as a tool call.
     ///
     /// Kept separately from [`Self::seq`] because continuation causality
@@ -447,6 +504,7 @@ impl ItemState {
             seq,
             kind,
             context_command: false,
+            batch_member: None,
             tool_call_started: None,
             call_id: None,
             tool_name: None,
@@ -756,6 +814,22 @@ pub struct SettledQuestion {
     outcome: QuestionOutcome,
 }
 
+/// An answered foreign question with an outcome in the session journal.
+pub struct ForeignQuestionPublication {
+    continuation_id: String,
+    answer: QuestionAnswer,
+}
+
+impl ForeignQuestionPublication {
+    pub fn continuation_id(&self) -> &str {
+        &self.continuation_id
+    }
+
+    pub(crate) fn canonical_answer(&self) -> String {
+        self.answer.model_text()
+    }
+}
+
 impl SettledQuestion {
     pub fn item_id(&self) -> ItemId {
         self.pending.item
@@ -863,9 +937,12 @@ impl QuestionContinuation {
 
 /// One money observation, in the order it was applied.
 ///
-/// One entry per `UsageUpdated` permits ordinary folding without another
-/// addition rule. A correction replaces all increments for one attempt
-/// with its single revised accounting value.
+/// One entry per `UsageUpdated`, not one per attempt: providers report usage
+/// in increments, and giving each increment its own entry means accumulation
+/// is just the fold, with no second addition rule for `CostDelta` to disagree
+/// with [`CumulativeCost::add_delta`]. A correction collapses all of one
+/// attempt's entries into a single revised one. See
+/// the design notes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Charge {
     /// Which durable generation fact owns this spend, or whether it predates
@@ -1053,10 +1130,23 @@ impl QueuedPrompt {
     }
 }
 
-/// Semantic state reduced from a domain-event log exclusively by the pure synchronous `apply`
-/// function.
+/// The reduction of a `DomainEvent` log: the harness's entire semantic
+/// state. Built exclusively by `apply`, which is pure and sync (ARCH §1, §4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionState {
+    /// The sole prompt-cache deadline, reduced from admitted request policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<crate::usage::PromptCacheDeadline>,
+    /// Passive lifetime evidence; replayed from admitted requests and settlements.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::usage::CacheLifetimeLearning::is_empty"
+    )]
+    pub cache_lifetime: crate::usage::CacheLifetimeLearning,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_profile: Option<crate::model_catalogue::ExecutionProfile>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub task_profiles: BTreeMap<ItemId, crate::model_catalogue::ExecutionProfile>,
     /// Per-configured-filter variables; new session identities start empty.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub protocol_filter_variables:
@@ -1079,6 +1169,8 @@ pub struct SessionState {
     /// Approved roots belong to this session, not to a fork or live process.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub session_roots: Vec<crate::permit::ProfileRoot>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owner_sandbox_grants: Vec<crate::permit::SandboxGrant>,
     /// Terminal consent for a profile root, retained only for policy re-admission.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub permanent_root_consents: Vec<crate::permit::PermanentRootConsent>,
@@ -1088,6 +1180,10 @@ pub struct SessionState {
     /// the caller's replay order and never reorders, clamps or rejects on
     /// this value — see `Seq`'s and `Timestamp`'s doc comments.
     pub last_seq: Seq,
+    /// When the last turn completed, from that event's timestamp. Measures an
+    /// absence across restarts (`crate::recap`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_turn_completed_at: Option<Timestamp>,
     /// The tagged source boundary that created this fork or compaction target.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lineage: Option<SessionLineage>,
@@ -1116,12 +1212,26 @@ pub struct SessionState {
     pub goal: Option<GoalRecord>,
     #[serde(default)]
     pub plan: crate::plan::Plan,
+    /// Tool calls of the main agent since the plan was last updated; the plan tool itself
+    /// is not counted. Derived from the journal only, so replay reproduces it.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub plan_calls_since_update: u32,
     /// Per-turn state, keyed by turn id.
     pub turns: HashMap<TurnId, TurnState>,
     /// Per-item state, keyed by item id.
     pub items: HashMap<ItemId, ItemState>,
     #[serde(default)]
     pub detached_execs: BTreeMap<DetachedExecId, Option<DetachedExecSnapshot>>,
+    /// A user stop revokes automatic continuation, not access to the result.
+    /// Identity-bound revocation survives subsequent explicit turns and replay.
+    #[serde(default)]
+    pub stopped_background_execs: BTreeSet<DetachedExecId>,
+    #[serde(default)]
+    pub stopped_background_tasks: BTreeSet<SubagentInvocationId>,
+    /// The monitored lines already delivered for each background process, newest
+    /// last and bounded, so a completion view never repeats them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub monitored_lines: BTreeMap<DetachedExecId, Vec<String>>,
     /// Every event id observed so far, used to resolve causal parents.
     pub known_events: HashSet<EventId>,
     /// Event ids whose declared causal parent has not (yet) been observed.
@@ -1148,10 +1258,20 @@ pub struct SessionState {
     /// [`Self::charges`].
     pub cost: CumulativeCost,
     /// Every money contribution, in application order.
-    /// Retain attempt costs in order. Currency and the first unknown reason
-    /// are order-dependent, so refolding a map could change totals. Keep entries
-    /// for corrections; this is unbounded by session lifetime but proportional
-    /// to attempts, not log events. Live-attempt state is separately bounded.
+    ///
+    /// A `Vec` and not a map, and the order is load-bearing rather than
+    /// incidental: `CumulativeCost::add_delta` is order-dependent twice over
+    /// — the first `Known` delta fixes the settlement currency and the first
+    /// `Unknown` reason is the one kept — so refolding an unordered
+    /// collection can produce a different total from the original fold, and
+    /// with a `HashMap` a different one on each replay. See the ADR for the
+    /// worked counterexample.
+    ///
+    /// Grows by one entry per attempt and is not pruned: a correction can
+    /// only replace a contribution that is still here. That is proportional
+    /// to attempts, not to log length — a log holds many events per attempt —
+    /// but it is unbounded over a session's life. The *lifecycle* state
+    /// ([`Self::live_attempts`]) is the part bounded by live generations.
     pub charges: Vec<Charge>,
     /// Models whose cost anomaly has already been durably announced.
     #[serde(default)]
@@ -1197,6 +1317,9 @@ pub struct SessionState {
     skill_events: Vec<SkillEvent>,
     /// Error messages, in application order.
     pub errors: Vec<String>,
+    /// Non-hook errors used for turn termination diagnostics.
+    #[serde(default)]
+    pub non_hook_errors: Vec<String>,
     /// Compaction summaries, in application order.
     pub compactions: Vec<String>,
     /// Fork records, in application order.
@@ -1218,6 +1341,9 @@ pub struct SessionState {
     /// and to distinguish duplicate resume from an identity never observed.
     #[serde(default)]
     settled_questions: HashMap<ItemId, SettledQuestion>,
+    /// Answers whose resumed outcome is present in this session journal.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    foreign_question_publications: HashMap<String, ItemId>,
     /// Turns whose not-yet-started sibling batch was closed for suspension.
     #[serde(default)]
     question_sibling_closures: HashMap<TurnId, Vec<SiblingClosure>>,
@@ -1235,15 +1361,21 @@ pub struct SessionState {
 impl Default for SessionState {
     fn default() -> Self {
         Self {
+            prompt_cache: None,
+            cache_lifetime: crate::usage::CacheLifetimeLearning::default(),
+            execution_profile: None,
+            task_profiles: BTreeMap::new(),
             constraints: Default::default(),
             context_request: None,
             context_cooldown: 0,
             execution_observation: None,
             session_selections: None,
             session_roots: Vec::new(),
+            owner_sandbox_grants: Vec::new(),
             permanent_root_consents: Vec::new(),
             usage: Usage::IDENTITY,
             last_seq: Seq::default(),
+            last_turn_completed_at: None,
             lineage: None,
             prompt_snapshot: None,
             title: None,
@@ -1254,9 +1386,13 @@ impl Default for SessionState {
             holds: HoldReceipts::default(),
             goal: None,
             plan: crate::plan::Plan::default(),
+            plan_calls_since_update: 0,
             turns: HashMap::default(),
             items: HashMap::default(),
             detached_execs: BTreeMap::default(),
+            stopped_background_execs: BTreeSet::default(),
+            stopped_background_tasks: BTreeSet::default(),
+            monitored_lines: BTreeMap::default(),
             known_events: HashSet::default(),
             unresolved_parents: Vec::default(),
             generations: HashMap::default(),
@@ -1282,6 +1418,7 @@ impl Default for SessionState {
             protocol_filter_variables: BTreeMap::default(),
             skill_events: Vec::default(),
             errors: Vec::default(),
+            non_hook_errors: Vec::default(),
             compactions: Vec::default(),
             forks: Vec::default(),
             queued_prompt_ledger: Vec::default(),
@@ -1289,6 +1426,7 @@ impl Default for SessionState {
             expedited_prompt_through: None,
             pending_question: None,
             settled_questions: HashMap::default(),
+            foreign_question_publications: HashMap::default(),
             question_sibling_closures: HashMap::default(),
         }
     }
@@ -1392,6 +1530,43 @@ impl SessionState {
         self.settled_questions.get(&question)
     }
 
+    pub fn foreign_question_publications(
+        &self,
+    ) -> impl Iterator<Item = ForeignQuestionPublication> + '_ {
+        self.foreign_question_publications
+            .iter()
+            .filter_map(
+                |(id, question)| match &self.settled_questions.get(question)?.outcome {
+                    QuestionOutcome::Answered(answer) => Some(ForeignQuestionPublication {
+                        continuation_id: id.clone(),
+                        answer: answer.clone(),
+                    }),
+                    _ => None,
+                },
+            )
+    }
+
+    fn publish_foreign_question_outcome(&mut self, ev: &DomainEvent, tool_call: ItemId) {
+        let Some(parent) = ev.env.parent else {
+            return;
+        };
+        for (question, settled) in &self.settled_questions {
+            if settled.settlement_event == parent
+                && settled.pending.turn == ev.env.turn
+                && matches!(settled.outcome, QuestionOutcome::Answered(_))
+                && let QuestionTarget::ForeignContinuation {
+                    tool_call: target,
+                    continuation_id,
+                } = &settled.pending.target
+                && *target == tool_call
+            {
+                self.foreign_question_publications
+                    .insert(continuation_id.clone(), *question);
+                break;
+            }
+        }
+    }
+
     /// Whether one durable answer settlement owns this exact foreign
     /// continuation lifecycle parent.
     pub(crate) fn owns_foreign_continuation_settlement(
@@ -1412,6 +1587,18 @@ impl SessionState {
                         ..
                     } if candidate == continuation_id
                 )
+        })
+    }
+
+    /// Whether a foreign continuation question was ever settled for this
+    /// tool call. A settled question proves the call was dispatched and then
+    /// suspended, so it was never "not run".
+    pub(crate) fn foreign_question_settled_for(&self, tool_call: ItemId) -> bool {
+        self.settled_questions.values().any(|settled| {
+            matches!(
+                &settled.pending.target,
+                QuestionTarget::ForeignContinuation { tool_call: call, .. } if *call == tool_call
+            )
         })
     }
 
@@ -1546,17 +1733,24 @@ impl SessionState {
         }
     }
 
-    /// Incomplete effect calls excluding the pure call intentionally waiting
-    /// on the pending question.
+    /// Incomplete effect calls excluding the call intentionally waiting on the
+    /// pending question and, when that call is an `mcp_batch` member, the
+    /// outer batch call that owns it until the member settles.
     pub fn torn_tool_errors(&self) -> Vec<ItemId> {
         let pending_call = self
             .pending_question
             .as_ref()
             .map(|pending| pending.target.tool_call());
+        let batch_owner = pending_call
+            .and_then(|call| self.items.get(&call))
+            .and_then(|item| item.batch_member);
         self.items
             .iter()
             .filter_map(|(id, item)| {
-                (item.kind == ItemKind::ToolCall && !item.completed && Some(*id) != pending_call)
+                (item.kind == ItemKind::ToolCall
+                    && !item.completed
+                    && Some(*id) != pending_call
+                    && Some(*id) != batch_owner)
                     .then_some(*id)
             })
             .collect()
@@ -1570,6 +1764,13 @@ impl SessionState {
             queued: self.queued_prompts().len(),
             interrupt_pending: self.interrupt_pending(),
         }
+    }
+
+    /// True after an operator stop until a new user request or operator goal.
+    pub fn automatic_work_paused(&self) -> bool {
+        self.goal
+            .as_ref()
+            .is_some_and(|goal| goal.automatic_work_paused)
     }
 
     /// Accepted prompts without a correlated consumption, in FIFO order.
@@ -1774,6 +1975,12 @@ impl SessionState {
             if let Some(result) = &item.tool_result {
                 references.extend(
                     result
+                        .images()
+                        .iter()
+                        .map(|image| image.reference().clone()),
+                );
+                references.extend(
+                    result
                         .content
                         .iter()
                         .filter_map(|block| block.evidence_reference())
@@ -1846,10 +2053,10 @@ impl SessionState {
                 ceilings,
                 derived_from,
             } => {
-                let may_set = self
-                    .goal
-                    .as_ref()
-                    .is_none_or(|goal| goal.state != GoalState::Active && goal.id != *id);
+                let may_set = self.goal.as_ref().is_none_or(|goal| {
+                    (goal.state != GoalState::Active || *owner == crate::goal::GoalOwner::Operator)
+                        && goal.id != *id
+                });
                 if may_set {
                     self.goal = Some(GoalRecord {
                         id: *id,
@@ -1860,12 +2067,14 @@ impl SessionState {
                         created_seq: ev.env.seq,
                         state: GoalState::Active,
                         continuation_turns: 0,
-                        continuation_budget: None,
+                        continuation_budget: (*owner == crate::goal::GoalOwner::Automated)
+                            .then_some(crate::goal::AUTOMATIC_CONTINUATION_LIMIT),
                         check_stop: None,
                         blocker_reason: None,
                         blocker_observations: 0,
                         achieved_by: None,
                         achievement_evidence: None,
+                        automatic_work_paused: false,
                         blocker_turns: Vec::new(),
                     });
                 }
@@ -1876,7 +2085,10 @@ impl SessionState {
                 continuation_turns,
             } => {
                 if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
-                    goal.continuation_budget = *continuation_budget;
+                    goal.continuation_budget = continuation_budget.or_else(|| {
+                        (goal.owner == crate::goal::GoalOwner::Automated)
+                            .then_some(crate::goal::AUTOMATIC_CONTINUATION_LIMIT)
+                    });
                     goal.continuation_turns = *continuation_turns;
                 }
             }
@@ -1884,15 +2096,20 @@ impl SessionState {
                 id,
                 continuation_budget,
             } => {
-                if let Some(goal) = self
-                    .goal
-                    .as_mut()
-                    .filter(|goal| goal.id == *id && goal.continuation_budget.is_none())
-                {
+                if let Some(goal) = self.goal.as_mut().filter(|goal| {
+                    goal.id == *id && goal.may_configure_allowance(*continuation_budget)
+                }) {
                     goal.continuation_budget = Some(*continuation_budget);
                 }
             }
             EventKind::GoalContinuation { id, text } => {
+                if !self
+                    .goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.id == *id && goal.state == GoalState::Active)
+                {
+                    return;
+                }
                 if let Some(goal) = self.goal.as_mut().filter(|goal| goal.id == *id) {
                     goal.continuation_turns = goal.continuation_turns.saturating_add(1);
                     goal.check_stop = None;
@@ -1906,18 +2123,9 @@ impl SessionState {
                     goal.check_stop = Some(reason.clone());
                 }
             }
-            EventKind::GoalUpdated { id, objective } => {
-                if let Some(goal) = self.goal.as_mut().filter(|goal| {
-                    goal.id == *id
-                        && goal.state == GoalState::Active
-                        && goal.owner == crate::goal::GoalOwner::Automated
-                }) {
-                    goal.objective = objective.clone();
-                    goal.blocker_reason = None;
-                    goal.blocker_observations = 0;
-                    goal.blocker_turns.clear();
-                }
-            }
+            // Retired model rewrite events cannot change the requested outcome.
+            // Keep decoding them so old journals remain readable.
+            EventKind::GoalUpdated { .. } => {}
             EventKind::GoalTransitioned { id, transition } => {
                 self.transition_goal(ev, id, transition)
             }
@@ -1982,9 +2190,15 @@ impl SessionState {
             }
             EventKind::SessionTitleChanged { title } => self.title = title.clone(),
             EventKind::SessionDeleted => self.deleted = true,
-            // An outstanding pause request cannot be overwritten. Ignore a boundary
-            // without its matching request rather than manufacture a pause state from
-            // an incomplete log.
+            // Total like every other arm, and the transitions it will not make
+            // are as load-bearing as the ones it will. A second request while
+            // one is already outstanding leaves the first standing, because
+            // the first is the one the boundary will answer and overwriting it
+            // would tell a retrying host its own request had been honoured. A
+            // boundary for a request nothing asked for is ignored rather than
+            // trusted: it can only come from a log that lost its request, and
+            // reducing it would manufacture the very boundary the ADR says is
+            // never manufactured.
             EventKind::SessionPauseRequested { request } => {
                 if self.pause == PauseState::Running {
                     self.pause = PauseState::Requested { request: *request };
@@ -2020,8 +2234,21 @@ impl SessionState {
             | EventKind::GoalCheckStopped { .. }
             | EventKind::GoalUpdated { .. }
             | EventKind::GoalTransitioned { .. } => self.apply_goal(ev),
+            EventKind::WorklistContinuation { completed, text } => {
+                self.plan.continuation_completed = Some(completed.clone());
+                if let Some(item) = self.item_mut(ev, ItemKind::HostContext) {
+                    item.text = text.clone();
+                }
+            }
             EventKind::PlanUpdated { update } => {
                 let _ = self.plan.apply(update);
+                self.plan_calls_since_update = 0;
+            }
+            EventKind::CheckpointContinued => {
+                self.turns
+                    .entry(ev.env.turn)
+                    .or_default()
+                    .checkpoint_continued = true;
             }
             EventKind::ContextRequested { request } => {
                 self.context_request = Some(request.clone());
@@ -2055,6 +2282,10 @@ impl SessionState {
                 images,
                 queued_prompt,
             } => {
+                self.plan.continuation_completed = None;
+                if let Some(goal) = &mut self.goal {
+                    goal.automatic_work_paused = false;
+                }
                 if let Some(id) = queued_prompt {
                     self.consume_prompt(*id);
                 }
@@ -2064,10 +2295,15 @@ impl SessionState {
                     item.audio = audio.clone();
                 }
             }
+            // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
             EventKind::AssistantDelta { text } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::Assistant) {
                     item.text.push_str(text);
                 }
+            }
+            // Opens the item, so its `seq` is the place the message began.
+            EventKind::AssistantMessageStarted => {
+                self.item_mut(ev, ItemKind::Assistant);
             }
             EventKind::AssistantMessage { text } => {
                 if let Some(item) = self.item_mut(ev, ItemKind::Assistant) {
@@ -2107,11 +2343,29 @@ impl SessionState {
                     item.args = args.clone();
                 }
             }
+            EventKind::BatchMemberStarted {
+                batch,
+                index: _,
+                name,
+                args,
+            } => {
+                if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
+                    item.tool_call_started.get_or_insert(ev.env.id);
+                    item.batch_member = Some(*batch);
+                    item.tool_name = Some(name.clone());
+                    item.args = args.clone();
+                }
+            }
             EventKind::ToolCallStarted {
                 name,
                 args,
                 call_id,
             } => {
+                // Only the main agent's own calls count toward a stale plan, and the plan
+                // tool is the update itself.
+                if ev.env.producer == crate::event::id::Producer::Main && name != "worklist" {
+                    self.plan_calls_since_update = self.plan_calls_since_update.saturating_add(1);
+                }
                 if let Some(item) = self.item_mut(ev, ItemKind::ToolCall) {
                     item.tool_call_started.get_or_insert(ev.env.id);
                     item.tool_name = Some(name.clone());
@@ -2131,6 +2385,9 @@ impl SessionState {
                     item.completed = true;
                     item.completed_at = Some(ev.env.ts);
                     item.ok = Some(*ok);
+                    if let Some(tool_call) = ev.env.item {
+                        self.publish_foreign_question_outcome(ev, tool_call);
+                    }
                 }
             }
             EventKind::ToolCallMeasured { timing } => {
@@ -2145,6 +2402,11 @@ impl SessionState {
                 self.background_tasks
                     .entry(*invocation)
                     .or_insert_with(|| authority.clone());
+                self.turns
+                    .entry(ev.env.turn)
+                    .or_default()
+                    .background_tasks
+                    .insert(*invocation);
             }
             EventKind::SubagentCompletionDelivered { invocation, text } => {
                 if !self.background_tasks.contains_key(invocation)
@@ -2157,7 +2419,17 @@ impl SessionState {
                     && let Some(item) = self.item_mut(ev, ItemKind::HostContext)
                 {
                     item.text = text.clone();
+                    self.plan.continuation_completed = None;
                     self.delivered_subagents.insert(*invocation, id);
+                }
+            }
+            EventKind::McpTaskResultDelivered { text, result } => {
+                if ev.env.item.is_some_and(|id| !self.items.contains_key(&id))
+                    && let Some(item) = self.item_mut(ev, ItemKind::HostContext)
+                {
+                    item.text = text.clone();
+                    item.tool_result = result.clone();
+                    self.plan.continuation_completed = None;
                 }
             }
             EventKind::HostContextAppended { text } => {
@@ -2167,19 +2439,49 @@ impl SessionState {
             }
             EventKind::DetachedExecStarted { id } => {
                 self.detached_execs.entry(*id).or_insert(None);
+                self.turns
+                    .entry(ev.env.turn)
+                    .or_default()
+                    .background_execs
+                    .insert(*id);
+            }
+            EventKind::DetachedExecOutput { output } => {
+                let new_delivery = ev.env.item.is_some_and(|id| !self.items.contains_key(&id))
+                    && (!output.lines.is_empty() || output.omitted > 0);
+                let kept = self.monitored_lines.entry(output.id).or_default();
+                kept.extend(output.lines.iter().map(|line| line.text.clone()));
+                let excess = kept.len().saturating_sub(MONITORED_LINES_KEPT);
+                kept.drain(..excess);
+                if matches!(self.detached_execs.get(&output.id), Some(None))
+                    && let Some(item) = self.item_mut(ev, ItemKind::DetachedExecNotification)
+                {
+                    item.text = output.model_text();
+                    if new_delivery {
+                        self.plan.continuation_completed = None;
+                    }
+                }
             }
             EventKind::DetachedExecSettled { snapshot } => {
                 if let Some(entry @ None) = self.detached_execs.get_mut(&snapshot.id)
                     && snapshot.outcome.is_some()
                 {
                     *entry = Some(snapshot.clone());
+                    self.plan.continuation_completed = None;
                     if let Some(item) = self.item_mut(ev, ItemKind::DetachedExecNotification) {
                         item.text = snapshot.model_text();
                     }
                 }
             }
             EventKind::QuestionRequested { request, target } => {
-                self.request_question(ev, request, target)
+                self.request_question(ev, request, target);
+                if let QuestionTarget::ForeignContinuation { tool_call, .. } = target
+                    && self
+                        .pending_question
+                        .as_ref()
+                        .is_some_and(|q| q.request_event == ev.env.id)
+                {
+                    self.publish_foreign_question_outcome(ev, *tool_call);
+                }
             }
             EventKind::QuestionMemberSettled { key, answer } => {
                 if let Some(pending) = self.pending_question.as_mut()
@@ -2218,12 +2520,60 @@ impl SessionState {
                     });
                 }
             }
+            EventKind::TaskProfileSelected { profile } => {
+                if let Some(item) = ev.env.item
+                    && self
+                        .items
+                        .get(&item)
+                        .is_some_and(|item| item.tool_name.as_deref() == Some("task"))
+                {
+                    self.task_profiles.insert(item, profile.clone());
+                }
+            }
             EventKind::GenerationStarted {
+                profile,
                 attempt,
                 role,
                 snapshot,
+                cache,
             } => {
                 self.start(ev, attempt, *role);
+                if self.generations.contains_key(&ev.env.id)
+                    && let Some(profile) = profile
+                {
+                    self.execution_profile = Some(profile.clone());
+                }
+                if self.generations.contains_key(&ev.env.id) {
+                    let learned = if *role == GenerationRole::Main {
+                        self.cache_lifetime
+                            .start(cache.as_ref(), *attempt, ev.env.ts)
+                    } else {
+                        // Mirrored child requests can refresh a shared lineage prefix
+                        // even when their accounting record omits cache metadata.
+                        self.cache_lifetime = Default::default();
+                        if self
+                            .prompt_cache
+                            .as_ref()
+                            .is_some_and(|cache| cache.estimate.is_some())
+                        {
+                            self.prompt_cache = None;
+                        }
+                        None
+                    };
+                    // A mirrored charge cannot retime an authoritative request TTL.
+                    if *role != GenerationRole::Subagent || cache.is_some() {
+                        self.prompt_cache = cache
+                            .as_ref()
+                            .and_then(|request| {
+                                crate::usage::PromptCacheDeadline::observe(
+                                    self.prompt_cache.as_ref(),
+                                    request,
+                                    ev.env.ts,
+                                )
+                            })
+                            .or(learned);
+                    }
+                }
                 if self.generations.contains_key(&ev.env.id)
                     && let Some(snapshot) = snapshot
                 {
@@ -2233,6 +2583,11 @@ impl SessionState {
             EventKind::FallbackDecision { .. } | EventKind::PermanentRootGrantPending { .. } => {}
             EventKind::SessionSelectionsSelected { selections } => {
                 self.session_selections = Some(selections.clone());
+            }
+            EventKind::SandboxOwnerGranted { grant } => {
+                if !self.owner_sandbox_grants.contains(grant) {
+                    self.owner_sandbox_grants.push(grant.clone());
+                }
             }
             EventKind::SessionRootGranted { root } => {
                 if !self.session_roots.contains(root) {
@@ -2246,6 +2601,8 @@ impl SessionState {
             }
             EventKind::RootRevoked { path } => {
                 self.session_roots.retain(|root| root.path() != path);
+                self.owner_sandbox_grants
+                    .retain(|grant| &grant.path != path);
                 self.permanent_root_consents
                     .retain(|consent| consent.root.path() != path);
             }
@@ -2288,6 +2645,24 @@ impl SessionState {
                 };
             }
             EventKind::TurnCompleted { ok, exit_reason } => {
+                if matches!(
+                    exit_reason,
+                    ExitReason::Cancelled(crate::event::domain::CancelCause::User)
+                ) && let Some(turn) = self.turns.get(&ev.env.turn)
+                {
+                    // An automatic wake turn starts no work of its own: the
+                    // stop targets the earlier work that woke it.
+                    if turn.checkpoint_continued {
+                        self.stopped_background_execs
+                            .extend(self.detached_execs.keys());
+                        self.stopped_background_tasks
+                            .extend(self.background_tasks.keys());
+                    } else {
+                        self.stopped_background_execs.extend(&turn.background_execs);
+                        self.stopped_background_tasks.extend(&turn.background_tasks);
+                    }
+                }
+                self.last_turn_completed_at = Some(ev.env.ts);
                 self.complete_turn(ev.env.turn, *ok, *exit_reason);
             }
             EventKind::CompactionSeeded {
@@ -2322,11 +2697,13 @@ impl SessionState {
                 source,
                 at_seq,
                 snapshot,
+                neutral,
             } => {
                 self.prompt_snapshot = snapshot.clone();
                 self.lineage = Some(SessionLineage::Fork {
                     source: *source,
                     at_seq: *at_seq,
+                    neutral: *neutral,
                 });
                 self.forks.push(ForkRecord {
                     source: *source,
@@ -2410,11 +2787,12 @@ impl SessionState {
                 location: location.clone(),
                 content: content.clone(),
             }),
-            // `kind` is deliberately not reduced: `errors` is a list of
-            // what was said, and nothing in the reducer branches on why.
-            // Adding a field no reader consults would be a second place for
-            // the classification to drift from the log's own copy.
-            EventKind::Error { message, .. } => self.errors.push(message.clone()),
+            EventKind::Error { message, .. } => {
+                self.errors.push(message.clone());
+                if !matches!(ev.env.producer, crate::event::id::Producer::Hook(_)) {
+                    self.non_hook_errors.push(message.clone());
+                }
+            }
         }
     }
 
@@ -2493,11 +2871,16 @@ impl SessionState {
             return;
         }
         match transition {
+            GoalTransition::Cancelled { cancelled_by } => {
+                goal.automatic_work_paused = *cancelled_by == crate::goal::GoalOwner::Operator;
+                goal.state = GoalState::Cancelled;
+                goal.check_stop = Some("goal cancelled".into());
+            }
             GoalTransition::AllowanceExtended { turns } => {
                 // admits checked the positive increment and overflow before replay.
                 goal.continuation_budget = Some(
                     goal.continuation_budget
-                        .unwrap_or(crate::goal::DEFAULT_CONTINUATION_BUDGET)
+                        .unwrap_or(20) // Historical extension before the first goal check.
                         + turns,
                 );
                 goal.check_stop = None;
@@ -2943,6 +3326,11 @@ impl SessionState {
         if booked != reported {
             self.refuse(ev, RefusalReason::UsageDisagreesWithSettlement);
         }
+        if self.cache_lifetime.tracks(*attempt) {
+            self.prompt_cache =
+                self.cache_lifetime
+                    .settle(*attempt, outcome, ev.env.ts, booked == reported);
+        }
     }
 
     /// Replace one settled attempt's contribution with a revised figure.
@@ -2971,6 +3359,15 @@ impl SessionState {
             // out of nothing.
             return self.refuse(ev, RefusalReason::UnknownAttempt);
         };
+        // A corrected usage report cannot leave empirical hit/loss evidence intact.
+        self.cache_lifetime = crate::usage::CacheLifetimeLearning::default();
+        if self
+            .prompt_cache
+            .as_ref()
+            .is_some_and(|cache| cache.estimate.is_some())
+        {
+            self.prompt_cache = None;
+        }
         self.charges[first].usage = *usage;
         self.charges[first].cost = cost.clone();
         for &at in booked[1..].iter().rev() {
@@ -3030,7 +3427,8 @@ impl SessionState {
     /// matters most in practice — a provider that reported no usage, priced
     /// properly an hour later.
     ///
-    /// O(n) per correction, and a log crafted to be all corrections replays in O(n²).
+    /// O(n) per correction, and a log crafted to be all corrections replays
+    /// in O(n²). See `POTENTIALS.md`.
     fn refold(&mut self) {
         let mut usage = Usage::IDENTITY;
         let mut cost = CumulativeCost::default();
@@ -3150,3 +3548,5 @@ fn hook_owner_matches_envelope(
         HookOccurrenceOwner::Generation { .. } | HookOccurrenceOwner::Subagent { .. } => Ok(()),
     }
 }
+/// Delivered monitor lines kept per process for completion de-duplication.
+const MONITORED_LINES_KEPT: usize = 200;

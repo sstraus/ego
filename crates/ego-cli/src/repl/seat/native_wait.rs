@@ -82,11 +82,7 @@ impl Wait {
                     Some(self.id),
                     json!({"outcome": outcome}),
                 ),
-                osc.state(if current.activity {
-                    State::Busy
-                } else {
-                    State::Idle
-                }),
+                osc.state(current.native_activity),
             ]
             .concat()
         });

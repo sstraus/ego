@@ -3,7 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
-use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -26,8 +26,9 @@ use crate::event::id::{
 };
 use crate::event::skill::{SkillInvocationId, SkillSourceAuthority};
 use crate::mcp::McpRuntimeBinding;
+use crate::permit::Op;
 use crate::permit::PolicyEngine;
-use crate::permit::rule::{ArgvToken, Rule, Segment};
+use crate::permit::rule::Rule;
 use crate::state::SessionState;
 use crate::turn::{CancelToken, SharedJournal, SharedJournalError};
 
@@ -36,6 +37,20 @@ const MAX_TIMEOUT_SECONDS: u64 = 3600;
 const MAX_HOOK_SCALAR_BYTES: usize = 16 * 1024;
 const MAX_HOOK_COLLECTION_ENTRIES: usize = 256;
 const MAX_HOOK_WIRE_BYTES: usize = 64 * 1024;
+
+/// What a pre-effect hook gate does when its handler fails to start, times out
+/// or crashes. Hooks fail open: only an explicit block decision from a handler
+/// that ran blocks, unless the hook opts in to `block` on failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFailurePolicy {
+    /// The guarded action does not run.
+    Block,
+    /// The guarded action continues; the failure stays in the event stream
+    /// and in one visible notice. This is the default.
+    #[default]
+    Allow,
+}
 
 /// One typed declaration shared by TOML and projected skill frontmatter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,6 +61,8 @@ pub struct HookConfigEntry {
     matcher: Option<HookMatcher>,
     #[serde(default)]
     once: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    on_failure: Option<HookFailurePolicy>,
     #[serde(default)]
     handler: HookHandlerConfig,
     #[serde(skip)]
@@ -64,6 +81,7 @@ impl HookConfigEntry {
             event,
             matcher,
             once: false,
+            on_failure: None,
             handler,
             source_location: None,
             invocation: None,
@@ -72,6 +90,11 @@ impl HookConfigEntry {
 
     pub fn with_once(mut self, once: bool) -> Self {
         self.once = once;
+        self
+    }
+
+    pub fn with_on_failure(mut self, policy: HookFailurePolicy) -> Self {
+        self.on_failure = Some(policy);
         self
     }
 
@@ -93,6 +116,10 @@ impl HookConfigEntry {
 
     pub fn once(&self) -> bool {
         self.once
+    }
+
+    pub fn on_failure(&self) -> HookFailurePolicy {
+        self.on_failure.unwrap_or_default()
     }
 
     /// Bind a projected skill entry to its invocation-scoped source authority.
@@ -124,6 +151,8 @@ impl HookConfigEntry {
             event: HookLifecycle,
             matcher: &'a Option<HookMatcher>,
             once: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            on_failure: Option<HookFailurePolicy>,
             handler: &'a HookHandlerConfig,
         }
 
@@ -132,6 +161,7 @@ impl HookConfigEntry {
             event: self.event,
             matcher: &self.matcher,
             once: self.once,
+            on_failure: self.on_failure,
             handler: &self.handler,
         })
         .expect("typed hook configuration has a canonical JSON encoding")
@@ -149,9 +179,9 @@ impl HookMatcher {
     fn matches(&self, event: &HookEvent) -> bool {
         match self {
             Self::Permission(matcher) => event
-                .permission_selector
+                .tool_call
                 .as_ref()
-                .is_some_and(|selector| permission_rule_covers(matcher, selector)),
+                .is_some_and(|call| call.ops.iter().any(|op| matcher.matches(op, &call.root))),
             Self::Exact(matcher) => event.selector.as_deref() == Some(matcher.as_str()),
         }
     }
@@ -260,6 +290,7 @@ impl HookHandlerConfig {
                 HookLifecycle::UserPromptSubmit
                     | HookLifecycle::PreModelSwitch
                     | HookLifecycle::PostModelSwitch
+                    | HookLifecycle::Interrupt
             ) =>
             {
                 30
@@ -595,6 +626,12 @@ impl HookSpec {
                 "once is valid only for invocation-scoped skill hooks",
             ));
         }
+        if entry.on_failure.is_some() && !entry.event.phase().is_pre_effect() {
+            return Err(HookCatalogueError::invalid(
+                "on_failure",
+                "on_failure is valid only for hooks that gate an effect",
+            ));
+        }
         let location = HookSourceLocation::parse(location)
             .map_err(|error| HookCatalogueError::invalid("location", error.to_string()))?;
         let digest = HookContentDigest::parse(&sha256_hex(source_content))
@@ -670,6 +707,7 @@ impl HookSpec {
                 name,
                 "matcher"
                     | "once"
+                    | "on_failure"
                     | "type"
                     | "command"
                     | "args"
@@ -721,6 +759,9 @@ impl HookSpec {
     }
     pub fn once(&self) -> bool {
         self.entry.once
+    }
+    pub fn on_failure(&self) -> HookFailurePolicy {
+        self.entry.on_failure()
     }
     pub fn skill_invocation(&self) -> Option<SkillInvocationId> {
         self.source.skill_invocation()
@@ -783,8 +824,31 @@ pub struct HookEvent {
     lifecycle: HookLifecycle,
     subject: HookSubject,
     selector: Option<String>,
-    permission_selector: Option<Rule>,
+    tool_call: Option<HookToolCall>,
     context: HookInputContext,
+}
+
+/// One tool call as the permit layer evaluates it: its canonical operations
+/// and the workspace that anchors relative rule patterns.
+///
+/// A permission-rule matcher is matched against these operations with the
+/// same predicate an allow or deny rule uses ([`Rule::matches`]). A call with
+/// several operations matches when the rule covers any one of them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookToolCall {
+    tool: String,
+    ops: Vec<Op>,
+    root: PathBuf,
+}
+
+impl HookToolCall {
+    pub fn new(tool: impl Into<String>, ops: impl Into<Vec<Op>>, root: impl Into<PathBuf>) -> Self {
+        Self {
+            tool: tool.into(),
+            ops: ops.into(),
+            root: root.into(),
+        }
+    }
 }
 
 impl HookEvent {
@@ -793,7 +857,7 @@ impl HookEvent {
             lifecycle,
             subject: HookSubject::Session,
             selector: None,
-            permission_selector: None,
+            tool_call: None,
             context: HookInputContext::default(),
         }
     }
@@ -803,23 +867,35 @@ impl HookEvent {
             lifecycle,
             subject,
             selector: None,
-            permission_selector: None,
+            tool_call: None,
             context: HookInputContext::default(),
         }
     }
 
+    /// An event whose selector is a plain string and that names no tool call.
+    /// Only exact matchers can match it.
     pub fn tool(
         lifecycle: HookLifecycle,
         subject: HookSubject,
         selector: impl Into<String>,
     ) -> Self {
-        let selector = selector.into();
-        let permission_selector = Rule::parse(&selector).ok();
         Self {
             lifecycle,
             subject,
-            selector: Some(selector),
-            permission_selector,
+            selector: Some(selector.into()),
+            tool_call: None,
+            context: HookInputContext::default(),
+        }
+    }
+
+    /// A tool-call event: exact matchers compare the tool name, permission
+    /// matchers the call's canonical operations.
+    pub fn tool_call(lifecycle: HookLifecycle, subject: HookSubject, call: HookToolCall) -> Self {
+        Self {
+            lifecycle,
+            subject,
+            selector: Some(call.tool.clone()),
+            tool_call: Some(call),
             context: HookInputContext::default(),
         }
     }
@@ -1154,7 +1230,7 @@ impl HookEventV1 {
             .handler
             .validate()
             .map_err(HookWireError::catalogue)?;
-        let value = Self {
+        let mut value = Self {
             version: 1,
             hook_id: request.hook(),
             invocation_id: request.invocation(),
@@ -1166,9 +1242,71 @@ impl HookEventV1 {
             hook_event_name: request.event.lifecycle,
             context: request.event.context.clone(),
         };
+        value.fit_wire_size();
         validate_wire_size(&value)?;
         Ok(value)
     }
+
+    /// A large tool output must not stop the hook from running: shorten the
+    /// largest text field, with a visible marker, until the request fits.
+    fn fit_wire_size(&mut self) {
+        const MARGIN: usize = 1024;
+        for _ in 0..64 {
+            let Ok(bytes) = serde_json::to_vec(&*self) else {
+                return;
+            };
+            if bytes.len() <= MAX_HOOK_WIRE_BYTES {
+                return;
+            }
+            let excess = bytes.len() - MAX_HOOK_WIRE_BYTES + MARGIN;
+            let context = &mut self.context;
+            let mut fields: Vec<&mut String> = [
+                context.prompt.as_mut(),
+                context.error.as_mut(),
+                context.transcript.as_mut(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            for value in [context.tool_input.as_mut(), context.tool_response.as_mut()]
+                .into_iter()
+                .flatten()
+            {
+                collect_strings(value, &mut fields);
+            }
+            let Some(largest) = fields.into_iter().max_by_key(|text| text.len()) else {
+                return;
+            };
+            if largest.len() <= MARGIN {
+                return;
+            }
+            let keep = largest.len().saturating_sub(excess).max(MARGIN);
+            *largest = bounded_wire_text(largest, keep);
+        }
+    }
+}
+
+fn collect_strings<'a>(value: &'a mut serde_json::Value, out: &mut Vec<&'a mut String>) {
+    match value {
+        serde_json::Value::String(text) => out.push(text),
+        serde_json::Value::Array(items) => {
+            items.iter_mut().for_each(|item| collect_strings(item, out))
+        }
+        serde_json::Value::Object(map) => {
+            map.values_mut().for_each(|item| collect_strings(item, out))
+        }
+        _ => {}
+    }
+}
+
+fn bounded_wire_text(text: &str, cap: usize) -> String {
+    let removed = text.len().saturating_sub(cap);
+    let marker = format!("\n[ego: {removed} bytes removed to fit the 64 KiB hook request]");
+    let mut end = cap.saturating_sub(marker.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}{marker}", &text[..end])
 }
 
 /// Strict command-stdin and HTTP-body request. Runtime-only effect state and
@@ -1329,38 +1467,6 @@ fn validate_wire_size(value: &impl Serialize) -> Result<(), HookWireError> {
     Ok(())
 }
 
-fn permission_rule_covers(matcher: &Rule, selector: &Rule) -> bool {
-    match (matcher, selector) {
-        (Rule::Read(pattern), Rule::Read(target))
-        | (Rule::Write(pattern), Rule::Write(target))
-        | (Rule::List(pattern), Rule::List(target))
-        | (Rule::Search(pattern), Rule::Search(target)) => {
-            if target.segments().iter().any(|segment| match segment {
-                Segment::Any => true,
-                Segment::One(glob) => glob.as_literal().is_none(),
-            }) {
-                return false;
-            }
-            pattern.matches(Path::new(&target.to_string()), Path::new(""))
-        }
-        (Rule::Exec(pattern), Rule::Exec(target)) => {
-            let argv = target
-                .tokens()
-                .iter()
-                .map(|token| match token {
-                    ArgvToken::One(glob) => glob.as_literal().map(str::to_owned),
-                    ArgvToken::AnyOne | ArgvToken::Rest => None,
-                })
-                .collect::<Option<Vec<_>>>();
-            argv.is_some_and(|argv| pattern.matches(&argv))
-        }
-        (Rule::Net(_), Rule::Net(_)) | (Rule::Tool { .. }, Rule::Tool { .. }) => {
-            matcher == selector
-        }
-        _ => false,
-    }
-}
-
 /// A fully validated immutable publication candidate.
 #[derive(Debug, Clone)]
 pub struct HookCatalogueCandidate {
@@ -1501,9 +1607,25 @@ pub struct HookCatalogue {
     specs: Vec<HookSpec>,
     sources: Vec<&'static str>,
     generation: String,
+    /// `--no-hooks`: nothing is admitted, and a skill cannot add a hook.
+    off: bool,
 }
 
 impl HookCatalogue {
+    /// The catalogue of an invocation that runs with every hook off.
+    pub fn off() -> Self {
+        Self {
+            off: true,
+            ..Self::publish(
+                HookCatalogueCandidate {
+                    specs: Vec::new(),
+                    sources: Vec::new(),
+                },
+                "off",
+            )
+        }
+    }
+
     pub fn admit_typed(
         layers: &[Sourced<ConfigLayer>],
         skills: &[HookSource],
@@ -1526,6 +1648,7 @@ impl HookCatalogue {
             specs: candidate.specs,
             sources: candidate.sources,
             generation: sha256_hex(format!("{boundary}\n{material}").as_bytes()),
+            off: false,
         }
     }
 
@@ -1535,6 +1658,9 @@ impl HookCatalogue {
         skills: &[HookSource],
         trust: Trust,
     ) -> Result<(), HookCatalogueError> {
+        if self.off {
+            return Ok(());
+        }
         let candidate = HookCatalogueCandidate::from_sources(layers, skills, trust)?;
         let next = Self::publish(candidate, &self.generation);
         *self = next;
@@ -1542,6 +1668,9 @@ impl HookCatalogue {
     }
 
     pub fn with_skill_sources(&self, skills: &[HookSource]) -> Result<Self, HookCatalogueError> {
+        if self.off {
+            return Ok(self.clone());
+        }
         let skill_candidate = HookCatalogueCandidate::from_sources(&[], skills, Trust::Trusted)?;
         let mut specs = self
             .specs
@@ -1580,6 +1709,9 @@ impl HookCatalogue {
 
     pub fn specs(&self) -> &[HookSpec] {
         &self.specs
+    }
+    pub fn is_off(&self) -> bool {
+        self.off
     }
     pub fn evidence(&self) -> HookCatalogueEvidence {
         HookCatalogueEvidence::new(
@@ -1889,6 +2021,13 @@ pub trait HookInvocationPort: Send + Sync {
 /// Builds one immutable hook invocation authority from one captured policy.
 /// The returned port may borrow this binding, never the temporary MCP reference.
 pub trait HookInvocationBinding: Send + Sync {
+    fn egress_filter<'a>(&self) -> Option<Arc<dyn crate::egress::EgressFilter + 'a>>
+    where
+        Self: 'a,
+    {
+        None
+    }
+
     fn bind<'a>(
         &self,
         policy: Arc<PolicyEngine>,
@@ -1957,6 +2096,7 @@ pub struct HookRunResult {
     decision: HookDecision,
     feedback: Vec<HookFeedback>,
     observer_failure: bool,
+    blocking_failure: bool,
     durable: bool,
     skipped_once: bool,
     started_invocation: bool,
@@ -1981,6 +2121,10 @@ impl HookRunResult {
     }
     pub fn is_blocked(&self) -> bool {
         self.decision.is_blocking()
+    }
+    /// A failed or uncertain gate blocked the effect, rather than only a veto.
+    pub fn is_blocking_failure(&self) -> bool {
+        self.blocking_failure
     }
     pub fn is_observer_failure(&self) -> bool {
         self.observer_failure
@@ -2135,7 +2279,14 @@ impl HookRunner {
                     return Err(error);
                 }
                 self.finish_recovered(&mut reservations, &starts);
-                apply_recovered_settlements(&mut result, phase, &evidence, &starts, &settlements);
+                apply_recovered_settlements(
+                    &mut result,
+                    phase,
+                    &specs,
+                    &evidence,
+                    &starts,
+                    &settlements,
+                );
                 if starts.len() != evidence.plan().len()
                     || settlements.len() != evidence.plan().len()
                 {
@@ -2224,6 +2375,7 @@ impl HookRunner {
                 &reached,
                 Some(started.invocation()),
                 &settled,
+                spec.on_failure(),
             );
         }
         Ok(result)
@@ -2443,6 +2595,11 @@ impl<'s> SessionHookState<'s> {
 
     pub fn journal(&self) -> SharedJournal<'s> {
         self.journal.clone()
+    }
+
+    /// The run cancellation shared with lifecycle hook effects.
+    pub fn cancel_token(&self) -> CancelToken {
+        self.parent_cancel.clone()
     }
 
     pub fn catalogue_evidence(&self) -> HookCatalogueEvidence {
@@ -2733,17 +2890,24 @@ fn hook_execution_identity(spec: &HookSpec) -> String {
 fn apply_recovered_settlements(
     aggregate: &mut HookRunResult,
     phase: HookPhase,
+    specs: &[&HookSpec],
     reached: &HookReachedEvidence,
     starts: &[HookStartedEvidence],
     settlements: &[HookSettledEvidence],
 ) {
     for (started, settled) in starts.iter().zip(settlements) {
+        // A hook that left the catalogue since the crash keeps the default.
+        let policy = specs
+            .iter()
+            .find(|spec| spec.id() == started.hook())
+            .map_or_else(HookFailurePolicy::default, |spec| spec.on_failure());
         apply_result(
             aggregate,
             phase,
             reached,
             Some(started.invocation()),
             settled.result(),
+            policy,
         );
     }
     aggregate.durable = true;
@@ -2763,6 +2927,7 @@ fn apply_result(
     reached: &HookReachedEvidence,
     invocation: Option<HookInvocationId>,
     result: &HookResult,
+    policy: HookFailurePolicy,
 ) {
     if let Some(feedback) = result.feedback() {
         let next = aggregate
@@ -2786,7 +2951,10 @@ fn apply_result(
         {
             aggregate.decision = HookDecision::RequestEscalation;
         }
-        HookResult::Failure { .. } if phase.is_pre_effect() => {
+        HookResult::Failure { .. }
+            if phase.is_pre_effect() && policy == HookFailurePolicy::Block =>
+        {
+            aggregate.blocking_failure = true;
             aggregate.decision = HookDecision::Block;
             aggregate.blocking_occurrence.get_or_insert(reached.event());
             if let Some(invocation) = invocation {
@@ -2806,6 +2974,7 @@ fn record_occurrence_uncertainty(
     started: Option<&HookStartedEvidence>,
 ) {
     if phase.is_pre_effect() {
+        result.blocking_failure = true;
         result.decision = HookDecision::Block;
         result.blocking_occurrence.get_or_insert(evidence.event());
         if let Some(started) = started {
@@ -2821,6 +2990,7 @@ fn record_occurrence_uncertainty(
 
 fn record_absent_failure(result: &mut HookRunResult, phase: HookPhase) {
     if phase.is_pre_effect() {
+        result.blocking_failure = true;
         result.decision = HookDecision::Block;
     } else {
         result.observer_failure = true;
@@ -2832,6 +3002,7 @@ fn empty_result() -> HookRunResult {
         decision: HookDecision::Continue,
         feedback: Vec::new(),
         observer_failure: false,
+        blocking_failure: false,
         durable: false,
         skipped_once: false,
         started_invocation: false,

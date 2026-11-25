@@ -486,8 +486,10 @@ impl Confinement {
 
     /// Whether this confines at least as much as `ceiling` does.
     ///
-    /// Explicit strict levels narrow Adaptive authority. This orders
-    /// selections, not backend guarantees; capability checks are separate.
+    /// The only question a ceiling is ever asked
+    /// (the design notes).
+    /// Explicit strict levels narrow Adaptive authority. This orders selections,
+    /// not backend capability guarantees, which are checked separately.
     pub const fn within(self, ceiling: Self) -> bool {
         matches!(
             (self, ceiling),
@@ -803,15 +805,26 @@ impl ExecObservation {
         old: &Self,
         approved: &[super::ProfileRoot],
     ) -> bool {
-        self.backend == old.backend
-            && self
-                .capabilities
-                .union(if self.capabilities.contains(ExecCaps::WRITE_DENIED) {
-                    ExecCaps::WRITE_SCOPED
-                } else {
-                    ExecCaps::empty()
-                })
-                .contains(old.capabilities)
+        // The unconfined backend's revision is the ego version, not a confinement guarantee.
+        (self.backend == old.backend
+            || (self.backend.name() == "null" && old.backend.name() == "null"))
+            && self.root_transition_is_sufficient(old, approved)
+    }
+
+    /// A disclosed root transition may change backend identity, never the
+    /// measured guarantees or any authority beyond its approved exact roots.
+    pub(crate) fn root_transition_is_sufficient(
+        &self,
+        old: &Self,
+        approved: &[super::ProfileRoot],
+    ) -> bool {
+        self.capabilities
+            .union(if self.capabilities.contains(ExecCaps::WRITE_DENIED) {
+                ExecCaps::WRITE_SCOPED
+            } else {
+                ExecCaps::empty()
+            })
+            .contains(old.capabilities)
             && self
                 .policy
                 .as_ref()
@@ -830,10 +843,18 @@ impl ExecObservation {
                 self.backend.name()
             ));
         } else if self.backend.revision() != old.backend.revision() {
-            changes.push(format!(
-                "backend measurement {} revision changed",
-                self.backend.name()
-            ));
+            if self.backend.name() == "null" {
+                changes.push(format!(
+                    "ego version {} -> {} (unconfined backend)",
+                    old.backend.revision(),
+                    self.backend.revision()
+                ));
+            } else {
+                changes.push(format!(
+                    "backend measurement {} revision changed",
+                    self.backend.name()
+                ));
+            }
         }
         if self.capabilities != old.capabilities {
             changes.push(format!(
@@ -1083,16 +1104,12 @@ impl RunConfinement {
         self.offline
     }
 
-    /// Whether this invocation may open an MCP HTTP transport.
+    /// Whether this invocation may open an MCP transport of any kind.
     ///
-    /// HTTP MCP runs in process, so only an online invocation with no
-    /// filesystem sandbox can admit it.
-    pub const fn admits_mcp_http(&self) -> bool {
-        !self.offline && matches!(self.level, Confinement::Off)
-    }
-
-    /// Whether this invocation may spawn an MCP stdio transport.
-    pub const fn admits_mcp_stdio(&self) -> bool {
+    /// Only `--offline` refuses MCP. A stdio server runs under the spawn
+    /// sandbox; an HTTP server runs in process, like the provider connection,
+    /// and reaches only the destination the owner configured.
+    pub const fn admits_mcp(&self) -> bool {
         !self.offline
     }
 
@@ -1141,6 +1158,15 @@ pub trait ProcessExecutor: Send + Sync {
         Ok(())
     }
 
+    /// Revalidate a call a person approved moments ago for this one launch.
+    ///
+    /// An adapter may skip a repeat of its most expensive content check here,
+    /// because it repeats that check at launch. A reusable approval never calls
+    /// this; it takes [`revalidate`](Self::revalidate).
+    fn revalidate_fresh_approval(&self, spec: &SpawnSpec) -> Result<(), ProcessError> {
+        self.revalidate(spec)
+    }
+
     fn execute<'a>(
         &'a self,
         spec: &'a SpawnSpec,
@@ -1148,6 +1174,11 @@ pub trait ProcessExecutor: Send + Sync {
 
     /// The active foreground exec that can be retained by this session.
     fn foreground_exec(&self) -> Option<DetachedExecId> {
+        None
+    }
+
+    /// The latest masked foreground output, for transient terminal presentation.
+    fn foreground_output(&self) -> Option<Vec<u8>> {
         None
     }
 
@@ -1177,6 +1208,31 @@ pub trait ProcessExecutor: Send + Sync {
         Err(ProcessError::Invariant(
             "process executor has no background lifecycle".to_owned(),
         ))
+    }
+
+    /// Subscribe the model to new complete output lines of one running
+    /// session-owned process. A later subscription replaces the earlier one.
+    fn monitor_background(
+        &self,
+        _id: DetachedExecId,
+        _monitor: DetachedExecMonitor,
+    ) -> Result<(), ProcessError> {
+        Err(ProcessError::Invariant(
+            "process executor has no background lifecycle".to_owned(),
+        ))
+    }
+
+    /// Remove and return the monitored lines queued since the last call.
+    fn take_background_output(
+        &self,
+        _id: DetachedExecId,
+    ) -> Result<Option<DetachedExecLines>, ProcessError> {
+        Ok(None)
+    }
+
+    /// Whether monitored lines are queued for delivery, without taking them.
+    fn background_output_ready(&self, _id: DetachedExecId) -> bool {
+        false
     }
 
     /// Execute one admitted hook handler with its strict request on stdin.
@@ -1221,9 +1277,9 @@ impl DetachedExecSnapshot {
             "background exec {}: {state}\nstdout tail ({} bytes omitted): {}\nstderr tail ({} bytes omitted): {}",
             self.id,
             self.stdout_omitted,
-            String::from_utf8_lossy(&self.stdout_tail),
+            crate::exec_output::compact(&self.stdout_tail),
             self.stderr_omitted,
-            String::from_utf8_lossy(&self.stderr_tail),
+            crate::exec_output::compact(&self.stderr_tail),
         );
         if let Some(
             DetachedExecOutcome::Exited { result, .. }
@@ -1235,6 +1291,91 @@ impl DetachedExecSnapshot {
                     text.push_str(&format!("\n[read_tool_result {reference}]"));
                 }
             }
+        }
+        text
+    }
+
+    /// The typed output totals this read observed. The tails are bounded and
+    /// `omitted` counts what fell out of them, so each total only grows.
+    pub fn output_observation(&self) -> SessionOutputObservation {
+        SessionOutputObservation {
+            id: self.id,
+            stdout_bytes: self
+                .stdout_omitted
+                .saturating_add(self.stdout_tail.len() as u64),
+            stderr_bytes: self
+                .stderr_omitted
+                .saturating_add(self.stderr_tail.len() as u64),
+        }
+    }
+}
+
+/// How much output one session process had written when a status read saw it.
+/// Journaled on the inspection result, so a later read can tell new output from
+/// the same output read again, also after replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOutputObservation {
+    pub id: crate::event::id::DetachedExecId,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+}
+
+/// What the model asked to see of one running session-owned process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetachedExecMonitor {
+    /// Deliver only complete lines this regular expression matches; `None`
+    /// delivers every new line.
+    pub pattern: Option<String>,
+    /// The largest number of lines one delivery carries.
+    pub max_lines: usize,
+}
+
+impl DetachedExecMonitor {
+    /// Lines one delivery carries when the model names no limit.
+    pub const DEFAULT_LINES: usize = 20;
+    /// The largest `max_lines` the model can choose.
+    pub const MAX_LINES: usize = 100;
+    /// Bytes of one delivered line; a longer line is cut and marked.
+    pub const LINE_BYTES: usize = 512;
+    /// Bytes of line text one delivery carries.
+    pub const DELIVERY_BYTES: usize = 4096;
+}
+
+/// One monitored line, after secret masking.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MonitoredLine {
+    pub stream: StreamProvenance,
+    pub text: String,
+}
+
+/// The monitored lines of one process queued since the previous delivery.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DetachedExecLines {
+    pub id: DetachedExecId,
+    pub lines: Vec<MonitoredLine>,
+    /// Lines that matched after the delivery bound was reached.
+    pub omitted: u64,
+}
+
+impl DetachedExecLines {
+    pub fn model_text(&self) -> String {
+        let mut text = format!(
+            "background exec {} monitor: {} new lines",
+            self.id,
+            self.lines.len()
+        );
+        if self.omitted > 0 {
+            text.push_str(&format!(
+                " ({} later lines omitted; exec_status shows the current tail)",
+                self.omitted
+            ));
+        }
+        for line in &self.lines {
+            let stream = match line.stream {
+                StreamProvenance::Stdout => "stdout",
+                StreamProvenance::Stderr => "stderr",
+            };
+            text.push_str(&format!("\n{stream}: {}", line.text));
         }
         text
     }
@@ -1282,11 +1423,11 @@ pub enum ProcessError {
     },
     Exit {
         code: Option<i32>,
-        result: ToolResult,
+        result: Box<ToolResult>,
     },
     Signal {
         signal: Option<i32>,
-        result: ToolResult,
+        result: Box<ToolResult>,
     },
     Timeout {
         timeout: Duration,
@@ -1321,12 +1462,15 @@ impl fmt::Display for ProcessError {
             Self::Launch { executable, reason } => {
                 write!(f, "could not launch {executable:?}: {reason}")
             }
-            Self::Exit { code, .. } => {
-                write!(f, "process exited unsuccessfully with code {code:?}")
-            }
-            Self::Signal { signal, .. } => {
-                write!(f, "process terminated by signal {signal:?}")
-            }
+            Self::Exit { code, .. } => match code {
+                Some(code) => write!(f, "process exited unsuccessfully with code {code}"),
+                None => f.write_str("process exited unsuccessfully with unknown code"),
+            },
+            Self::Signal { signal, .. } => match signal {
+                Some(9) => f.write_str("process terminated by signal SIGKILL"),
+                Some(signal) => write!(f, "process terminated by signal {signal}"),
+                None => f.write_str("process terminated by an unknown signal"),
+            },
             Self::Timeout { timeout } => write!(f, "process timed out after {timeout:?}"),
             Self::Cancelled => f.write_str("process was cancelled"),
             Self::EvidenceLimit { stream, limit } => {
@@ -1345,7 +1489,7 @@ impl ProcessError {
     pub fn into_failed_result(self) -> ToolResult {
         let diagnostic = self.to_string();
         let mut result = match self {
-            Self::Exit { result, .. } | Self::Signal { result, .. } => result,
+            Self::Exit { result, .. } | Self::Signal { result, .. } => *result,
             _ => ToolResult::new(Vec::new()),
         };
         result

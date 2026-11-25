@@ -7,7 +7,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use ego_core::config::{ConfigLayer, ModelRef, Sourced, Trust, resolve};
+use ego_core::config::{ConfigLayer, ModelRef, Source, Sourced, Trust, resolve};
 use ego_core::event::hook::HookLifecycle;
 use ego_core::event::skill::{
     SkillContentDigest, SkillDescriptorEvidence, SkillId, SkillInvocationId, SkillSourceLocation,
@@ -195,23 +195,22 @@ impl SkillCatalogueCapture {
     }
 
     pub(crate) fn render_summary(&self) -> String {
-        let mut rows = vec![format!(
-            "skills: {} admitted; /skills details for sources and diagnostics",
-            self.descriptors().len()
-        )];
-        rows.extend(
-            self.descriptors()
-                .iter()
-                .take(6)
-                .map(|spec| format!("/{} — {}", spec.name(), spec.descriptor().description)),
-        );
+        let mut table = vec![vec!["Skill".into(), "Description".into()]];
+        table.extend(self.descriptors().iter().map(|spec| {
+            vec![
+                format!("/{}", spec.name()),
+                spec.descriptor().description.clone(),
+            ]
+        }));
+        let mut rows = vec![format!("skills: {} admitted", self.descriptors().len())];
+        rows.extend(crate::render::table::plain_table(table));
         if self.retained_last_good() {
-            rows.push("skills: retained last good catalogue; /skills diagnose".to_owned());
+            rows.push("skills: retained last good catalogue; /skills diagnose".into());
         }
-        rows.push("/skills details — show every skill and its source".to_owned());
-        rows.push("/skills diagnose — inspect admission problems".to_owned());
-        rows.push("/skills rescan — reload the skill catalogue".to_owned());
-        rows.push("/skills invoke NAME [arguments] — run a user-invocable skill".to_owned());
+        rows.push(
+            "/skills details · /skills diagnose · /skills rescan · /skills invoke NAME [arguments]"
+                .into(),
+        );
         rows.join("\n")
     }
 
@@ -452,6 +451,29 @@ impl SkillCatalogue {
     }
 }
 
+/// Skills the owner hid by name, from the user, system and flag layers only.
+#[derive(Debug, Default)]
+struct SkillVisibility {
+    hide: BTreeSet<String>,
+    off: BTreeSet<String>,
+}
+
+impl SkillVisibility {
+    fn from_layers(layers: &[Sourced<ConfigLayer>]) -> Self {
+        let mut visibility = Self::default();
+        for layer in layers {
+            if !matches!(layer.source, Source::User | Source::System | Source::Flags) {
+                continue;
+            }
+            if let Some(skills) = &layer.value.skills {
+                visibility.hide.extend(skills.hide.iter().cloned());
+                visibility.off.extend(skills.off.iter().cloned());
+            }
+        }
+        visibility
+    }
+}
+
 struct Candidate {
     admitted: Vec<(SkillSpec, PathBuf)>,
     diagnostics: Vec<SkillDiagnostic>,
@@ -509,12 +531,18 @@ impl Candidate {
                 match resolve(profile_layers, profile_trust, Some(profile)) {
                     Ok(_) => true,
                     Err(error) => {
+                        let hint = match profile {
+                            "Explore" | "Plan" => format!(
+                                "; ego has no built-in `{profile}` agent, define [profile.{profile}] in the configuration to map it"
+                            ),
+                            _ => String::new(),
+                        };
                         diagnostics.push(SkillDiagnostic {
                             name: spec.name().to_owned(),
                             source: spec.source(),
                             source_path: source_path.clone(),
                             message: format!(
-                                "field `agent` must select an existing profile: {error}"
+                                "field `agent` must select an existing profile: {error}{hint}"
                             ),
                             collision: false,
                         });
@@ -547,6 +575,24 @@ impl Candidate {
                 names.insert(name.to_owned())
             }
         });
+        // The owner's `[skills]` choice applies last, so it wins over every root.
+        if let Some(layers) = profile_layers {
+            let visibility = SkillVisibility::from_layers(layers);
+            admitted.retain_mut(|(spec, _)| {
+                let name = spec.name().to_owned();
+                if visibility.off.contains(&name) {
+                    return false;
+                }
+                if visibility.hide.contains(&name) {
+                    // A skill only the model could use has nothing left to offer.
+                    if !spec.descriptor().user_invocable {
+                        return false;
+                    }
+                    spec.hide_from_model();
+                }
+                true
+            });
+        }
         admitted.sort_by(|(left, _), (right, _)| left.name().cmp(right.name()));
         diagnostics.sort_by(|left, right| {
             left.name
@@ -674,24 +720,43 @@ fn load_skill(
     let source_digest = SkillContentDigest::parse(&ego_core::digest::sha256_hex(text.as_bytes()))
         .map_err(|error| error.to_string())?;
     let (header, body) = yaml_envelope::split(&text, false)?;
-    let mut entries = yaml_envelope::mapping(header)?;
+    let mut entries = if header.trim().is_empty() {
+        BTreeMap::new()
+    } else {
+        match yaml_envelope::mapping(header) {
+            Ok(entries) => entries,
+            // Text that is not YAML at all (an unquoted `description: Use when: x`)
+            // loads with no fields, as in the reference format, unless the header
+            // names a field that restricts the skill: dropping that field would
+            // widen who may invoke it or what it may use.
+            Err(message) if message.starts_with("contains invalid YAML") => {
+                if let Some(key) = restricting_key(header) {
+                    return Err(format!(
+                        "{message}; the header names `{key}`, so the skill is refused instead of loaded without it. Quote a value that contains `: `"
+                    ));
+                }
+                BTreeMap::new()
+            }
+            Err(message) => return Err(message),
+        }
+    };
     validate_field_names(&entries)?;
 
-    let name = take_required_string(&mut entries, "name")?;
+    let name =
+        take_optional_string(&mut entries, "name")?.unwrap_or_else(|| directory_name.to_owned());
     validate_skill_name(&name)?;
-    if name != directory_name {
-        return Err(format!(
-            "field `name` must equal containing directory `{directory_name}`"
-        ));
-    }
-    let description = take_required_string(&mut entries, "description")?;
-    if description.chars().count() > 1024 {
-        return Err("field `description` exceeds 1024 characters".to_owned());
-    }
+    // An over-long description is cut, not refused: the listing shows a bounded
+    // prefix whatever the author wrote.
+    let description = truncate_chars(
+        take_optional_string(&mut entries, "description")?
+            .unwrap_or_else(|| body.trim().split("\n\n").next().unwrap_or(&name).to_owned()),
+        MAX_DESCRIPTION_CHARS,
+    );
 
-    let allowed_tools = take_tool_scalar(&mut entries, "allowed-tools")?;
-    let disallowed_tools = take_tool_scalar(&mut entries, "disallowed-tools")?.unwrap_or_default();
-    let _ = take_optional_string(&mut entries, "license")?;
+    let allowed_tools = take_tools(&mut entries, "allowed-tools")?;
+    let disallowed_tools = take_tools(&mut entries, "disallowed-tools")?.unwrap_or_default();
+    // `license` is portable metadata that nothing acts on.
+    entries.remove("license");
     let compatibility = take_optional_string(&mut entries, "compatibility")?;
     if compatibility
         .as_deref()
@@ -700,9 +765,11 @@ fn load_skill(
         return Err("field `compatibility` exceeds 500 characters".to_owned());
     }
     let trigger = take_optional_string(&mut entries, "when_to_use")?;
-    let argument_hint = take_optional_string(&mut entries, "argument-hint")?;
-    let model = take_optional_string(&mut entries, "model")?.map(ModelRef);
-    let effort = take_optional_string(&mut entries, "effort")?;
+    let argument_hint = take_argument_hint(&mut entries)?;
+    let model = take_optional_string(&mut entries, "model")?
+        .filter(|model| !model.eq_ignore_ascii_case("inherit"))
+        .map(ModelRef);
+    let effort = take_optional_string(&mut entries, "effort")?.map(|value| value.to_lowercase());
     if let Some(value) = effort.as_deref()
         && ego_core::skill::parse_skill_effort(value).is_none()
     {
@@ -717,6 +784,17 @@ fn load_skill(
                 .to_owned(),
         );
     }
+    if matches!(entries.get("arguments"), Some(Node::Scalar { .. })) {
+        let value = take_optional_string(&mut entries, "arguments")?.expect("present scalar");
+        let names = value
+            .split_whitespace()
+            .map(|value| Node::Scalar {
+                value: value.to_owned(),
+                plain: false,
+            })
+            .collect();
+        entries.insert("arguments".to_owned(), Node::Sequence(names));
+    }
     let arguments = take_string_sequence(&mut entries, "arguments")?;
     if let Some(argument) = arguments
         .iter()
@@ -726,7 +804,24 @@ fn load_skill(
             "field `arguments` contains invalid identifier `{argument}`"
         ));
     }
-    let paths = take_string_sequence(&mut entries, "paths")?;
+    // `resource-paths` is ego's own policy: the skill-relative files a model may
+    // read. `paths` keeps the meaning it has in the reference format, a hint
+    // for when the skill applies, and never restricts anything.
+    let paths = take_string_sequence(&mut entries, "resource-paths")?;
+    let activation = take_activation_paths(&mut entries);
+    let trigger = match (trigger, activation.is_empty()) {
+        (trigger, true) => trigger,
+        (trigger, false) => {
+            let hint = format!(
+                "Applies when working with files matching: {}",
+                activation.join(", ")
+            );
+            Some(match trigger {
+                Some(trigger) => format!("{trigger} {hint}"),
+                None => hint,
+            })
+        }
+    };
     let metadata = take_string_mapping(&mut entries, "metadata")?;
 
     let context = take_optional_string(&mut entries, "context")?;
@@ -740,6 +835,9 @@ fn load_skill(
     if let Some(agent) = &agent {
         validate_profile_name(agent).map_err(|message| format!("field `agent` {message}"))?;
     }
+    // The reference format's default subagent is the child with no special role.
+    // In ego that is a child with no profile, so the name maps to nothing.
+    let agent = agent.filter(|agent| !agent.eq_ignore_ascii_case("general-purpose"));
     let background = take_optional_bool(&mut entries, "background")?.unwrap_or(false);
     let bare = take_optional_bool(&mut entries, "bare")?.unwrap_or(false);
     let hooks = match entries.remove("hooks") {
@@ -751,10 +849,12 @@ fn load_skill(
             .collect::<Result<Vec<_>, _>>()?,
         Some(_) => return Err("field `hooks` must be a sequence".to_owned()),
     };
-    if entries.contains_key("shell") {
-        return Err("field `shell` is unsupported".to_owned());
+    if let Some(shell) = take_optional_string(&mut entries, "shell")?
+        && !matches!(shell.as_str(), "bash" | "powershell")
+    {
+        return Err("field `shell` must be exactly `bash` or `powershell`".to_owned());
     }
-    debug_assert!(entries.is_empty(), "the closed field set is fully consumed");
+    // Remaining fields are inert extensions, not invocation authority.
 
     let location = SkillSourceLocation::parse(&format!("skills/{name}/SKILL.md"))
         .map_err(|error| error.to_string())?;
@@ -806,49 +906,49 @@ fn load_skill(
     Ok(spec)
 }
 
-fn validate_field_names(entries: &BTreeMap<String, Node>) -> Result<(), String> {
-    for key in entries.keys() {
-        if key == "allowed_tools" {
-            return Err(
-                "field `allowed_tools` is unsupported; use exact field `allowed-tools`".to_owned(),
-            );
-        }
-        if !matches!(
-            key.as_str(),
-            "name"
-                | "description"
-                | "license"
-                | "compatibility"
-                | "metadata"
-                | "allowed-tools"
-                | "when_to_use"
-                | "argument-hint"
-                | "arguments"
-                | "disable-model-invocation"
-                | "user-invocable"
-                | "disallowed-tools"
-                | "model"
-                | "effort"
-                | "paths"
-                | "context"
-                | "agent"
-                | "background"
-                | "bare"
-                | "hooks"
-                | "shell"
-        ) {
-            return Err(format!("contains unknown or unsupported field `{key}`"));
+/// Fields whose loss would widen a skill: visibility, tools, execution context.
+const RESTRICTING_KEYS: &[&str] = &[
+    "allowed-tools",
+    "allowed_tools",
+    "disallowed-tools",
+    "disallowed_tools",
+    "disable-model-invocation",
+    "user-invocable",
+    "context",
+    "agent",
+    "bare",
+    "hooks",
+    "model",
+    "effort",
+    "resource-paths",
+];
+
+/// The first restricting field named at the start of a header line, found as
+/// text because the header did not parse.
+fn restricting_key(header: &str) -> Option<&'static str> {
+    header.lines().find_map(|line| {
+        RESTRICTING_KEYS.iter().copied().find(|key| {
+            line.strip_prefix(key)
+                .is_some_and(|rest| rest.trim_start().starts_with(':'))
+        })
+    })
+}
+
+pub(crate) fn validate_field_names(entries: &BTreeMap<String, Node>) -> Result<(), String> {
+    for (old, canonical) in [
+        ("allowed_tools", "allowed-tools"),
+        ("disallowed_tools", "disallowed-tools"),
+    ] {
+        if entries.contains_key(old) {
+            return Err(format!(
+                "field `{old}` is unsupported; use exact field `{canonical}`"
+            ));
         }
     }
     Ok(())
 }
 
-fn take_required_string(entries: &mut BTreeMap<String, Node>, key: &str) -> Result<String, String> {
-    take_optional_string(entries, key)?
-        .ok_or_else(|| format!("is missing required string field `{key}`"))
-}
-
-fn take_optional_string(
+pub(crate) fn take_optional_string(
     entries: &mut BTreeMap<String, Node>,
     key: &str,
 ) -> Result<Option<String>, String> {
@@ -868,8 +968,22 @@ fn take_optional_bool(
         return Ok(None);
     };
     match node {
-        Node::Scalar { value, plain: true } if value == "true" => Ok(Some(true)),
-        Node::Scalar { value, plain: true } if value == "false" => Ok(Some(false)),
+        Node::Scalar { value, plain: true }
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            ) =>
+        {
+            Ok(Some(true))
+        }
+        Node::Scalar { value, plain: true }
+            if matches!(
+                value.to_ascii_lowercase().as_str(),
+                "false" | "no" | "off" | "0"
+            ) =>
+        {
+            Ok(Some(false))
+        }
         _ => Err(format!("field `{key}` must be a boolean")),
     }
 }
@@ -906,51 +1020,145 @@ fn take_string_mapping(
         return Ok(BTreeMap::new());
     };
     let Node::Mapping(nodes) = node else {
-        return Err(format!("field `{key}` must be a string mapping"));
+        return Ok(BTreeMap::new());
     };
-    nodes
+    // Free-form data for outside tools: entries that are not scalars are
+    // skipped, and a number or a boolean is kept as its text.
+    Ok(nodes
         .into_iter()
-        .map(|(key_node, value_node)| {
-            let Some(map_key) = yaml_envelope::scalar(key_node) else {
-                return Err(format!("field `{key}` keys must be non-empty strings"));
-            };
-            let Some(value) = yaml_envelope::scalar(value_node) else {
-                return Err(format!("field `{key}` values must be non-empty strings"));
-            };
-            Ok((map_key, value))
+        .filter_map(|(key_node, value_node)| match (key_node, value_node) {
+            (Node::Scalar { value: map_key, .. }, Node::Scalar { value, .. })
+                if !map_key.is_empty() =>
+            {
+                Some((map_key, value))
+            }
+            _ => None,
         })
+        .collect())
+}
+
+const MAX_DESCRIPTION_CHARS: usize = 1536;
+
+fn truncate_chars(value: String, limit: usize) -> String {
+    match value.char_indices().nth(limit) {
+        Some((end, _)) => value[..end].to_owned(),
+        None => value,
+    }
+}
+
+/// Activation globs: a comma-separated string or a list. Anything else is
+/// ignored, because the globs only inform the model.
+fn take_activation_paths(entries: &mut BTreeMap<String, Node>) -> Vec<String> {
+    let words = match entries.remove("paths") {
+        Some(Node::Scalar { value, .. }) => value.split(',').map(str::to_owned).collect(),
+        Some(Node::Sequence(items)) => items
+            .into_iter()
+            .filter_map(|item| match item {
+                Node::Scalar { value, .. } => Some(value),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    words
+        .into_iter()
+        .map(|word: String| word.trim().to_owned())
+        .filter(|word| !word.is_empty() && !word.chars().any(char::is_control))
+        .take(32)
         .collect()
 }
 
-fn take_tool_scalar(
+/// `[issue-number]` is a YAML list, and it is the spelling the reference
+/// format documents for a hint. Read it back as the bracketed text.
+pub(crate) fn take_argument_hint(
+    entries: &mut BTreeMap<String, Node>,
+) -> Result<Option<String>, String> {
+    if matches!(entries.get("argument-hint"), Some(Node::Sequence(_)))
+        && let Some(Node::Sequence(items)) = entries.remove("argument-hint")
+    {
+        let words = items
+            .into_iter()
+            .map(|item| match item {
+                Node::Scalar { value, .. } if !value.is_empty() => Ok(value),
+                _ => Err("field `argument-hint` must be a string or a list of strings".to_owned()),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if words.is_empty() {
+            return Err("field `argument-hint` must not be an empty list".to_owned());
+        }
+        return Ok(Some(format!("[{}]", words.join(", "))));
+    }
+    take_optional_string(entries, "argument-hint")
+}
+
+pub(crate) fn take_tools(
     entries: &mut BTreeMap<String, Node>,
     key: &str,
 ) -> Result<Option<Vec<String>>, String> {
     let Some(node) = entries.remove(key) else {
         return Ok(None);
     };
-    let value = yaml_envelope::scalar(node)
-        .ok_or_else(|| format!("field `{key}` must be one non-empty space-separated scalar"))?;
-    let tools = value.split(' ').collect::<Vec<_>>();
-    if tools.is_empty()
-        || tools.iter().any(|tool| tool.is_empty())
-        || tools.join(" ") != value
-        || value.contains(',')
-    {
-        return Err(format!(
-            "field `{key}` must be one non-empty space-separated scalar"
-        ));
-    }
-    let mut unique = BTreeSet::new();
-    for tool in &tools {
-        if !PORTABLE_TOOLS.contains(tool) {
-            return Err(format!("field `{key}` contains unknown tool `{tool}`"));
+    let nodes = match node {
+        Node::Sequence(nodes) => nodes,
+        scalar @ Node::Scalar { .. } => vec![scalar],
+        _ => return Err(format!("field `{key}` must be a string or list of strings")),
+    };
+    let mut tools = BTreeSet::new();
+    for node in nodes {
+        let value = yaml_envelope::scalar(node)
+            .ok_or_else(|| format!("field `{key}` must contain non-empty strings"))?;
+        let mut depth = 0usize;
+        for tool in value
+            .split(|c: char| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                depth == 0 && (c == ',' || c.is_whitespace())
+            })
+            .filter(|tool| !tool.is_empty())
+        {
+            if key == "disallowed-tools" {
+                if let Some(tool) = reference_tool(tool) {
+                    tools.insert(tool.to_owned());
+                }
+            } else {
+                if !PORTABLE_TOOLS.contains(&tool) {
+                    if reference_tool(tool).is_some() || tool.contains('(') {
+                        return Err(format!(
+                            "field `{key}` names `{tool}`, which is not an ego tool name; in ego the field narrows the tools a skill may use, so name them as {}",
+                            PORTABLE_TOOLS.join(", ")
+                        ));
+                    }
+                    return Err(format!("field `{key}` contains unknown tool `{tool}`"));
+                }
+                tools.insert(tool.to_owned());
+            }
         }
-        if !unique.insert(*tool) {
-            return Err(format!("field `{key}` contains duplicate tool `{tool}`"));
-        }
     }
-    Ok(Some(tools.into_iter().map(str::to_owned).collect()))
+    Ok(Some(tools.into_iter().collect()))
+}
+
+fn reference_tool(tool: &str) -> Option<&str> {
+    Some(match tool {
+        "Bash" => "exec",
+        "Read" => "read",
+        "Write" => "write",
+        "Edit" | "MultiEdit" => "edit",
+        "Glob" => "glob",
+        "Grep" => "grep",
+        "AskUserQuestion" => "ask_question",
+        "WebFetch" => "web_fetch",
+        "NotebookEdit" => "notebook_edit",
+        "Task" | "Agent" => "task",
+        tool if PORTABLE_TOOLS.contains(&tool)
+            || matches!(tool, "web_fetch" | "notebook_edit" | "task") =>
+        {
+            tool
+        }
+        _ => return None,
+    })
 }
 
 fn validate_skill_name(name: &str) -> Result<(), String> {

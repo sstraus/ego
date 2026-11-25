@@ -1,5 +1,10 @@
-//! Terminal and pipe output share one stdout owner, `Stdout`. Diagnostics use `note` and cannot
-//! write protocol stdout. Structured output must contain no terminal controls.
+//! Everything that reaches a terminal or a pipe: the three `--output` modes
+//! of `CLI.md` §4, and the rule that stdout is protocol-clean.
+//!
+//! §4.5: "stdout is protocol-clean in json/jsonl/acp modes, all diagnostics on
+//! stderr". That is enforced here by there being exactly one type that can
+//! write to stdout at all — [`Stdout`] — and by the diagnostic path
+//! ([`note`]) not being able to reach it.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{ErrorKind, IsTerminal, Write};
@@ -28,8 +33,28 @@ use crate::repl::SurfaceOutput;
 pub trait Diagnostics: Send + Sync {
     fn note(&self, message: &str);
 
+    fn error(&self, message: &str) {
+        self.note(message);
+    }
+
+    /// A local policy notice, without an assistant item or instruction.
+    fn filter_notice(&self, message: &str) {
+        self.note(&format!("εgo filter: {message}"));
+    }
+
     /// One already-laid-out diagnostic block, with no spacing between its rows.
     fn notice_block(&self, message: &str) {
+        self.note(message);
+    }
+
+    /// Startup rows already carry their labels and terminal-width layout.
+    fn startup_block(&self, message: &str) {
+        self.notice_block(message);
+    }
+
+    /// Append-only callers report grants immediately; a terminal groups them
+    /// after admission, using the same resolved authority as its status view.
+    fn startup_detail(&self, message: &str) {
         self.note(message);
     }
 
@@ -38,7 +63,7 @@ pub trait Diagnostics: Send + Sync {
     /// diagnostic and the detail is dropped; a terminal surface commits the
     /// rows to the transcript and keeps the detail.
     fn tool_row(&self, rows: &str, _detail: String) {
-        self.note(rows);
+        self.notice_block(rows);
     }
 
     /// A replaceable successful shell row; append-only adapters keep the row.
@@ -75,6 +100,18 @@ pub trait TextOutput: Diagnostics {
     fn finish_plan(&self, _caps: Capabilities) {}
     fn begin_block(&self) {}
     fn settle_shell(&self) {}
+    fn start_tool(&self, _item: ItemId, line: crate::render::Line) {
+        self.note(&line.text());
+    }
+    fn update_tool(
+        &self,
+        _item: ItemId,
+        _line: crate::render::Line,
+        _preview: Vec<crate::render::Line>,
+    ) {
+    }
+    fn finish_tool(&self, _item: ItemId) {}
+    fn clear_tools(&self) {}
     fn finish(&self) {}
 }
 
@@ -82,8 +119,24 @@ pub trait TextOutput: Diagnostics {
 pub struct Stderr;
 
 impl Diagnostics for Stderr {
+    fn filter_notice(&self, message: &str) {
+        let mut err = std::io::stderr();
+        let raw = stderr_is_raw(&err);
+        write_notice(
+            &mut err,
+            &format!("εgo filter: {message}"),
+            None,
+            raw,
+            false,
+        );
+    }
+
     fn note(&self, message: &str) {
         note(message);
+    }
+
+    fn error(&self, message: &str) {
+        stderr_error(message, false);
     }
 
     fn notice_block(&self, message: &str) {
@@ -122,17 +175,25 @@ impl Diagnostics for Stderr {
 /// the failure it avoids.
 pub struct Stdout {
     inner: Mutex<Option<std::io::Stdout>>,
+    no_color: bool,
     /// The first write that failed, kept so the run can report *why* it
     /// stopped rather than merely that it did.
     broken: Mutex<Option<String>>,
+    last_diagnostic: Mutex<Option<String>>,
     cancel: CancelToken,
 }
 
 impl Stdout {
     pub fn new(cancel: CancelToken) -> Self {
+        Self::with_no_color(cancel, false)
+    }
+
+    pub fn with_no_color(cancel: CancelToken, no_color: bool) -> Self {
         Stdout {
             inner: Mutex::new(Some(std::io::stdout())),
+            no_color,
             broken: Mutex::new(None),
+            last_diagnostic: Mutex::new(None),
             cancel,
         }
     }
@@ -179,6 +240,23 @@ impl Stdout {
         self.cancel.cancel(CancelCause::Host);
     }
 
+    /// Report termination unless the event stream just printed the same cause.
+    pub fn final_note(&self, message: &str, error: bool) {
+        if self
+            .last_diagnostic
+            .lock()
+            .expect("diagnostic lock")
+            .as_deref()
+            != Some(message)
+        {
+            if error {
+                self.error(message);
+            } else {
+                self.note(message);
+            }
+        }
+    }
+
     /// Why stdout stopped accepting writes, if it did.
     pub fn broken(&self) -> Option<String> {
         self.broken
@@ -189,8 +267,24 @@ impl Stdout {
 }
 
 impl Diagnostics for Stdout {
+    fn startup_block(&self, message: &str) {
+        let mut err = std::io::stderr();
+        let raw = stderr_is_raw(&err);
+        write_notice(&mut err, message, None, raw, false);
+    }
+
+    fn filter_notice(&self, message: &str) {
+        Stderr.filter_notice(message);
+    }
+
     fn note(&self, message: &str) {
         note(message);
+        *self.last_diagnostic.lock().expect("diagnostic lock") = Some(message.to_owned());
+    }
+
+    fn error(&self, message: &str) {
+        stderr_error(message, self.no_color);
+        *self.last_diagnostic.lock().expect("diagnostic lock") = Some(message.to_owned());
     }
 
     fn notice_block(&self, message: &str) {
@@ -238,22 +332,46 @@ pub struct InteractiveOutput {
     inner: Mutex<SurfaceOutput>,
     /// Shared with the terminal owner's tool expansion action.
     details: Arc<ExpansionHistory>,
+    caps: Capabilities,
 }
 
 impl InteractiveOutput {
     pub fn new(output: SurfaceOutput) -> Self {
+        Self::with_capabilities(output, Capabilities::plain())
+    }
+
+    pub fn with_capabilities(output: SurfaceOutput, caps: Capabilities) -> Self {
         Self {
             details: Arc::clone(&output.details),
             inner: Mutex::new(output),
+            caps,
         }
     }
 }
 
 impl Diagnostics for InteractiveOutput {
+    fn startup_detail(&self, _message: &str) {}
+
+    fn startup_block(&self, message: &str) {
+        self.line(message);
+    }
+
+    fn filter_notice(&self, message: &str) {
+        let text = format!("εgo filter: {message}");
+        let width = terminal_size::terminal_size().map(|(width, _)| usize::from(width.0));
+        self.line(&wrap_notice(&text, width));
+    }
+
     fn note(&self, message: &str) {
         let text = format!("{DISPLAY_NAME}: {message}");
         let width = terminal_size::terminal_size().map(|(width, _)| usize::from(width.0));
         self.line(&wrap_notice(&text, width));
+    }
+
+    fn error(&self, message: &str) {
+        let width = terminal_size::terminal_size().map(|(width, _)| usize::from(width.0));
+        let text = wrap_notice(&format!("{DISPLAY_NAME}: {message}"), width);
+        self.line(&paint_error(&text, self.caps.coloured()));
     }
 
     fn notice_block(&self, message: &str) {
@@ -359,6 +477,39 @@ impl TextOutput for InteractiveOutput {
             .settle_shell();
     }
 
+    fn start_tool(&self, item: ItemId, line: crate::render::Line) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .start_tool(item, line);
+    }
+
+    fn update_tool(
+        &self,
+        item: ItemId,
+        line: crate::render::Line,
+        preview: Vec<crate::render::Line>,
+    ) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .update_tool(item, line, preview);
+    }
+
+    fn finish_tool(&self, item: ItemId) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .finish_tool(item);
+    }
+
+    fn clear_tools(&self) {
+        self.inner
+            .lock()
+            .expect("surface output lock")
+            .clear_tools();
+    }
+
     fn finish(&self) {
         let _ = self.inner.lock().expect("surface output lock").finish();
     }
@@ -404,20 +555,22 @@ pub(crate) fn plan_block(plan: &ego_core::plan::Plan, caps: Capabilities) -> Str
     use ego_core::plan::StepStatus;
 
     if plan.steps.is_empty() {
-        return "Plan cleared".into();
+        return "Worklist cleared".into();
     }
     let completed = plan
         .steps
         .iter()
         .filter(|step| step.status == StepStatus::Completed)
         .count();
-    let mut rows = vec![format!("Plan {completed}/{}", plan.steps.len())];
+    let mut rows = vec![format!("Worklist {completed}/{}", plan.steps.len())];
     for step in &plan.steps {
         let (symbol, colour) = match step.status {
             StepStatus::Completed => ("✓", Palette::ADDED_FG),
             StepStatus::InProgress => ("▶", Palette::CODE),
             StepStatus::Pending => ("○", Palette::GUTTER_FG),
             StepStatus::Blocked => ("!", Palette::ERROR),
+            StepStatus::Waiting => ("…", Palette::GUTTER_FG),
+            StepStatus::Cancelled => ("×", Palette::GUTTER_FG),
         };
         // A step is one logical row even when its text contains line breaks.
         let text = ego_core::permit::terminal_safe(
@@ -434,14 +587,64 @@ pub(crate) fn plan_block(plan: &ego_core::plan::Plan, caps: Capabilities) -> Str
     rows.join("\n")
 }
 
+fn stderr_error(message: &str, no_color: bool) {
+    let mut err = std::io::stderr();
+    let environment = crate::render::caps::Environment::read();
+    let terminal = crate::render::caps::Terminal {
+        stdout_is_terminal: err.is_terminal(),
+        ..crate::render::caps::Terminal::from_process(no_color, &environment)
+    };
+    let caps = Capabilities::of(&terminal);
+    let width = err
+        .is_terminal()
+        .then(terminal_size::terminal_size)
+        .flatten()
+        .map(|(width, _)| usize::from(width.0));
+    let raw = stderr_is_raw(&err);
+    write_diagnostic(&mut err, message, width, raw, caps.coloured());
+}
+
 fn stderr_is_raw(err: &std::io::Stderr) -> bool {
     err.is_terminal() && crossterm::terminal::is_raw_mode_enabled().unwrap_or(false)
 }
 
-fn write_note(mut err: impl Write, message: &str, width: Option<usize>, raw: bool) {
-    // Nothing to be done if the diagnostic channel itself is gone, and a
-    // panic here would replace a report with a crash.
-    let text = wrap_notice(&format!("{DISPLAY_NAME}: {message}"), width);
+fn write_note(err: impl Write, message: &str, width: Option<usize>, raw: bool) {
+    write_diagnostic(err, message, width, raw, false);
+}
+
+fn paint_error(text: &str, coloured: bool) -> String {
+    if coloured {
+        format!("\x1b[31m{text}\x1b[0m")
+    } else {
+        text.to_owned()
+    }
+}
+
+fn write_diagnostic(
+    err: impl Write,
+    message: &str,
+    width: Option<usize>,
+    raw: bool,
+    coloured: bool,
+) {
+    write_notice(
+        err,
+        &format!("{DISPLAY_NAME}: {message}"),
+        width,
+        raw,
+        coloured,
+    );
+}
+
+fn write_notice(
+    mut err: impl Write,
+    message: &str,
+    width: Option<usize>,
+    raw: bool,
+    coloured: bool,
+) {
+    // A closed diagnostic channel must not replace a report with a crash.
+    let text = paint_error(&wrap_notice(message, width), coloured);
     if raw {
         // Raw mode disables the tty's LF-to-CRLF translation, including wrapped rows.
         let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
@@ -463,59 +666,43 @@ pub fn empty_listing(missing: &str, add_with: &str) -> String {
     format!("{missing}; see '{add_with} --help' to add an entry")
 }
 
-/// Human completion notice; full-output handles belong only in model history.
-pub(crate) fn background_exec_notice(snapshot: &ego_core::permit::DetachedExecSnapshot) -> String {
+/// Human completion notice. The model and evidence store retain full output.
+/// Keep one turn's outcome block short even when many processes finish at once.
+pub(crate) fn background_exec_notice(
+    snapshots: &[&ego_core::permit::DetachedExecSnapshot],
+) -> String {
     use ego_core::permit::DetachedExecOutcome;
 
-    let state = match &snapshot.outcome {
-        None => "running".to_owned(),
-        Some(DetachedExecOutcome::Exited { code, .. }) => format!("exited code {code}"),
-        Some(DetachedExecOutcome::Signalled {
-            signal: Some(signal),
-            ..
-        }) => {
-            format!("stopped by signal {signal}")
-        }
-        Some(DetachedExecOutcome::Signalled { signal: None, .. }) => {
-            "stopped by a signal".to_owned()
-        }
-        Some(DetachedExecOutcome::Cancelled) => "cancelled".to_owned(),
-        Some(DetachedExecOutcome::TimedOut { timeout_ms }) => {
-            format!("timed out after {timeout_ms} ms")
-        }
-        Some(DetachedExecOutcome::Interrupted) => "interrupted".to_owned(),
-        Some(DetachedExecOutcome::Failed { reason }) => format!("failed: {reason}"),
-    };
-    let mut text = format!("Background command {}: {state}.", snapshot.id);
-    for (label, bytes, omitted) in [
-        ("Output", &snapshot.stdout_tail, snapshot.stdout_omitted),
-        (
-            "Error output",
-            &snapshot.stderr_tail,
-            snapshot.stderr_omitted,
-        ),
-    ] {
-        let tail = String::from_utf8_lossy(bytes);
-        let tail = tail.trim_end();
-        if !tail.is_empty() {
-            if omitted == 0 {
-                text.push_str(&format!("\n{label}:\n{tail}"));
-            } else {
-                text.push_str(&format!(
-                    "\n{label} ({omitted} earlier bytes omitted):\n{tail}"
-                ));
-            }
-        } else if omitted > 0 {
-            text.push_str(&format!("\n{label}: {omitted} bytes omitted."));
+    let failures = snapshots
+        .iter()
+        .filter(|snapshot| {
+            !matches!(
+                snapshot.outcome,
+                Some(DetachedExecOutcome::Exited { code: 0, .. })
+            )
+        })
+        .count();
+    format!(
+        "Background commands: {} settled, {failures} not successful.",
+        snapshots.len()
+    )
+}
+
+pub(crate) struct JsonDiagnosticSink;
+
+impl EventSink for JsonDiagnosticSink {
+    fn publish(&self, event: &PublicEvent, _state: &SessionState) {
+        if let PublicEvent::FilterNotice { text, .. } = event {
+            Stderr.filter_notice(text);
         }
     }
-    text
 }
 
 /// The live view of a run: one `PublicEvent` per line, as it happens.
 ///
-/// Publish and flush each JSONL event immediately so consumers observe it before the turn
-/// ends.
+/// `CLI.md` §4.2 says *live*, and the only way a sink can be live is to write
+/// on `publish` — which is what this does, flushing every line, so a consumer
+/// reading a pipe sees an event before the turn that produced it has ended.
 pub struct JsonlSink<'a> {
     out: &'a Stdout,
 }
@@ -545,8 +732,47 @@ impl EventSink for JsonlSink<'_> {
 #[derive(Default)]
 pub(crate) struct ProviderTurnNotices(Mutex<HashMap<TurnId, String>>);
 
+/// How a failed turn ended, and the last error it published.
+pub(crate) struct TurnFailure {
+    exit_reason: ego_core::event::domain::ExitReason,
+    cause: Option<String>,
+}
+
+impl TurnFailure {
+    pub(crate) fn provider_notice(&self) -> Option<String> {
+        (self.exit_reason == ego_core::event::domain::ExitReason::Provider).then(|| {
+            format!(
+                "{}; review the output, then send a new prompt to continue",
+                self.cause
+                    .as_deref()
+                    .unwrap_or("the provider response failed")
+            )
+        })
+    }
+
+    /// The message of a refused turn: a retry of the same request repeats it.
+    pub(crate) fn refusal(&self) -> Option<String> {
+        refused(false, self.exit_reason).then(|| {
+            self.cause
+                .clone()
+                .unwrap_or_else(|| "the turn was refused".to_owned())
+        })
+    }
+}
+
+/// A turn that the request itself made fail (preflight gap, invalid request,
+/// policy). Unlike a provider failure, waking the session again repeats it.
+pub(crate) fn refused(ok: bool, exit_reason: ego_core::event::domain::ExitReason) -> bool {
+    !ok && exit_reason == ego_core::event::domain::ExitReason::Usage
+}
+
 impl ProviderTurnNotices {
     pub(crate) fn observe(&self, event: &PublicEvent) -> Option<String> {
+        self.failure(event)?.provider_notice()
+    }
+
+    /// The failure of a turn, once, at its completion.
+    pub(crate) fn failure(&self, event: &PublicEvent) -> Option<TurnFailure> {
         match event {
             PublicEvent::Error { turn, message, .. } => {
                 self.0
@@ -565,11 +791,9 @@ impl ProviderTurnNotices {
                 exit_reason,
             } => {
                 let cause = self.0.lock().expect("turn diagnostic lock").remove(turn);
-                (!*ok && *exit_reason == ego_core::event::domain::ExitReason::Provider).then(|| {
-                    format!(
-                        "{}; review the output, then send a new prompt to continue",
-                        cause.as_deref().unwrap_or("the provider response failed")
-                    )
+                (!*ok).then_some(TurnFailure {
+                    exit_reason: *exit_reason,
+                    cause,
                 })
             }
             _ => None,
@@ -578,6 +802,7 @@ impl ProviderTurnNotices {
 }
 
 /// The default text mode: line-oriented, closer to a Unix tool than a TUI
+/// (`SPEC.md` §2.3, `ARCHITECTURE.md` §6).
 ///
 /// Assistant text is written as it streams, with no line of its own, so
 /// `ego run "…" > answer.txt` contains the answer and nothing else. Everything
@@ -610,6 +835,8 @@ pub struct TextSink<'a> {
     turn_started: Mutex<HashMap<TurnId, Instant>>,
     edited_lines: Mutex<HashMap<TurnId, ego_core::permit::LineChange>>,
     last_cache: Mutex<Option<(ego_core::generator::attempt::CachePrefix, bool)>>,
+    /// Remembers which MCP attention notes earlier launches already showed.
+    attention: Option<crate::mcp_attention::AttentionLedger>,
 }
 
 struct StartedCall {
@@ -626,11 +853,9 @@ struct Streaming {
 
 impl<'a> TextSink<'a> {
     pub fn set_workspace(&self, workspace: Option<&std::path::Path>) {
-        self.text
-            .lock()
-            .expect("text sink lock")
-            .answer
-            .set_workspace(workspace);
+        let mut text = self.text.lock().expect("text sink lock");
+        text.answer.set_workspace(workspace);
+        text.tools.set_workspace(workspace);
     }
 
     pub fn new(
@@ -644,7 +869,7 @@ impl<'a> TextSink<'a> {
             quiet,
             text: Mutex::new(Streaming {
                 answer: Answer::new(capabilities, workspace),
-                tools: tool_row::ToolRows::default(),
+                tools: tool_row::ToolRows::new(workspace),
                 open: false,
             }),
             ceiling: Mutex::new(None),
@@ -656,7 +881,18 @@ impl<'a> TextSink<'a> {
             turn_started: Mutex::new(HashMap::new()),
             edited_lines: Mutex::new(HashMap::new()),
             last_cache: Mutex::new(None),
+            attention: None,
         }
+    }
+
+    /// Show each MCP attention note once per server instead of at every launch.
+    #[must_use]
+    pub(crate) fn with_attention_ledger(
+        mut self,
+        ledger: crate::mcp_attention::AttentionLedger,
+    ) -> Self {
+        self.attention = Some(ledger);
+        self
     }
 
     /// Compare reduced goal facts, not provider prose, at the live output boundary.
@@ -697,13 +933,14 @@ impl<'a> TextSink<'a> {
                 };
                 receipts.push(format!("Goal ({owner}): {}", goal.objective));
             }
-            let allowance = goal
-                .continuation_budget
-                .map_or_else(|| "pending".into(), |n| n.to_string());
+            let allowance = goal.continuation_budget.map(|n| n.to_string());
             if prior.is_some_and(|prior| prior.continuation_turns < goal.continuation_turns) {
+                let turn = allowance.as_ref().map_or_else(
+                    || format!("Goal turn {}", goal.continuation_turns),
+                    |limit| format!("Goal turn {} of {limit}", goal.continuation_turns),
+                );
                 receipts.push(format!(
-                    "Goal turn {} of {allowance}: {}",
-                    goal.continuation_turns,
+                    "{turn}: {}",
                     goal.blocker_reason
                         .as_deref()
                         .unwrap_or("condition unavailable")
@@ -719,20 +956,32 @@ impl<'a> TextSink<'a> {
                         "Goal paused, waiting for you: {}. It continues after your reply.",
                         goal.objective
                     ));
+                } else if let Some(dependency) = goal_wait_reason(goal) {
+                    if prior.and_then(goal_wait_reason).is_none() {
+                        receipts.push(format!(
+                            "Goal waiting: {} — {dependency}. It continues when new input or completion evidence arrives.",
+                            goal.objective
+                        ));
+                    }
                 } else {
                     let mut receipt = format!("Goal stopped: {} — {reason}", goal.objective);
                     if goal.continuation_turns > 0 {
-                        receipt
-                            .push_str(&format!("; turns {}/{allowance}", goal.continuation_turns));
+                        receipt.push_str(&allowance.as_ref().map_or_else(
+                            || format!("; turns {}", goal.continuation_turns),
+                            |limit| format!("; turns {}/{limit}", goal.continuation_turns),
+                        ));
                     }
                     if let Some(condition) = &goal.blocker_reason {
                         receipt.push_str(&format!("; last unmet condition: {condition}"));
                     }
                     receipt.push_str(". Inspect the goal with '/goal show'.");
-                    if goal.state == GoalState::Active
-                        && reason.starts_with("goal continuation budget exhausted")
+                    if goal.owner == ego_core::goal::GoalOwner::Automated
+                        && goal.state == GoalState::Active
+                        && goal
+                            .continuation_budget
+                            .is_some_and(|limit| goal.continuation_turns >= limit)
                     {
-                        receipt.push_str(" Grant N more automatic turns with '/goal extend N' or 'ego resume ID --goal-operation extend=N', then continue work.");
+                        receipt.push_str(" Resume with '/goal resume' or 'ego resume ID --goal-operation resume', then submit a work prompt.");
                     }
                     receipts.push(receipt);
                 }
@@ -748,9 +997,14 @@ impl<'a> TextSink<'a> {
     /// What an operator has to be told about the ceiling they asked for, and
     /// `None` when the flag does exactly what its spelling says.
     ///
-    /// Tell text-mode operators when a monetary ceiling is inapplicable or clamped.
-    /// Machine-readable `MeteringSelected` events alone do not inform a reader of default
-    /// terminal output.
+    /// Two of [`CeilingEffect`]'s three values are a flag that behaves
+    /// differently from how it reads, and `CLI.md` §5 spells `--budget` as a
+    /// **hard cap**: `Inapplicable` is not a cap at all, and a clamped `Binds`
+    /// caps at a figure nobody typed. Both are already on
+    /// [`PublicEvent::MeteringSelected`] for `--output json/jsonl`; this is the
+    /// same fact for the operator who did not ask for a machine-readable
+    /// stream, and without it the default mode is exactly the "silently vacuous
+    /// flag" that event's own doc says is not acceptable.
     ///
     /// Money is rendered `{amount}{currency}` — the spelling `--budget` itself
     /// accepts — so the figure quoted back can be retyped.
@@ -852,6 +1106,31 @@ impl<'a> TextSink<'a> {
 }
 
 impl EventSink for TextSink<'_> {
+    fn wants_exec_progress(&self) -> bool {
+        self.capabilities.on_screen() && !self.quiet
+    }
+
+    fn exec_progress(&self, item: ItemId, elapsed: std::time::Duration, output: &[u8]) {
+        let calls = self.calls.lock().expect("started calls lock");
+        let Some(call) = calls.get(&item) else {
+            return;
+        };
+        let text = String::from_utf8_lossy(output);
+        let mut preview: Vec<_> = text
+            .lines()
+            .rev()
+            .take(tool_row::PREVIEW_LINES)
+            .map(|row| crate::render::Line::plain(ego_core::permit::terminal_safe(row)))
+            .collect();
+        preview.reverse();
+        let args: serde_json::Value = serde_json::from_str(&call.args).unwrap_or_default();
+        let program = args["argv"][0].as_str().unwrap_or("exec");
+        let program = ego_core::permit::terminal_safe(program);
+        let line = crate::render::Line::plain(format!("… $ {} · {}s", program, elapsed.as_secs()));
+        drop(calls);
+        self.out.update_tool(item, line, preview);
+    }
+
     fn cache_observed(
         &self,
         prefix: &ego_core::generator::attempt::CachePrefix,
@@ -889,10 +1168,15 @@ impl EventSink for TextSink<'_> {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         let provider_notice = self.provider_notices.observe(event);
+        if matches!(event, PublicEvent::TurnCompleted { .. }) {
+            self.out.clear_tools();
+        }
         self.goal_receipts(event, state);
-        if matches!(event, PublicEvent::TurnCompleted { .. }) && !self.quiet {
+        if matches!(event, PublicEvent::TurnCompleted { .. }) {
             self.finish();
-            self.out.finish_plan(self.capabilities.with_current_width());
+            if !self.quiet {
+                self.out.finish_plan(self.capabilities.with_current_width());
+            }
         }
         // Only adjacent completed top-level exec calls share the live row.
         // Prose settles through write_answer/begin_block when it becomes visible;
@@ -919,6 +1203,13 @@ impl EventSink for TextSink<'_> {
             {
                 self.finish();
                 let failed = matches!(event, PublicEvent::TurnCompleted { ok: false, .. });
+                let cancelled = matches!(
+                    event,
+                    PublicEvent::TurnCompleted {
+                        exit_reason: ego_core::event::domain::ExitReason::Cancelled(_),
+                        ..
+                    }
+                );
                 let colour = if failed {
                     crate::render::style::Palette::ERROR
                 } else {
@@ -926,18 +1217,45 @@ impl EventSink for TextSink<'_> {
                 };
                 let style = crate::render::style::Style::fg(colour);
                 let capabilities = self.capabilities.with_current_width();
-                let receipt = crate::render::Line::of(vec![
-                    crate::render::Span::new(format!("{DISPLAY_NAME}: "), style),
-                    crate::render::Span::new(cause, if failed { style } else { style.strike() }),
-                    crate::render::Span::new(" — retry finished", style),
-                ])
-                .wrap(capabilities.width)
-                .into_iter()
-                .map(|line| line.render(capabilities.depth))
-                .collect::<Vec<_>>()
-                .join("\n");
+                let mut receipt = crate::render::Line::of(vec![crate::render::Span::new(
+                    format!("{DISPLAY_NAME}: "),
+                    style,
+                )]);
+                if !cancelled {
+                    receipt.push(crate::render::Span::new(
+                        cause,
+                        if failed { style } else { style.strike() },
+                    ));
+                    receipt.push(crate::render::Span::new(" — ", style));
+                }
+                receipt.push(crate::render::Span::new(
+                    if cancelled {
+                        "retry cancelled"
+                    } else if failed {
+                        "retry failed"
+                    } else {
+                        "retry succeeded"
+                    },
+                    style,
+                ));
+                let receipt = receipt
+                    .wrap(capabilities.width)
+                    .into_iter()
+                    .map(|line| line.render(capabilities.depth))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 self.out.line(&receipt);
             }
+        }
+        if matches!(
+            event,
+            PublicEvent::TurnStarted { .. }
+                | PublicEvent::ItemCompleted {
+                    kind: ItemKind::AgentMessage,
+                    ..
+                }
+        ) {
+            self.finish();
         }
         match event {
             PublicEvent::TurnStarted { turn } if self.capabilities.on_screen() => {
@@ -946,7 +1264,11 @@ impl EventSink for TextSink<'_> {
                     .expect("turn clock lock")
                     .insert(*turn, Instant::now());
             }
-            PublicEvent::TurnCompleted { turn, ok, .. } if self.capabilities.on_screen() => {
+            PublicEvent::TurnCompleted {
+                turn,
+                ok,
+                exit_reason,
+            } if self.capabilities.on_screen() => {
                 let started = self
                     .turn_started
                     .lock()
@@ -958,7 +1280,10 @@ impl EventSink for TextSink<'_> {
                     .expect("edit count lock")
                     .remove(turn);
                 if let Some(started) = started
+                    && state.turns.contains_key(turn)
                     && (!self.quiet || provider_notice.is_some())
+                    && (*exit_reason != ego_core::event::domain::ExitReason::ContextOverflow
+                        || provider_notice.is_some())
                 {
                     self.finish();
                     let elapsed = tool_row::duration(started.elapsed());
@@ -1006,18 +1331,24 @@ impl EventSink for TextSink<'_> {
                 }
             }
             PublicEvent::SessionStarted { mcp_errors, .. } => {
-                if !mcp_errors.is_empty() {
+                if mcp_errors.is_empty() {
+                    if let Some(ledger) = &self.attention {
+                        ledger.unseen(&[]);
+                    }
+                } else {
                     self.finish();
                     if self.capabilities.on_screen() {
-                        let servers = if mcp_errors.len() == 1 {
-                            "server needs"
-                        } else {
-                            "servers need"
+                        let fresh = match &self.attention {
+                            Some(ledger) => ledger.unseen(mcp_errors),
+                            None => mcp_errors.clone(),
                         };
-                        self.out.note(&format!(
-                            "MCP: {} {servers} attention; run /mcp for status or 'ego mcp ls' for diagnostics",
-                            mcp_errors.len()
-                        ));
+                        if !fresh.is_empty() {
+                            self.out
+                                .startup_block(&crate::mcp_attention::startup_notice(
+                                    mcp_errors,
+                                    self.capabilities.with_current_width().width,
+                                ));
+                        }
                     } else {
                         for error in mcp_errors {
                             self.out.note(error);
@@ -1035,8 +1366,16 @@ impl EventSink for TextSink<'_> {
                 text,
                 ..
             } => self.stream(text),
-            // One row per call, drawn when the call finishes: a row needs the
-            // outcome and the duration, and the start event has neither.
+            PublicEvent::ItemStarted {
+                kind: ItemKind::Tool,
+                name,
+                ..
+            } if self.quiet || name.as_deref() == Some(ego_core::question::ASK_QUESTION_TOOL) => {
+                let mut streaming = self.text.lock().expect("streaming output lock");
+                self.finish_text(&mut streaming);
+            }
+            // Show the unresolved request without inventing an outcome; completion
+            // replaces it with the existing compact receipt.
             // `ask_question` gets none: the selector already shows the
             // question as prompt and options, and a row would repeat the call's
             // JSON after the answer.
@@ -1047,6 +1386,22 @@ impl EventSink for TextSink<'_> {
                 text,
                 ..
             } if !self.quiet && name != ego_core::question::ASK_QUESTION_TOOL => {
+                {
+                    let mut streaming = self.text.lock().expect("streaming output lock");
+                    self.finish_text(&mut streaming);
+                }
+                if (self.capabilities.on_screen() || name == "exec")
+                    && tool_row::can_show_request(name, text.as_deref().unwrap_or(""))
+                {
+                    self.out.start_tool(
+                        *item,
+                        tool_row::running(
+                            name,
+                            text.as_deref().unwrap_or(""),
+                            self.capabilities.with_current_width(),
+                        ),
+                    );
+                }
                 self.calls
                     .lock()
                     .expect("a poisoned lock means a writer panicked mid-line")
@@ -1087,46 +1442,91 @@ impl EventSink for TextSink<'_> {
                     .expect("a poisoned lock means a writer panicked mid-line")
                     .remove(item);
                 if let Some(started) = started {
+                    self.out.finish_tool(*item);
                     let mut streaming = self.text.lock().expect("streaming output lock");
                     self.finish_text(&mut streaming);
-                    let record = streaming.tools.record(
-                        &Finished {
+                    let write_result = state
+                        .items
+                        .get(item)
+                        .and_then(|item| item.tool_result.as_ref())
+                        .filter(|_| {
+                            matches!(started.name.rsplit(" › ").next(), Some("write" | "edit"))
+                        });
+                    if let Some(result) = write_result {
+                        let result_text = result.model_text();
+                        let call = Finished {
                             name: &started.name,
                             args: &started.args,
                             ok: *ok,
-                            result: text.as_deref().unwrap_or(""),
-                            result_blocks: state
-                                .items
-                                .get(item)
-                                .and_then(|item| item.tool_result.as_ref())
-                                .map(|result| result.content.as_slice()),
+                            result: &result_text,
+                            result_blocks: Some(&result.content),
                             timing: state.items.get(item).and_then(|item| item.tool_timing),
-                        },
-                        self.capabilities.with_current_width(),
-                    );
-                    if self.capabilities.on_screen()
-                        && let Some(live) = record.shell_progress
-                    {
-                        self.out.shell_row(&record.rows, record.detail, live);
+                            before_image: None,
+                        };
+                        for record in streaming.tools.record_writes(
+                            &call,
+                            result.file_writes(),
+                            self.capabilities.with_current_width(),
+                        ) {
+                            self.out.tool_row(&record.rows, record.detail);
+                        }
                     } else {
-                        self.out.tool_row(&record.rows, record.detail);
+                        let record = streaming.tools.record(
+                            &Finished {
+                                name: &started.name,
+                                args: &started.args,
+                                ok: *ok,
+                                result: text.as_deref().unwrap_or(""),
+                                result_blocks: state
+                                    .items
+                                    .get(item)
+                                    .and_then(|item| item.tool_result.as_ref())
+                                    .map(|result| result.content.as_slice()),
+                                timing: state.items.get(item).and_then(|item| item.tool_timing),
+                                before_image: state
+                                    .items
+                                    .get(item)
+                                    .and_then(|item| item.tool_result.as_ref())
+                                    .and_then(|result| result.before_image()),
+                            },
+                            self.capabilities.with_current_width(),
+                        );
+                        if self.capabilities.on_screen()
+                            && let Some(live) = record.shell_progress
+                        {
+                            self.out.shell_row(&record.rows, record.detail, live);
+                        } else {
+                            self.out.tool_row(&record.rows, record.detail);
+                        }
                     }
                 }
             }
-            // Do not suppress unmet-guarantee warnings with `quiet`; these are policy
-            // facts, not progress output.
+            // The durable anomaly still records unknown cost. Only a known
+            // absence of a monetary ceiling makes its cap warning irrelevant.
+            // An unknown ceiling keeps the warning; quiet mode does not hide
+            // a configured cap that cannot protect the owner.
+            PublicEvent::FilterNotice { text, .. } => {
+                self.finish();
+                self.out.filter_notice(text);
+            }
             PublicEvent::CostAnomaly {
                 model,
                 estimated_upper_bound,
                 cause,
                 ..
             } => {
-                self.finish();
-                self.out.note(&ego_core::public::cost_anomaly_message(
-                    model,
-                    estimated_upper_bound.as_ref(),
-                    *cause,
-                ));
+                let uncapped = matches!(
+                    self.ceiling.lock().expect("ceiling state lock").as_ref(),
+                    Some((CeilingEffect::None, _))
+                );
+                if !uncapped {
+                    self.finish();
+                    self.out.note(&ego_core::public::cost_anomaly_message(
+                        model,
+                        estimated_upper_bound.as_ref(),
+                        *cause,
+                    ));
+                }
             }
             PublicEvent::MeteringSelected { ceiling, rates, .. } => {
                 let mut last = self
@@ -1154,6 +1554,7 @@ impl EventSink for TextSink<'_> {
                 attempt,
                 limit,
                 delay_ms,
+                capacity,
                 cause,
                 recovery_remaining_ms,
                 ..
@@ -1167,8 +1568,20 @@ impl EventSink for TextSink<'_> {
                 } else {
                     format!("attempt {attempt}/{limit}")
                 };
+                let (problem, at) = if *capacity {
+                    let next = chrono::Local::now()
+                        + chrono::TimeDelta::milliseconds(
+                            i64::try_from(*delay_ms).unwrap_or(i64::MAX / 1_000_000),
+                        );
+                    (
+                        "provider at capacity",
+                        format!(" at {}", next.format("%-I:%M:%S %p")),
+                    )
+                } else {
+                    ("connection problem", String::new())
+                };
                 let message = format!(
-                    "{cause} — connection problem, retrying in {:.1}s ({counter})",
+                    "{cause} — {problem}, retrying in {:.1}s{at} ({counter})",
                     *delay_ms as f64 / 1_000.0
                 );
                 if self.capabilities.on_screen() && self.out.live_retry() {
@@ -1193,7 +1606,7 @@ impl EventSink for TextSink<'_> {
                     *self.retry_cause.lock().expect("retry cause lock") = Some(message.clone());
                     self.out.retry_status(Some((message, 0)));
                 } else {
-                    self.out.note(message);
+                    self.out.error(message);
                 }
             }
             _ => {}
@@ -1201,16 +1614,23 @@ impl EventSink for TextSink<'_> {
     }
 }
 
-/// Last reported context occupancy. An absent value means unknown, not an empty context.
+/// The occupancy half of §4.1's result, present only when something reported
+/// it. An absent key says "nobody has told us"; a zero would say the context
+/// is empty.
 #[derive(Debug, Serialize)]
 pub struct ContextReport {
     pub used_tokens: u64,
     pub provenance: OccupancyProvenance,
 }
 
-/// The single JSON completion object. Derive `ok` and `exit_reason` from one `RunTermination`
-/// so they cannot contradict each other. Serialize usage and cost from the core session state
-/// rather than rebuilding their vocabulary.
+/// The single object `--output json` writes at completion (`CLI.md` §4.1).
+///
+/// `ok` and `exit_reason` are both read off one [`RunTermination`], so they
+/// cannot disagree — §4.2's "one error field" rule, and the Claude
+/// `subtype:"success"` + `is_error:true` contradiction it was written against.
+/// `usage` and `cost` are `SessionState`'s own values, serialised rather than
+/// rebuilt: the four priced categories and the `unstarted|known|unknown` state
+/// are contracts core already owns.
 #[derive(Debug, Serialize)]
 pub struct Report {
     pub v: u32,
@@ -1224,12 +1644,27 @@ pub struct Report {
     /// server was admitted.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp_errors: Vec<String>,
-    /// The denied action, so a script receiving exit 3 can identify the permission it needs.
+    /// The action a permission-refused run was denied. §4.4 requires it: a
+    /// script handed exit 3 and no subject has been told nothing.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denied: Option<String>,
-    /// The authority that refused, separate from the denied action. Absence means nobody
-    /// answered, not an unnamed refusal. This optional field is detected by presence and
-    /// appears only for policy refusal.
+    /// Who refused it, when somebody did.
+    ///
+    /// Beside [`denied`](Self::denied) rather than replacing it: the action
+    /// and the authority are two facts, and folding one into the other would
+    /// break every consumer of a documented §4.4 field for no gain.
+    ///
+    /// Absent means **nobody answered** — §6's evaluation order was exhausted
+    /// — which is unambiguous alongside `exit_reason: "permission"`. That is
+    /// the one place [`DeniedBy`](ego_core::run::DeniedBy)'s explicit `Nobody`
+    /// arm becomes an `Option`, and the one place the `Option` earns its keep.
+    ///
+    /// A new key and no version bump. §4.2 already ratifies presence as this
+    /// format's detection mechanism — error arrays "present only when
+    /// non-empty — a CI gate is a presence check" — so a key that appears only
+    /// on exit 3 is additive under a rule that was written down rather than
+    /// under one asserted here. See
+    /// the design notes §4.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub denied_by: Option<Authority>,
     pub turns: usize,
@@ -1245,6 +1680,18 @@ pub struct GoalReport {
     pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+// Existing journal receipts encode the wait category in the reason. Keep the
+// terminal and JSON projections on the same durable interpretation.
+fn goal_wait_reason(goal: &ego_core::goal::GoalRecord) -> Option<&str> {
+    if goal.state != ego_core::goal::GoalState::Active {
+        return None;
+    }
+    let reason = goal.check_stop.as_deref()?;
+    reason
+        .strip_prefix("goal waiting: ")
+        .or_else(|| reason.strip_prefix("waiting for an inbound event: "))
 }
 
 impl GoalReport {
@@ -1267,6 +1714,8 @@ impl GoalReport {
             GoalState::Achieved => "achieved",
             _ if exhausted => "exhausted",
             GoalState::Blocked => "stopped",
+            GoalState::Cancelled => "cancelled",
+            GoalState::Active if goal_wait_reason(goal).is_some() => "waiting",
             GoalState::Active if goal.check_stop.is_some() => "stopped",
             GoalState::Active => "active",
         };
@@ -1324,10 +1773,73 @@ impl Report {
     }
 }
 
-/// Exercise the unanswered-permission completion mapping with synthetic data, without executing
-/// a mutating tool.
+/// The one arm of §4.1's denial mapping the binary cannot reach.
+///
+/// `DeniedBy::Nobody` needs a call the mode declines to auto-approve, and
+/// `ModeApprover` declines only mutating operations (`approver.rs`: "a read
+/// inside the workspace that stopped the run to ask would be the prompt
+/// fatigue `ARCHITECTURE.md:238` counts as a security bug"). This build's
+/// `builtins()` are `read`, `glob` and `grep` — every one of them
+/// non-mutating — so no argv reaches it, and a test that spawned `ego` could
+/// not produce one. It arrives with the write tool.
+///
+/// That is exactly why the arm is asserted here rather than left to the
+/// process tests: a mapping nothing exercises is an assumption with a match
+/// arm's syntax, and the change that first exercises it — the write tool — is
+/// the one that must not discover it was wrong.
 #[cfg(test)]
 mod tests {
+    fn settled(
+        outcome: ego_core::permit::DetachedExecOutcome,
+        stdout: &str,
+        stderr: &str,
+    ) -> ego_core::permit::DetachedExecSnapshot {
+        ego_core::permit::DetachedExecSnapshot {
+            id: ego_core::event::id::DetachedExecId::new(),
+            outcome: Some(outcome),
+            stdout_tail: stdout.as_bytes().to_vec(),
+            stderr_tail: stderr.as_bytes().to_vec(),
+            stdout_omitted: 0,
+            stderr_omitted: 0,
+        }
+    }
+
+    // Catches: output replay or a failed process omitted from the aggregate outcome.
+    #[test]
+    fn settled_background_commands_become_one_bounded_outcome_block() {
+        use ego_core::permit::{DetachedExecOutcome as Outcome, ToolResult};
+        let exited = |code| Outcome::Exited {
+            code,
+            result: ToolResult::new(Vec::new()),
+        };
+        let ok = settled(exited(0), "monitored progress", "");
+        let failed = settled(exited(2), "", "compile error");
+        let text = background_exec_notice(&[&ok, &failed]);
+        assert!(
+            !text.contains("monitored progress") && !text.contains("compile error"),
+            "{text}"
+        );
+        assert_eq!(text, "Background commands: 2 settled, 1 not successful.");
+    }
+
+    // Catches: per-process identities expanding a simultaneous settlement into noisy rows.
+    #[test]
+    fn simultaneous_background_commands_share_one_summary_without_process_ids() {
+        use ego_core::permit::{DetachedExecOutcome as Outcome, ToolResult};
+        let exited = |code| Outcome::Exited {
+            code,
+            result: ToolResult::new(Vec::new()),
+        };
+        let first = settled(exited(0), "a", "");
+        let second = settled(exited(1), "", "boom");
+        let text = background_exec_notice(&[&first, &second]);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        assert!(
+            !text.contains(&first.id.to_string()) && !text.contains(&second.id.to_string()),
+            "{text}"
+        );
+    }
+
     use ego_core::event::id::SessionId;
     use ego_core::state::SessionState;
 
@@ -1340,7 +1852,7 @@ mod tests {
             termination,
             serde_json::Value::String(String::new()),
         );
-        serde_json::to_value(report).expect("the completion object serializes")
+        serde_json::to_value(report).expect("§4.1's object serialises")
     }
 
     // Catches: resume's stderr adapter emits LF without CR while the seat owns raw mode.
@@ -1397,6 +1909,128 @@ mod tests {
                 && text.contains("εgo: raw-block-one\r\nraw-block-two\r\n"),
             "raw diagnostics must use CRLF for every row: {text:?}"
         );
+    }
+
+    // Catches: ANSI styling bytes make already-laid-out headless tool rows wrap early.
+    #[test]
+    fn headless_tool_rows_keep_painted_line_boundaries() {
+        const CHILD: &str = "EGO_TEST_PAINTED_TOOL_ROWS_CHILD";
+        const ROW: &str = "\x1b[38;2;123;123;123m1234567890\x1b[0m\x1b[38;2;123;123;123m1234567890\x1b[0m\x1b[38;2;123;123;123m1234567890\x1b[0m";
+        if std::env::var_os(CHILD).is_some() {
+            Stderr.tool_row(ROW, String::new());
+            Stdout::new(CancelToken::new()).tool_row(ROW, String::new());
+            return;
+        }
+
+        use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+        use std::io::Read;
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("PTY");
+        let mut command = CommandBuilder::new(std::env::current_exe().expect("test executable"));
+        command.args([
+            "--exact",
+            "output::tests::headless_tool_rows_keep_painted_line_boundaries",
+            "--nocapture",
+        ]);
+        command.env(CHILD, "1");
+        let mut child = pair.slave.spawn_command(command).expect("child");
+        drop(pair.slave);
+        let mut reader = pair.master.try_clone_reader().expect("reader");
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let reading = std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = reader.read_to_end(&mut bytes);
+            let _ = sender.send(bytes);
+        });
+        let bytes = match receiver.recv_timeout(std::time::Duration::from_secs(10)) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("painted tool row child did not finish: {error}");
+            }
+        };
+        assert!(child.wait().expect("child status").success());
+        reading.join().expect("reader thread");
+        let text = String::from_utf8_lossy(&bytes);
+        assert_eq!(
+            text.matches(&format!("εgo: {ROW}\r\n")).count(),
+            2,
+            "painted rows must remain intact: {text:?}"
+        );
+    }
+
+    // Catches: a turn error is rendered as an uncoloured informational note.
+    #[test]
+    fn turn_error_is_red_on_a_coloured_surface() {
+        use super::*;
+        use ego_core::generator::types::ErrorKind;
+
+        let (sender, received) = crossbeam::channel::unbounded();
+        let caps = Capabilities {
+            depth: crate::render::Depth::TrueColor,
+            ..Capabilities::plain()
+        };
+        let output = InteractiveOutput::with_capabilities(
+            SurfaceOutput::new(sender, CancelToken::new()),
+            caps,
+        );
+        let sink = TextSink::new(&output, false, caps, None);
+        sink.publish(
+            &PublicEvent::Error {
+                turn: TurnId::new(),
+                item: None,
+                message: "protocol_filter requires a committed user turn".into(),
+                kind: ErrorKind::Invalid,
+            },
+            &SessionState::default(),
+        );
+        output.finish();
+        let rows = received.try_iter().collect::<String>();
+        assert!(
+            rows.contains("\x1b[31mεgo: protocol_filter requires a committed user turn\x1b[0m"),
+            "{rows:?}"
+        );
+    }
+
+    // Catches: redirected or NO_COLOR diagnostics receive terminal escape bytes.
+    #[test]
+    fn error_diagnostic_obeys_stderr_terminal_and_no_color() {
+        use super::*;
+        use crate::render::caps::Terminal;
+        for (tty, no_color, expected) in [
+            (true, None, "\x1b[31mεgo: failure\x1b[0m\n"),
+            (false, None, "εgo: failure\n"),
+            (true, Some("1"), "εgo: failure\n"),
+        ] {
+            let terminal = Terminal {
+                flag_no_color: false,
+                flag_plain: false,
+                stdout_is_terminal: tty,
+                columns: None,
+                no_color,
+                term: Some("xterm"),
+                colorterm: None,
+                term_program: None,
+                term_program_version: None,
+                tuic_socket: None,
+            };
+            let mut bytes = Vec::new();
+            write_diagnostic(
+                &mut bytes,
+                "failure",
+                None,
+                false,
+                Capabilities::of(&terminal).coloured(),
+            );
+            assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -1460,7 +2094,7 @@ mod tests {
             action: "edit may not write /ws/x".to_string(),
             by: DeniedBy::Nobody,
         });
-        let object = object.as_object().expect("completion publishes an object");
+        let object = object.as_object().expect("§4.1 publishes an object");
 
         assert!(
             !object.contains_key("goal"),
@@ -1468,7 +2102,10 @@ mod tests {
         );
         assert_eq!(object["exit_reason"], "permission");
         assert_eq!(object["denied"], "edit may not write /ws/x");
-        // Omit absent errors rather than emitting null, preserving presence-based detection.
+        // Absent, not null. §4.2 ratifies presence as this format's detection
+        // mechanism — error arrays "present only when non-empty — a CI gate is
+        // a presence check" — and a null would be a value every consumer has
+        // to special-case in order to learn the same thing.
         assert!(
             !object.contains_key("denied_by"),
             "nobody decided, so there is no authority to name"
@@ -1508,6 +2145,50 @@ mod tests {
     impl TextOutput for Recorded {
         fn write(&self, _text: &str) {}
         fn line(&self, _text: &str) {}
+    }
+
+    // Catches: local policy text becoming streamed answer content instead of a
+    // renderer-owned diagnostic while an answer is in progress.
+    #[test]
+    fn filter_notice_finishes_answer_and_uses_local_diagnostics() {
+        #[derive(Default)]
+        struct Output {
+            answer: Mutex<String>,
+            notices: Mutex<Vec<String>>,
+        }
+        impl Diagnostics for Output {
+            fn note(&self, text: &str) {
+                self.notices.lock().unwrap().push(text.into());
+            }
+        }
+        impl TextOutput for Output {
+            fn write(&self, text: &str) {
+                self.answer.lock().unwrap().push_str(text);
+            }
+            fn line(&self, text: &str) {
+                self.write(text);
+            }
+        }
+        let out = Output::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+        sink.stream("Before notice.");
+        sink.publish(
+            &PublicEvent::FilterNotice {
+                turn: TurnId::new(),
+                text: "Local policy is active".into(),
+            },
+            &SessionState::default(),
+        );
+        sink.stream("After notice.");
+        sink.finish();
+        let answer = out.answer.lock().unwrap();
+        assert!(answer.contains("Before notice."));
+        assert!(answer.contains("After notice."));
+        assert!(!answer.contains("Local policy"));
+        assert_eq!(
+            *out.notices.lock().unwrap(),
+            ["εgo filter: Local policy is active"]
+        );
     }
 
     // Catches: blocked progress labels an active goal as stopped and prints empty audit fields.
@@ -1569,84 +2250,226 @@ mod tests {
         );
     }
 
-    // Catches: an OR guard offers extension for active non-budget stops or terminal goals.
+    // Catches: active waits render as terminal stops, paraphrases spam receipts,
+    // or coalescing hides a real resume/wait transition or budget/provider stop.
     #[test]
-    fn goal_extension_hint_requires_active_budget_stop() {
+    fn goal_wait_receipts_and_json_follow_durable_transitions() {
+        use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+        use ego_core::event::id::{EventId, GoalId, Producer, Seq};
+        use ego_core::event::time::Timestamp;
+        use ego_core::goal::GoalOwner;
+
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+        let turn = TurnId::new();
+        let id = GoalId::new();
+        let mut state = SessionState::default();
+        let mut seq = Seq::ZERO;
+        for (kind, status, waits) in [
+            (
+                EventKind::GoalSet {
+                    id,
+                    objective: "Verify artifact".into(),
+                    owner: GoalOwner::Operator,
+                    ceilings: Default::default(),
+                    derived_from: None,
+                },
+                "active",
+                0,
+            ),
+            (
+                EventKind::GoalCheckStopped {
+                    id,
+                    reason: "goal waiting: child is running".into(),
+                },
+                "waiting",
+                1,
+            ),
+            (
+                EventKind::GoalCheckStopped {
+                    id,
+                    reason: "goal waiting: child has not finished".into(),
+                },
+                "waiting",
+                1,
+            ),
+            (
+                EventKind::GoalContinuation {
+                    id,
+                    text: "inspect completion".into(),
+                },
+                "active",
+                1,
+            ),
+            (
+                EventKind::GoalCheckStopped {
+                    id,
+                    reason: "waiting for an inbound event: no progress".into(),
+                },
+                "waiting",
+                2,
+            ),
+            (
+                EventKind::GoalCheckStopped {
+                    id,
+                    reason: "goal check failed: provider unavailable".into(),
+                },
+                "stopped",
+                2,
+            ),
+            (
+                EventKind::GoalCheckStopped {
+                    id,
+                    reason: "goal check token budget reached".into(),
+                },
+                "exhausted",
+                2,
+            ),
+        ] {
+            state.apply(&DomainEvent {
+                env: Envelope {
+                    seq: seq.next(),
+                    id: EventId::new(),
+                    turn,
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::EPOCH,
+                    producer: Producer::Main,
+                },
+                kind,
+            });
+            sink.goal_receipts(
+                &PublicEvent::TurnCompleted {
+                    turn,
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+                &state,
+            );
+            let report =
+                serde_json::to_value(GoalReport::of(state.goal.as_ref().unwrap())).unwrap();
+            assert_eq!(report["status"], status);
+            let notes = out.notes.lock().unwrap();
+            assert_eq!(
+                notes
+                    .iter()
+                    .filter(|note| note.starts_with("Goal waiting:"))
+                    .count(),
+                waits
+            );
+            if status == "waiting" {
+                assert!(!notes.iter().any(|note| note.starts_with("Goal stopped:")));
+                assert!(report["reason"].as_str().unwrap().contains("waiting"));
+            }
+        }
+        let notes = out.notes.lock().unwrap();
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("Goal waiting: Verify artifact — child is running"))
+        );
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|note| note.starts_with("Goal stopped:"))
+                .count(),
+            2
+        );
+    }
+
+    // Catches: receipts advertise a removed extension operation for saved goals.
+    #[test]
+    fn goal_stop_receipts_never_advertise_removed_extension() {
         use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
         use ego_core::event::id::{EventId, GoalId, Producer, Seq};
         use ego_core::event::time::Timestamp;
         use ego_core::goal::{GoalOwner, GoalState, GoalTransition};
 
-        for (terminal, reason, offers_extension) in [
-            (false, "goal check failed: provider unavailable", false),
-            (true, "goal continuation budget exhausted", false),
-            (false, "goal continuation budget exhausted", true),
-            (true, "goal check failed: provider unavailable", false),
-        ] {
-            let out = Recorded::default();
-            let sink = TextSink::new(&out, false, Capabilities::plain(), None);
-            let turn = TurnId::new();
-            let id = GoalId::new();
-            let mut state = SessionState::default();
-            let mut seq = Seq::ZERO;
-            let mut events = vec![EventKind::GoalSet {
-                id,
-                objective: "Verify the artifact".into(),
-                owner: GoalOwner::Operator,
-                ceilings: Default::default(),
-                derived_from: None,
-            }];
-            if terminal {
-                events.push(EventKind::GoalTransitioned {
+        for owner in [GoalOwner::Operator, GoalOwner::Automated] {
+            for (terminal, reason) in [
+                (false, "goal check failed: provider unavailable"),
+                (true, "goal continuation budget exhausted"),
+                (false, "goal continuation budget exhausted"),
+                (true, "goal check failed: provider unavailable"),
+            ] {
+                let out = Recorded::default();
+                let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+                let turn = TurnId::new();
+                let id = GoalId::new();
+                let mut state = SessionState::default();
+                let mut seq = Seq::ZERO;
+                let mut events = vec![EventKind::GoalSet {
                     id,
-                    transition: GoalTransition::Blocked {
-                        reason: "operator action required".into(),
-                    },
-                });
-            }
-            events.push(EventKind::GoalCheckStopped {
-                id,
-                reason: reason.into(),
-            });
-            for kind in events {
-                state.apply(&DomainEvent {
-                    env: Envelope {
-                        seq: seq.next(),
-                        id: EventId::new(),
-                        turn,
-                        item: None,
-                        parent: None,
-                        ts: Timestamp::EPOCH,
-                        producer: Producer::Main,
-                    },
-                    kind,
-                });
-                sink.publish(&PublicEvent::TurnStarted { turn }, &state);
-            }
-            assert_eq!(
-                state.goal.as_ref().unwrap().state,
-                if terminal {
-                    GoalState::Blocked
-                } else {
-                    GoalState::Active
+                    objective: "Verify the artifact".into(),
+                    owner,
+                    ceilings: Default::default(),
+                    derived_from: None,
+                }];
+                if owner == GoalOwner::Automated {
+                    for _ in 0..20 {
+                        events.push(EventKind::GoalContinuation {
+                            id,
+                            text: "continue".into(),
+                        });
+                    }
                 }
-            );
-            let notes = out.notes.lock().unwrap();
-            let receipt = notes
-                .iter()
-                .find(|note| note.starts_with("Goal stopped:"))
-                .expect("the stop must remain visible");
-            assert!(receipt.contains(reason), "{receipt}");
-            assert!(receipt.contains("/goal show"), "{receipt}");
-            for hint in ["/goal extend N", "ego resume ID --goal-operation extend=N"] {
-                assert_eq!(receipt.contains(hint), offers_extension, "{receipt}");
+                if terminal {
+                    events.push(EventKind::GoalTransitioned {
+                        id,
+                        transition: GoalTransition::Blocked {
+                            reason: "operator action required".into(),
+                        },
+                    });
+                }
+                events.push(EventKind::GoalCheckStopped {
+                    id,
+                    reason: reason.into(),
+                });
+                for kind in events {
+                    state.apply(&DomainEvent {
+                        env: Envelope {
+                            seq: seq.next(),
+                            id: EventId::new(),
+                            turn,
+                            item: None,
+                            parent: None,
+                            ts: Timestamp::EPOCH,
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    });
+                    sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+                }
+                assert_eq!(
+                    state.goal.as_ref().unwrap().state,
+                    if terminal {
+                        GoalState::Blocked
+                    } else {
+                        GoalState::Active
+                    }
+                );
+                let notes = out.notes.lock().unwrap();
+                let receipt = notes
+                    .iter()
+                    .find(|note| note.starts_with("Goal stopped:"))
+                    .expect("the stop must remain visible");
+                assert!(receipt.contains(reason), "{receipt}");
+                assert!(receipt.contains("/goal show"), "{receipt}");
+                assert_eq!(
+                    receipt.contains("/goal resume"),
+                    owner == GoalOwner::Automated && !terminal,
+                    "{receipt}"
+                );
+                for hint in ["/goal extend N", "ego resume ID --goal-operation extend=N"] {
+                    assert!(!receipt.contains(hint), "{receipt}");
+                }
             }
         }
     }
 
-    // Catches: a recovered provider error turns green but still reads as a current error.
+    // Catches: ambiguous recovery receipts and stale provider errors blamed for cancellation.
     #[test]
-    fn recovered_retry_strikes_only_the_original_cause() {
+    fn retry_receipts_distinguish_recovery_failure_and_cancellation() {
         #[derive(Default)]
         struct LiveRows(Mutex<Vec<String>>);
         impl Diagnostics for LiveRows {
@@ -1670,7 +2493,26 @@ mod tests {
             term: Some("xterm-256color"),
             ..Default::default()
         });
-        for success in [true, false] {
+        use ego_core::event::domain::{CancelCause, ExitReason};
+        for (ending, suffix) in [
+            (None, "retry succeeded"),
+            (Some((true, ExitReason::Completed)), "retry succeeded"),
+            (Some((false, ExitReason::Usage)), "retry failed"),
+            (
+                Some((false, ExitReason::Cancelled(CancelCause::User))),
+                "retry cancelled",
+            ),
+            (
+                Some((false, ExitReason::Cancelled(CancelCause::Host))),
+                "retry cancelled",
+            ),
+            (
+                Some((false, ExitReason::Cancelled(CancelCause::Timeout))),
+                "retry cancelled",
+            ),
+        ] {
+            let success = suffix == "retry succeeded";
+            let cancelled = suffix == "retry cancelled";
             let out = LiveRows::default();
             let sink = TextSink::new(&out, false, screen, None);
             let turn = TurnId::new();
@@ -1681,12 +2523,19 @@ mod tests {
                     limit: 3,
                     delay_ms: 100,
                     kind: ego_core::generator::types::ErrorKind::Transient,
+                    capacity: false,
                     cause: cause.into(),
                     recovery_remaining_ms: None,
                 },
                 &SessionState::default(),
             );
-            let settled = if success {
+            let settled = if let Some((ok, exit_reason)) = ending {
+                PublicEvent::TurnCompleted {
+                    turn,
+                    ok,
+                    exit_reason,
+                }
+            } else {
                 PublicEvent::ItemStarted {
                     turn,
                     item: ItemId::new(),
@@ -1694,26 +2543,17 @@ mod tests {
                     name: None,
                     text: None,
                 }
-            } else {
-                PublicEvent::TurnCompleted {
-                    turn,
-                    ok: false,
-                    exit_reason: ego_core::event::domain::ExitReason::Usage,
-                }
             };
             sink.publish(&settled, &SessionState::default());
             let rows = out.0.lock().unwrap();
-            let receipt = rows
-                .iter()
-                .find(|row| row.contains("retry finished"))
-                .unwrap();
-            assert!(receipt.contains(cause), "{receipt:?}");
+            let receipt = rows.iter().find(|row| row.contains(suffix)).unwrap();
+            assert_eq!(receipt.contains(cause), !cancelled, "{receipt:?}");
             assert_eq!(
                 receipt.matches("\x1b[9;").count(),
                 usize::from(success),
                 "{receipt:?}"
             );
-            assert!(receipt.contains(" — retry finished"), "{receipt:?}");
+            assert!(!receipt.contains("retry finished"), "{receipt:?}");
             if success {
                 assert!(receipt.contains(&format!("m{cause}\x1b[0m")), "{receipt:?}");
             }
@@ -1785,6 +2625,41 @@ mod tests {
         assert!(out.notes.lock().unwrap()[0].contains("1 server needs attention"));
     }
 
+    /// Catches: an unused broken server repeating the note at every
+    /// launch, or the note omitting the route to server controls.
+    #[test]
+    fn attention_note_names_the_details_route_and_shows_once() {
+        let home = tempfile::tempdir().unwrap();
+        let event = PublicEvent::SessionStarted {
+            v: PUBLIC_EVENT_VERSION,
+            session: SessionId::new(),
+            capabilities: vec![],
+            mcp_errors: vec!["MCP server 'fx': offline".into()],
+            hook_errors: vec![],
+            instructions: vec![],
+        };
+        let launch = || {
+            let out = Recorded::default();
+            let screen = Capabilities::of(&crate::render::caps::Terminal {
+                stdout_is_terminal: true,
+                term: Some("xterm"),
+                ..Default::default()
+            });
+            let sink = TextSink::new(&out, false, screen, None).with_attention_ledger(
+                crate::mcp_attention::AttentionLedger::in_home(Some(home.path().to_path_buf())),
+            );
+            sink.publish(&event, &SessionState::default());
+            out.notes.lock().unwrap().clone()
+        };
+        let first = launch();
+        assert_eq!(first.len(), 1);
+        assert!(
+            first[0].contains("fx") && first[0].contains("/mcp"),
+            "{first:?}"
+        );
+        assert!(launch().is_empty());
+    }
+
     /// Catches: interactive grouping silently deleting headless per-server diagnostics.
     #[test]
     fn headless_startup_keeps_each_mcp_error() {
@@ -1805,13 +2680,60 @@ mod tests {
         assert_eq!(*out.notes.lock().unwrap(), errors);
     }
 
+    // Catches: an unpriced generation interrupts a live turn when no money cap exists,
+    // or a later capped generation loses its warning after an uncapped one.
+    #[test]
+    fn cost_anomaly_warns_only_when_a_monetary_ceiling_is_configured() {
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+        let mut state = SessionState::default();
+        let turn = ego_core::event::id::TurnId::new();
+        state.turns.insert(turn, Default::default());
+        let anomaly = PublicEvent::CostAnomaly {
+            turn,
+            model: "anthropic/fixture".into(),
+            estimated_upper_bound: None,
+            cause: None,
+        };
+        sink.publish(
+            &PublicEvent::MeteringSelected {
+                turn,
+                metering: ego_core::public::MeteringKind::Currency,
+                ceiling: CeilingEffect::None,
+                rates: RateSource::None,
+            },
+            &state,
+        );
+        sink.publish(&anomaly, &state);
+        assert!(out.notes.lock().unwrap().is_empty());
+
+        sink.publish(
+            &PublicEvent::MeteringSelected {
+                turn,
+                metering: ego_core::public::MeteringKind::Currency,
+                ceiling: CeilingEffect::Binds {
+                    limit: ego_core::cost::Money {
+                        amount: "1".parse().unwrap(),
+                        currency: ego_core::cost::CurrencyCode::new("USD").unwrap(),
+                    },
+                    clamped_from: None,
+                },
+                rates: RateSource::None,
+            },
+            &state,
+        );
+        sink.publish(&anomaly, &state);
+        assert_eq!(out.notes.lock().unwrap().len(), 1);
+    }
+
     /// Catches: quiet mode hiding missing cost or estimates being called actual cost.
     #[test]
     fn cost_anomaly_remains_visible_in_quiet_mode_without_fabricating_actual_cost() {
         let out = Recorded::default();
         let sink = TextSink::new(&out, true, Capabilities::plain(), None);
-        let state = SessionState::default();
+        let mut state = SessionState::default();
         let turn = ego_core::event::id::TurnId::new();
+        state.turns.insert(turn, Default::default());
         for bound in [
             None,
             Some(ego_core::cost::Money {
@@ -1846,8 +2768,9 @@ mod tests {
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
         let sink = TextSink::new(&out, false, caps, None);
-        let state = SessionState::default();
+        let mut state = SessionState::default();
         let turn = ego_core::event::id::TurnId::new();
+        state.turns.insert(turn, Default::default());
         for cached in [0, 18_400] {
             sink.publish(
                 &PublicEvent::UsageUpdated {
@@ -1961,8 +2884,9 @@ mod tests {
         caps.osc = crate::render::caps::OscProfile::Standard;
         let interactive = TextSink::new(&out, false, caps, None);
         let headless = TextSink::new(&out, false, Capabilities::plain(), None);
-        let state = SessionState::default();
+        let mut state = SessionState::default();
         let turn = ego_core::event::id::TurnId::new();
+        state.turns.insert(turn, Default::default());
         let start = PublicEvent::TurnStarted { turn };
         let end = PublicEvent::TurnCompleted {
             turn,
@@ -1979,6 +2903,36 @@ mod tests {
         assert!(notes[0].contains(" · done "), "{notes:?}");
     }
 
+    // Catches: private checkpoint preparation or recoverable pressure adding turn receipts.
+    #[test]
+    fn compaction_turns_do_not_print_elapsed_receipts() {
+        for private in [true, false] {
+            let out = Recorded::default();
+            let mut caps = Capabilities::plain();
+            caps.osc = crate::render::caps::OscProfile::Standard;
+            let sink = TextSink::new(&out, false, caps, None);
+            let mut state = SessionState::default();
+            let turn = TurnId::new();
+            if !private {
+                state.turns.insert(turn, Default::default());
+            }
+            sink.publish(&PublicEvent::TurnStarted { turn }, &state);
+            sink.publish(
+                &PublicEvent::TurnCompleted {
+                    turn,
+                    ok: private,
+                    exit_reason: if private {
+                        ego_core::event::domain::ExitReason::Completed
+                    } else {
+                        ego_core::event::domain::ExitReason::ContextOverflow
+                    },
+                },
+                &state,
+            );
+            assert!(out.notes.lock().unwrap().is_empty());
+        }
+    }
+
     /// Catches: a terminal receipt loses the diff-like signs or leaks ANSI
     /// sequences when colour was disabled.
     #[test]
@@ -1991,8 +2945,9 @@ mod tests {
                 caps.depth = crate::render::caps::Depth::Ansi16;
             }
             let sink = TextSink::new(&out, false, caps, None);
-            let state = SessionState::default();
+            let mut state = SessionState::default();
             let turn = TurnId::new();
+            state.turns.insert(turn, Default::default());
             sink.publish(&PublicEvent::TurnStarted { turn }, &state);
             sink.edited_lines.lock().unwrap().insert(
                 turn,
@@ -2033,8 +2988,25 @@ mod tests {
         let sink = TextSink::new(&out, false, caps, None);
         let turn = TurnId::new();
         let mut state = SessionState::default();
-        sink.publish(&PublicEvent::TurnStarted { turn }, &state);
         let mut seq = Seq::ZERO;
+        state.apply(&DomainEvent {
+            env: Envelope {
+                seq: seq.next(),
+                id: EventId::new(),
+                turn,
+                item: Some(ItemId::new()),
+                parent: None,
+                ts: Timestamp::from_millis(0),
+                producer: Producer::Main,
+            },
+            kind: EventKind::UserPrompt {
+                text: "Measure tracked edits.".to_owned(),
+                images: Vec::new(),
+                audio: Vec::new(),
+                queued_prompt: None,
+            },
+        });
+        sink.publish(&PublicEvent::TurnStarted { turn }, &state);
         for (ok, change) in [
             (
                 true,
@@ -2072,12 +3044,24 @@ mod tests {
             state.apply(&event);
             sink.publish(&ego_core::public::project_public(&event).unwrap(), &state);
         }
-        sink.publish(
-            &PublicEvent::TurnCompleted {
+        let completed = DomainEvent {
+            env: Envelope {
+                seq: seq.next(),
+                id: EventId::new(),
                 turn,
+                item: None,
+                parent: None,
+                ts: Timestamp::from_millis(0),
+                producer: Producer::Main,
+            },
+            kind: EventKind::TurnCompleted {
                 ok: true,
                 exit_reason: ExitReason::Completed,
             },
+        };
+        state.apply(&completed);
+        sink.publish(
+            &ego_core::public::project_public(&completed).unwrap(),
             &state,
         );
         let notes = out.notes.lock().unwrap();
@@ -2091,8 +3075,9 @@ mod tests {
         let mut caps = Capabilities::plain();
         caps.osc = crate::render::caps::OscProfile::Standard;
         let sink = TextSink::new(&out, true, caps, None);
-        let state = SessionState::default();
+        let mut state = SessionState::default();
         let turn = TurnId::new();
+        state.turns.insert(turn, Default::default());
         sink.publish(&PublicEvent::TurnStarted { turn }, &state);
         sink.publish(
             &PublicEvent::TurnCompleted {
@@ -2133,6 +3118,7 @@ mod tests {
             id: index.to_string(),
             text: text.into(),
             status,
+            reason: None,
         })
         .collect();
         state
@@ -2223,6 +3209,7 @@ mod tests {
                     text: "Read\n\n界界界界界界界界界界界界界界界界界界界界界界\tthen verify"
                         .into(),
                     status: StepStatus::Pending,
+                    reason: None,
                 }],
             })
             .unwrap();
@@ -2231,6 +3218,7 @@ mod tests {
             update: PlanUpdate::Step {
                 id: "unicode".into(),
                 status: StepStatus::Pending,
+                reason: None,
             },
         };
         let out = Recorded::default();
@@ -2262,28 +3250,205 @@ mod tests {
         // Catches: terminal renders stale operation payloads instead of the authoritative plan.
         use ego_core::plan::{PlanStep, PlanUpdate, StepStatus};
         let mut state = SessionState::default();
-        state.plan.steps = vec![PlanStep {
-            id: "stable".into(),
-            text: "Verify output".into(),
-            status: StepStatus::Blocked,
-        }];
         let event = PublicEvent::PlanUpdated {
             turn: ego_core::event::id::TurnId::new(),
             update: PlanUpdate::Step {
                 id: "stable".into(),
-                status: StepStatus::Blocked,
+                status: StepStatus::Pending,
+                reason: None,
             },
         };
         let out = Recorded::default();
         let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+        for (status, symbol) in [
+            (StepStatus::Blocked, "!"),
+            (StepStatus::Waiting, "…"),
+            (StepStatus::Cancelled, "×"),
+        ] {
+            state
+                .plan
+                .apply(&PlanUpdate::Replace {
+                    steps: vec![PlanStep {
+                        id: "stable".into(),
+                        text: "Verify output".into(),
+                        status,
+                        reason: None,
+                    }],
+                })
+                .unwrap();
+            sink.publish(&event, &state);
+            assert_eq!(
+                out.notes.lock().unwrap().last().unwrap(),
+                &format!("Worklist 0/1\n{symbol} Verify output")
+            );
+        }
+        state
+            .plan
+            .apply(&PlanUpdate::Replace { steps: vec![] })
+            .unwrap();
         sink.publish(&event, &state);
-        assert_eq!(*out.notes.lock().unwrap(), ["Plan 0/1\n! Verify output"]);
-        state.plan.steps.clear();
-        sink.publish(&event, &state);
-        assert_eq!(out.notes.lock().unwrap().last().unwrap(), "Plan cleared");
+        assert_eq!(
+            out.notes.lock().unwrap().last().unwrap(),
+            "Worklist cleared"
+        );
         let quiet_out = Recorded::default();
         TextSink::new(&quiet_out, true, Capabilities::plain(), None).publish(&event, &state);
         assert!(quiet_out.notes.lock().unwrap().is_empty());
+    }
+
+    #[derive(Default)]
+    struct Visible(Mutex<String>);
+
+    impl Diagnostics for Visible {
+        fn note(&self, text: &str) {
+            self.line(text);
+        }
+    }
+
+    impl TextOutput for Visible {
+        fn write(&self, text: &str) {
+            self.0.lock().unwrap().push_str(text);
+        }
+        fn line(&self, text: &str) {
+            self.write(&format!("{text}\n"));
+        }
+    }
+
+    // Catches: compact file labels use the launch directory after an in-process workspace switch.
+    #[test]
+    fn tool_paths_follow_the_text_sink_workspace_on_switch() {
+        let root = std::env::temp_dir().join("ego-tool-row-workspaces");
+        let first = root.join("one");
+        let second = root.join("two");
+        let out = Recorded::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain(), Some(&first));
+        let state = SessionState::default();
+        for (workspace, path) in [
+            (None, first.join("a.rs")),
+            (Some(&second), second.join("b.rs")),
+        ] {
+            if let Some(workspace) = workspace {
+                sink.set_workspace(Some(workspace));
+            }
+            let item = ItemId::new();
+            let args = serde_json::json!({"files":[{"path":path}]}).to_string();
+            sink.publish(&started(item, "read", &args), &state);
+            sink.publish(&completed(item, true, "line"), &state);
+        }
+        let rows = out.rows.lock().unwrap();
+        assert!(rows[0].0.starts_with("✓ read a.rs ·"), "{:?}", rows[0]);
+        assert!(rows[1].0.starts_with("✓ read b.rs ·"), "{:?}", rows[1]);
+    }
+
+    // Catches: buffered prose and the command appear only after a slow tool finishes.
+    #[test]
+    fn running_tool_snapshot_contains_preceding_prose_and_active_command() {
+        let out = Visible::default();
+        let sink = TextSink::new(&out, false, Capabilities::plain(), None);
+        let state = SessionState::default();
+        sink.stream("Starting the resume now.");
+        let item = ItemId::new();
+        sink.publish(
+            &started(item, "exec", r#"{"argv":["coord-resume.sh"]}"#),
+            &state,
+        );
+        let snapshot = out.0.lock().unwrap().clone();
+        assert!(
+            snapshot.starts_with("Starting the resume now.\n"),
+            "{snapshot:?}"
+        );
+        assert!(snapshot.contains("$ coord-resume.sh"), "{snapshot:?}");
+        assert!(
+            !snapshot.contains("exit 0"),
+            "unfinished command cannot claim success"
+        );
+        sink.publish(&completed(item, true, ""), &state);
+        assert!(out.0.lock().unwrap().contains("exit 0"));
+    }
+
+    // Catches: incomplete or malformed exec arguments invent a command or lose its eventual receipt.
+    #[test]
+    fn unrenderable_exec_request_keeps_completion_without_inventing_command() {
+        for args in [
+            r#"{"argv":["python3","/Users/st"#,
+            r#"{"argv":[]}"#,
+            r#"{"argv":["echo",42]}"#,
+        ] {
+            for quiet in [false, true] {
+                let out = Visible::default();
+                let sink = TextSink::new(&out, quiet, Capabilities::plain(), None);
+                let state = SessionState::default();
+                let item = ItemId::new();
+                sink.publish(&started(item, "exec", args), &state);
+                assert!(out.0.lock().unwrap().is_empty(), "{args}");
+                sink.publish(&completed(item, false, "interrupted: not run"), &state);
+                let snapshot = out.0.lock().unwrap().clone();
+                if quiet {
+                    assert!(snapshot.is_empty(), "{args}: {snapshot:?}");
+                } else {
+                    assert!(
+                        snapshot.contains("interrupted: not run"),
+                        "{args}: {snapshot:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    // Catches: consecutive assistant messages join when neither supplies a newline,
+    // including results arriving after queued input, failed tools or cancellation.
+    #[test]
+    fn answer_boundaries_close_without_relying_on_the_next_tool_result() {
+        for quiet in [false, true] {
+            for boundary in ["message", "turn", "cancel", "failure", "tool"] {
+                let out = Visible::default();
+                let sink = TextSink::new(&out, quiet, Capabilities::plain(), None);
+                let state = SessionState::default();
+                let turn = TurnId::new();
+                let item = ItemId::new();
+                sink.stream("Previous answer.");
+                let event = match boundary {
+                    "message" => PublicEvent::ItemCompleted {
+                        turn,
+                        item,
+                        kind: ItemKind::AgentMessage,
+                        ok: true,
+                        text: None,
+                    },
+                    "turn" => PublicEvent::TurnStarted { turn },
+                    "cancel" => PublicEvent::TurnCompleted {
+                        turn,
+                        ok: false,
+                        exit_reason: ego_core::event::domain::ExitReason::Cancelled(
+                            CancelCause::User,
+                        ),
+                    },
+                    "failure" => PublicEvent::Error {
+                        turn,
+                        item: None,
+                        message: "tool failed".into(),
+                        kind: ego_core::generator::types::ErrorKind::Invalid,
+                    },
+                    _ => started(item, "read", r#"{"path":"a.rs"}"#),
+                };
+                sink.publish(&event, &state);
+                sink.stream("intent: Next answer.");
+                sink.finish();
+                let snapshot = out.0.lock().unwrap().clone();
+                assert!(
+                    snapshot.starts_with("Previous answer.\n"),
+                    "{boundary}: {snapshot:?}"
+                );
+                assert!(
+                    !snapshot.contains("Previous answer.intent:"),
+                    "{boundary}: {snapshot:?}"
+                );
+                assert!(
+                    snapshot.ends_with("intent: Next answer.\n"),
+                    "{boundary}: {snapshot:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2293,7 +3458,10 @@ mod tests {
         let state = SessionState::default();
         let item = ItemId::new();
 
-        sink.publish(&started(item, "read", r#"{"path":"a.rs"}"#), &state);
+        sink.publish(
+            &started(item, "read", r#"{"files":[{"path":"a.rs"}]}"#),
+            &state,
+        );
         assert!(
             out.rows.lock().unwrap().is_empty(),
             "a row needs an outcome"
@@ -2320,8 +3488,14 @@ mod tests {
         let state = SessionState::default();
         let (first, second) = (ItemId::new(), ItemId::new());
 
-        sink.publish(&started(first, "read", r#"{"path":"first.rs"}"#), &state);
-        sink.publish(&started(second, "read", r#"{"path":"second.rs"}"#), &state);
+        sink.publish(
+            &started(first, "read", r#"{"files":[{"path":"first.rs"}]}"#),
+            &state,
+        );
+        sink.publish(
+            &started(second, "read", r#"{"files":[{"path":"second.rs"}]}"#),
+            &state,
+        );
         sink.publish(&completed(second, true, "x"), &state);
         sink.publish(&completed(first, false, "denied"), &state);
 
@@ -2347,14 +3521,21 @@ mod tests {
         ] {
             let item = ItemId::new();
             sink.publish(
-                &started(item, name, r#"{"path":"a.rs","argv":["printf","one"]}"#),
+                &started(
+                    item,
+                    name,
+                    r#"{"files":[{"path":"a.rs"}],"argv":["printf","one"]}"#,
+                ),
                 &state,
             );
             sink.publish(&completed(item, true, "one\ntwo\nthree"), &state);
         }
         sink.stream("parent prose\n\n");
         let item = ItemId::new();
-        sink.publish(&started(item, "alpha › read", r#"{"path":"b.rs"}"#), &state);
+        sink.publish(
+            &started(item, "alpha › read", r#"{"files":[{"path":"b.rs"}]}"#),
+            &state,
+        );
         sink.publish(&completed(item, true, "hello"), &state);
         let rows = out.rows.lock().unwrap();
         let shown = rows
@@ -2391,7 +3572,10 @@ mod tests {
         let quiet = TextSink::new(&out, true, Capabilities::plain(), None);
         let state = SessionState::default();
         let item = ItemId::new();
-        quiet.publish(&started(item, "read", r#"{"path":"a.rs"}"#), &state);
+        quiet.publish(
+            &started(item, "read", r#"{"files":[{"path":"a.rs"}]}"#),
+            &state,
+        );
         quiet.publish(&completed(item, true, "x"), &state);
 
         let loud = TextSink::new(&out, false, Capabilities::plain(), None);
@@ -2406,10 +3590,8 @@ mod tests {
     }
 
     fn expand_recorded_exec() -> String {
-        let events: Vec<ego_core::event::domain::DomainEvent> = serde_json::from_str(include_str!(
-            "../tests/fixtures/expand-visible-streams.json"
-        ))
-        .unwrap();
+        let events: Vec<ego_core::event::domain::DomainEvent> =
+            serde_json::from_str(include_str!("../tests/fixtures/expand-664.json")).unwrap();
         let (output, rows) = interactive();
         let sink = TextSink::new(&output, false, Capabilities::plain(), None);
         let mut state = SessionState::default();
@@ -2430,7 +3612,7 @@ mod tests {
         let expanded = expand_recorded_exec();
         assert_eq!(
             expanded,
-            include_str!("../tests/fixtures/expand-visible-streams.expected.txt")
+            include_str!("../tests/fixtures/expand-664.expected.txt")
         );
     }
 

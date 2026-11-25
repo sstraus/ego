@@ -1,4 +1,5 @@
-//! Filesystem JSONL session store and derived manifests.
+//! `JsonlStore`: the filesystem `SessionStore` — a JSONL event log plus a
+//! JSON manifest, per session directory (`ARCHITECTURE.md` §5).
 //!
 //! ```text
 //! <root>/<session-id>/
@@ -16,7 +17,7 @@ use ego_core::compact::{
 };
 use ego_core::event::domain::{DomainEvent, EventKind, GenerationRole};
 use ego_core::event::hook::HookCatalogueEvidence;
-use ego_core::event::id::{Producer, Seq, SessionId};
+use ego_core::event::id::{ItemId, Producer, Seq, SessionId};
 use ego_core::event::time::Timestamp;
 use ego_core::evidence::{
     ConfigProvenance, EvidenceError, EvidenceKey, EvidenceLogSource, EvidenceRecord, EvidenceWrite,
@@ -30,10 +31,10 @@ use ego_core::session::{
     TargetSeed,
 };
 use ego_core::session_lifecycle::{
-    InactiveSessionLease, LeasedLifecycleAppend, LifecycleAppendError, LifecyclePublication,
-    SessionLifecycleStore,
+    InactiveSessionLease, LeasedLifecycleAppend, LifecycleAppendError, LifecycleError,
+    LifecyclePublication, LineageAnchor, ListedFacts, SessionLifecycleStore,
 };
-use ego_core::state::SessionState;
+use ego_core::state::{PauseState, SessionState};
 use ego_core::store::blob::{BlobError, BlobRef, BlobStore};
 use ego_core::store::codec::{
     CODEC_VERSION, CodecError, Header, StoreLine, decode_line, encode_header, encode_record,
@@ -45,6 +46,7 @@ use fd_lock::RwLock;
 use futures::stream::{self, BoxStream};
 
 use super::blob::SessionBlobStore;
+use super::catalogue::{SessionTable, discard_if_corrupt};
 use super::io::{AtomicReplacePublication, SessionLogWriter, StoreIo, tmp_path_for};
 use super::lease::Lease;
 use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
@@ -56,6 +58,9 @@ use super::snapshot::{SNAPSHOT_VERSION, Snapshot, SnapshotRejection, validate};
 struct RunManifest {
     #[serde(flatten)]
     meta: SessionMeta,
+    /// Actual named account selected in the journal, never inferred from config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     execution: Option<ExecObservation>,
     #[serde(default)]
@@ -64,6 +69,68 @@ struct RunManifest {
     evidence: ManifestEvidence,
     #[serde(default)]
     deleted: bool,
+    /// Hold state, kept so a listing reads no log. Absent in a manifest written
+    /// before this field existed; the first listing derives and persists it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pause: Option<PauseState>,
+    /// Root and cutoff message of `meta.lineage`, derived once on first listing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    lineage_anchor: Option<LineageAnchor>,
+}
+
+/// Catalogue-only decoding. Do not flatten `SessionMeta` here: serde's
+/// flattened-field buffer would materialize the ignored execution evidence.
+#[derive(serde::Deserialize)]
+struct CatalogueManifest {
+    #[serde(default)]
+    profiles: SessionProfiles,
+    id: SessionId,
+    workspace_root: PathBuf,
+    model: Option<String>,
+    created: Timestamp,
+    updated: Timestamp,
+    title: Option<String>,
+    summary: Option<String>,
+    #[serde(default)]
+    summary_failures: u32,
+    lineage: Option<SessionLineage>,
+    #[serde(default)]
+    deleted: bool,
+    pause: Option<PauseState>,
+    lineage_anchor: Option<LineageAnchor>,
+}
+
+impl CatalogueManifest {
+    fn meta(self) -> SessionMeta {
+        SessionMeta {
+            profiles: self.profiles,
+            id: self.id,
+            workspace_root: self.workspace_root,
+            model: self.model,
+            created: self.created,
+            updated: self.updated,
+            title: self.title,
+            summary: self.summary,
+            summary_failures: self.summary_failures,
+            lineage: self.lineage,
+        }
+    }
+}
+
+#[derive(Default)]
+struct CatalogueMarkers {
+    messages: Vec<(Seq, ItemId)>,
+    models: Vec<(Seq, String)>,
+    lineage: Vec<(Seq, SessionLineage)>,
+}
+
+struct CatalogueLog {
+    revision: Option<super::FileRevision>,
+    meta: SessionMeta,
+    pause: PauseState,
+    deleted: bool,
+    clean: bool,
+    markers: CatalogueMarkers,
 }
 
 impl RunManifest {
@@ -86,6 +153,7 @@ impl RunManifest {
 
 #[derive(Clone)]
 struct LogManifestFacts {
+    connection: Option<String>,
     profiles: SessionProfiles,
     created: Timestamp,
     workspace_root: PathBuf,
@@ -99,6 +167,7 @@ struct LogManifestFacts {
     summary: Option<String>,
     summary_failures: u32,
     deleted: bool,
+    pause: PauseState,
 }
 
 fn meta_from_log_facts(id: SessionId, facts: &LogManifestFacts) -> SessionMeta {
@@ -217,9 +286,12 @@ impl Repair {
 
 /// Check the log's header line and return the offset just past it.
 ///
-/// Validate the header before tail repair. Treating a damaged first line
-/// as an ordinary zero-length valid prefix could delete an entire session
-/// whose records remain intact.
+/// **Separate from the tail scan below, and the separation is the point.**
+/// The header is not a candidate for repair. A prefix scan that rejects the
+/// line at index 0 has established a valid prefix of zero bytes, and a
+/// caller that then truncates to that length deletes the entire session —
+/// which is what this store did, reporting it as an ordinary `Repair`. See
+/// the design notes §1.
 ///
 /// So the header is answered here, before anything is allowed to remove a
 /// byte. `read` and `recover` both come through this function so the two
@@ -249,7 +321,8 @@ fn decoded_header(bytes: &[u8]) -> Result<Option<(Header, usize)>, StoreError> {
 fn header_end(bytes: &[u8]) -> Result<Option<usize>, StoreError> {
     match decoded_header(bytes)? {
         Some((header, end)) if header.v == CODEC_VERSION => Ok(Some(end)),
-        // Check the codec version before interpreting records from another build.
+        // ADR §3. Nothing compared `v` before, so a log written by a later
+        // build was read as though it were this version's.
         Some((header, _)) => Err(StoreError::UnsupportedLog { found: header.v }),
         None => Ok(None),
     }
@@ -387,6 +460,23 @@ fn split_lines(bytes: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
+/// Full session snapshots can clear an account; sparse run choices inherit it.
+fn apply_connection_selection(selected: &mut Option<String>, entry: &SessionEntry) {
+    match entry {
+        SessionEntry::Event(event) => {
+            if let EventKind::SessionSelectionsSelected { selections } = &event.kind {
+                *selected = selections.connection().map(str::to_owned);
+            }
+        }
+        SessionEntry::RunTransaction(transaction) => {
+            if let Some(connection) = transaction.selections().connection() {
+                *selected = Some(connection.to_owned());
+            }
+        }
+        _ => {}
+    }
+}
+
 /// The manifest facts derived from a valid log prefix.
 ///
 /// Only ever called on a prefix [`valid_prefix`] has already accepted, so
@@ -405,6 +495,7 @@ impl ManifestProjection {
     fn new(header: &Header) -> Self {
         Self {
             facts: LogManifestFacts {
+                connection: None,
                 profiles: header.profiles.clone(),
                 created: header.created,
                 workspace_root: header.workspace_root.clone(),
@@ -418,6 +509,7 @@ impl ManifestProjection {
                 summary: None,
                 summary_failures: 0,
                 deleted: false,
+                pause: PauseState::Running,
             },
             state: SessionState::default(),
             evidence_records: Vec::new(),
@@ -426,6 +518,7 @@ impl ManifestProjection {
     }
 
     fn apply(&mut self, entry: SessionEntry) {
+        apply_connection_selection(&mut self.facts.connection, &entry);
         match entry {
             SessionEntry::Event(event) => {
                 self.reachable_blobs.extend(event.kind.blob_references());
@@ -445,8 +538,17 @@ impl ManifestProjection {
                             prompt_revision,
                         })
                     }
-                    EventKind::Forked { source, at_seq, .. } => {
-                        self.facts.lineage = Some(SessionLineage::Fork { source, at_seq })
+                    EventKind::Forked {
+                        source,
+                        at_seq,
+                        neutral,
+                        ..
+                    } => {
+                        self.facts.lineage = Some(SessionLineage::Fork {
+                            source,
+                            at_seq,
+                            neutral,
+                        })
                     }
                     EventKind::ExecutionObserved { observation, .. } => {
                         self.facts.execution = Some(observation)
@@ -483,11 +585,19 @@ impl ManifestProjection {
         facts.title = self.state.title.clone();
         facts.summary = self.state.summary.clone();
         facts.summary_failures = self.state.summary_failures;
+        facts.pause = self.state.pause;
         Ok(facts)
     }
 }
 
 fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError> {
+    log_manifest_facts_and_messages(log, None)
+}
+
+fn log_manifest_facts_and_messages(
+    log: &[u8],
+    mut markers: Option<&mut CatalogueMarkers>,
+) -> Result<Option<LogManifestFacts>, StoreError> {
     let mut lines = split_lines(log).into_iter();
     let Some(header_line) = lines.next() else {
         return Ok(None);
@@ -497,6 +607,7 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
         _ => return Ok(None),
     };
     let mut projection = ManifestProjection::new(&header);
+    let mut sequence = Seq::ZERO;
     for line in lines {
         let record = match decode_line(line)? {
             StoreLine::Record(record) => record,
@@ -515,6 +626,57 @@ fn log_manifest_facts(log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError
                 header.session, record.seq
             ))
         })?;
+        if let Some(markers) = markers.as_deref_mut() {
+            match &entry {
+                SessionEntry::Event(event) => {
+                    sequence = sequence.max(event.env.seq);
+                    match &event.kind {
+                        EventKind::UserPrompt { .. }
+                        | EventKind::AssistantDelta { .. }
+                        | EventKind::AssistantMessage { .. } => {
+                            if let Some(item) = event.env.item {
+                                markers.messages.push((event.env.seq, item));
+                            }
+                        }
+                        EventKind::Forked {
+                            source,
+                            at_seq,
+                            neutral,
+                            ..
+                        } => markers.lineage.push((
+                            sequence,
+                            SessionLineage::Fork {
+                                source: *source,
+                                at_seq: *at_seq,
+                                neutral: *neutral,
+                            },
+                        )),
+                        EventKind::CompactionSeeded {
+                            source,
+                            source_seq,
+                            prompt_revision,
+                            ..
+                        } => markers.lineage.push((
+                            sequence,
+                            SessionLineage::Compaction {
+                                source: *source,
+                                source_seq: *source_seq,
+                                prompt_revision: *prompt_revision,
+                            },
+                        )),
+                        _ => {}
+                    }
+                }
+                SessionEntry::Evidence(EvidenceRecord::GenerationAdmission(admission))
+                    if admission.role() == GenerationRole::Main =>
+                {
+                    markers
+                        .models
+                        .push((sequence, admission.target().canonical_model().0.clone()));
+                }
+                _ => {}
+            }
+        }
         projection.apply(entry);
     }
     projection.facts().map(Some)
@@ -614,7 +776,70 @@ pub struct JsonlStore {
     pid_index_home: Option<PathBuf>,
     appenders: Mutex<HashMap<SessionId, Weak<Mutex<AppendState>>>>,
     writer_cache: Mutex<Option<CachedWriter>>,
+    catalogue_logs: Mutex<HashMap<SessionId, Arc<CatalogueLog>>>,
     pub(super) io: Arc<dyn StoreIo>,
+}
+
+/// A stable last-use ordering for one resume picker. Only stat hints are read
+/// when it is created; manifests and journals are opened a page at a time.
+pub struct ResumeListing {
+    candidates: std::vec::IntoIter<SessionId>,
+}
+
+impl ResumeListing {
+    pub fn has_more(&self) -> bool {
+        !self.candidates.as_slice().is_empty()
+    }
+
+    /// Skip unreadable, unpublished and unrelated sessions without taking a
+    /// lock, repairing data, or emitting per-session diagnostics.
+    pub fn next_page(
+        &mut self,
+        store: &JsonlStore,
+        workspace: Option<&std::path::Path>,
+        exclude: Option<SessionId>,
+        limit: usize,
+        keep: impl Fn(&SessionMeta) -> bool,
+    ) -> Vec<SessionMeta> {
+        let mut page = Vec::new();
+        while page.len() < limit {
+            let Some(id) = self.candidates.next() else {
+                break;
+            };
+            if Some(id) == exclude {
+                continue;
+            }
+            let Ok(Some(manifest)) = store.read_manifest(&id) else {
+                continue;
+            };
+            if manifest.meta.id != id
+                || workspace.is_some_and(|root| manifest.meta.workspace_root != root)
+                || manifest.deleted
+            {
+                continue;
+            }
+            if !matches!(store.io.exists(&store.quarantine_path(&id)), Ok(false)) {
+                continue;
+            }
+            // A manifest is a display cache, not proof that a journal is readable.
+            // Read one immutable snapshot; a torn or concurrent append is absent
+            // from this listing, never repaired or protected with a writer lock.
+            let Ok(Some(facts)) = store.local_lifecycle_facts(id) else {
+                continue;
+            };
+            if facts.deleted || workspace.is_some_and(|root| facts.workspace_root != root) {
+                continue;
+            }
+            let mut meta = meta_from_log_facts(id, &facts);
+            if meta.model.is_none() {
+                meta.model = manifest.meta.model;
+            }
+            if keep(&meta) {
+                page.push(meta);
+            }
+        }
+        page
+    }
 }
 
 impl JsonlStore {
@@ -631,9 +856,13 @@ impl JsonlStore {
     /// `-C DIR` before anything reads a path, so there is a single notion of
     /// "here".
     ///
-    /// The caller supplies an already canonical workspace. Re-resolving here
-    /// would duplicate `run.rs` and could misidentify symlink or `/var` aliases
-    /// as a different workspace.
+    /// It must already be canonical. This type does not resolve it — that
+    /// would be a second canonicaliser to keep in step with `run.rs`'s, and
+    /// `AGENTS.md`'s reuse-first rule says one. A path that has not been
+    /// through `std::fs::canonicalize` will not compare equal to the same
+    /// directory reached through a symlink or through `/var` instead of
+    /// `/private/var`, and the failure is a session that quietly does not
+    /// belong to the workspace it was created in.
     pub fn new(
         root: impl Into<PathBuf>,
         workspace: impl Into<PathBuf>,
@@ -645,6 +874,7 @@ impl JsonlStore {
             pid_index_home: None,
             appenders: Mutex::new(HashMap::new()),
             writer_cache: Mutex::new(None),
+            catalogue_logs: Mutex::new(HashMap::new()),
             io: Arc::from(io),
         }
     }
@@ -681,6 +911,36 @@ impl JsonlStore {
         )
     }
 
+    /// Resume uses log last-write time as last use, with descending ID ties.
+    /// This deliberately differs from the authoritative updated order of `list_readable`.
+    pub fn resume_listing(&self) -> Result<ResumeListing, StoreError> {
+        let mut candidates = Vec::new();
+        for dir in self.io.list_dirs(&self.root)? {
+            let Some(id) = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<SessionId>().ok())
+            else {
+                continue;
+            };
+            let Ok(Some(revision)) = self.io.file_revision(&self.log_path(&id)) else {
+                continue;
+            };
+            candidates.push((revision.modified, id));
+        }
+        candidates.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.to_string().cmp(&a.1.to_string()))
+        });
+        Ok(ResumeListing {
+            candidates: candidates
+                .into_iter()
+                .map(|(_, id)| id)
+                .collect::<Vec<_>>()
+                .into_iter(),
+        })
+    }
+
     /// An invalidation hint for a live follower, not a substitute for replay validation.
     pub fn log_revision(&self, id: &SessionId) -> std::io::Result<Option<super::FileRevision>> {
         self.io.file_revision(&self.log_path(id))
@@ -696,6 +956,14 @@ impl JsonlStore {
     }
 
     fn readable_meta_existing(&self, id: &SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        // Do not create a directory for a session that does not exist.
+        if !self.io.exists(&self.log_path(id))? {
+            return Err(StoreError::NotFound);
+        }
+        // A journal append can be visible before its final newline. Take the
+        // same short lock as appenders before interpreting the snapshot.
+        let mut lock = self.open_events_lock(id)?;
+        let _guard = lock.write()?;
         if self.io.exists(&self.quarantine_path(id))? {
             return Ok(None);
         }
@@ -706,6 +974,73 @@ impl JsonlStore {
     /// Conversational search is a derived cache beside the authoritative logs.
     pub fn history(self: &Arc<Self>) -> super::HistoryIndex {
         super::HistoryIndex::new(self.root.join("history.sqlite"), Arc::clone(self))
+    }
+
+    /// The directory holding this store's session journals.
+    pub fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Enumerate local logs for cleanup, without depending on readable ancestors.
+    /// Quarantine hides sessions from resume, not from an owner's explicit cleanup.
+    pub fn cleanup_inventory(
+        &self,
+        unreadable: &mut dyn FnMut(SessionId, StoreError),
+    ) -> Result<Vec<SessionMeta>, StoreError> {
+        self.scan_session_meta(unreadable, |id| {
+            let mut lock = self.open_events_lock(id)?;
+            let _guard = lock.write()?;
+            Ok(self
+                .local_lifecycle_facts(*id)?
+                .filter(|facts| !facts.deleted)
+                .map(|facts| meta_from_log_facts(*id, &facts)))
+        })
+    }
+
+    fn scan_session_meta(
+        &self,
+        unreadable: &mut dyn FnMut(SessionId, StoreError),
+        mut read_meta: impl FnMut(&SessionId) -> Result<Option<SessionMeta>, StoreError>,
+    ) -> Result<Vec<SessionMeta>, StoreError> {
+        let mut metas = Vec::new();
+        for dir in self.io.list_dirs(&self.root)? {
+            let Some(id) = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<SessionId>().ok())
+            else {
+                continue;
+            };
+            match read_meta(&id) {
+                Ok(Some(meta)) => metas.push(meta),
+                Ok(None) => {}
+                Err(error) => unreadable(id, error),
+            }
+        }
+        Ok(metas)
+    }
+
+    /// Permanently remove a directory only while its authoritative format is unsupported.
+    /// This destructive OS operation never treats corruption as format incompatibility.
+    pub fn remove_incompatible(&self, id: &SessionId) -> Result<bool, StoreError> {
+        let dir = self.session_dir(id);
+        if !std::fs::symlink_metadata(&dir)?.file_type().is_dir() {
+            return Err(StoreError::Io(std::io::Error::other(
+                "session is not a real directory",
+            )));
+        }
+        let _lease = Lease::probe(&self.lease_path(id))?
+            .ok_or_else(|| StoreError::Io(std::io::Error::other("session has an active writer")))?;
+        let mut lock = self.open_events_lock(id)?;
+        let _guard = lock.write()?;
+        match self.local_lifecycle_facts(*id) {
+            Err(StoreError::UnsupportedLog { .. }) => {
+                std::fs::remove_dir_all(dir)?;
+                Ok(true)
+            }
+            Ok(_) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn session_dir(&self, id: &SessionId) -> PathBuf {
@@ -1114,12 +1449,23 @@ impl JsonlStore {
         first.next();
         let valid_kind = match (&event.kind, seed.lineage()) {
             (
-                EventKind::Forked { source, at_seq, .. },
+                EventKind::Forked {
+                    source,
+                    at_seq,
+                    neutral,
+                    ..
+                },
                 SessionLineage::Fork {
                     source: lineage_source,
                     at_seq: lineage_seq,
+                    neutral: lineage_neutral,
                 },
-            ) => event.env.item.is_none() && *source == lineage_source && *at_seq == lineage_seq,
+            ) => {
+                event.env.item.is_none()
+                    && *source == lineage_source
+                    && *at_seq == lineage_seq
+                    && *neutral == lineage_neutral
+            }
             (
                 EventKind::CompactionSeeded {
                     source,
@@ -1141,6 +1487,40 @@ impl JsonlStore {
             _ => false,
         };
         let trailing = events.get(1..).unwrap_or_default();
+        // Generation choices precede metadata and carry no source effect authority.
+        // A neutral fork must pin its target model and optional target account.
+        let neutral = matches!(event.kind, EventKind::Forked { neutral: true, .. });
+        let (metadata_trailing, valid_selection) = match trailing.first().map(|event| &event.kind) {
+            Some(EventKind::SessionSelectionsSelected { selections }) => {
+                let minimal = ego_core::run::RunSelections::empty()
+                    .with_connection(selections.connection().map(str::to_owned));
+                let valid = match seed.lineage() {
+                    SessionLineage::Fork { .. } if neutral => selections
+                        .model()
+                        .zip(selections.thinking())
+                        .is_some_and(|(model, thinking)| {
+                            *selections == minimal.with_model_and_thinking(model.clone(), thinking)
+                        }),
+                    SessionLineage::Fork { .. } => *selections == selections.for_fork_prompt(),
+                    SessionLineage::Compaction { .. } => {
+                        selections.connection().is_some() && *selections == minimal
+                    }
+                };
+                (&trailing[1..], valid)
+            }
+            _ => (trailing, !neutral),
+        };
+        // Only compaction continues explicit owner sandbox authority. Forks
+        // cannot publish these receipts through their metadata suffix.
+        let owner_count = if matches!(event.kind, EventKind::CompactionSeeded { .. }) {
+            metadata_trailing
+                .iter()
+                .take_while(|event| matches!(event.kind, EventKind::SandboxOwnerGranted { .. }))
+                .count()
+        } else {
+            0
+        };
+        let metadata_trailing = &metadata_trailing[owner_count..];
         let is_title = |event: &&DomainEvent| {
             matches!(
                 &event.kind,
@@ -1158,14 +1538,14 @@ impl JsonlStore {
         };
         // Context metadata is an ordered suffix of the same atomic seed,
         // never an arbitrary additional conversation record.
-        let (metadata, context) = match trailing.iter().position(|event| {
+        let (metadata, context) = match metadata_trailing.iter().position(|event| {
             matches!(
                 event.kind,
                 EventKind::ContextRequested { .. } | EventKind::ContextCooldown { .. }
             )
         }) {
-            Some(index) => trailing.split_at(index),
-            None => (trailing, &[][..]),
+            Some(index) => metadata_trailing.split_at(index),
+            None => (metadata_trailing, &[][..]),
         };
         let valid_context = match context {
             [] => true,
@@ -1181,7 +1561,9 @@ impl JsonlStore {
             Some(event) if matches!(event.kind, EventKind::PlanUpdated { .. }) => {
                 let valid = match &event.kind {
                     EventKind::PlanUpdated {
-                        update: update @ ego_core::plan::PlanUpdate::Replace { .. },
+                        update:
+                            update @ (ego_core::plan::PlanUpdate::Replace { .. }
+                            | ego_core::plan::PlanUpdate::Restore { .. }),
                     } => ego_core::plan::Plan::default().apply(update).is_ok(),
                     _ => false,
                 };
@@ -1189,7 +1571,8 @@ impl JsonlStore {
             }
             _ => (metadata, true),
         };
-        let valid_shape = valid_context
+        let valid_shape = valid_selection
+            && valid_context
             && valid_plan
             && match metadata {
                 [] => true,
@@ -1294,6 +1677,50 @@ impl JsonlStore {
     }
 
     /// Read and parse `id`'s manifest, or `None` if it does not exist yet.
+    /// Read only the cheap manifest projection in parallel. Recovery stays on
+    /// the caller so several damaged sessions cannot hydrate large logs at once.
+    fn catalogue_candidate(
+        &self,
+        dir: &std::path::Path,
+    ) -> Option<Result<(SessionMeta, bool), String>> {
+        match self.io.exists(&dir.join("events.jsonl")) {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(error) => {
+                tracing::warn!(dir = %dir.display(), reason = %error,
+                    "skipping session whose log existence could not be checked");
+                return None;
+            }
+        }
+        Some(match self.io.read(&dir.join("manifest.json")) {
+            Ok(Some(bytes)) => serde_json::from_slice::<CatalogueManifest>(&bytes)
+                .map_err(|error| error.to_string())
+                .and_then(|manifest| {
+                    if dir
+                        .file_name()
+                        .is_some_and(|name| name == &*session_dir_name(&manifest.id))
+                    {
+                        let deleted = manifest.deleted;
+                        Ok((manifest.meta(), deleted))
+                    } else {
+                        Err("the manifest names a different session".to_owned())
+                    }
+                }),
+            Ok(None) => Err("the manifest is missing".to_owned()),
+            Err(error) => Err(error.to_string()),
+        })
+    }
+
+    fn read_catalogue_manifest(
+        &self,
+        id: &SessionId,
+    ) -> Result<Option<CatalogueManifest>, StoreError> {
+        self.io
+            .read(&self.manifest_path(id))?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(StoreError::Manifest))
+            .transpose()
+    }
+
     fn read_manifest(&self, id: &SessionId) -> Result<Option<RunManifest>, StoreError> {
         match self.io.read(&self.manifest_path(id))? {
             None => Ok(None),
@@ -1433,9 +1860,13 @@ impl JsonlStore {
     /// Bring `id`'s on-disk state back to something every later read can
     /// trust, and report what had to change.
     ///
-    /// Recover before reading or appending after a crash. Recovery is idempotent: clean
-    /// sessions remain untouched. Repair scratch files, torn tails and derived manifests;
-    /// do not remove a live writer's lease.
+    /// This is the recovery half of `ARCHITECTURE.md` §5 and
+    /// `plans/m0a-contracts.md` Step 6, and it must be run before a session
+    /// is read or appended to after a crash. It is idempotent: running it on
+    /// an already-clean session returns a clean [`Repair`] and touches
+    /// nothing, so a caller can run it unconditionally on open rather than
+    /// having to first work out whether a crash happened — which is not
+    /// knowable from the outside anyway.
     ///
     /// The three kill points, in the order they are repaired:
     ///
@@ -1544,6 +1975,14 @@ impl JsonlStore {
             facts.model = self.inherited_model(facts.lineage)?;
         }
 
+        self.write_manifest_from_facts(id, facts)
+    }
+
+    fn write_manifest_from_facts(
+        &self,
+        id: &SessionId,
+        facts: LogManifestFacts,
+    ) -> Result<bool, StoreError> {
         // A manifest that fails to parse is treated exactly like a missing
         // one — it is a derived cache, and the log can regenerate it — but
         // an I/O error is propagated, because "cannot read this path" is
@@ -1555,6 +1994,7 @@ impl JsonlStore {
         };
 
         let projected_meta = meta_from_log_facts(*id, &facts);
+        let manifest_lineage = projected_meta.lineage;
         let meta = SessionMeta {
             profiles: projected_meta.profiles,
             id: projected_meta.id,
@@ -1575,10 +2015,13 @@ impl JsonlStore {
             // a rebuild can lose — so the header is the better authority for
             // a value that must never drift.
             //
-            // The header is write-once, not checksum-protected: `encode_header` uses
-            // plain JSON, while `StoreRecord` payloads carry checksums. Its creation
-            // identity is authoritative because it is not rewritten, not because it
-            // has the record checksum.
+            // This comment used to add "and is checksum-protected". It is
+            // not: `encode_header` is a plain `serde_json::to_vec`
+            // (`codec.rs:186-190`) and the checksum covers `StoreRecord`
+            // only, which makes the header the *least* protected line in the
+            // file. The conclusion survives on the write-once clause alone;
+            // the deleted clause was never checked. ADR §2 of
+            // the design notes.
             created: projected_meta.created,
             updated: projected_meta.updated,
             title: projected_meta.title,
@@ -1588,10 +2031,17 @@ impl JsonlStore {
         };
         let mut manifest = RunManifest {
             meta,
+            connection: facts.connection,
             execution: facts.execution,
             hooks: facts.hooks,
             evidence: facts.evidence,
             deleted: facts.deleted,
+            pause: Some(facts.pause),
+            // A lineage edge never changes, so its derived anchor stays valid.
+            lineage_anchor: previous
+                .as_ref()
+                .filter(|previous| previous.meta.lineage == manifest_lineage)
+                .and_then(|previous| previous.lineage_anchor),
         };
         manifest.omit_ci_prose(None);
         if previous.as_ref() == Some(&manifest) {
@@ -1606,7 +2056,11 @@ impl JsonlStore {
         let only_updated_trails = previous.as_ref().is_some_and(|previous| {
             let mut current = manifest.clone();
             current.meta.updated = previous.meta.updated;
-            current == *previous && previous.meta.updated < manifest.meta.updated
+            // A manifest from before `pause` existed gains it here: not damage.
+            let predates_pause = previous.pause.is_none();
+            current.pause = previous.pause;
+            current == *previous
+                && (previous.meta.updated < manifest.meta.updated || predates_pause)
         });
         if !only_updated_trails {
             tracing::warn!(
@@ -1616,6 +2070,7 @@ impl JsonlStore {
         }
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
+        self.note_catalogue(&manifest.meta, manifest.deleted);
         Ok(!only_updated_trails)
     }
 
@@ -1642,8 +2097,14 @@ impl JsonlStore {
                 | EventKind::CompactionSeeded { .. }
                 | EventKind::Compacted { .. }
         );
+        let is_pause_event = matches!(
+            ev.kind,
+            EventKind::SessionPauseRequested { .. }
+                | EventKind::SessionPaused { .. }
+                | EventKind::SessionResumed { .. }
+        );
         let log_facts = if (previous.is_none() && !is_new_session)
-            || (refresh_synopsis && projected.is_none())
+            || ((refresh_synopsis || is_pause_event) && projected.is_none())
         {
             match self.io.read(&self.log_path(id))? {
                 Some(bytes) => self.catalogue_facts(&bytes)?,
@@ -1736,9 +2197,15 @@ impl JsonlStore {
                     source_seq: *source_seq,
                     prompt_revision: *prompt_revision,
                 }),
-                EventKind::Forked { source, at_seq, .. } => Some(SessionLineage::Fork {
+                EventKind::Forked {
+                    source,
+                    at_seq,
+                    neutral,
+                    ..
+                } => Some(SessionLineage::Fork {
                     source: *source,
                     at_seq: *at_seq,
+                    neutral: *neutral,
                 }),
                 _ => previous
                     .as_ref()
@@ -1766,18 +2233,44 @@ impl JsonlStore {
             .map(|manifest| manifest.evidence.clone())
             .or_else(|| log_facts.as_ref().map(|facts| facts.evidence.clone()))
             .unwrap_or_default();
+        let pause = projected
+            .map(|state| state.pause)
+            .or_else(|| log_facts.as_ref().map(|facts| facts.pause))
+            .or_else(|| previous.as_ref().and_then(|manifest| manifest.pause))
+            .or(is_new_session.then_some(PauseState::Running));
+        let lineage_anchor = previous
+            .as_ref()
+            .filter(|previous| previous.meta.lineage == meta.lineage)
+            .and_then(|previous| previous.lineage_anchor);
+        let connection = match &ev.kind {
+            EventKind::SessionSelectionsSelected { selections } => {
+                selections.connection().map(str::to_owned)
+            }
+            _ => previous
+                .as_ref()
+                .and_then(|manifest| manifest.connection.clone())
+                .or_else(|| {
+                    log_facts
+                        .as_ref()
+                        .and_then(|facts| facts.connection.clone())
+                }),
+        };
         let mut manifest = RunManifest {
             meta,
+            connection,
             execution,
             hooks,
             evidence,
             deleted: matches!(ev.kind, EventKind::SessionDeleted)
                 || previous.as_ref().is_some_and(|manifest| manifest.deleted)
                 || log_facts.as_ref().is_some_and(|facts| facts.deleted),
+            pause,
+            lineage_anchor,
         };
         manifest.omit_ci_prose(log_facts.as_ref().map(|facts| &facts.evidence));
         let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
         self.io.replace_atomic(&self.manifest_path(id), &bytes)?;
+        self.note_catalogue(&manifest.meta, manifest.deleted);
         Ok(())
     }
 
@@ -2065,10 +2558,13 @@ impl JsonlStore {
                     summary_failures: 0,
                     lineage: None,
                 },
+                connection: None,
                 execution: None,
                 hooks: HookCatalogueEvidence::default(),
                 evidence: ManifestEvidence::default(),
                 deleted: false,
+                pause: Some(PauseState::Running),
+                lineage_anchor: None,
             },
             None => {
                 return Err(StoreError::Io(std::io::Error::other(
@@ -2124,7 +2620,8 @@ impl JsonlStore {
         let record_line = encode_record(position, &SessionEntry::Event(ev.clone()))?;
         let is_root_authority = matches!(
             ev.kind,
-            EventKind::SessionRootGranted { .. }
+            EventKind::SandboxOwnerGranted { .. }
+                | EventKind::SessionRootGranted { .. }
                 | EventKind::PermanentRootGrantPending { .. }
                 | EventKind::PermanentRootGranted { .. }
                 | EventKind::RootRevoked { .. }
@@ -2193,7 +2690,10 @@ impl JsonlStore {
                     ..
                 }
         );
+        let is_connection_selection =
+            matches!(ev.kind, EventKind::SessionSelectionsSelected { .. });
         if is_turn_boundary
+            || is_connection_selection
             || is_execution_observation
             || is_execution_measurement
             || is_hook_admission
@@ -2207,7 +2707,15 @@ impl JsonlStore {
             }
         }
 
+        let is_pause_event = matches!(
+            ev.kind,
+            EventKind::SessionPauseRequested { .. }
+                | EventKind::SessionPaused { .. }
+                | EventKind::SessionResumed { .. }
+        );
         if (is_new_session && !is_hook_invocation)
+            || is_connection_selection
+            || is_pause_event
             || is_turn_boundary
             || is_execution_observation
             || is_hook_admission
@@ -2705,113 +3213,15 @@ impl SessionStore for JsonlStore {
         &self,
         unreadable: &mut dyn FnMut(SessionId, StoreError),
     ) -> Result<Vec<SessionMeta>, StoreError> {
-        let mut metas = Vec::new();
-        for dir in self.io.list_dirs(&self.root)? {
-            let Some(id) = dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| name.parse::<SessionId>().ok())
-            else {
-                continue;
-            };
-            let result = self.readable_meta_existing(&id);
-            match result {
-                Ok(Some(meta)) => metas.push(meta),
-                Ok(None) => {}
-                Err(error) => unreadable(id, error),
-            }
-        }
-        Ok(metas)
+        // A lease can create a directory before the first log publication.
+        // Use the named lookup's absence semantics, not its internal NotFound.
+        self.scan_session_meta(unreadable, |id| self.readable_meta(id))
     }
 
     fn list(&self) -> Result<Vec<SessionMeta>, StoreError> {
         let dirs = self.io.list_dirs(&self.root)?;
         let mut metas = Vec::new();
-        for dir in dirs {
-            // A manifest is only a projection: it cannot make a missing log
-            // resumable. Returning that stale row makes lifecycle catalogue
-            // replay refuse every session with "session not found".
-            match self.io.exists(&dir.join("events.jsonl")) {
-                Ok(true) => {}
-                Ok(false) => continue,
-                Err(error) => {
-                    tracing::warn!(
-                        dir = %dir.display(),
-                        reason = %error,
-                        "skipping session whose log existence could not be checked"
-                    );
-                    continue;
-                }
-            }
-            let manifest_path = dir.join("manifest.json");
-            // Skip and warn on individual unreadable or corrupt manifests. One broken
-            // catalogue entry must not prevent listing every healthy session; the log
-            // remains independently checksummed.
-            let cached = match self.io.read(&manifest_path) {
-                Ok(Some(bytes)) => serde_json::from_slice::<RunManifest>(&bytes)
-                    .map_err(|error| error.to_string())
-                    .and_then(|manifest| {
-                        // A manifest naming another session is as unusable
-                        // as a corrupt one: the log decides.
-                        if dir
-                            .file_name()
-                            .is_some_and(|name| name == &*session_dir_name(&manifest.meta.id))
-                        {
-                            Ok((manifest.meta, manifest.deleted))
-                        } else {
-                            Err("the manifest names a different session".to_owned())
-                        }
-                    }),
-                Ok(None) => Err("the manifest is missing".to_owned()),
-                Err(error) => Err(error.to_string()),
-            };
-            // The manifest is a derived cache and the log is the authority,
-            // so a session whose manifest is missing, unreadable or corrupt
-            // is still listed — from its log, without editing anything on
-            // disk. A directory with no readable log either is skipped.
-            let (meta, deleted) = match cached {
-                Ok(listed) => listed,
-                Err(reason) => match self.meta_from_log_prefix(&dir) {
-                    Some(listed) => listed,
-                    None => {
-                        if self.io.exists(&dir.join("events.jsonl")).unwrap_or(false) {
-                            tracing::warn!(
-                                dir = %dir.display(),
-                                reason = %reason,
-                                "skipping session with neither a usable manifest nor a usable log"
-                            );
-                        }
-                        continue;
-                    }
-                },
-            };
-            // The id in the manifest has to be the id in the path, because
-            // every other method here goes the other way: `read`, `append`
-            // and `meta` all derive the directory from the id
-            // (`session_dir`). An entry whose two halves disagree is an id
-            // this method would hand out and those methods would then look
-            // for somewhere else — `ego ls` printing a session `ego resume`
-            // cannot open, or, if a directory of that name does exist,
-            // opening a different session than the one listed.
-            //
-            // Nothing this crate writes can produce the mismatch; a person
-            // copying a session directory to keep a snapshot can, and that
-            // is exactly when a wrong answer would be trusted. Skipped
-            // rather than repaired for the same reason the two arms above
-            // are: `list` reports what is on disk and never edits it, and
-            // which of the two names is the true one is not knowable from
-            // here.
-            if dir
-                .file_name()
-                .is_none_or(|name| name != &*session_dir_name(&meta.id))
-            {
-                tracing::warn!(
-                    dir = %dir.display(),
-                    manifest_id = %session_dir_name(&meta.id),
-                    "skipping session whose manifest names a different id than its directory"
-                );
-                continue;
-            }
+        for (meta, deleted) in self.catalogue_entries(dirs)? {
             // A quarantined session is refused for good, so no catalogue
             // reader may see it, whichever of manifest or log named it.
             if self.io.exists(&self.quarantine_path(&meta.id))? {
@@ -2826,6 +3236,231 @@ impl SessionStore for JsonlStore {
 }
 
 impl JsonlStore {
+    /// The catalogue entry of every readable session in `dirs`, deleted ones
+    /// included.
+    fn catalogue_entries(
+        &self,
+        dirs: Vec<PathBuf>,
+    ) -> Result<Vec<(SessionMeta, bool)>, StoreError> {
+        // The live profile is dominated by opening independent manifest files,
+        // not JSON decoding. Bound I/O concurrency rather than parallelizing
+        // full-log recovery.
+        let chunk_size = dirs.len().div_ceil(8).max(1);
+        let candidates = std::thread::scope(|scope| {
+            let readers: Vec<_> = dirs
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .map(|dir| self.catalogue_candidate(dir))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            readers
+                .into_iter()
+                .map(|reader| {
+                    reader
+                        .join()
+                        .map_err(|_| invalid_log("catalogue reader panicked"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+        })?;
+        Ok(dirs
+            .into_iter()
+            .zip(candidates.into_iter().flatten())
+            .filter_map(|(dir, cached)| self.catalogue_entry(&dir, cached?))
+            .collect())
+    }
+
+    /// Resolve one catalogue candidate read by [`Self::catalogue_candidate`].
+    fn catalogue_entry(
+        &self,
+        dir: &std::path::Path,
+        cached: Result<(SessionMeta, bool), String>,
+    ) -> Option<(SessionMeta, bool)> {
+        // The manifest is a derived cache and the log is the authority,
+        // so a session whose manifest is missing, unreadable or corrupt
+        // is still listed — from its log, without editing anything on
+        // disk. A directory with no readable log either is skipped.
+        let (meta, deleted) = match cached {
+            Ok(listed) => listed,
+            Err(reason) => match self.meta_from_log_prefix(dir) {
+                Some(listed) => listed,
+                None => {
+                    if self.io.exists(&dir.join("events.jsonl")).unwrap_or(false) {
+                        tracing::warn!(
+                            dir = %dir.display(),
+                            reason = %reason,
+                            "skipping session with neither a usable manifest nor a usable log"
+                        );
+                    }
+                    return None;
+                }
+            },
+        };
+        // The id in the manifest has to be the id in the path, because
+        // every other method here goes the other way: `read`, `append`
+        // and `meta` all derive the directory from the id
+        // (`session_dir`). An entry whose two halves disagree is an id
+        // this method would hand out and those methods would then look
+        // for somewhere else — `ego ls` printing a session `ego resume`
+        // cannot open, or, if a directory of that name does exist,
+        // opening a different session than the one listed.
+        //
+        // Nothing this crate writes can produce the mismatch; a person
+        // copying a session directory to keep a snapshot can, and that
+        // is exactly when a wrong answer would be trusted. Skipped
+        // rather than repaired for the same reason the two arms above
+        // are: `list` reports what is on disk and never edits it, and
+        // which of the two names is the true one is not knowable from
+        // here.
+        if dir
+            .file_name()
+            .is_none_or(|name| name != &*session_dir_name(&meta.id))
+        {
+            tracing::warn!(
+                dir = %dir.display(),
+                manifest_id = %session_dir_name(&meta.id),
+                "skipping session whose manifest names a different id than its directory"
+            );
+            return None;
+        }
+        Some((meta, deleted))
+    }
+
+    pub(super) fn session_table_path(&self) -> PathBuf {
+        self.root.join("history.sqlite")
+    }
+
+    /// Keep the session table current after a manifest write. The table is
+    /// derived: a failed write leaves a stale row that a listing corrects.
+    fn note_catalogue(&self, meta: &SessionMeta, deleted: bool) {
+        let path = self.session_table_path();
+        if let Err(error) = SessionTable::open(&path).and_then(|table| table.upsert(meta, deleted))
+        {
+            discard_if_corrupt(&path, &error);
+            tracing::debug!(session = %meta.id, %error, "session table not updated");
+        }
+    }
+
+    /// Add the sessions the table lacks, from their manifests, and drop the
+    /// rows whose directory is gone. A complete table costs one directory read.
+    pub(super) fn reconcile_catalogue(&self, table: &mut SessionTable) -> Result<(), PageError> {
+        let mut known = table.ids()?;
+        let mut missing = Vec::new();
+        for dir in self.io.list_dirs(&self.root)? {
+            let Some(id) = dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.parse::<SessionId>().ok())
+            else {
+                continue;
+            };
+            if !known.remove(&id.to_string()) {
+                missing.push(dir);
+            }
+        }
+        if !missing.is_empty() {
+            let entries = self.catalogue_entries(missing)?;
+            table.upsert_all(entries.iter().map(|(meta, deleted)| (meta, *deleted)))?;
+        }
+        if !known.is_empty() {
+            table.remove_all(known.iter().map(String::as_str))?;
+        }
+        Ok(())
+    }
+
+    /// One page from the table. Each row is read again from its manifest, so
+    /// a stale row is corrected and skipped, never returned.
+    fn catalogue_page_from_table(
+        &self,
+        table: &mut SessionTable,
+        root: Option<&std::path::Path>,
+        mut after: Option<(Timestamp, SessionId)>,
+        limit: usize,
+    ) -> Result<Vec<SessionMeta>, PageError> {
+        self.reconcile_catalogue(table)?;
+        let mut items = Vec::new();
+        while items.len() < limit {
+            let wanted = limit - items.len();
+            let rows = table.page(root, after, wanted)?;
+            let exhausted = rows.len() < wanted;
+            for (created, id) in rows {
+                after = Some((created, id));
+                let dir = self.session_dir(&id);
+                let Some((meta, deleted)) = self
+                    .catalogue_candidate(&dir)
+                    .and_then(|cached| self.catalogue_entry(&dir, cached))
+                else {
+                    table.remove_all([id.to_string().as_str()])?;
+                    continue;
+                };
+                let matches = !deleted
+                    && meta.created == created
+                    && root.is_none_or(|root| meta.workspace_root == root);
+                if !matches {
+                    // Created is immutable; a different value means a replaced
+                    // directory. Its corrected row is listed in its own place.
+                    table.upsert(&meta, deleted)?;
+                    continue;
+                }
+                if self.io.exists(&self.quarantine_path(&id))? {
+                    continue;
+                }
+                items.push(meta);
+            }
+            if exhausted {
+                break;
+            }
+        }
+        Ok(items)
+    }
+}
+
+/// Why a table page failed: the table itself, or the authoritative store.
+pub(super) enum PageError {
+    Table(rusqlite::Error),
+    Store(StoreError),
+}
+
+impl From<rusqlite::Error> for PageError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Table(error)
+    }
+}
+
+impl From<StoreError> for PageError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<std::io::Error> for PageError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Store(error.into())
+    }
+}
+
+impl JsonlStore {
+    /// Read the stable account from the same authoritative stream as run selections.
+    /// Legacy sessions have no account binding and are never assigned one by label.
+    pub fn selected_connection(&self, session: &SessionId) -> Result<Option<String>, StoreError> {
+        use futures::StreamExt;
+        let stream = match SessionStore::read(self, session) {
+            Ok(stream) => stream,
+            Err(StoreError::NotFound) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        let entries = futures::executor::block_on(stream.collect::<Vec<_>>());
+        let mut selected = None;
+        for entry in entries {
+            apply_connection_selection(&mut selected, &entry?);
+        }
+        Ok(selected)
+    }
+
     /// Read the last explicit model choice from the authoritative session stream.
     pub fn selected_model(
         &self,
@@ -2836,8 +3471,21 @@ impl JsonlStore {
             futures::executor::block_on(SessionStore::read(self, session)?.collect::<Vec<_>>());
         let mut selected = None;
         for entry in entries {
-            if let SessionEntry::ModelSelected(model) = entry? {
-                selected = Some(model);
+            let model = match entry? {
+                SessionEntry::ModelSelected(model) => Some(model),
+                SessionEntry::Event(event) => match event.kind {
+                    ego_core::event::domain::EventKind::SessionSelectionsSelected {
+                        selections,
+                    } => selections.model().cloned(),
+                    _ => None,
+                },
+                SessionEntry::RunTransaction(transaction) => {
+                    transaction.selections().model().cloned()
+                }
+                _ => None,
+            };
+            if model.is_some() {
+                selected = model;
             }
         }
         Ok(selected)
@@ -2885,6 +3533,158 @@ impl JsonlStore {
 
 impl JsonlStore {
     fn lifecycle_facts(&self, id: SessionId) -> Result<Option<LogManifestFacts>, StoreError> {
+        let Some(mut facts) = self.local_lifecycle_facts(id)? else {
+            return Ok(None);
+        };
+        if facts.model.is_none() {
+            facts.model = self.inherited_model(facts.lineage)?;
+        }
+        Ok(Some(facts))
+    }
+
+    fn local_lifecycle_facts(&self, id: SessionId) -> Result<Option<LogManifestFacts>, StoreError> {
+        let Some(bytes) = self.read_local_lifecycle_log(id)? else {
+            return Ok(None);
+        };
+        log_manifest_facts(&bytes)
+    }
+
+    fn local_lifecycle_projection(
+        &self,
+        id: SessionId,
+    ) -> Result<Option<LogManifestFacts>, StoreError> {
+        let revision = self.io.file_revision(&self.log_path(&id)).ok().flatten();
+        let Some(bytes) = self.read_local_lifecycle_log(id)? else {
+            return Ok(None);
+        };
+        let mut markers = CatalogueMarkers::default();
+        let Some(facts) = log_manifest_facts_and_messages(&bytes, Some(&mut markers))? else {
+            return Ok(None);
+        };
+        self.remember_catalogue_log(id, revision, &facts, markers, true)?;
+        Ok(Some(facts))
+    }
+
+    fn cached_catalogue_log(&self, id: SessionId) -> Result<Option<Arc<CatalogueLog>>, StoreError> {
+        let Some(revision) = self.io.file_revision(&self.log_path(&id)).ok().flatten() else {
+            return Ok(None);
+        };
+        Ok(self
+            .catalogue_logs
+            .lock()
+            .map_err(|_| invalid_log("catalogue cache poisoned"))?
+            .get(&id)
+            .filter(|cached| cached.revision.as_ref() == Some(&revision))
+            .cloned())
+    }
+
+    fn remember_catalogue_log(
+        &self,
+        id: SessionId,
+        revision: Option<super::FileRevision>,
+        facts: &LogManifestFacts,
+        markers: CatalogueMarkers,
+        clean: bool,
+    ) -> Result<Arc<CatalogueLog>, StoreError> {
+        let projected = Arc::new(CatalogueLog {
+            revision,
+            meta: meta_from_log_facts(id, facts),
+            pause: facts.pause,
+            deleted: facts.deleted,
+            clean,
+            markers,
+        });
+        if projected.revision.is_some()
+            && self.io.file_revision(&self.log_path(&id)).ok().flatten() == projected.revision
+        {
+            self.catalogue_logs
+                .lock()
+                .map_err(|_| invalid_log("catalogue cache poisoned"))?
+                .insert(id, projected.clone());
+        }
+        Ok(projected)
+    }
+
+    /// A compact display snapshot, including the valid prefix of a torn log.
+    /// It never repairs disk and cannot be used as restoration authority.
+    fn catalogue_log(&self, id: SessionId) -> Result<Option<Arc<CatalogueLog>>, StoreError> {
+        if let Some(cached) = self.cached_catalogue_log(id)? {
+            return Ok(Some(cached));
+        }
+        let revision = self.io.file_revision(&self.log_path(&id)).ok().flatten();
+        let Some(bytes) = self.io.read(&self.log_path(&id))? else {
+            return Ok(None);
+        };
+        let (header, start) = decoded_header(&bytes)?.ok_or(StoreError::MissingHeader)?;
+        if header.v != CODEC_VERSION {
+            return Err(StoreError::UnsupportedLog { found: header.v });
+        }
+        if header.session != id {
+            return Err(StoreError::WrongSession {
+                expected: header.session,
+                asked: id,
+            });
+        }
+        let (valid_len, _) = valid_prefix(&bytes, start);
+        let mut markers = CatalogueMarkers::default();
+        let Some(facts) = log_manifest_facts_and_messages(&bytes[..valid_len], Some(&mut markers))?
+        else {
+            return Ok(None);
+        };
+        self.remember_catalogue_log(id, revision, &facts, markers, valid_len == bytes.len())
+            .map(Some)
+    }
+
+    fn catalogue_inherited_model(
+        &self,
+        mut lineage: Option<SessionLineage>,
+    ) -> Result<Option<String>, StoreError> {
+        let mut visited = HashSet::new();
+        while let Some(edge) = lineage {
+            let (source, cutoff) = match edge {
+                SessionLineage::Fork { source, at_seq, .. } => (source, at_seq),
+                SessionLineage::Compaction {
+                    source, source_seq, ..
+                } => (source, source_seq),
+            };
+            if !visited.insert(source) {
+                return Err(invalid_log("model projection encountered a lineage cycle"));
+            }
+            let Some(source) = self.catalogue_log(source)? else {
+                return Ok(None);
+            };
+            if let Some((_, model)) = source
+                .markers
+                .models
+                .iter()
+                .rev()
+                .find(|(seq, _)| *seq <= cutoff)
+            {
+                return Ok(Some(model.clone()));
+            }
+            lineage = source
+                .markers
+                .lineage
+                .iter()
+                .rev()
+                .find(|(seq, _)| *seq <= cutoff)
+                .map(|(_, edge)| *edge);
+        }
+        Ok(None)
+    }
+
+    fn catalogue_meta(&self, id: SessionId) -> Result<Option<(SessionMeta, bool)>, StoreError> {
+        let Some(cached) = self.catalogue_log(id)? else {
+            return Ok(None);
+        };
+        let mut meta = cached.meta.clone();
+        if meta.model.is_none() {
+            meta.model = self.catalogue_inherited_model(meta.lineage)?;
+        }
+        Ok(Some((meta, cached.deleted)))
+    }
+
+    fn read_local_lifecycle_log(&self, id: SessionId) -> Result<Option<Vec<u8>>, StoreError> {
         let Some(bytes) = self.io.read(&self.log_path(&id))? else {
             return Ok(None);
         };
@@ -2902,7 +3702,7 @@ impl JsonlStore {
         if valid_len != bytes.len() {
             return Err(invalid_log("session log has a corrupt or torn tail"));
         }
-        self.catalogue_facts(&bytes)
+        Ok(Some(bytes))
     }
 
     fn catalogue_facts(&self, log: &[u8]) -> Result<Option<LogManifestFacts>, StoreError> {
@@ -2924,7 +3724,7 @@ impl JsonlStore {
         let mut visited = HashSet::new();
         while let Some(edge) = lineage {
             let (source, cutoff) = match edge {
-                SessionLineage::Fork { source, at_seq } => (source, at_seq),
+                SessionLineage::Fork { source, at_seq, .. } => (source, at_seq),
                 SessionLineage::Compaction {
                     source, source_seq, ..
                 } => (source, source_seq),
@@ -2946,8 +3746,17 @@ impl JsonlStore {
                             break;
                         }
                         match event.kind {
-                            EventKind::Forked { source, at_seq, .. } => {
-                                lineage = Some(SessionLineage::Fork { source, at_seq });
+                            EventKind::Forked {
+                                source,
+                                at_seq,
+                                neutral,
+                                ..
+                            } => {
+                                lineage = Some(SessionLineage::Fork {
+                                    source,
+                                    at_seq,
+                                    neutral,
+                                });
                             }
                             EventKind::CompactionSeeded {
                                 source,
@@ -2983,14 +3792,8 @@ impl JsonlStore {
     /// prefix of its log. `None` when there is no readable log; a torn tail
     /// is ignored rather than refused, because listing never edits a session.
     fn meta_from_log_prefix(&self, dir: &std::path::Path) -> Option<(SessionMeta, bool)> {
-        let bytes = self.io.read(&dir.join("events.jsonl")).ok()??;
-        let (header, start) = decoded_header(&bytes).ok()??;
-        if header.v != CODEC_VERSION {
-            return None;
-        }
-        let (valid_len, _) = valid_prefix(&bytes, start);
-        let facts = self.catalogue_facts(&bytes[..valid_len]).ok()??;
-        Some((meta_from_log_facts(header.session, &facts), facts.deleted))
+        let id = dir.file_name()?.to_str()?.parse::<SessionId>().ok()?;
+        self.catalogue_meta(id).ok()?
     }
 
     fn publish_empty_session_lifecycle(
@@ -3175,6 +3978,155 @@ impl SessionLifecycleStore for JsonlStore {
     fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError> {
         Ok(self.io.exists(&self.quarantine_path(&id))?)
     }
+
+    fn listed_facts(&self, id: SessionId) -> Result<Option<ListedFacts>, StoreError> {
+        let listed = |manifest: &CatalogueManifest| {
+            manifest.pause.map(|pause| ListedFacts {
+                pause,
+                deleted: manifest.deleted,
+                lineage_anchor: manifest.lineage_anchor,
+            })
+        };
+        // An unreadable manifest is a missing one: the log can regenerate it.
+        if let Ok(Some(facts)) = self
+            .read_catalogue_manifest(&id)
+            .map(|m| m.as_ref().and_then(listed))
+        {
+            return Ok(Some(facts));
+        }
+        // Enumeration may already have projected a missing/corrupt manifest.
+        // Reuse that same validated log snapshot without turning list into repair.
+        if let Some(cached) = self.cached_catalogue_log(id)? {
+            if !cached.clean {
+                return Err(invalid_log("session log has a corrupt or torn tail"));
+            }
+            return Ok(Some(ListedFacts {
+                pause: cached.pause,
+                deleted: cached.deleted,
+                lineage_anchor: None,
+            }));
+        }
+        // A manifest without the fields predates them. Derive them once under
+        // the append lock and persist, so the next listing reads no log.
+        if !self.io.exists(&self.log_path(&id))? {
+            return Ok(None);
+        }
+        let mut lock = self.open_events_lock(&id)?;
+        let _guard = lock.write()?;
+        let previous = self.read_catalogue_manifest(&id).ok().flatten();
+        let Some(mut facts) = self.local_lifecycle_projection(id)? else {
+            return Ok(None);
+        };
+        // Updating display facts must not reconstruct inherited execution evidence.
+        // Existing model projection remains owned by the normal writer/recovery path.
+        if facts.model.is_none() {
+            facts.model = previous
+                .as_ref()
+                .and_then(|manifest| manifest.model.clone());
+        }
+        let (pause, deleted) = (facts.pause, facts.deleted);
+        let rebuilt = if previous.is_some() {
+            self.write_manifest_from_facts(&id, facts)
+        } else {
+            // With no usable metadata, recovery must still derive the inherited
+            // model rather than persist an incomplete catalogue projection.
+            self.rebuild_manifest_from_facts(&id, facts)
+        };
+        if let Err(error) = rebuilt {
+            tracing::warn!(session = %session_dir_name(&id), %error, "listing could not persist the derived manifest facts");
+        }
+        let lineage_anchor = self
+            .read_catalogue_manifest(&id)
+            .ok()
+            .flatten()
+            .and_then(|manifest| manifest.lineage_anchor);
+        Ok(Some(ListedFacts {
+            pause,
+            deleted,
+            lineage_anchor,
+        }))
+    }
+
+    fn catalogue_page(
+        &self,
+        root: Option<&std::path::Path>,
+        after: Option<(Timestamp, SessionId)>,
+        limit: usize,
+    ) -> Result<Option<Vec<SessionMeta>>, StoreError> {
+        let path = self.session_table_path();
+        let page = SessionTable::open(&path)
+            .map_err(PageError::Table)
+            .and_then(|mut table| self.catalogue_page_from_table(&mut table, root, after, limit));
+        match page {
+            Ok(items) => Ok(Some(items)),
+            Err(PageError::Store(error)) => Err(error),
+            Err(PageError::Table(error)) => {
+                discard_if_corrupt(&path, &error);
+                tracing::warn!(%error, "session table unavailable; listing from the manifests");
+                Ok(None)
+            }
+        }
+    }
+
+    fn note_opened(&self, id: SessionId, at: Timestamp) {
+        let path = self.session_table_path();
+        if let Err(error) = SessionTable::open(&path).and_then(|table| table.note_opened(id, at)) {
+            discard_if_corrupt(&path, &error);
+            tracing::debug!(session = %id, %error, "session open time not recorded");
+        }
+    }
+
+    fn listed_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        if !self.io.exists(&self.log_path(&id))? {
+            return Ok(None);
+        }
+        if let Ok(Some(manifest)) = self.read_catalogue_manifest(&id)
+            && manifest.id == id
+        {
+            return Ok(Some(manifest.meta()));
+        }
+        Ok(self.catalogue_meta(id)?.map(|(meta, _)| meta))
+    }
+
+    fn listed_message_at(
+        &self,
+        id: SessionId,
+        cutoff: Seq,
+    ) -> Result<Option<ItemId>, LifecycleError> {
+        // This also warms a legacy source's hold facts, so a later page cannot
+        // read the same log again merely to derive its pause state.
+        self.listed_facts(id)?;
+        let cached = self
+            .catalogue_log(id)?
+            .ok_or_else(|| LifecycleError::UnknownSession {
+                session: id,
+                store_root: self.storage_root(),
+            })?;
+        if !cached.clean {
+            return Err(invalid_log("session log has a corrupt or torn tail").into());
+        }
+        Ok(cached
+            .markers
+            .messages
+            .iter()
+            .rev()
+            .find(|(seq, _)| *seq <= cutoff)
+            .map(|(_, item)| *item))
+    }
+
+    fn cache_lineage_anchor(&self, id: SessionId, anchor: LineageAnchor) -> Result<(), StoreError> {
+        let mut lock = self.open_events_lock(&id)?;
+        let _guard = lock.write()?;
+        let Some(mut manifest) = self.read_manifest(&id)? else {
+            return Ok(());
+        };
+        if manifest.meta.lineage.is_none() || manifest.lineage_anchor == Some(anchor) {
+            return Ok(());
+        }
+        manifest.lineage_anchor = Some(anchor);
+        let bytes = serde_json::to_vec(&manifest).expect("RunManifest always serialises");
+        Ok(self.io.replace_atomic(&self.manifest_path(&id), &bytes)?)
+    }
 }
 
 impl ReplaySource for JsonlStore {
@@ -3205,9 +4157,16 @@ impl ReplaySource for JsonlStore {
                 source_seq,
                 prompt_revision,
             }),
-            EventKind::Forked { source, at_seq, .. } => {
-                Some(SessionLineage::Fork { source, at_seq })
-            }
+            EventKind::Forked {
+                source,
+                at_seq,
+                neutral,
+                ..
+            } => Some(SessionLineage::Fork {
+                source,
+                at_seq,
+                neutral,
+            }),
             _ => None,
         };
         if lineage.is_some() && first_event.env.seq != first {

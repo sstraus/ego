@@ -1,6 +1,6 @@
 //! Why an *invocation* ended, as opposed to why a turn did.
 //!
-
+//! See the design notes and `CLI.md` §4.3.
 //!
 //! Two levels rather than one enum, because a turn and a run are not the same
 //! thing. `max_turns` fires *between* two completed turns: recording it as
@@ -74,11 +74,21 @@ impl SessionId {
 
 /// Who refused the call that ended the run — or that nobody did.
 ///
-/// Denial authority tells the operator which rule layer, mode or boundary can lift a
-/// refusal. No attribution is also explicit, not unknown.
+/// The fifth case exit 3 could not express. `CLI.md` §4.4 offers three opt-ins
+/// — `--allow`, a stronger `--sandbox`, `--yolo` — and says they "act on
+/// different axes". Which of them applies is this value, and for one arm the
+/// answer is *none of them*: a deny rule sends an operator to the config layer
+/// `RuleAuthority::from` names, the mode floor sends them to `--mode`, the
+/// boundary sends them to `--sandbox` and explicitly not to `--yolo`, and a
+/// question nobody answered sends them to `--allow`.
 ///
-/// [`Nobody`](Self::Nobody) explicitly states that no authority decided.
-/// Unlike `None`, it does not imply unknown attribution.
+/// [`Nobody`](Self::Nobody) rather than `Option<Authority>`, even though a
+/// `None` here could only ever mean the one thing — `RunTermination` is not
+/// durable, so nothing else can put one there. Every Rust reader's prior for
+/// `Option` is "absent or unknown", and this is neither: it is a stated fact
+/// about a run in which §6's order was exhausted. Same size, nothing to
+/// re-derive. See
+/// the design notes §2.
 ///
 /// There is deliberately no `Authority::Nobody` arm. That type is persisted
 /// through `EventKind::PermissionDecided`, and a *decision* event whose
@@ -107,7 +117,8 @@ pub enum DeniedBy {
 /// [`TurnOutcome`]: crate::turn::TurnOutcome
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Denial {
-    /// What was refused, rendered for a person.
+    /// What was refused, rendered for a person. `CLI.md` §4.4's "denied
+    /// action".
     pub action: String,
     pub by: DeniedBy,
 }
@@ -123,9 +134,18 @@ pub enum RunTermination {
     TaskFailed,
     /// The command line itself was wrong. No turn ever ran.
     UsageError { message: String },
-    /// An unresolved permission carries the denied action and authority so callers can
-    /// distinguish a configured refusal from nobody answering. It is one termination category
-    /// with separate facts, not two variants with identical exit semantics.
+    /// A call needed a grant this run could not produce. Carries the action so
+    /// §4.1's result can name it — a script that gets exit 3 and no subject
+    /// cannot act on it — and [`DeniedBy`] so it can tell a refusal somebody
+    /// made from a question nobody answered, which want different remedies.
+    ///
+    /// Two fields and not two variants. The precedent that looks like it
+    /// argues for a `PermissionUnanswered` beside this one is [`MaxTurns`]'s
+    /// doc below, and it argues the other way: that split exists because §4.1
+    /// spells the two limits as two different words, and §4.1 has exactly
+    /// **one** word for permission. A second variant would return
+    /// `"permission"` from [`exit_reason`](Self::exit_reason) like this one,
+    /// exit 3 like this one, and still need a field to say anything.
     ///
     /// [`MaxTurns`]: Self::MaxTurns
     PermissionRequired { action: String, by: DeniedBy },
@@ -136,6 +156,8 @@ pub enum RunTermination {
     /// failure. The run is settled and the session takes the next prompt.
     /// `message` names the cause once, in words a host may show.
     Provider { message: String },
+    /// A local generation guard stopped the run; no automatic retry is safe.
+    Guard { message: String },
     /// The exchange was lost after the turn had already shown output, so
     /// nobody can say what the provider did with the rest. The only provider
     /// failure that leaves the run uncertain.
@@ -147,8 +169,13 @@ pub enum RunTermination {
     Failed { message: String },
     /// A budget ceiling stopped the run.
     BudgetExceeded,
-    /// Budget exhaustion may interrupt a turn; a maximum-turn limit applies only between
-    /// turns. Keep their exit reasons distinct.
+    /// `--max-turns` stopped the run. Two variants rather than one
+    /// `LimitReached`, even though `CLI.md` §4.3 gives both exit 5, because
+    /// §4.1 spells them as two different words (`budget` and `max_turns`).
+    /// Fusing them here would make one of those words unproducible, and a
+    /// ratified word nothing can emit is a contract we only claim to meet.
+    /// They differ in kind too: a budget ceiling interrupts a turn, and a
+    /// turn limit is only ever reached *between* turns.
     MaxTurns,
     /// A host asked for a safe-boundary pause and the boundary was reached.
     ///
@@ -164,7 +191,7 @@ pub enum RunTermination {
     Signalled(Signal),
 }
 
-/// Run termination and process exit classification.
+/// The signals with a defined exit code in `CLI.md` §4.3.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Int,
@@ -172,7 +199,7 @@ pub enum Signal {
 }
 
 impl RunTermination {
-    /// The run result preserves the final durable outcome.
+    /// The process exit code, per `CLI.md` §4.3.
     ///
     /// The mapping lives here and not in the binary because it is the same
     /// mapping for every front end, and a second copy in an ACP host would be
@@ -189,18 +216,28 @@ impl RunTermination {
             RunTermination::ContextOverflow { .. } => 4,
             RunTermination::BudgetExceeded => 5,
             RunTermination::MaxTurns => 5,
-            // Pause has no human-input payload and uses exit 6, not exit 3. Scripts receiving
-            // exit 3 must find a denied action or question; a host-held pause asks neither.
+            // A code of its own and not 3, though both stop for a human. §4.1
+            // ratifies that on exit 3 "exactly one human-input payload is
+            // present" — a `denied`/`denied_by` pair or a `question` object —
+            // and a pause has neither: nothing was refused and nothing is
+            // being asked. A script that reads 3 goes looking for a payload
+            // that is not there. 6 is the first free code in §4.3's table and
+            // no script can be observing it today.
             RunTermination::Paused => 6,
+            RunTermination::Guard { .. } => 7,
             RunTermination::TimedOut => 124,
             RunTermination::Signalled(Signal::Int) => 130,
             RunTermination::Signalled(Signal::Term) => 143,
         }
     }
 
-    /// Usage errors identify input the caller must change. Completion reasons and process exit
-    /// codes partition outcomes differently; consumers needing both distinctions must read
-    /// both.
+    /// The `exit_reason` string of `CLI.md` §4.1.
+    ///
+    /// Neither finer nor coarser than [`exit_code`](Self::exit_code) — just
+    /// cut differently. §4.1 publishes six words and §4.3 nine codes, and the
+    /// two are separately ratified contracts rather than two spellings of
+    /// one: `error` covers five codes, while one code (5) covers two words.
+    /// A caller that needs a distinction the other side makes reads both.
     pub fn exit_reason(&self) -> &'static str {
         match self {
             RunTermination::Done => "done",
@@ -210,6 +247,7 @@ impl RunTermination {
             RunTermination::PermissionRequired { .. } => "permission",
             RunTermination::QuestionRequired { .. } => "question",
             RunTermination::Paused => "paused",
+            RunTermination::Guard { .. } => "guard",
             RunTermination::TaskFailed
             | RunTermination::UsageError { .. }
             | RunTermination::Provider { .. }
@@ -242,24 +280,38 @@ impl RunTermination {
     /// [`MaxTurns`](Self::MaxTurns): it is a fact about the invocation that no
     /// single turn is in a position to report.
     ///
-    /// A turn can detect request/model disagreement because it holds resolved
-    /// capabilities. A requested thinking level the model cannot accept is a
-    /// usage error, not a provider or internal failure.
+    /// **[`UsageError`](Self::UsageError) was in that sentence and should not
+    /// have been.** A turn is in fact the only thing positioned to notice one
+    /// class of it: the invocation and the *resolved* model disagree — a
+    /// `--thinking` level the model does not accept — and nothing above the
+    /// turn holds the resolved [`ModelCapabilities`] to compare against. See
+    /// the design notes.
     ///
     /// [`ModelCapabilities`]: crate::generator::capabilities::ModelCapabilities
     ///
-    /// A `PermissionRequired` turn that recorded no denial is reported as our own defect
-    /// rather than as exit 3 with an empty subject: a script that gets 3 and cannot see
-    /// what was denied has been told nothing, and inventing a placeholder would hide the
-    /// bug that produced it. The missing thing is the whole [`Denial`], so an action can
-    /// no longer arrive without an authority beside it. [`after_turn`](Self::after_turn)
-    /// for a whole turn outcome.
+    /// `denied` is what a [`ExitReason::PermissionRequired`] turn was refused
+    /// and who refused it, which `CLI.md` §4.1 and §4.4 require in the result.
+    /// A `PermissionRequired` turn that recorded no denial is reported as our
+    /// own defect rather than as exit 3 with an empty subject: a script that
+    /// gets 3 and cannot see what was denied has been told nothing, and
+    /// inventing a placeholder would hide the bug that produced it. The
+    /// missing thing is the whole [`Denial`], so an action can no longer
+    /// arrive without an authority beside it.
+    /// [`after_turn`](Self::after_turn) for a whole turn outcome.
     ///
     /// A provider failure carries what the turn learned about it: the cause a
     /// host may be shown, and whether the turn's effect is known.
     /// Usage failures carry the current turn's journal diagnostic. Other
     /// outcomes are decided by the exit reason alone.
     pub fn after_outcome(outcome: &crate::turn::TurnOutcome) -> Option<Self> {
+        if outcome.exit_reason == ExitReason::Guard {
+            return Some(Self::Guard {
+                message: outcome
+                    .guard_failure
+                    .clone()
+                    .unwrap_or_else(|| "a local generation guard stopped the turn".into()),
+            });
+        }
         if outcome.exit_reason == ExitReason::Usage
             && let Some(message) = &outcome.usage_error
         {
@@ -286,6 +338,9 @@ impl RunTermination {
     pub fn after_turn(reason: ExitReason, denied: Option<Denial>) -> Option<Self> {
         match reason {
             ExitReason::Completed => None,
+            ExitReason::Guard => Some(RunTermination::Guard {
+                message: "a local generation guard stopped the turn".into(),
+            }),
             ExitReason::Budget => Some(RunTermination::BudgetExceeded),
             ExitReason::Paused => Some(RunTermination::Paused),
             ExitReason::PermissionRequired => Some(match denied {
@@ -382,10 +437,21 @@ impl std::str::FromStr for RequestId {
     }
 }
 
-/// Derived identity of the complete inbound command body, never a serialized copy. Run
-/// transactions persist this value, so copying the body would duplicate text and put image
-/// bytes outside their blob lifecycle. `Self::of` derives it; `Self::parse` admits
-/// already-derived structured identities such as child invocation hashes.
+/// Digest of the complete inbound command body used for idempotency.
+///
+/// **Derived from the body, never a copy of it.** This value is written into
+/// the durable run transaction (`RunCommand::CommandAdmitted`), which the
+/// session store serialises to its JSONL, so a caller that passes the request
+/// body itself persists that body a second time. For a text prompt that is
+/// waste; for a prompt that can carry image blocks it breaks
+/// `docs/decisions/2026-08-29-images-are-session-blobs-before-they-are-wire-
+/// parts.md`, which rules that durable prompt records carry a reference, a
+/// media type and dimensions and "never carry bytes".
+///
+/// [`Self::of`] is how a protocol adapter should build one. [`Self::parse`]
+/// stays for the callers whose identity is already derived and structured —
+/// `subagent.rs`'s `child:<invocation>:<sha256>` names its origin as well as
+/// its content — so the rule is bounded derivation, not one fixed spelling.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct RequestDigest(String);
@@ -529,6 +595,15 @@ impl RunRevision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunSelections {
+    /// Stable account ID, never the editable presentation name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection: Option<String>,
+    /// Non-secret digest of the admitted account's credential source for a derived run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection_binding: Option<String>,
+    /// Explicit tool names retained so resume cannot change a search recipient.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tools: Option<Vec<String>>,
     /// One launch-owned canonical read directory, retained across durable runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     read_only_dir: Option<PathBuf>,
@@ -600,6 +675,9 @@ impl RunSelections {
     ) -> Self {
         Self {
             read_only_dir: None,
+            connection: None,
+            connection_binding: None,
+            tools: None,
             model,
             thinking,
             mode,
@@ -640,6 +718,9 @@ impl RunSelections {
     pub const fn empty() -> Self {
         Self {
             read_only_dir: None,
+            connection: None,
+            connection_binding: None,
+            tools: None,
             model: None,
             thinking: None,
             mode: None,
@@ -652,6 +733,37 @@ impl RunSelections {
             sandbox_readmission: None,
             trust: None,
         }
+    }
+
+    pub fn with_connection(mut self, connection: Option<String>) -> Self {
+        if self.connection != connection {
+            self.connection_binding = None;
+        }
+        self.connection = connection;
+        self
+    }
+
+    pub fn connection(&self) -> Option<&str> {
+        self.connection.as_deref()
+    }
+
+    pub fn with_connection_binding(mut self, id: String, binding: String) -> Self {
+        self.connection = Some(id);
+        self.connection_binding = Some(binding);
+        self
+    }
+
+    pub fn connection_binding(&self) -> Option<&str> {
+        self.connection_binding.as_deref()
+    }
+
+    pub fn with_tools(mut self, tools: Option<Vec<String>>) -> Self {
+        self.tools = tools;
+        self
+    }
+
+    pub fn tools(&self) -> Option<&Vec<String>> {
+        self.tools.as_ref()
     }
 
     pub const fn sandbox(&self) -> Option<Confinement> {
@@ -747,6 +859,17 @@ impl RunSelections {
         self.model = Some(model);
         self.thinking = Some(thinking);
         self
+    }
+
+    /// Retain generation choices, not the source's admitted effect authority.
+    pub fn for_fork_prompt(&self) -> Self {
+        Self {
+            connection: self.connection.clone(),
+            tools: self.tools.clone(),
+            model: self.model.clone(),
+            thinking: self.thinking,
+            ..Self::empty()
+        }
     }
 
     fn with_model(&self, model: ModelRef) -> Self {
@@ -1042,10 +1165,20 @@ pub enum RunAppend {
     CommittedDurabilityUncertain { diagnostic: String },
 }
 
-/// Transient submitted text and images. Durable events retain blob references, media types, and
-/// dimensions, not inline bytes. This type is deliberately not serializable; command admission
-/// projects text. Validated `Image` values bound size and derive dimensions from content before
-/// admission.
+/// One prompt as it was submitted: its text, and the images sent beside it.
+///
+/// **Transient, and deliberately not the durable record.** The bytes here are
+/// on their way to the session's content-addressed store; what survives in the
+/// event stream is a `BlobRef`, a media type and dimensions, which is what
+/// `docs/decisions/2026-08-29-images-are-session-blobs-before-they-are-wire-
+/// parts.md` requires. `RunCommand::CommandAdmitted` therefore projects only
+/// [`Self::text`], and this type is intentionally not `Serialize`: a durable
+/// record that could hold it would be a durable record holding bytes.
+///
+/// [`Image`] is used rather than a looser inline type because it is already the
+/// validated one — its constructor bounds the byte length and decodes the
+/// dimensions *from the bytes*, so a declared media type the payload
+/// contradicts fails to construct rather than being admitted and refused later.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RunPrompt {
     text: String,
@@ -1282,6 +1415,12 @@ pub trait EventSinkFactory: Send + Sync {
     fn execution_policy_notice(&self, _message: &str) -> Result<(), String> {
         Ok(())
     }
+
+    /// Whether the host follows a `session_compacted` transition to the
+    /// successor, so the run may compact and continue in it.
+    fn follows_session_transitions(&self) -> bool {
+        false
+    }
 }
 
 /// Non-serializable bindings that travel only with effect authority.
@@ -1295,6 +1434,8 @@ pub struct RunExecutionBindings {
     budget_gate: Option<SharedBudgetGate>,
     effect_tools: Option<Arc<BTreeSet<String>>>,
     delegation_allowed: bool,
+    model_selection_ceiling: Option<crate::model_catalogue::ModelSelectionCeiling>,
+    model_catalogue: Option<Arc<crate::model_catalogue::ModelCatalogue>>,
     human: Option<Arc<dyn HumanApprover>>,
     cancel: crate::turn::CancelToken,
     sandbox_grants: Option<Arc<dyn SandboxGrantPort>>,
@@ -1318,6 +1459,8 @@ impl RunExecutionBindings {
             budget_gate: None,
             effect_tools: None,
             delegation_allowed: true,
+            model_selection_ceiling: None,
+            model_catalogue: None,
             human: None,
             cancel: crate::turn::CancelToken::new(),
             sandbox_grants: None,
@@ -1326,6 +1469,29 @@ impl RunExecutionBindings {
             host: None,
             interactive_control: None,
         }
+    }
+
+    pub fn with_model_selection_ceiling(
+        mut self,
+        ceiling: crate::model_catalogue::ModelSelectionCeiling,
+    ) -> Self {
+        self.model_selection_ceiling = Some(ceiling);
+        self
+    }
+    pub fn model_selection_ceiling(
+        &self,
+    ) -> Option<&crate::model_catalogue::ModelSelectionCeiling> {
+        self.model_selection_ceiling.as_ref()
+    }
+    pub fn with_model_catalogue(
+        mut self,
+        catalogue: Option<Arc<crate::model_catalogue::ModelCatalogue>>,
+    ) -> Self {
+        self.model_catalogue = catalogue;
+        self
+    }
+    pub fn model_catalogue(&self) -> Option<Arc<crate::model_catalogue::ModelCatalogue>> {
+        self.model_catalogue.clone()
     }
 
     /// Cancellation shared by admission measurement and the executing turn.
@@ -1573,8 +1739,10 @@ pub trait RunExecutor: Send + Sync {
     /// session log names it. That is what makes a repeated `_ego/pause`
     /// idempotent rather than a second, later hold.
     ///
-    /// `Ok` means the request was delivered. Only the durable log establishes
-    /// that the requested boundary has actually been reached.
+    /// Returning `Ok` says the request was delivered, not that the boundary
+    /// has been reached — only the log says that, and only once the turn has
+    /// got there. See
+    /// the design notes.
     fn pause<'a>(
         &'a self,
         handle: &'a RunHandle,
@@ -2470,9 +2638,17 @@ where
     }
 
     /// Ask the run serving this session to stop at its next boundary.
-    /// Return the current snapshot without appending. The session writer records
-    /// `SessionPauseRequested` and `SessionPaused`; a separate run-stream record
-    /// could disagree about whether the durable boundary exists.
+    ///
+    /// Answers with the snapshot as it stands, which is how a caller learns
+    /// which half of the ADR's contract it is in: a run that is no longer
+    /// `Running` has nothing left to hold back, and one that is has been
+    /// asked and has not got there yet.
+    ///
+    /// It appends nothing. The durable record of a pause is the session
+    /// log's `SessionPauseRequested`/`SessionPaused` pair, written by the
+    /// turn that stops — the one writer holding the lease. A second record
+    /// on the run stream would be a second account of the same fact, free to
+    /// disagree with the first.
     pub async fn pause(
         &self,
         session: SessionId,

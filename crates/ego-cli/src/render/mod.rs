@@ -1,8 +1,12 @@
 //! The renderer: the only place in this workspace that knows a terminal has a
 //! colour, a width, or an opinion about escape sequences.
 //!
-//! Only `output.rs` writes terminal streams. Renderers return [`line::Line`] or `String`
-//! values and provide no second door to stdout.
+//! `ARCHITECTURE.md` §6 ratifies a line-oriented renderer with an ownership
+//! contract (R12): *exactly one component writes to the terminal*. This module
+//! is that component's vocabulary; `output.rs` is the component. Nothing here
+//! writes to a stream — every function returns a [`line::Line`] or a `String`
+//! — because a renderer that could write would be a second door to stdout, and
+//! `output.rs` owns the only one.
 //!
 //! `ego-core`, `ego-ai` and `ego-tools` depend on none of this and must not:
 //! a `PublicEvent` is a fact about a run, and how a fact looks is the CLI's
@@ -23,6 +27,7 @@
 //! - [`osc`] is the out-of-band half: what ego tells the host that is not
 //!   text on the screen.
 
+pub(crate) mod attachments;
 pub mod caps;
 pub mod diff;
 pub mod line;
@@ -55,8 +60,14 @@ pub(crate) fn duration(elapsed: std::time::Duration) -> String {
 }
 
 /// Render a block of lines to bytes, one `\n` per line.
-/// Strip trailing padding for [`Depth::None`]. Diff padding carries a
-/// background in terminals but has no meaning in plain redirected text.
+///
+/// The one place trailing whitespace is removed. It matters more than it
+/// looks: a diff pads every row to the full width so its background reaches
+/// the right edge, and the ADR §2 rules that the piped form is a *different*
+/// rendering rather than the coloured one with escapes stripped — precisely
+/// because that padding would survive stripping and produce a file of ragged
+/// blanks. At [`Depth::None`] there is no background to carry, so the padding
+/// has nothing left to do and goes.
 pub fn block(lines: &[Line], depth: Depth) -> String {
     block_with(
         lines,

@@ -1,18 +1,19 @@
 //! The ACP connection's operator seat for model, effort, mode and sandbox.
 //!
-//! The connected client is the human seat in an ACP-owned turn. This module
-//! projects the offered controls and applies the client's choices.
+//! `2026-09-03-acp-host-control-is-negotiated-per-session.md` makes the
+//! connected client the person in an ACP-owned turn. This is the other half
+//! of that: the picker that person is offered, and what a pick actually does.
 //!
 //! Model, effort and mode are answered from the same two sources the terminal
 //! picker uses — the discovered model catalogue and the workspace's resolved
 //! configuration. Sandbox choices come from the process observations the ACP
 //! initializer pins before this seat is exposed.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use ego_ai::catalogue::{ModelAvailability, ModelCatalogueSnapshot};
-use ego_core::config::{Effective, Mode, ModelRef};
+use ego_core::config::{ConnectionConfig, Effective, Mode, ModelRef};
 use ego_core::control::{
     ControlError, ControlSelect, SessionControlChange, SessionControlState, SessionControls,
 };
@@ -67,13 +68,30 @@ struct ProfileSeat {
 }
 
 /// Everything one connection knows and may change for one session.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 struct SessionSeat {
+    capture: Option<Arc<crate::config::FrozenRunConfig>>,
+    connection: Option<String>,
+    /// The saved accounts a bound seat may move to when its model changes route.
+    connections: BTreeMap<String, ConnectionConfig>,
+    catalogue: Option<ModelCatalogueSnapshot>,
     read_only_dir: Option<std::path::PathBuf>,
     chosen: Chosen,
     confinement: Option<ConfinementMeasurements>,
     profile: Option<ProfileSeat>,
     prompt: Option<ego_core::config::SessionPromptOptions>,
+}
+
+impl std::fmt::Debug for SessionSeat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionSeat")
+            .field("captured", &self.capture.is_some())
+            .field("connection", &self.connection)
+            .field("catalogue", &self.catalogue)
+            .field("chosen", &self.chosen)
+            .field("profile", &self.profile)
+            .finish_non_exhaustive()
+    }
 }
 
 /// One ACP connection's generation controls.
@@ -87,8 +105,10 @@ pub struct AcpSessionControls {
     /// The weakest confinement this connection may run at, and the value a
     /// session starts on.
     ///
-    /// An operator-set ceiling, not a default. Messages on this connection
-    /// cannot raise it.
+    /// A ceiling rather than a default:
+    /// the design notes.
+    /// The operator who spawned the process set it, and no message on this
+    /// connection can move it.
     sandbox_ceiling: Confinement,
     catalogue: Option<ModelCatalogueSnapshot>,
     sessions: Mutex<HashMap<SessionId, SessionSeat>>,
@@ -164,6 +184,96 @@ impl AcpSessionControls {
         self
     }
 
+    /// Reuse the seat's immutable policy rather than re-reading edited configuration.
+    pub(crate) fn profile_effective(
+        &self,
+        session: SessionId,
+        profile: Option<&str>,
+        ceiling: Option<&str>,
+    ) -> Result<Option<Effective>, ControlError> {
+        let sessions = self.lock_sessions()?;
+        let Some(pinned) = sessions
+            .get(&session)
+            .and_then(|seat| seat.profile.as_ref())
+        else {
+            return Ok(None);
+        };
+        if pinned.profile.as_deref() != profile || pinned.ceiling_profile.as_deref() != ceiling {
+            return Err(ControlError::Refused {
+                control: "profile",
+                why: "session profile names are already pinned".into(),
+            });
+        }
+        Ok(Some(pinned.effective.clone()))
+    }
+
+    pub(crate) fn captured_config(
+        &self,
+        session: SessionId,
+    ) -> Result<Option<Arc<crate::config::FrozenRunConfig>>, ControlError> {
+        Ok(self
+            .lock_sessions()?
+            .get(&session)
+            .and_then(|seat| seat.capture.clone()))
+    }
+
+    /// Instance-capable seats retain one authority through live model switches.
+    /// A seat bound to an ordinary account keeps its existing execution path.
+    pub(crate) fn execution_config(
+        &self,
+        request: &ego_core::run::RunPreparation,
+    ) -> Result<Option<Arc<crate::config::FrozenRunConfig>>, ControlError> {
+        let sessions = self.lock_sessions()?;
+        let Some(seat) = sessions.get(&request.run_id.session_id()) else {
+            return Ok(None);
+        };
+        let Some(capture) = &seat.capture else {
+            return Ok(None);
+        };
+        let mut args = crate::run::protocol_args(None, crate::cli::SessionShape::default());
+        args.directory = Some(request.root.as_path().to_path_buf());
+        args.model = request
+            .selections
+            .model()
+            .or(seat.chosen.model.as_ref())
+            .map(|model| model.0.clone());
+        args.connection = request
+            .selections
+            .connection()
+            .map(str::to_owned)
+            .or_else(|| seat.connection.clone());
+        if let Some(profile) = &seat.profile {
+            args.profile = profile.profile.clone();
+            args.profile_source = args
+                .profile
+                .as_ref()
+                .map(|_| ego_core::config::Source::Flags);
+            args.ceiling_profile = profile.ceiling_profile.clone();
+        }
+        let effective = capture
+            .resolve(&args)
+            .map_err(|error| ControlError::Refused {
+                control: "model",
+                why: error.to_string(),
+            })?;
+        if seat.connection.is_some()
+            && crate::models::selected_instance_provider(&effective).is_none()
+        {
+            return Ok(None);
+        }
+        let trust = request
+            .selections
+            .trust()
+            .unwrap_or(ego_core::config::Trust::Untrusted);
+        let capture = capture
+            .admit_workspace(request.root.as_path(), trust)
+            .map_err(|error| ControlError::Refused {
+                control: "model",
+                why: error.to_string(),
+            })?;
+        Ok(Some(Arc::new(capture)))
+    }
+
     /// Pin profile policy before measurement or any prompt can start.
     pub(crate) fn seed_profile(
         &self,
@@ -171,7 +281,41 @@ impl AcpSessionControls {
         effective: Effective,
         profile: Option<String>,
         ceiling_profile: Option<String>,
+        capture: Option<Arc<crate::config::FrozenRunConfig>>,
     ) -> Result<(), ControlError> {
+        let restored = self
+            .store
+            .as_ref()
+            .map(|store| store.selected_connection(&session))
+            .transpose()
+            .map_err(|error| ControlError::Internal(error.to_string()))?
+            .flatten();
+        let selected =
+            if let Some(provider) = crate::models::selected_instance_provider(&effective) {
+                crate::models::instance_discovery_connection(
+                    &effective.providers,
+                    &effective.connections,
+                    restored.as_deref().or(effective.connection.as_deref()),
+                    Some(provider),
+                )
+                .map(|connection| connection.map(|(id, _)| id))
+            } else {
+                let vendor = effective
+                    .model
+                    .as_ref()
+                    .and_then(|model| model.0.split_once('/'))
+                    .map(|(route, _)| crate::auth::connection_vendor(route));
+                ego_core::config::select_connection(
+                    &effective.connections,
+                    restored.as_deref().or(effective.connection.as_deref()),
+                    if restored.is_some() { None } else { vendor },
+                )
+                .map(|connection| connection.map(|(id, _)| id.to_owned()))
+            }
+            .map_err(|why| ControlError::Refused {
+                control: "connection",
+                why,
+            })?;
         let mut sessions = self.lock_sessions()?;
         let seat = sessions.entry(session).or_default();
         if let Some(pinned) = &seat.profile {
@@ -194,18 +338,74 @@ impl AcpSessionControls {
                 why: "session policy is already pinned".into(),
             });
         }
-        let selected = effective.sandbox.unwrap_or_default();
-        let sandbox_ceiling = if selected.within(self.sandbox_ceiling) {
-            selected
+        let selected_sandbox = effective.sandbox.unwrap_or_default();
+        let sandbox_ceiling = if selected_sandbox.within(self.sandbox_ceiling) {
+            selected_sandbox
         } else {
             self.sandbox_ceiling
         };
-        seat.profile = Some(ProfileSeat {
-            effective,
-            profile,
-            ceiling_profile,
-            sandbox_ceiling,
-        });
+        let catalogue = if selected.is_some() || !effective.providers.instances.is_empty() {
+            Some(
+                crate::models::saved_catalogue_snapshot(&effective, selected.as_deref()).map_err(
+                    |why| ControlError::Refused {
+                        control: "connection",
+                        why,
+                    },
+                )?,
+            )
+        } else {
+            None
+        };
+        if selected.is_none()
+            && !effective.providers.instances.is_empty()
+            && capture.is_none()
+            && seat.capture.is_none()
+        {
+            return Err(ControlError::Refused {
+                control: "model",
+                why: "instance-capable sessions require captured configuration authority".into(),
+            });
+        }
+        if crate::models::selected_instance_provider(&effective).is_some() {
+            let model = effective
+                .model
+                .as_ref()
+                .expect("instance selection has a model");
+            let entry = catalogue.as_ref().and_then(|catalogue| {
+                catalogue
+                    .models
+                    .iter()
+                    .find(|entry| entry.slug.to_string() == model.0)
+            });
+            if !entry.is_some_and(|entry| entry.availability == ModelAvailability::Available) {
+                return Err(ControlError::Refused {
+                    control: "model",
+                    why: format!(
+                        "configured instance model '{}' has no available admitted definition or credential",
+                        model.0
+                    ),
+                });
+            }
+        }
+        seat.catalogue = catalogue;
+        if !effective.providers.instances.is_empty() && seat.capture.is_none() {
+            seat.capture = capture;
+        }
+        seat.connection = selected;
+        seat.connections.clone_from(&effective.connections);
+        // Ordinary accounts retain their existing policy. Configured instances also
+        // pin default-profile settings so a later save cannot rebind the seat.
+        if profile.is_some()
+            || ceiling_profile.is_some()
+            || (seat.connection.is_none() && !effective.providers.instances.is_empty())
+        {
+            seat.profile = Some(ProfileSeat {
+                effective,
+                profile,
+                ceiling_profile,
+                sandbox_ceiling,
+            });
+        }
         Ok(())
     }
 
@@ -245,6 +445,12 @@ impl AcpSessionControls {
         mut selections: ego_core::run::RunSelections,
     ) -> Result<ego_core::run::RunSelections, ControlError> {
         let sessions = self.lock_sessions()?;
+        if let Some(id) = sessions
+            .get(&session)
+            .and_then(|seat| seat.connection.as_ref())
+        {
+            selections = selections.with_connection(Some(id.clone()));
+        }
         if let Some(path) = sessions
             .get(&session)
             .and_then(|seat| seat.read_only_dir.as_ref())
@@ -364,6 +570,11 @@ impl AcpSessionControls {
                 "the ACP confinement measurements for this session are already pinned".to_owned(),
             ));
         }
+        if let Some(model) = &selected_model
+            && let Some(account) = rebinding(&seat.connections, seat.connection.as_deref(), model)?
+        {
+            seat.connection = account;
+        }
         seat.chosen.model = selected_model.or_else(|| seat.chosen.model.clone());
         seat.confinement = Some(measurements);
         Ok(())
@@ -413,9 +624,13 @@ impl AcpSessionControls {
     /// A configured model remains present even when discovery never saw it: a
     /// host that cannot re-select what the session started with would be
     /// looking at a picker that disagrees with the run.
-    fn models(&self, current: Option<&ModelRef>) -> Vec<ModelRef> {
+    fn models(
+        &self,
+        current: Option<&ModelRef>,
+        catalogue: Option<&ModelCatalogueSnapshot>,
+    ) -> Vec<ModelRef> {
         let mut models: Vec<_> = current.cloned().into_iter().collect();
-        if let Some(catalogue) = &self.catalogue {
+        if let Some(catalogue) = catalogue {
             for model in catalogue
                 .models
                 .iter()
@@ -437,18 +652,21 @@ impl AcpSessionControls {
     /// effort the provider rejects would break the next generation. This is
     /// the list a change is validated against, so it must never be widened to
     /// accommodate what is already set.
-    fn accepted(&self, model: &ModelRef) -> Option<Vec<ThinkingLevel>> {
-        reasoning_levels(self.catalogue.as_ref()?, &model.0).ok()
+    fn accepted(
+        &self,
+        model: &ModelRef,
+        catalogue: Option<&ModelCatalogueSnapshot>,
+    ) -> Option<Vec<ThinkingLevel>> {
+        reasoning_levels(catalogue?, &model.0).ok()
     }
 
     fn resolved_effort(
         &self,
         model: &ModelRef,
         explicit: Option<ThinkingLevel>,
+        catalogue: Option<&ModelCatalogueSnapshot>,
     ) -> Option<ThinkingLevel> {
-        let row = self
-            .catalogue
-            .as_ref()?
+        let row = catalogue?
             .models
             .iter()
             .find(|entry| entry.slug.to_string() == model.0)?;
@@ -468,11 +686,12 @@ impl AcpSessionControls {
         &self,
         model: Option<&ModelRef>,
         current: Option<ThinkingLevel>,
+        catalogue: Option<&ModelCatalogueSnapshot>,
     ) -> Vec<ThinkingLevel> {
         let Some(model) = model else {
             return Vec::new();
         };
-        let Some(mut efforts) = self.accepted(model) else {
+        let Some(mut efforts) = self.accepted(model, catalogue) else {
             return current.into_iter().collect();
         };
         if let Some(current) = current
@@ -485,6 +704,11 @@ impl AcpSessionControls {
     }
 
     fn compose(&self, seat: &SessionSeat) -> Result<SessionControlState, ControlError> {
+        let catalogue = seat.catalogue.as_ref().or(if seat.connection.is_none() {
+            self.catalogue.as_ref()
+        } else {
+            None
+        });
         let measured = seat.confinement.as_ref().ok_or_else(Self::uninitialized)?;
         let chosen = &seat.chosen;
         let profile = seat.profile.as_ref().map(|profile| &profile.effective);
@@ -494,9 +718,9 @@ impl AcpSessionControls {
         let explicit_effort = chosen
             .effort
             .or_else(|| profile.map_or(self.effort, |effective| effective.thinking));
-        let effort = model
-            .as_ref()
-            .and_then(|model| explicit_effort.or_else(|| self.resolved_effort(model, None)));
+        let effort = model.as_ref().and_then(|model| {
+            explicit_effort.or_else(|| self.resolved_effort(model, None, catalogue))
+        });
         let mode = chosen.mode.unwrap_or_else(|| {
             profile.map_or(self.mode, |effective| {
                 effective.mode.unwrap_or(Mode::Default)
@@ -504,12 +728,12 @@ impl AcpSessionControls {
         });
         Ok(SessionControlState {
             model: ControlSelect {
-                available: self.models(model.as_ref()),
+                available: self.models(model.as_ref(), catalogue),
                 current: model.clone(),
                 chosen: chosen.model.clone(),
             },
             effort: ControlSelect {
-                available: self.efforts(model.as_ref(), effort),
+                available: self.efforts(model.as_ref(), effort, catalogue),
                 current: effort,
                 chosen: chosen.effort,
             },
@@ -583,6 +807,11 @@ impl SessionControls for AcpSessionControls {
         let default_model =
             profile.map_or(self.model.as_ref(), |effective| effective.model.as_ref());
         let default_effort = profile.map_or(self.effort, |effective| effective.thinking);
+        let catalogue = seat.catalogue.as_ref().or(if seat.connection.is_none() {
+            self.catalogue.as_ref()
+        } else {
+            None
+        });
         let judge = profile.map_or(self.judge, |effective| effective.judge.is_some());
         let chosen = &mut seat.chosen;
         match change {
@@ -593,7 +822,9 @@ impl SessionControls for AcpSessionControls {
                 // accept it.
                 let explicit_effort = chosen.effort.or(default_effort);
                 if explicit_effort.is_some()
-                    && self.resolved_effort(&model, explicit_effort).is_none()
+                    && self
+                        .resolved_effort(&model, explicit_effort, catalogue)
+                        .is_none()
                 {
                     return Err(ControlError::Refused {
                         control: "model",
@@ -602,17 +833,41 @@ impl SessionControls for AcpSessionControls {
                         ),
                     });
                 }
+                let account = rebinding(&seat.connections, seat.connection.as_deref(), &model)?;
+                // A protocol session admits its account once, with its run.
+                // After that, a pick on another provider could only fail at
+                // the next generation, so it is refused while it can be.
+                if account.is_some()
+                    && let Some(store) = &self.store
+                    && let Some(ran) = store
+                        .selected_connection(&session)
+                        .map_err(|error| ControlError::Internal(error.to_string()))?
+                {
+                    let account = seat.connections.get(&ran).map_or_else(
+                        || ran.clone(),
+                        |account| format!("{} ({ran})", account.name),
+                    );
+                    return Err(ControlError::Refused {
+                        control: "model",
+                        why: format!(
+                            "this session already runs on account {account}, and `{model}` needs another provider's account; start a new session with that model"
+                        ),
+                    });
+                }
                 if let Some(store) = &self.store {
                     store
                         .record_model_selection(&session, model.clone())
                         .map_err(|error| ControlError::Internal(error.to_string()))?;
+                }
+                if let Some(account) = account {
+                    seat.connection = account;
                 }
                 chosen.model = Some(model);
             }
             SessionControlChange::Effort(effort) => {
                 let model = chosen.model.as_ref().or(default_model);
                 if model
-                    .and_then(|model| self.resolved_effort(model, Some(effort)))
+                    .and_then(|model| self.resolved_effort(model, Some(effort), catalogue))
                     .is_none()
                 {
                     return Err(ControlError::Unavailable {
@@ -669,5 +924,311 @@ impl SessionControls for AcpSessionControls {
             }
         }
         self.compose(seat)
+    }
+}
+
+/// Where a bound seat's account moves when its model moves to `model`.
+///
+/// `None` keeps the binding. A bound seat runs each route on that route's own
+/// account, selected as an explicit `--model` on `ego run` or `ego resume`
+/// selects it, so the next run never carries an account that cannot serve
+/// its model. An unbound seat has nothing to move: its run selects by vendor.
+fn rebinding(
+    connections: &BTreeMap<String, ConnectionConfig>,
+    bound: Option<&str>,
+    model: &ModelRef,
+) -> Result<Option<Option<String>>, ControlError> {
+    let (Some(bound), Some((route, _))) = (bound, model.0.split_once('/')) else {
+        return Ok(None);
+    };
+    if connections
+        .get(bound)
+        .is_some_and(|account| crate::auth::connection_route(account) == route)
+    {
+        return Ok(None);
+    }
+    crate::models::route_account(connections, route)
+        .map(|account| Some(account.map(|(id, _)| id)))
+        .map_err(|why| ControlError::Refused {
+            control: "model",
+            why: format!("`{model}` has no single saved account for route {route}: {why}"),
+        })
+}
+
+#[cfg(test)]
+mod named_connection_tests {
+    use super::*;
+    use ego_core::config::{ConfigLayer, Source, Trust, resolve};
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind};
+    use ego_core::event::id::{EventId, Producer, Seq, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::run::RunSelections;
+    use ego_core::store::session_store::SessionStore;
+
+    // Catches: a seat bound to one account offering only that account's route,
+    // a pick on another signed-in route that keeps the old account (the next
+    // run then fails on the route mismatch), and a route nobody signed in to
+    // being offered.
+    #[test]
+    fn bound_seat_offers_and_follows_other_signed_in_routes() {
+        const CHILD: &str = "EGO_ACP_ROUTE_SEAT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let home = tempfile::tempdir().unwrap();
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "acp_controls::named_connection_tests::bound_seat_offers_and_follows_other_signed_in_routes",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("EGO_HOME", home.path())
+                .env("ACP_ROUTE_OPENAI_KEY", "key-openai")
+                .env("ACP_ROUTE_ANTHROPIC_KEY", "key-anthropic")
+                .env_remove("ACP_ROUTE_GEMINI_KEY")
+                .env_remove("GEMINI_API_KEY")
+                .env_remove("GOOGLE_API_KEY")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+        let text = "model='openai/gpt-6.1-sol'\n[connections.work_openai]\nname='Work'\nvendor='openai'\naccess='key'\nkey_env='ACP_ROUTE_OPENAI_KEY'\n[connections.work_anthropic]\nname='Work'\nvendor='anthropic'\naccess='key'\nkey_env='ACP_ROUTE_ANTHROPIC_KEY'\n[connections.work_gemini]\nname='Work'\nvendor='gemini'\naccess='key'\nkey_env='ACP_ROUTE_GEMINI_KEY'\n";
+        let effective = resolve(
+            &[ConfigLayer::parse(Source::User, text).unwrap()],
+            Trust::Untrusted,
+            None,
+        )
+        .unwrap();
+        let session = SessionId::new();
+        let controls = AcpSessionControls::new(&effective, Confinement::Off, None);
+        controls
+            .seed_profile(session, effective.clone(), None, None, None)
+            .unwrap();
+        controls
+            .seed_confinement(session, Vec::new(), Vec::new())
+            .unwrap();
+        let connection = |controls: &AcpSessionControls| {
+            controls
+                .profile_selections(session, RunSelections::empty())
+                .unwrap()
+                .connection()
+                .map(str::to_owned)
+        };
+        assert_eq!(connection(&controls).as_deref(), Some("work_openai"));
+        let offered: Vec<String> = controls
+            .state(session)
+            .unwrap()
+            .model
+            .available
+            .into_iter()
+            .map(|model| model.0)
+            .collect();
+        assert!(
+            offered.iter().any(|model| model == "openai/gpt-6.1-sol"),
+            "{offered:?}"
+        );
+        assert!(
+            offered
+                .iter()
+                .any(|model| model == "anthropic/claude-opus-5-5"),
+            "a signed-in route must be offered: {offered:?}"
+        );
+        assert!(
+            !offered.iter().any(|model| model.starts_with("gemini/")),
+            "a route without a credential must not be offered: {offered:?}"
+        );
+
+        let staged = controls
+            .stage(
+                session,
+                SessionControlChange::Model(ModelRef("anthropic/claude-opus-5-5".into())),
+            )
+            .unwrap();
+        assert_eq!(staged.model.current.unwrap().0, "anthropic/claude-opus-5-5");
+        assert_eq!(connection(&controls).as_deref(), Some("work_anthropic"));
+        assert!(
+            staged
+                .model
+                .available
+                .iter()
+                .any(|model| model.0 == "openai/gpt-6.1-sol"),
+            "the original route stays selectable after a switch"
+        );
+
+        controls
+            .stage(
+                session,
+                SessionControlChange::Model(ModelRef("openai/gpt-6.1-sol".into())),
+            )
+            .unwrap();
+        assert_eq!(connection(&controls).as_deref(), Some("work_openai"));
+
+        // A session whose run already admitted its account cannot move it.
+        let journal = tempfile::tempdir().unwrap();
+        let store = Arc::new(ego_tools::store::JsonlStore::new(
+            journal.path(),
+            journal.path(),
+            Box::new(ego_tools::store::OsIo),
+        ));
+        let ran = SessionId::new();
+        store
+            .append(
+                &ran,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: { Seq::ZERO }.next(),
+                        id: EventId::new(),
+                        turn: TurnId::new(),
+                        item: None,
+                        parent: None,
+                        ts: Timestamp::from_millis(1),
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::SessionSelectionsSelected {
+                        selections: RunSelections::empty()
+                            .with_connection(Some("work_openai".into())),
+                    },
+                },
+            )
+            .unwrap();
+        let controls =
+            AcpSessionControls::new(&effective, Confinement::Off, None).with_store(store);
+        controls
+            .seed_profile(ran, effective, None, None, None)
+            .unwrap();
+        controls
+            .seed_confinement(ran, Vec::new(), Vec::new())
+            .unwrap();
+        let refused = controls
+            .stage(
+                ran,
+                SessionControlChange::Model(ModelRef("anthropic/claude-opus-5-5".into())),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                ControlError::Refused {
+                    control: "model",
+                    ..
+                }
+            ),
+            "{refused:?}"
+        );
+        assert_eq!(
+            controls
+                .profile_selections(ran, RunSelections::empty())
+                .unwrap()
+                .connection(),
+            Some("work_openai")
+        );
+        assert_eq!(
+            controls.state(ran).unwrap().model.current.unwrap().0,
+            "openai/gpt-6.1-sol",
+            "a refused pick must not land"
+        );
+    }
+
+    // Catches: reconnect adopts a changed default or resolves a renamed/missing account by label.
+    #[test]
+    fn named_connections_acp_reconnect_restores_account_before_preparation() {
+        let home = tempfile::tempdir().unwrap();
+        let store = Arc::new(ego_tools::store::JsonlStore::new(
+            home.path(),
+            home.path(),
+            Box::new(ego_tools::store::OsIo),
+        ));
+        let session = SessionId::new();
+        let mut seq = Seq::ZERO;
+        store
+            .append(
+                &session,
+                &DomainEvent {
+                    env: Envelope {
+                        seq: seq.next(),
+                        id: EventId::new(),
+                        turn: TurnId::new(),
+                        item: None,
+                        parent: None,
+                        ts: Timestamp::from_millis(1),
+                        producer: Producer::Main,
+                    },
+                    kind: EventKind::SessionSelectionsSelected {
+                        selections: RunSelections::new(
+                            Some(ModelRef("anthropic/claude-opus-5-5".into())),
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        .with_connection(Some("account_b".into())),
+                    },
+                },
+            )
+            .unwrap();
+        let text = "connection='account_a'\nmodel='anthropic/claude-opus-5-5'\n[connections.account_a]\nname='Personal'\nvendor='anthropic'\naccess='key'\nkey_env='ACP_MISSING_KEY_A'\n[connections.account_b]\nname='Renamed'\nvendor='anthropic'\naccess='key'\nkey_env='ACP_MISSING_KEY_B'\n";
+        let effective = resolve(
+            &[ConfigLayer::parse(Source::User, text).unwrap()],
+            Trust::Untrusted,
+            None,
+        )
+        .unwrap();
+        let controls =
+            AcpSessionControls::new(&effective, Confinement::Off, None).with_store(store.clone());
+        controls
+            .seed_profile(session, effective.clone(), None, None, None)
+            .unwrap();
+        assert_eq!(
+            controls.confinement_ceiling(session).unwrap(),
+            Confinement::Off,
+            "resolving the account must not turn the platform default into a profile ceiling"
+        );
+        let selections = controls
+            .profile_selections(session, RunSelections::empty())
+            .unwrap();
+        assert_eq!(selections.connection(), Some("account_b"));
+        // A saved account is authoritative even when the process default model has another vendor.
+        let mut other_vendor = effective.clone();
+        other_vendor.model = Some(ModelRef("openai/gpt-6-luna".into()));
+        let restored_controls =
+            AcpSessionControls::new(&other_vendor, Confinement::default(), None)
+                .with_store(store.clone());
+        restored_controls
+            .seed_profile(session, other_vendor, None, None, None)
+            .unwrap();
+        assert_eq!(
+            restored_controls
+                .profile_selections(session, RunSelections::empty())
+                .unwrap()
+                .connection(),
+            Some("account_b")
+        );
+        restored_controls
+            .seed_confinement(session, Vec::new(), Vec::new())
+            .unwrap();
+        assert_eq!(
+            restored_controls
+                .state(session)
+                .unwrap()
+                .model
+                .current
+                .unwrap()
+                .0,
+            "anthropic/claude-opus-5-5"
+        );
+        let mut missing = effective;
+        missing.connections.remove("account_b");
+        let controls =
+            AcpSessionControls::new(&missing, Confinement::default(), None).with_store(store);
+        assert!(
+            controls
+                .seed_profile(session, missing, None, None, None)
+                .is_err()
+        );
     }
 }

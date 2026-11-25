@@ -154,17 +154,21 @@ feature. It has no dependency on an ego crate. Rust SDK 3.4.0 declares Rust
 1.88.0 as its minimum version; dependency resolution can add requirements, so
 use the current project toolchain and preserve the generated lockfile.
 
-Build with the current toolchain, then run the client through the isolated launcher:
+Build it with Cargo and run it through the same launcher:
 
 ```sh
 root="$PWD"
 cargo build --manifest-path "$root/docs/integrations/examples/acp/rust/Cargo.toml"
+# Run the resulting ego-acp-client-example executable through the same launcher:
 sh "$root/docs/integrations/examples/acp/isolated.sh" /absolute/path/to/ego-acp-client-example
 ```
 
-The executable must match the operating system on which you run the launcher.
-These examples are protocol smoke checks, not full editor compatibility tests.
-Permission handling and in-flight cancellation need separate integration tests.
+Build the client on the machine where it runs; a Linux executable does not run
+on macOS. The client was built and run on both Linux and macOS against an
+installed ego, each run with its own isolated HOME. All runs exited 0 with
+initialize, new, pause/resume, expected loopback prompt refusal, idle cancel,
+load, resume, and fork. No paid provider was contacted. Permission handling and
+in-flight cancellation remain unexercised, as in the other isolated examples.
 
 ### Observed local output
 

@@ -1,11 +1,13 @@
 //! Nous Portal's captured current Chat Completions projection.
 //!
-//! The Portal contract omits reasoning controls when thinking is off; OpenAI's current
+//! Hermes omits reasoning controls when thinking is off; OpenAI's current
 //! Platform mapping sends its explicit `none` spelling. The response grammar
 //! remains the shared Chat Completions grammar, so only request construction
 //! differs and decoding is delegated.
 //!
-//! Client-contract fixture recorded 2026-08-24. It is not represented as a live Nous recording.
+//! Captured-client-derived from
+//! `NousResearch/hermes-agent@a0ca7c19204e514f9590ce3b812e029b315ab9e9`,
+//! read 2026-08-24. It is not represented as a live Nous recording.
 
 use std::sync::Arc;
 

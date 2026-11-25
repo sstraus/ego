@@ -1,4 +1,5 @@
-//! The per-layer configuration schema.
+//! The config schema. Every layer is `deny_unknown_fields`
+//! (`CLI.md` §4.5) — an unrecognised key is a hard error, not a silent skip.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
@@ -32,7 +33,7 @@ impl std::fmt::Display for ModelRef {
     }
 }
 
-/// Layer values before precedence resolution.
+/// Permission mode — `ARCHITECTURE.md` §3.4 axis 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Mode {
@@ -121,8 +122,9 @@ where
 /// config path and the frontmatter path from disagreeing about what one string
 /// means.
 ///
-/// Invalid rules are configuration errors with a file and line. Rules this
-/// build cannot enforce are refused by name during the same load.
+/// So a rule that is not a rule is a config error with a file and a line, and a
+/// rule this build cannot enforce is refused by name at the same moment —
+/// `2026-08-21-a-rule-that-means-exactly-one-thing.md` §6a.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PermCfg {
@@ -139,7 +141,7 @@ pub struct PermCfg {
 /// the effect when the operator wrote a tool, and says what is missing when the
 /// head has no operations — wrapped in serde's location so it arrives with the
 /// file and line attached.
-fn rules<'de, D>(deserializer: D) -> Result<Vec<Rule>, D::Error>
+pub(super) fn rules<'de, D>(deserializer: D) -> Result<Vec<Rule>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -170,29 +172,54 @@ pub struct ExecLayer {
 impl ExecLayer {
     /// Derive the existing process policy without capturing environment values.
     pub fn policy(&self) -> Result<crate::permit::EnvPolicy, crate::permit::EnvNameError> {
+        self.policy_excluding(&[])
+    }
+
+    pub(super) fn policy_excluding(
+        &self,
+        excluded: &[&str],
+    ) -> Result<crate::permit::EnvPolicy, crate::permit::EnvNameError> {
         use crate::permit::EnvPolicy;
+        let permitted = |name: &&str| {
+            !excluded.iter().any(|excluded| {
+                if cfg!(windows) {
+                    name.eq_ignore_ascii_case(excluded)
+                } else {
+                    name == excluded
+                }
+            })
+        };
         match self.env.unwrap_or_default() {
-            ExecEnvironment::Inherit => Ok(EnvPolicy::Inherited),
-            ExecEnvironment::Core => EnvPolicy::allow_only([
-                "PATH",
-                "HOME",
-                "USER",
-                "LOGNAME",
-                "SHELL",
-                "TMPDIR",
-                "TMP",
-                "TEMP",
-                "LANG",
-                "LC_ALL",
-                "LC_CTYPE",
-                "SYSTEMROOT",
-                "WINDIR",
-                "COMSPEC",
-                "PATHEXT",
-            ]),
-            ExecEnvironment::Allowlist => {
-                EnvPolicy::allow_only(self.env_allowlist.iter().flatten().map(String::as_str))
-            }
+            ExecEnvironment::Inherit if excluded.is_empty() => Ok(EnvPolicy::Inherited),
+            ExecEnvironment::Inherit => EnvPolicy::inherited_except(excluded.iter().copied()),
+            ExecEnvironment::Core => EnvPolicy::allow_only(
+                [
+                    "PATH",
+                    "HOME",
+                    "USER",
+                    "LOGNAME",
+                    "SHELL",
+                    "TMPDIR",
+                    "TMP",
+                    "TEMP",
+                    "LANG",
+                    "LC_ALL",
+                    "LC_CTYPE",
+                    "SYSTEMROOT",
+                    "WINDIR",
+                    "COMSPEC",
+                    "PATHEXT",
+                ]
+                .into_iter()
+                .filter(permitted),
+            ),
+            ExecEnvironment::Allowlist => EnvPolicy::allow_only(
+                self.env_allowlist
+                    .iter()
+                    .flatten()
+                    .map(String::as_str)
+                    .filter(permitted),
+            ),
         }
     }
 }
@@ -206,10 +233,14 @@ pub enum Network {
     Off,
 }
 
-/// Instruction content selected by the resolved posture.
+/// The overrides a `[profile.NAME]` table may apply on top of the layer that
+/// defines it (`CLI.md` §7, `--profile NAME`).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileLayer {
+    /// User estimate for provider-managed cache lifetime, in positive seconds.
+    /// This affects the countdown only and is never a provider request field.
+    pub cache_ttl_seconds: Option<std::num::NonZeroU64>,
     pub max_output_tokens: Option<std::num::NonZeroU64>,
     pub model: Option<ModelRef>,
     pub thinking: Option<ThinkingLevel>,
@@ -547,6 +578,10 @@ pub struct McpHttpConfig {
     pub url: McpHttpUrl,
     pub auth: McpHttpAuth,
     pub allow_insecure_loopback: bool,
+    /// Extra OAuth hosts the owner enrolled for this server: origins that may
+    /// host the authorization, token and registration endpoints when they
+    /// differ from the issuer's origin. Empty means issuer origin only.
+    pub oauth_hosts: Vec<McpHttpUrl>,
 }
 
 impl McpHttpConfig {
@@ -560,9 +595,25 @@ impl McpHttpConfig {
             url: url.into(),
             auth,
             allow_insecure_loopback,
+            oauth_hosts: Vec::new(),
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Enrol OAuth hosts for this server. Each must be a bare origin.
+    pub fn with_oauth_hosts(mut self, hosts: Vec<McpHttpUrl>) -> Result<Self, McpValueError> {
+        self.oauth_hosts = hosts;
+        self.validate()?;
+        Ok(self)
+    }
+
+    /// Whether the OAuth credential of this server crosses the network
+    /// unencrypted: the owner opted a non-loopback plaintext server into OAuth.
+    pub fn sends_credentials_in_plaintext(&self) -> bool {
+        self.auth == McpHttpAuth::Oauth
+            && self.url.parsed.scheme() == "http"
+            && !is_exact_loopback(&self.url)
     }
 
     pub fn validate(&self) -> Result<(), McpValueError> {
@@ -583,16 +634,34 @@ impl McpHttpConfig {
             ));
         }
 
+        for host in &self.oauth_hosts {
+            let url = &host.parsed;
+            let bare = url.path() == "/"
+                && url.query().is_none()
+                && url.fragment().is_none()
+                && url.username().is_empty()
+                && url.password().is_none()
+                && url.host().is_some();
+            let secure =
+                url.scheme() == "https" || (url.scheme() == "http" && is_exact_loopback(host));
+            if !bare || !secure {
+                return Err(McpValueError::new(format!(
+                    "OAuth host `{}` must be an https origin (or a loopback http origin) without path, query, fragment or userinfo",
+                    host.text
+                )));
+            }
+        }
+
         match self.url.parsed.scheme() {
             "https" if self.allow_insecure_loopback => Err(McpValueError::new(
                 "allow_insecure_loopback is invalid for HTTPS",
             )),
             "https" => Ok(()),
+            // The per-server opt-in admits any host the owner names: a
+            // plaintext server on the owner network is an intended destination
+            //. It never applies to HTTPS, so no downgrade.
             "http" if !self.allow_insecure_loopback => Err(McpValueError::new(
                 "plaintext HTTP requires allow_insecure_loopback = true",
-            )),
-            "http" if !is_exact_loopback(&self.url) => Err(McpValueError::new(
-                "plaintext HTTP requires exact localhost or an IP-literal loopback host",
             )),
             "http" => Ok(()),
             _ => Err(McpValueError::new(
@@ -657,6 +726,8 @@ struct McpHttpWire {
     auth: McpHttpAuth,
     #[serde(default)]
     allow_insecure_loopback: bool,
+    #[serde(default)]
+    oauth_hosts: Vec<McpHttpUrl>,
     #[serde(default = "enabled_by_default")]
     enabled: bool,
 }
@@ -693,6 +764,7 @@ impl McpEntryWire {
             Self::Http(wire) => {
                 let _ = wire.transport;
                 McpHttpConfig::new(wire.url, wire.auth, wire.allow_insecure_loopback)
+                    .and_then(|config| config.with_oauth_hosts(wire.oauth_hosts))
                     .map(|mut config| {
                         config.profile = wire.profile;
                         McpServerConfig::Http(config)
@@ -751,6 +823,8 @@ impl<'de> Deserialize<'de> for McpServerConfig {
 /// row on every launch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StatusSegmentName {
+    Cache,
+    RateLimits,
     Fast,
     Model,
     Effort,
@@ -793,6 +867,8 @@ impl StatusSegmentName {
         "fast",
         "mode",
         "context",
+        "cache",
+        "rate_limits",
         "cost",
         "queue",
         "drafts",
@@ -810,6 +886,8 @@ impl StatusSegmentName {
             "fast" => Some(Self::Fast),
             "mode" => Some(Self::Mode),
             "context" => Some(Self::Context),
+            "cache" => Some(Self::Cache),
+            "rate_limits" => Some(Self::RateLimits),
             "cost" => Some(Self::Cost),
             "queue" => Some(Self::Queue),
             "drafts" => Some(Self::Drafts),
@@ -829,6 +907,8 @@ impl StatusSegmentName {
             Self::Fast => "fast",
             Self::Mode => "mode",
             Self::Context => "context",
+            Self::Cache => "cache",
+            Self::RateLimits => "rate_limits",
             Self::Cost => "cost",
             Self::Queue => "queue",
             Self::Drafts => "drafts",
@@ -904,10 +984,16 @@ pub struct UiLayer {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AuthProviderLayer {
+    /// User-owned login availability; absent disables Anthropic only.
+    pub oauth_login_enabled: Option<bool>,
     /// Explicit user-owned transformation of final generation bytes.
     pub protocol_filter: Option<ProtocolFilterConfig>,
     /// Program invoked with `login` or `refresh`; its stdout is the secret.
     pub credential_command: Option<String>,
+    /// Seconds the credential command may run per call; absent keeps the
+    /// 120 s default. A browser login that needs longer raises it.
+    #[serde(default, deserialize_with = "credential_timeout_secs")]
+    pub credential_timeout_secs: Option<u64>,
     /// Profile identity headers. Credential and wire headers are forbidden.
     #[serde(default, deserialize_with = "auth_headers")]
     pub headers: HashMap<String, String>,
@@ -918,8 +1004,6 @@ pub struct AuthProviderLayer {
 #[serde(deny_unknown_fields)]
 pub struct ProtocolFilterConfig {
     pub command: PathBuf,
-    #[serde(default)]
-    pub identity_headers: Vec<String>,
     #[serde(default = "protocol_filter_timeout")]
     pub timeout_ms: u64,
     #[serde(default = "protocol_filter_enabled")]
@@ -927,7 +1011,7 @@ pub struct ProtocolFilterConfig {
 }
 
 fn protocol_filter_timeout() -> u64 {
-    1000
+    10_000
 }
 fn protocol_filter_enabled() -> bool {
     true
@@ -938,68 +1022,12 @@ impl ProtocolFilterConfig {
         if !self.command.is_absolute()
             || self.command.as_os_str().is_empty()
             || self.command.to_string_lossy().contains('\0')
-            || !(1..=1000).contains(&self.timeout_ms)
-            || self.identity_headers.len() > 16
+            || !(1..=30_000).contains(&self.timeout_ms)
         {
-            return Err(
-                "protocol_filter requires an absolute executable, at most 16 identity headers and 1..1000ms",
-            );
-        }
-        let mut seen = std::collections::HashSet::new();
-        for name in &self.identity_headers {
-            if !is_protocol_filter_identity_header(name) || !seen.insert(name.to_ascii_lowercase())
-            {
-                return Err(
-                    "protocol_filter contains a forbidden, invalid or duplicate identity header",
-                );
-            }
+            return Err("protocol_filter requires an absolute executable and 1..30000ms");
         }
         Ok(())
     }
-}
-
-/// Identity fields cannot change authentication, routing or the wire contract.
-pub fn is_protocol_filter_identity_header(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    !name.is_empty()
-        && name.len() <= 128
-        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-        && !["proxy-", "sec-", "content-", "accept-", "x-forwarded-"]
-            .iter()
-            .any(|prefix| name.starts_with(prefix))
-        && !name.contains("token")
-        && !name.contains("api-key")
-        && !name.contains("auth")
-        && !name.contains("cookie")
-        && !name.ends_with("-version")
-        && !name.ends_with("-beta")
-        && !matches!(
-            name.as_str(),
-            "host"
-                | "connection"
-                | "content-length"
-                | "content-type"
-                | "content-encoding"
-                | "content-range"
-                | "content-digest"
-                | "digest"
-                | "trailer"
-                | "transfer-encoding"
-                | "te"
-                | "upgrade"
-                | "accept"
-                | "accept-encoding"
-                | "accept-language"
-                | "expect"
-                | "range"
-                | "chatgpt-account-id"
-                | "forwarded"
-                | "via"
-                | "x-forwarded-host"
-                | "x-forwarded-for"
-                | "x-forwarded-proto"
-                | "x-http-method-override"
-        )
 }
 
 /// Header names an operator's `[auth.<provider>.headers]` table may not set.
@@ -1029,6 +1057,22 @@ pub fn is_forbidden_auth_header(name: &str) -> bool {
         .any(|forbidden| name.eq_ignore_ascii_case(forbidden))
 }
 
+/// Upper bound of `auth.PROVIDER.credential_timeout_secs`: one hour.
+pub const MAX_CREDENTIAL_TIMEOUT_SECS: u64 = 3600;
+
+fn credential_timeout_secs<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let seconds = Option::<u64>::deserialize(deserializer)?;
+    if seconds.is_some_and(|seconds| !(1..=MAX_CREDENTIAL_TIMEOUT_SECS).contains(&seconds)) {
+        return Err(serde::de::Error::custom(format!(
+            "credential_timeout_secs must be 1..={MAX_CREDENTIAL_TIMEOUT_SECS} seconds"
+        )));
+    }
+    Ok(seconds)
+}
+
 fn auth_headers<'de, D>(deserializer: D) -> Result<HashMap<String, String>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1050,10 +1094,33 @@ where
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigLayer {
+    /// Complete deployment authorities, accepted only from user/system layers.
+    #[serde(default)]
+    pub providers: super::ProvidersLayer,
+    /// Stable account selection; only the user or explicit flags may choose it.
+    pub connection: Option<String>,
+    /// Non-secret identities owned by the user, never by a workspace.
+    #[serde(default)]
+    pub connections: std::collections::BTreeMap<String, super::ConnectionConfig>,
+    /// Stable numbers; inactive assignments reserve numbers after deletion.
+    #[serde(default)]
+    pub account_numbers: super::AccountNumbers,
+    pub residual_limits: Option<crate::permit::residual::ResidualLimits>,
+    /// Owner-only compaction policy, merged field by field.
+    pub compaction: Option<crate::compact::CompactionLayer>,
+    /// Owner-only recap after an absence (`[recap]`), merged field by field.
+    pub recap: Option<crate::recap::RecapLayer>,
+    /// Default model and effort for task children, merged field by field.
+    pub task: Option<crate::turn::ChildDefaults>,
+    /// Owner-only: skills hidden by name (`[skills]` with `hide` and `off`).
+    pub skills: Option<crate::skill::SkillVisibilityLayer>,
     /// User-owned shared instruction hierarchy. Absence starts at the repository.
     pub instructions: Option<InstructionConfig>,
+    /// User-owned cold session storage (`[sessions]`).
+    pub sessions: Option<SessionStorageConfig>,
     pub max_output_tokens: Option<std::num::NonZeroU64>,
-    /// Prompt caching: short (default), none, or explicit user opt-in long.
+    /// Prompt caching: short (default), none, or long. A project or local layer
+    /// may select long only after the workspace is trusted.
     pub cache: Option<crate::generator::capabilities::CacheRetention>,
     pub model: Option<ModelRef>,
     /// Default reasoning effort. Absence contributes no precedence value.
@@ -1073,14 +1140,50 @@ pub struct ConfigLayer {
     /// A spend ceiling, in the same grammar `--budget` takes
     /// (`crate::ceiling::Budget`).
     ///
-    /// This layer is `deny_unknown_fields`, so until the key existed the promise could
-    /// not be kept by anybody: writing it produced `ConfigError::UnknownKey`.
+    /// `CLI.md:296-299` promises an administrator this key on
+    /// `/etc/ego/config.toml` and calls the system layer "the only source of
+    /// ceilings". This layer is `deny_unknown_fields`, so until the key
+    /// existed the promise could not be kept by anybody: writing it produced
+    /// `ConfigError::UnknownKey`.
     pub budget: Option<Budget>,
     /// Mirrors `--bare`: forces `Posture::Bare` even in a trusted workspace.
     pub bare: Option<bool>,
-    /// Keyed by profile name.
+    /// User-only: `true` turns the web tool block on loopback, LAN and
+    /// shared-space addresses off. Repository content is not the owner.
+    pub web_private_network: Option<bool>,
+    /// Owner-only opt-in: keep one memory file per workspace under
+    /// `$EGO_HOME/memory/`. Repository content is not the owner.
+    pub memory: Option<bool>,
+    /// Owner-only switch for file checkpoints (private Git objects and refs before every
+    /// `write` and `edit` in a Git worktree). Absent: on. Repository content is not the owner.
+    pub checkpoints: Option<bool>,
+    /// Owner-only switch for unattended interactive sessions: a call that would wait
+    /// on a permission prompt is denied, the model reads the denial and the turn
+    /// continues. Absent: off. Repository content is not the owner.
+    pub deny_prompts: Option<bool>,
+    /// Owner-only persistent tool selection, the same names as `--tools`; an empty
+    /// list is `--no-tools`. The `--tools` flag overrides it for one run.
+    pub tools: Option<Vec<String>>,
+    /// User-only opt-in: `ego doctor` probes provider reachability over the
+    /// network. Repository content is not the owner.
+    pub doctor_network: Option<bool>,
+    /// Owner-only opt-in: let the model ask language servers for
+    /// definitions, references and diagnostics (the `lsp` tool). It starts
+    /// processes, so repository content cannot turn it on.
+    pub lsp: Option<bool>,
+    /// Owner-only opt-in: let the model save build-output recipes for this
+    /// workspace (the `build_recipe` tool) and shorten later exec answers.
+    /// Repository content is not the owner.
+    pub build_recipes: Option<bool>,
+    /// User-only opt-in: declare the MCP Tasks extension to HTTP servers and
+    /// track the tasks they start. Repository content is not the owner.
+    pub mcp_tasks: Option<bool>,
+    /// `[profile.NAME]` sections, selected with `--profile NAME` /
+    /// `EGO_PROFILE` (`CLI.md` §7). Keyed by profile name.
     #[serde(default)]
     pub profile: HashMap<String, ProfileLayer>,
+    /// User-only fallback executable, overridden by a provider entry.
+    pub protocol_filter: Option<ProtocolFilterConfig>,
     /// Provider login commands and non-secret identity-header overlays.
     #[serde(default)]
     pub auth: HashMap<String, AuthProviderLayer>,
@@ -1092,6 +1195,9 @@ pub struct ConfigLayer {
     /// Hooks retain declaration order within this authority layer.
     #[serde(default)]
     pub hooks: Vec<HookConfigEntry>,
+    /// Authority a project proposes; applied only when the owner trusts the
+    /// workspace with exactly this text.
+    pub grants: Option<super::grants::ProjectGrants>,
 }
 
 impl ConfigLayer {
@@ -1101,19 +1207,61 @@ impl ConfigLayer {
     pub fn parse(source: Source, text: &str) -> Result<Sourced<ConfigLayer>, ConfigError> {
         let value: ConfigLayer =
             toml::from_str(text).map_err(|err| classify_parse_error(source, &err))?;
-        for provider in value.auth.values() {
-            if let Some(filter) = &provider.protocol_filter {
-                if source != Source::User {
-                    return Err(ConfigError::Invalid {
-                        source,
-                        message: "protocol_filter requires user configuration".into(),
-                    });
-                }
-                filter.validate().map_err(|message| ConfigError::Invalid {
+        if ((!value.connections.is_empty() || !value.account_numbers.is_empty())
+            && source != Source::User)
+            || (value.connection.is_some() && !matches!(source, Source::User | Source::Flags))
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "connections require user configuration; connection selection requires user configuration or flags".into(),
+            });
+        }
+        super::connection::validate_numbers(&value.account_numbers)
+            .map_err(|message| ConfigError::Invalid { source, message })?;
+        validate_providers(source, &value.providers)?;
+        for (id, connection) in &value.connections {
+            connection
+                .validate(id)
+                .map_err(|message| ConfigError::Invalid { source, message })?;
+        }
+        if value.connection.as_ref().is_some_and(|id| {
+            id.is_empty()
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        }) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "invalid connection ID".into(),
+            });
+        }
+        if source != Source::User
+            && value
+                .auth
+                .values()
+                .any(|provider| provider.oauth_login_enabled.is_some())
+        {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "oauth_login_enabled requires user configuration".into(),
+            });
+        }
+        for filter in value.protocol_filter.iter().chain(
+            value
+                .auth
+                .values()
+                .filter_map(|provider| provider.protocol_filter.as_ref()),
+        ) {
+            if source != Source::User {
+                return Err(ConfigError::Invalid {
                     source,
-                    message: message.into(),
-                })?;
+                    message: "protocol_filter requires user configuration".into(),
+                });
             }
+            filter.validate().map_err(|message| ConfigError::Invalid {
+                source,
+                message: message.into(),
+            })?;
         }
         if let Some(instructions) = &value.instructions
             && (source != Source::User
@@ -1131,6 +1279,37 @@ impl ConfigLayer {
                 message: "instructions paths require absolute paths in user configuration".into(),
             });
         }
+        if let Some(skills) = &value.skills {
+            if !matches!(source, Source::User | Source::System | Source::Flags) {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: "`[skills]` belongs only to user, system or flag configuration".into(),
+                });
+            }
+            if skills
+                .hide
+                .iter()
+                .chain(&skills.off)
+                .any(|name| name.trim().is_empty())
+            {
+                return Err(ConfigError::Invalid {
+                    source,
+                    message: "`skills.hide` and `skills.off` take skill names".into(),
+                });
+            }
+        }
+        if value.sessions.is_some() && source != Source::User {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "`[sessions]` belongs only to user configuration".into(),
+            });
+        }
+        if value.instructions.as_ref().and_then(|i| i.max_files) == Some(0) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "`instructions.max_files` must be at least 1".into(),
+            });
+        }
         if source != Source::System && value.max_mode.is_some() {
             return Err(ConfigError::Invalid {
                 source,
@@ -1138,12 +1317,52 @@ impl ConfigLayer {
                     .into(),
             });
         }
-        if value.cache == Some(crate::generator::capabilities::CacheRetention::Long)
-            && source != Source::User
-        {
+        if value.web_private_network.is_some() && source != Source::User {
             return Err(ConfigError::Invalid {
                 source,
-                message: "cache = long requires explicit user config".to_owned(),
+                message: "web_private_network requires user configuration".to_owned(),
+            });
+        }
+        if value.checkpoints.is_some() && !matches!(source, Source::User | Source::Flags) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "checkpoints requires user configuration or the command line".to_owned(),
+            });
+        }
+        if value.deny_prompts.is_some() && !matches!(source, Source::User | Source::Flags) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "deny_prompts requires user configuration or the command line".to_owned(),
+            });
+        }
+        if value.tools.is_some() && !matches!(source, Source::User | Source::Flags) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "tools requires user configuration or the command line".to_owned(),
+            });
+        }
+        if value.mcp_tasks.is_some() && source != Source::User {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "mcp_tasks requires user configuration".to_owned(),
+            });
+        }
+        if value.memory.is_some() && !matches!(source, Source::User | Source::Flags) {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "memory requires user configuration or the command line".to_owned(),
+            });
+        }
+        if value.build_recipes.is_some() && source != Source::User {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "build_recipes requires user configuration".to_owned(),
+            });
+        }
+        if value.lsp.is_some() && source != Source::User {
+            return Err(ConfigError::Invalid {
+                source,
+                message: "lsp requires user configuration".to_owned(),
             });
         }
         if let Some((name, _)) = value.profile.iter().find(|(name, profile)| {
@@ -1242,6 +1461,9 @@ impl ConfigLayer {
                     .to_string(),
             });
         }
+        if let Some(grants) = &value.grants {
+            grants.validate(source)?;
+        }
         Ok(Sourced { source, value })
     }
 
@@ -1255,7 +1477,7 @@ impl ConfigLayer {
 }
 
 /// `toml`'s `deny_unknown_fields` diagnostic reads
-/// `unknown field \`key\`, expected...` or
+/// `unknown field \`key\`, expected ...` or
 /// `unknown field \`key\`, there are no fields` regardless of nesting depth
 /// (a nested table's unknown field is reported by leaf name only, e.g.
 /// `permissions.bogus` and `profile.ci.bogus` both surface as `bogus`).
@@ -1283,6 +1505,44 @@ fn classify_parse_error(source: Source, err: &toml::de::Error) -> ConfigError {
     }
 }
 
+/// User-owned cold session storage: sessions with no write for
+/// `compress_after_days` are stored zstd-compressed. `compress = false` turns
+/// the background job off; compressed sessions stay readable either way.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionStorageConfig {
+    pub compress: Option<bool>,
+    pub compress_after_days: Option<std::num::NonZeroU32>,
+    /// A session not opened for this many days is deleted.
+    pub retention_days: Option<std::num::NonZeroU32>,
+}
+
+impl SessionStorageConfig {
+    /// Seven days unless configured.
+    pub const DEFAULT_COMPRESS_AFTER_DAYS: u32 = 7;
+    /// Thirty days unless configured.
+    pub const DEFAULT_RETENTION_DAYS: u32 = 30;
+
+    /// How long a session that nobody opens is kept.
+    pub fn retention(&self) -> std::time::Duration {
+        let days = self
+            .retention_days
+            .map_or(Self::DEFAULT_RETENTION_DAYS, std::num::NonZeroU32::get);
+        std::time::Duration::from_secs(u64::from(days) * 86_400)
+    }
+
+    /// How long a session stays plain, or `None` when compression is off.
+    pub fn compress_after(&self) -> Option<std::time::Duration> {
+        if self.compress == Some(false) {
+            return None;
+        }
+        let days = self
+            .compress_after_days
+            .map_or(Self::DEFAULT_COMPRESS_AFTER_DAYS, std::num::NonZeroU32::get);
+        Some(std::time::Duration::from_secs(u64::from(days) * 86_400))
+    }
+}
+
 /// Optional user-owned instruction hierarchy, independent of sandbox authority.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1290,4 +1550,37 @@ pub struct InstructionConfig {
     pub shared_root: Option<std::path::PathBuf>,
     #[serde(default)]
     pub exclude_roots: Vec<std::path::PathBuf>,
+    /// How many instruction files and import attempts one run may load.
+    /// Absent: [`Limits::default`]. Size limits are not configurable.
+    pub max_files: Option<usize>,
+}
+
+impl InstructionConfig {
+    /// Discovery limits for this configuration.
+    pub fn limits(&self) -> super::Limits {
+        let default = super::Limits::default();
+        super::Limits {
+            max_files: self.max_files.unwrap_or(default.max_files),
+            ..default
+        }
+    }
+}
+
+/// Apply the same trust/validation boundary to parsed and directly injected layers.
+pub(super) fn validate_providers(
+    source: Source,
+    providers: &super::ProvidersLayer,
+) -> Result<(), ConfigError> {
+    if !providers.instances.is_empty() && !matches!(source, Source::System | Source::User) {
+        return Err(ConfigError::Invalid {
+            source,
+            message: "provider instances require trusted user or system configuration".into(),
+        });
+    }
+    for instance in providers.instances.values() {
+        instance
+            .validate()
+            .map_err(|message| ConfigError::Invalid { source, message })?;
+    }
+    Ok(())
 }

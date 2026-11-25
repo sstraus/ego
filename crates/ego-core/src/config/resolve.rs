@@ -1,4 +1,5 @@
-//! Precedence resolution and the trust gate.
+//! Precedence resolution and the trust gate. Pure functions over injected
+//! sources — no file I/O (`plans/m0a-contracts.md` Step 12).
 
 use super::error::ConfigError;
 use std::collections::BTreeMap;
@@ -15,7 +16,8 @@ use crate::generator::types::ThinkingLevel;
 use crate::permit::Confinement;
 use crate::permit::rule::Rule;
 
-/// Only the system layer can impose a non-relaxable ceiling.
+/// Ambient-loading posture (`CLI.md` §4.5): whether project-local config,
+/// hooks, skills and MCP servers may load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Posture {
     Bare,
@@ -80,7 +82,38 @@ impl ResolvedMcpConfig {
 /// and the trust gate have been applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Effective {
+    pub providers: super::ResolvedProviders,
+    pub connection: Option<String>,
+    pub connections: std::collections::BTreeMap<String, super::ConnectionConfig>,
+    pub account_numbers: super::AccountNumbers,
+    pub cache_ttl_seconds: Option<std::num::NonZeroU64>,
+    pub residual_limits: crate::permit::residual::ResidualLimits,
+    /// Owner-only compaction policy; idle compaction is opt-in.
+    pub compaction: crate::compact::CompactionConfig,
+    /// Owner-only recap after an absence; off by default.
+    pub recap: crate::recap::RecapConfig,
+    /// Owner-only defaults for task children; unset keeps the parent's values.
+    pub task: crate::turn::ChildDefaults,
     pub instructions: super::InstructionConfig,
+    /// Owner opt-in for the workspace memory file; off by default.
+    pub memory: bool,
+    /// File checkpoints before `write` and `edit`; on unless the owner turns them off.
+    pub checkpoints: bool,
+    /// Owner opt-in for unattended interactive sessions: deny a call that would
+    /// wait on a permission prompt and continue the turn; off by default.
+    pub deny_prompts: bool,
+    /// Owner tool selection from the `tools` key; `None` keeps every default tool.
+    pub tools: Option<Vec<String>>,
+    /// Owner opt-in: `ego doctor` probes provider reachability; off by default.
+    pub doctor_network: bool,
+    /// Owner opt-in for the `lsp` tool's language servers; off by default.
+    pub lsp: bool,
+    /// Owner opt-in for learned build-output recipes; off by default.
+    pub build_recipes: bool,
+    /// Owner opt-in for MCP Tasks on HTTP servers; off by default.
+    pub mcp_tasks: bool,
+    /// Cold session storage, from the user layer only.
+    pub sessions: super::SessionStorageConfig,
     pub max_output_tokens: Option<std::num::NonZeroU64>,
     /// Fields reduced by an explicitly selected host profile ceiling.
     pub profile_warnings: Vec<String>,
@@ -101,6 +134,8 @@ pub struct Effective {
     pub sandbox_provenance: super::SettingProvenance,
     /// Winning layer for the active profile roots.
     pub roots_source: Option<Source>,
+    /// Per-root declaration and optional host ceiling origins.
+    pub root_origins: Vec<(crate::permit::RootCfg, Source, Option<String>)>,
     /// Additional user-selected read and executable roots, before canonicalization.
     pub exec_paths: Vec<PathBuf>,
     pub permissions: Ruleset,
@@ -115,8 +150,8 @@ pub struct Effective {
     pub roots: Vec<crate::permit::RootCfg>,
     /// What this run may spend, after precedence and the system clamp.
     ///
-    /// Both fields remain `None` unless a ceiling was explicitly configured.
-    /// ego does not impose a ceiling of its own.
+    /// `2026-08-21-a-run-with-no-ceiling.md` §4: both fields are `None`
+    /// unless somebody wrote a ceiling, because ego imposes none of its own.
     pub ceilings: Ceilings,
     /// What the system clamp reduced, per field, so the run can say so.
     ///
@@ -127,6 +162,8 @@ pub struct Effective {
     /// Provider login-command and identity-header configuration, after layer
     /// precedence. Values are non-secret.
     pub auth: std::collections::HashMap<String, AuthProviderLayer>,
+    /// User-owned global fallback; never composed with a provider executable.
+    pub protocol_filter: Option<super::ProtocolFilterConfig>,
     /// Interactive presentation fields after per-field precedence.
     pub ui: UiLayer,
     /// Effective configured entries and winning tombstones with provenance.
@@ -174,7 +211,17 @@ impl std::fmt::Display for Discarded {
 /// eligibility, so it is never discarded and saying it was would be false.
 fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
     let ConfigLayer {
+        providers,
+        connection,
+        connections,
+        account_numbers,
+        residual_limits,
+        compaction,
+        recap,
+        task: _,
+        skills,
         instructions,
+        sessions,
         max_output_tokens,
         cache,
         model,
@@ -189,15 +236,36 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         permissions,
         budget,
         bare: _,
+        web_private_network,
+        memory,
+        checkpoints,
+        deny_prompts,
+        tools,
+        doctor_network,
+        lsp,
+        build_recipes,
+        mcp_tasks,
         profile,
+        protocol_filter,
         auth,
         ui,
         mcp,
         hooks,
+        grants,
     } = layer;
     let mut settings = Vec::new();
     for (present, name) in [
+        (!providers.instances.is_empty(), "providers"),
+        (connection.is_some(), "connection"),
+        (!connections.is_empty(), "connections"),
+        (!account_numbers.is_empty(), "account_numbers"),
+        (protocol_filter.is_some(), "protocol_filter"),
+        (residual_limits.is_some(), "residual_limits"),
+        (compaction.is_some(), "compaction"),
+        (recap.is_some(), "recap"),
+        (skills.is_some(), "skills"),
         (instructions.is_some(), "instructions"),
+        (sessions.is_some(), "sessions"),
         (max_output_tokens.is_some(), "max_output_tokens"),
         (cache.is_some(), "cache"),
         (model.is_some(), "model"),
@@ -211,11 +279,21 @@ fn settings_in(layer: &ConfigLayer) -> Vec<&'static str> {
         (exec_paths.is_some(), "exec_paths"),
         (permissions.is_some(), "permissions"),
         (budget.is_some(), "budget"),
+        (web_private_network.is_some(), "web_private_network"),
+        (memory.is_some(), "memory"),
+        (checkpoints.is_some(), "checkpoints"),
+        (deny_prompts.is_some(), "deny_prompts"),
+        (tools.is_some(), "tools"),
+        (doctor_network.is_some(), "doctor_network"),
+        (lsp.is_some(), "lsp"),
+        (build_recipes.is_some(), "build_recipes"),
+        (mcp_tasks.is_some(), "mcp_tasks"),
         (!profile.is_empty(), "profile tables"),
         (!auth.is_empty(), "auth"),
         (ui.is_some(), "ui"),
         (!mcp.servers.is_empty(), "mcp servers"),
         (!hooks.is_empty(), "hooks"),
+        (grants.is_some(), "grants"),
     ] {
         if present {
             settings.push(name);
@@ -234,6 +312,21 @@ fn join(settings: &[&'static str]) -> String {
     }
 }
 
+impl Effective {
+    /// Derive the built-in child environment from the admitted configuration.
+    pub fn exec_policy(&self) -> Result<crate::permit::EnvPolicy, crate::permit::EnvNameError> {
+        let signing_credentials: Vec<_> = self
+            .connections
+            .values()
+            .filter(|connection| {
+                connection.vendor == super::ProviderProfile::BedrockRuntimeSigv4.as_str()
+            })
+            .filter_map(|connection| connection.key_env.as_deref())
+            .collect();
+        self.exec.policy_excluding(&signing_credentials)
+    }
+}
+
 /// Resolves layered config into one [`Effective`] value.
 ///
 /// Precedence is `flags > env > local > project > user > system`,
@@ -243,18 +336,25 @@ fn join(settings: &[&'static str]) -> String {
 /// applied — a profile changes what its own layer contributes, it does not
 /// change that layer's rank.
 ///
-/// When the resolved posture is [`Posture::Bare`] — because the workspace is
-/// [`Trust::Untrusted`], or because any layer's `bare` flag forced it even while trusted
-/// — the `project` and `local` layers are dropped entirely before anything else is
-/// computed: they cannot affect `model`, `mode`, `permissions` or which `[profile.NAME]`
-/// tables are available. `bare` itself is read from every layer regardless of
-/// eligibility, since asking for *more* restriction from an otherwise-excluded source is
-/// never a security problem.
+/// **Trust gate** (`CLI.md` §4.5): ambient discovery is trust-gated, and
+/// that includes project-local *config*, not just hooks/skills/MCP. When the
+/// resolved posture is [`Posture::Bare`] — because the workspace is
+/// [`Trust::Untrusted`], or because any layer's `bare` flag forced it even
+/// while trusted — the `project` and `local` layers are dropped entirely
+/// before anything else is computed: they cannot affect `model`, `mode`,
+/// `permissions` or which `[profile.NAME]` tables are available. `bare`
+/// itself is read from every layer regardless of eligibility, since asking
+/// for *more* restriction from an otherwise-excluded source is never a
+/// security problem.
 ///
-/// No other layer's `allow`, and no profile override that merely omits the entry, can
-/// pull it back out. Multiple `system` layers union rather than overwrite. Deny entries
-/// from any other source are ordinary config and can be relaxed by a higher-precedence
-/// layer.
+/// **System ceiling** (`ARCHITECTURE.md` §3.4): a `deny` entry from any
+/// `system`-sourced layer — its own base `permissions.deny`, and its active
+/// `[profile.NAME]` override's `permissions.deny` if one is selected — is
+/// collected into a ceiling *before* the ordinary precedence merge runs, and
+/// re-applied after. No other layer's `allow`, and no profile override that
+/// merely omits the entry, can pull it back out. Multiple `system` layers
+/// union rather than overwrite. Deny entries from any other source are
+/// ordinary config and can be relaxed by a higher-precedence layer.
 ///
 /// Returns [`ConfigError::UnknownProfile`] if `active_profile` is given but
 /// no eligible layer defines that profile — missing from one layer is
@@ -308,6 +408,9 @@ fn resolve_inner(
     selected_by: Option<Source>,
     profile_ceiling: Option<&Effective>,
 ) -> Result<Effective, ConfigError> {
+    for layer in layers {
+        super::layer::validate_providers(layer.source, &layer.value.providers)?;
+    }
     let mut ordered: Vec<&Sourced<ConfigLayer>> = layers.iter().collect();
     ordered.sort_by_key(|l| l.source.rank());
 
@@ -348,6 +451,7 @@ fn resolve_inner(
     let active_profile_name = active_profile;
     let resolved_active_profile =
         resolve_active_profile(&eligible, active_profile_name, selected_by)?;
+    let mut cache_ttl_seconds = None;
     let mut max_output_tokens = None;
     let mut cache = crate::generator::capabilities::CacheRetention::Short;
     let mut model = None;
@@ -361,22 +465,105 @@ fn resolve_inner(
     let mut roots_source = None;
     let mut exec_paths = Vec::new();
     let mut permissions = Ruleset::default();
+    let mut web_private_network = false;
+    let mut memory = false;
+    let mut checkpoints = true;
+    let mut deny_prompts = false;
+    let mut tools: Option<Vec<String>> = None;
+    let mut doctor_network = false;
+    let mut lsp = false;
+    let mut build_recipes = false;
+    let mut mcp_tasks = false;
     let mut judge = None;
+    let mut residual_limits = crate::permit::residual::ResidualLimits::default();
+    let mut compaction = crate::compact::CompactionConfig::default();
+    let mut recap = crate::recap::RecapConfig::default();
+    let mut task = crate::turn::ChildDefaults::default();
     let mut ceilings = Ceilings::default();
     let mut auth = std::collections::HashMap::new();
+    let mut connection = None;
+    let mut connections = std::collections::BTreeMap::new();
+    let mut account_numbers = super::AccountNumbers::new();
+    let mut providers = super::ResolvedProviders::default();
     let mut ui = UiLayer::default();
     let mut mcp = ResolvedMcpConfig::default();
     let mut instructions = super::InstructionConfig::default();
+    let mut sessions = super::SessionStorageConfig::default();
     let mut session_dir = None;
     let mut artifact_dir = None;
     let mut roots = Vec::new();
+    let mut root_origins = Vec::new();
     let mut root_restrictions = Vec::new();
 
     for sourced in &eligible {
+        for (id, instance) in &sourced.value.providers.instances {
+            if providers
+                .instances
+                .insert(
+                    id.clone(),
+                    Sourced {
+                        source: sourced.source,
+                        value: instance.clone(),
+                    },
+                )
+                .is_some()
+            {
+                return Err(ConfigError::Invalid {
+                    source: sourced.source,
+                    message: format!("duplicate provider instance ID {}", id.as_str()),
+                });
+            }
+        }
+        if sourced.source == Source::User {
+            account_numbers.extend(sourced.value.account_numbers.clone());
+            for (id, value) in &sourced.value.connections {
+                value.validate(id).map_err(|message| ConfigError::Invalid {
+                    source: sourced.source,
+                    message,
+                })?;
+                connections.insert(id.clone(), value.clone());
+            }
+        }
+        if matches!(sourced.source, Source::User | Source::Flags)
+            && let Some(value) = &sourced.value.connection
+        {
+            connection = Some(value.clone());
+        }
+        if let Some(value) = sourced.value.memory {
+            memory = value;
+        }
+        if let Some(value) = sourced.value.checkpoints {
+            checkpoints = value;
+        }
+        if let Some(value) = sourced.value.deny_prompts {
+            deny_prompts = value;
+        }
+        if let Some(value) = &sourced.value.tools {
+            tools = Some(value.clone());
+        }
+        if let Some(value) = sourced.value.lsp {
+            lsp = value;
+        }
+        if let Some(value) = sourced.value.build_recipes {
+            build_recipes = value;
+        }
         if sourced.source == Source::User {
             instructions = sourced.value.instructions.clone().unwrap_or_default();
+            sessions = sourced.value.sessions.clone().unwrap_or_default();
+            if let Some(value) = sourced.value.web_private_network {
+                web_private_network = value;
+            }
+            if let Some(value) = sourced.value.doctor_network {
+                doctor_network = value;
+            }
+            if let Some(value) = sourced.value.mcp_tasks {
+                mcp_tasks = value;
+            }
         }
         let profile = active_profile_name.and_then(|name| sourced.value.profile.get(name));
+        if let Some(ttl) = profile.and_then(|profile| profile.cache_ttl_seconds) {
+            cache_ttl_seconds = Some(ttl);
+        }
 
         apply_mcp_entries(
             &mut mcp,
@@ -413,6 +600,29 @@ fn resolve_inner(
             &mut sandbox,
             &mut sandbox_provenance,
         );
+        if matches!(sourced.source, Source::User | Source::System)
+            && let Some(limits) = sourced.value.residual_limits
+        {
+            residual_limits = limits;
+        }
+        // Compaction spends paid requests; a project cannot turn it on. The
+        // command line (`-c compaction.headless=true`) is the owner's too.
+        if matches!(
+            sourced.source,
+            Source::User | Source::System | Source::Flags
+        ) && let Some(layer) = &sourced.value.compaction
+        {
+            compaction.merge(layer);
+        }
+        // A recap spends a paid request; only the owner's files turn it on.
+        if matches!(sourced.source, Source::User | Source::System)
+            && let Some(layer) = &sourced.value.recap
+        {
+            recap.merge(layer);
+        }
+        if let Some(layer) = &sourced.value.task {
+            task.merge(layer);
+        }
         merge_exec_controls(&mut exec, sourced, profile);
         if let Some(value) = profile
             .and_then(|profile| profile.network)
@@ -443,8 +653,11 @@ fn resolve_inner(
             .and_then(|p| p.budget.as_ref())
             .or(sourced.value.budget.as_ref())
         {
-            // Merge token and money ceilings per field. Naming one must not erase the other;
-            // they enforce independent resources.
+            // Per field, so a layer naming a token ceiling does not erase a
+            // money ceiling a lower one set. They are independent
+            // instruments — §9's token ceiling needs no rates and binds on
+            // every metering class — and merging them into one slot would
+            // make naming either a way to drop the other.
             ceilings.apply(budget);
         }
         if let Some(path) = profile.and_then(|profile| profile.session_dir.clone()) {
@@ -462,6 +675,7 @@ fn resolve_inner(
                 selected,
                 &mut roots,
                 &mut roots_source,
+                &mut root_origins,
                 &mut root_restrictions,
             );
         }
@@ -474,8 +688,9 @@ fn resolve_inner(
         merge_auth(&mut auth, &sourced.value.auth);
         if sourced.source == Source::User {
             for (id, provider) in &sourced.value.auth {
-                auth.entry(id.clone()).or_default().protocol_filter =
-                    provider.protocol_filter.clone();
+                let resolved = auth.entry(id.clone()).or_default();
+                resolved.protocol_filter = provider.protocol_filter.clone();
+                resolved.oauth_login_enabled = provider.oauth_login_enabled;
             }
         }
         if let Some(template) = sourced
@@ -512,9 +727,13 @@ fn resolve_inner(
     // if !deny.contains(&entry) { deny.push(entry); }
     // ```
     //
-    // Deduplicating predicates must preserve all origins. Otherwise a rule
-    // shared by system and user layers could report only the user source, whose
-    // removal would not lift the denial.
+    // which is correct about enforcement — one deny is one entry — and threw
+    // away the only fact an attribution needs. A predicate denied in both
+    // `/etc/ego/config.toml` and the operator's own config arrived here
+    // already present, was skipped, and kept whichever origin the merge loop
+    // happened to leave: the *user* copy, the one whose deletion changes
+    // nothing. See
+    // the design notes.
     for entry in system_deny {
         Ruleset::merge(&mut permissions.deny, entry, Source::System);
     }
@@ -528,8 +747,14 @@ fn resolve_inner(
     // allow.retain(|entry| !deny.contains(entry));
     // ```
     //
-    // Deny/allow relationships are decided against actual calls, not by string
-    // equality between rule lists. Different patterns can overlap semantically.
+    // which spelled "deny beats allow" as *string equality between two
+    // lists*: `deny = ["exec(git *)"]` left `allow = ["exec(git push)"]`
+    // standing, because the strings differ, and the resolved config then said
+    // the push was allowed. No better comparison rescues it — those two rules
+    // are neither equal nor unrelated, and the only place their relationship
+    // is decidable is against an actual call. See
+    // the design notes §6 and
+    // the design notes §7.
     //
     // The system-deny ceiling above is a *different* job and stays: it
     // guarantees a `/etc/ego` entry is present in the list at all, which no
@@ -561,9 +786,30 @@ fn resolve_inner(
         )
     });
 
-    // The same construction one field over: a `system` ceiling is gathered outside the
-    // ordinary merge and re-applied after it, so no higher-precedence layer and no
-    // profile override can raise it.
+    // A trusted project's proposals come last and add to what the owner set.
+    // Ceilings are gathered below, so they bind these roots and paths too.
+    for layer in &eligible {
+        if let Some(grants) = &layer.value.grants {
+            apply_grants(
+                layer.source,
+                grants,
+                &mut roots,
+                &mut roots_source,
+                &mut root_origins,
+                &mut exec_paths,
+            );
+            for rule in &grants.allow {
+                Ruleset::merge(&mut permissions.allow, rule.clone(), layer.source);
+            }
+        }
+    }
+
+    // The same construction one field over: a `system` ceiling is gathered
+    // outside the ordinary merge and re-applied after it, so no
+    // higher-precedence layer and no profile override can raise it. `min`
+    // rather than "system wins", because `CLI.md:311` binds everyone to the
+    // administrator's cap and not to the administrator's *figure* — an
+    // operator asking for less keeps their own.
     let system_ceiling = system_budget_ceiling(&eligible, active_profile_name);
     let clamped = ceilings.clamp(&system_ceiling);
 
@@ -613,8 +859,40 @@ fn resolve_inner(
             max_output_tokens = Some(max_output_tokens.map_or(limit, |value| value.min(limit)));
         }
     }
+    compaction
+        .validate()
+        .map_err(|message| ConfigError::Invalid {
+            source: Source::User,
+            message,
+        })?;
+    if let Some(id) = connection.as_deref() {
+        super::select_connection(&connections, Some(id), None).map_err(|message| {
+            ConfigError::Invalid {
+                source: Source::User,
+                message,
+            }
+        })?;
+    }
     Ok(Effective {
+        providers,
+        connection,
+        connections,
+        account_numbers,
+        cache_ttl_seconds,
+        residual_limits,
+        compaction,
+        recap,
+        task,
         instructions,
+        memory,
+        checkpoints,
+        deny_prompts,
+        tools,
+        doctor_network,
+        lsp,
+        build_recipes,
+        mcp_tasks,
+        sessions,
         max_output_tokens,
         profile_warnings,
         cache,
@@ -629,8 +907,14 @@ fn resolve_inner(
         network,
         sandbox_provenance,
         roots_source,
+        root_origins,
         exec_paths,
-        permissions: permissions.with_credential_defaults(),
+        permissions: Ruleset {
+            web_private_network,
+            ..permissions
+                .with_credential_defaults()
+                .with_development_host_defaults()
+        },
         judge,
         posture,
         active_profile: resolved_active_profile,
@@ -640,6 +924,10 @@ fn resolve_inner(
         ceilings,
         clamped,
         auth,
+        protocol_filter: eligible
+            .iter()
+            .filter(|layer| layer.source == Source::User)
+            .find_map(|layer| layer.value.protocol_filter.clone()),
         ui,
         mcp,
         discarded,
@@ -665,17 +953,48 @@ fn system_budget_ceiling(
     system_ceiling
 }
 
+/// Owner-approved project proposals extend, never replace, the owner's values.
+fn apply_grants(
+    source: Source,
+    grants: &super::ProjectGrants,
+    roots: &mut Vec<crate::permit::RootCfg>,
+    roots_source: &mut Option<Source>,
+    root_origins: &mut Vec<(crate::permit::RootCfg, Source, Option<String>)>,
+    exec_paths: &mut Vec<PathBuf>,
+) {
+    for root in &grants.roots {
+        if !roots.contains(root) {
+            roots.push(root.clone());
+            root_origins.push((root.clone(), source, None));
+        }
+    }
+    if !grants.roots.is_empty() {
+        roots_source.get_or_insert(source);
+    }
+    for path in &grants.exec_paths {
+        if !exec_paths.contains(path) {
+            exec_paths.push(path.clone());
+        }
+    }
+}
+
 fn select_roots(
     source: Source,
     selected: &[crate::permit::RootCfg],
     roots: &mut Vec<crate::permit::RootCfg>,
     roots_source: &mut Option<Source>,
+    root_origins: &mut Vec<(crate::permit::RootCfg, Source, Option<String>)>,
     root_restrictions: &mut Vec<Vec<crate::permit::RootCfg>>,
 ) {
     if matches!(source, Source::Project | Source::Local) {
         root_restrictions.push(roots.clone());
     }
     *roots = selected.to_vec();
+    *root_origins = selected
+        .iter()
+        .cloned()
+        .map(|root| (root, source, None))
+        .collect();
     *roots_source = Some(source);
 }
 
@@ -718,10 +1037,7 @@ fn merge_generation_fields(
     {
         *max_output_tokens = Some(value);
     }
-    if let Some(value) = sourced.value.cache
-        && (value != crate::generator::capabilities::CacheRetention::Long
-            || sourced.source == Source::User)
-    {
+    if let Some(value) = sourced.value.cache {
         *cache = value;
     }
     if let Some(m) = profile
@@ -875,6 +1191,9 @@ fn merge_auth(
         let resolved = auth.entry(id.clone()).or_default();
         if provider.credential_command.is_some() {
             resolved.credential_command = provider.credential_command.clone();
+        }
+        if provider.credential_timeout_secs.is_some() {
+            resolved.credential_timeout_secs = provider.credential_timeout_secs;
         }
         for (name, value) in &provider.headers {
             resolved

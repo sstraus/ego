@@ -1,11 +1,44 @@
-//! Gemini Interactions represents conversation steps rather than role messages. Completion uses
-//! interaction status; `thinking_level` has no `off`.
+//! Gemini's Interactions API: a conversation is a list of steps.
 //!
-//! Every request states `store: false` and omits previous interaction identity because ego
-//! rebuilds history from its own log.
+//! the design notes §3 chose this over the legacy
+//! `models:generateContent`, and §3.8 resolved the shape ego actually needs.
+//! The three facts that make this a mapping of its own rather than a variant
+//! of another:
 //!
-//! Thought tokens are a separate summand beside output tokens; tool-use tokens belong to input.
-//! Restated step totals are not new spending: emit usage from the provider's final report.
+//! - **A conversation is steps, not roles.** A user turn is a `user_input`
+//!   step and a prior answer a `model_output` step; a tool call and its result
+//!   are steps beside them rather than blocks inside a turn. There is no
+//!   `role` field anywhere in the request.
+//! - **There is no finish reason in this protocol at all.** The terminal
+//!   signal is the interaction's `status`, which is why [`ending`] reads a
+//!   status and the family's `consume_finish_reason` has no counterpart here.
+//! - **`thinking_level` has no `off`.** The floor is `minimal`, and omitting
+//!   the field selects a per-model default that thinks — so `Off` is refused
+//!   rather than translated into a request that bills for reasoning the caller
+//!   switched off.
+//!
+//! # Stateless, and it has to say so
+//!
+//! `store` defaults to **true** on this API and multi-turn is documented as
+//! `previous_interaction_id`. ego is stateless by construction: it rebuilds
+//! the whole history from its own log every turn. Worse, the stateful mode is
+//! *inexpressible* at this seam — [`WireFormat::build_request`] is a pure
+//! function of the request, and no `AiEvent` could carry an interaction id
+//! back out of [`decode`]. So every request states `store: false` and names no
+//! previous interaction, and that is a decision recorded rather than a default
+//! relied upon.
+//!
+//! # Usage is four summands, not a partition
+//!
+//! `total_thought_tokens` is a **separate summand** beside
+//! `total_output_tokens`, not a breakdown of it, and `total_tool_use_tokens`
+//! belongs to the input side. §3.3 checks the arithmetic against Google's own
+//! example. A decoder that treated thought tokens as a subset would
+//! under-report every reasoning turn.
+//!
+//! `step.stop` may restate the running total beside its per-step figure, and
+//! restating is not spending: usage is reported once, from the provider's last
+//! word.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -30,6 +63,14 @@ use super::{RequestRefused, RequestTarget, WireFormat};
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct GeminiInteractions;
 
+/// Hosted search is decoded but not advertised, on the default path or an
+/// explicit request. A stateless continuation must replay the signed
+/// `google_search_call` and `google_search_result` steps exactly as received,
+/// and the result step carries `search_suggestions`. The grounding terms do
+/// not permit storing Search Suggestions in a session log for later resume or
+/// fork, and they require their display with the grounded answer, which this
+/// client does not do. Until a compliant replay exists, the trait defaults
+/// (`false`) apply and the generator refuses `web_search` without fallback.
 impl WireFormat for GeminiInteractions {
     fn build_request(
         &self,
@@ -158,12 +199,14 @@ struct GenerationConfig {
 }
 
 #[derive(Serialize)]
-struct WireTool<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    name: &'a str,
-    description: &'a str,
-    parameters: &'a serde_json::Value,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireTool<'a> {
+    Function {
+        name: &'a str,
+        description: &'a str,
+        parameters: &'a serde_json::Value,
+    },
+    GoogleSearch,
 }
 
 /// One step of the conversation, in the request's own vocabulary.
@@ -282,7 +325,7 @@ fn project<'a>(messages: &'a [Message]) -> Result<(Option<String>, Vec<Step<'a>>
                     data: base64::engine::general_purpose::STANDARD.encode(image.bytes()),
                     mime_type: image.media_type().mime(),
                 }),
-                ContentBlock::Reasoning { state } | ContentBlock::ProviderContent { state } => {
+                ContentBlock::Reasoning { state } | ContentBlock::ProviderContent { state, .. } => {
                     flush(turn, &mut pending, &mut steps);
                     if state.dialect != DIALECT {
                         return Err(Inexpressible::ReasoningStateFromAnotherDialect {
@@ -386,12 +429,13 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
         tools: req
             .tools
             .iter()
-            .map(|tool| WireTool {
-                kind: "function",
+            .filter(|tool| req.web_search.is_none() || tool.name != "web_search")
+            .map(|tool| WireTool::Function {
                 name: &tool.name,
                 description: &tool.description,
                 parameters: &tool.parameters,
             })
+            .chain(req.web_search.map(|_| WireTool::GoogleSearch))
             .collect(),
         generation_config: GenerationConfig {
             max_output_tokens: req.max_output_tokens,
@@ -472,7 +516,17 @@ enum Delta {
     Arguments {
         arguments: String,
     },
+    SearchQueries(Vec<String>),
+    Citations(Vec<Citation>),
     Ignored,
+}
+
+#[derive(Deserialize)]
+struct Citation {
+    #[serde(rename = "type")]
+    kind: String,
+    url: Option<String>,
+    title: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -482,7 +536,24 @@ struct DeltaEnvelope {
     text: Option<String>,
     content: Option<Box<RawValue>>,
     signature: Option<String>,
-    arguments: Option<String>,
+    arguments: Option<Box<RawValue>>,
+    annotations: Option<Vec<Citation>>,
+}
+
+/// `queries` defaults to empty: one reference example spells a singular
+/// `query`, and a frame must not be dropped for a field the schema calls
+/// optional.
+#[derive(Deserialize)]
+struct SearchArguments {
+    #[serde(default)]
+    queries: Vec<String>,
+}
+
+/// A `model_output` content item that arrives whole in `step.start`.
+#[derive(Deserialize)]
+struct AnnotatedContent {
+    #[serde(default)]
+    annotations: Vec<Citation>,
 }
 
 impl Frame {
@@ -502,7 +573,9 @@ impl Frame {
                 }
             }
             "step.delta" => {
-                let delta: DeltaEnvelope = serde_json::from_str(frame.delta?.get()).ok()?;
+                let payload = frame.delta?;
+                let raw = payload.get();
+                let delta: DeltaEnvelope = serde_json::from_str(raw).ok()?;
                 let delta = match delta.kind.as_str() {
                     "text" => Delta::Text { text: delta.text? },
                     "thought_summary" => Delta::ThoughtSummary {
@@ -512,8 +585,16 @@ impl Frame {
                         signature: delta.signature?,
                     },
                     "arguments_delta" => Delta::Arguments {
-                        arguments: delta.arguments?,
+                        arguments: serde_json::from_str(delta.arguments?.get()).ok()?,
                     },
+                    "google_search_call" => {
+                        let arguments: SearchArguments =
+                            serde_json::from_str(delta.arguments?.get()).ok()?;
+                        Delta::SearchQueries(arguments.queries)
+                    }
+                    "text_annotation_delta" => {
+                        Delta::Citations(delta.annotations.unwrap_or_default())
+                    }
                     _ => Delta::Ignored,
                 };
                 Self::StepDelta {
@@ -561,10 +642,19 @@ struct WireUsage {
     total_cached_tokens: u64,
     #[serde(default)]
     total_output_tokens: u64,
-    #[serde(default)]
-    total_thought_tokens: u64,
+    /// Absent is not zero: `Usage::reasoning_tokens` can say "not reported".
+    total_thought_tokens: Option<u64>,
     #[serde(default)]
     total_tool_use_tokens: u64,
+    /// Absent is not zero: the decoder then counts the queries it observed.
+    grounding_tool_count: Option<Vec<GroundingToolCount>>,
+}
+
+#[derive(Deserialize)]
+struct GroundingToolCount {
+    #[serde(rename = "type")]
+    kind: String,
+    count: u64,
 }
 
 #[derive(Deserialize)]
@@ -596,6 +686,10 @@ enum StepState {
         name: String,
         args: String,
     },
+    Search {
+        id: String,
+        queries: Vec<String>,
+    },
     Other,
 }
 
@@ -612,6 +706,13 @@ enum Ending {
 pub struct StreamDecoder {
     sse: SseDecoder,
     steps: BTreeMap<u32, StepState>,
+    searches: std::collections::BTreeSet<String>,
+    /// Distinct non-empty queries: the documented billing unit, used only
+    /// when the provider omits `grounding_tool_count`.
+    queries: std::collections::BTreeSet<String>,
+    /// One source line per URL. Annotations cite text segments, so one source
+    /// is usually annotated many times in one answer.
+    cited: std::collections::BTreeSet<String>,
     usage: Option<WireUsage>,
     ending: Option<Ending>,
     provider_error: Option<(String, ErrorKind)>,
@@ -624,9 +725,26 @@ impl super::StreamSink for StreamDecoder {
     fn finish(self: Box<Self>, transport: Option<HttpError>) -> Vec<AiEvent> {
         StreamDecoder::finish(*self, transport)
     }
+    fn usage_incoherent(&self) -> bool {
+        self.usage
+            .as_ref()
+            .is_some_and(|usage| into_usage(usage, self.queries.len()).is_none())
+    }
 }
 
 impl StreamDecoder {
+    fn cite(&mut self, citations: Vec<Citation>, out: &mut Vec<AiEvent>) {
+        for citation in citations {
+            if citation.kind == "url_citation"
+                && let Some(url) = citation.url
+                && self.cited.insert(url.clone())
+            {
+                let title = citation.title.unwrap_or_else(|| url.clone());
+                out.push(AiEvent::Citation { url, title });
+            }
+        }
+    }
+
     /// Feed bytes; get the events that completed within them.
     pub fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
         let mut out = Vec::new();
@@ -686,6 +804,21 @@ impl StreamDecoder {
                             .unwrap_or_default(),
                         args: String::new(),
                     },
+                    "google_search_call" => StepState::Search {
+                        id: step
+                            .fields
+                            .get("id")
+                            .and_then(|raw| serde_json::from_str(raw.get()).ok())
+                            .unwrap_or_else(|| format!("google-search-{index}")),
+                        // A whole step may already carry its arguments; a
+                        // later delta that restates them is merged, not doubled.
+                        queries: step
+                            .fields
+                            .get("arguments")
+                            .and_then(|raw| serde_json::from_str::<SearchArguments>(raw.get()).ok())
+                            .map(|arguments| arguments.queries)
+                            .unwrap_or_default(),
+                    },
                     "model_output" => {
                         if let Some(content) = step.fields.get("content")
                             && let Ok(contents) =
@@ -694,6 +827,11 @@ impl StreamDecoder {
                             for content in contents {
                                 if let Some(text) = summary_text(&content) {
                                     out.push(AiEvent::TextDelta { text });
+                                }
+                                if let Ok(annotated) =
+                                    serde_json::from_str::<AnnotatedContent>(content.get())
+                                {
+                                    self.cite(annotated.annotations, out);
                                 }
                             }
                         }
@@ -732,6 +870,16 @@ impl StreamDecoder {
                         args.push_str(&arguments);
                     }
                 }
+                Delta::SearchQueries(new_queries) => {
+                    if let Some(StepState::Search { queries, .. }) = self.steps.get_mut(&index) {
+                        for query in new_queries {
+                            if !queries.contains(&query) {
+                                queries.push(query);
+                            }
+                        }
+                    }
+                }
+                Delta::Citations(citations) => self.cite(citations, out),
                 Delta::Ignored => {}
             },
             Frame::StepStop { index } => match self.steps.remove(&index) {
@@ -744,6 +892,7 @@ impl StreamDecoder {
                             .is_ok_and(|signature| !signature.is_empty())
                     }) {
                         out.push(AiEvent::ReasoningState(ReasoningState {
+                            connection: None,
                             dialect: DIALECT.to_string(),
                             blob: serde_json::to_string(&ThoughtBlob {
                                 kind: "thought",
@@ -762,6 +911,20 @@ impl StreamDecoder {
                 // A thought that closed with no signature minted nothing
                 // replayable, and inventing one would be worse than replaying
                 // none.
+                Some(StepState::Search { id, queries }) => {
+                    self.queries.extend(
+                        queries
+                            .iter()
+                            .filter(|query| !query.trim().is_empty())
+                            .cloned(),
+                    );
+                    if self.searches.insert(id.clone()) {
+                        out.push(AiEvent::WebSearch {
+                            call_id: id,
+                            query: queries.join("; "),
+                        });
+                    }
+                }
                 Some(StepState::Other) | None => {}
             },
             Frame::Completed { interaction } => {
@@ -785,8 +948,14 @@ impl StreamDecoder {
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
         }
-        if let Some(usage) = self.usage.take() {
-            out.push(AiEvent::Usage(into_usage(&usage)));
+        let observed_queries = self.queries.len();
+        if let Some(usage) = self
+            .usage
+            .take()
+            .as_ref()
+            .and_then(|usage| into_usage(usage, observed_queries))
+        {
+            out.push(AiEvent::Usage(usage));
         }
         if let Some((message, kind)) = self.provider_error.take() {
             out.push(AiEvent::Error { message, kind });
@@ -823,7 +992,9 @@ impl StreamDecoder {
                 };
                 out.push(AiEvent::Error {
                     message,
-                    kind: ErrorKind::Transient,
+                    kind: transport
+                        .as_ref()
+                        .map_or(ErrorKind::Transient, HttpError::kind),
                 });
                 out.push(AiEvent::Stop(StopReason::Error));
             }
@@ -880,24 +1051,36 @@ fn classify_error(code: &str) -> ErrorKind {
 ///
 /// `total_thought_tokens` joins the output because it *is* output the caller
 /// paid for, and `total_tool_use_tokens` joins the input because it is prompt
-/// the provider assembled. Neither is subtracted from anything: this API
-/// reports summands, and the only figure it partitions is `total_tokens`.
-fn into_usage(usage: &WireUsage) -> Usage {
-    Usage {
+/// the provider assembled. `total_cached_tokens` is the cached part of
+/// `total_input_tokens`, so a cached count above the input total does not
+/// partition it: `None`, and the shared stage decides what that means.
+///
+/// An absent `total_cached_tokens` still reads as zero: `Usage` has no
+/// "not reported" state for cache reads, and that redesign is out of scope.
+fn into_usage(usage: &WireUsage, observed_queries: usize) -> Option<Usage> {
+    let thought = usage.total_thought_tokens.unwrap_or(0);
+    Some(Usage {
         uncached_input_tokens: usage
             .total_input_tokens
-            .saturating_sub(usage.total_cached_tokens)
+            .checked_sub(usage.total_cached_tokens)?
             .saturating_add(usage.total_tool_use_tokens),
         cache_read_tokens: usage.total_cached_tokens,
         // This API states no cache-write figure at all, at either retention.
         cache_write_tokens: 0,
         cache_write_extended_tokens: 0,
-        web_search_requests: 0,
-        reasoning_tokens: Some(usage.total_thought_tokens),
-        output_tokens: usage
-            .total_output_tokens
-            .saturating_add(usage.total_thought_tokens),
-    }
+        // Billing is per distinct non-empty query, not per search step. The
+        // provider count wins; without it, the observed queries are the
+        // documented unit rather than a silent zero.
+        web_search_requests: match &usage.grounding_tool_count {
+            Some(counts) => counts
+                .iter()
+                .filter(|entry| entry.kind == "google_search")
+                .fold(0_u64, |total, entry| total.saturating_add(entry.count)),
+            None => observed_queries as u64,
+        },
+        reasoning_tokens: usage.total_thought_tokens,
+        output_tokens: usage.total_output_tokens.saturating_add(thought),
+    })
 }
 
 /// Decode one Interactions response into the generation's events.

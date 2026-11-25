@@ -13,7 +13,33 @@ pub(crate) fn apply(
     workspace: &Path,
     directory: &Path,
 ) -> Result<(), UsageError> {
-    let refuse = |reason: &str| UsageError(format!("read-only directory: {reason}"));
+    admit_directory(
+        effective,
+        workspace,
+        directory,
+        RootAccess::Read,
+        "read-only directory",
+    )
+}
+
+/// One `--allow-dir`: the same exact-directory rule with the access the flag names.
+pub(crate) fn apply_allow(
+    effective: &mut Effective,
+    workspace: &Path,
+    directory: &Path,
+    access: RootAccess,
+) -> Result<(), UsageError> {
+    admit_directory(effective, workspace, directory, access, "--allow-dir")
+}
+
+fn admit_directory(
+    effective: &mut Effective,
+    workspace: &Path,
+    directory: &Path,
+    access: RootAccess,
+    label: &str,
+) -> Result<(), UsageError> {
+    let refuse = |reason: &str| UsageError(format!("{label}: {reason}"));
     if !directory.is_absolute()
         || directory
             .components()
@@ -31,11 +57,20 @@ pub(crate) fn apply(
     let mut candidate = effective.clone();
     candidate.roots.push(RootCfg {
         consent: None,
-        path: canonical,
-        access: RootAccess::Read,
+        path: canonical.clone(),
+        access,
     });
-    super::profile_roots::admit(&candidate, &ego_core::permit::CanonPath::new(workspace))
-        .map_err(|error| refuse(&error))?;
+    // An explicit request, unlike a stale configured entry, is refused when it
+    // cannot be admitted: the host asked for this exact root.
+    let (admitted, notes) =
+        super::profile_roots::admit_noted(&candidate, &ego_core::permit::CanonPath::new(workspace))
+            .map_err(|error| refuse(&error))?;
+    if !admitted
+        .iter()
+        .any(|root| root.path().as_path() == canonical && root.access() == access)
+    {
+        return Err(refuse(notes.last().map_or("not admitted", String::as_str)));
+    }
     *effective = candidate;
     Ok(())
 }

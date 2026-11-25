@@ -106,6 +106,29 @@ impl EditMode for SurfaceEditMode {
                 ReedlineEvent::ExecuteHostCommand(MODE_CYCLE_COMMAND.to_owned())
             };
         }
+        if self.phase.get() != EditPhase::Modal
+            && !matches!(
+                self.editor.edit_mode(),
+                PromptEditMode::Vi(reedline::PromptViMode::Normal | reedline::PromptViMode::Visual)
+            )
+            && matches!(&raw, Event::Key(key) if key.code == KeyCode::Char('@')
+                && key.modifiers.difference(KeyModifiers::SHIFT).is_empty())
+        {
+            self.status.lock().expect("surface status lock").file_menu = true;
+        }
+        if self.phase.get() != EditPhase::Modal
+            && self.status.lock().expect("surface status lock").file_menu
+            && let Event::Key(key) = &raw
+            && key.modifiers.is_empty()
+        {
+            match key.code {
+                KeyCode::Enter => return ReedlineEvent::Enter,
+                KeyCode::Esc => return ReedlineEvent::Esc,
+                KeyCode::Up => return ReedlineEvent::MenuUp,
+                KeyCode::Down => return ReedlineEvent::MenuDown,
+                _ => {}
+            }
+        }
         let picker_open = self.picker_open();
         let question_selector_open = if self.phase.get() == EditPhase::Modal {
             self.status
@@ -203,6 +226,7 @@ impl EditMode for SurfaceEditMode {
                     match key_event.code {
                         KeyCode::Up => key("up"),
                         KeyCode::Down => key("down"),
+                        KeyCode::PageDown => key("next"),
                         KeyCode::Enter => key("enter"),
                         KeyCode::Esc => key("escape"),
                         KeyCode::Backspace => key("backspace"),
@@ -235,6 +259,11 @@ impl EditMode for SurfaceEditMode {
                     match key.code {
                         KeyCode::Up => queued("up"),
                         KeyCode::Down => queued("down"),
+                        KeyCode::PageUp => queued("page-up"),
+                        KeyCode::PageDown => queued("page-down"),
+                        KeyCode::Home => queued("home"),
+                        KeyCode::End => queued("end"),
+                        KeyCode::Char('s' | 'S') => queued("save"),
                         KeyCode::Enter => queued("enter"),
                         KeyCode::Esc => queued("escape"),
                         KeyCode::Char(' ') => queued("space"),
@@ -264,6 +293,8 @@ impl EditMode for SurfaceEditMode {
                         KeyCode::Char('n' | 'N') => permission_decision_command("deny"),
                         KeyCode::Char('e' | 'E') => permission_decision_command("amend"),
                         KeyCode::Char('a' | 'A') => permission_decision_command("remember"),
+                        KeyCode::Char('k' | 'K') => permission_decision_command("block"),
+                        KeyCode::Char('g' | 'G') => permission_decision_command("general"),
                         KeyCode::Char('d' | 'D') => permission_decision_command("details"),
                         KeyCode::Enter => ReedlineEvent::None,
                         KeyCode::Esc => {
@@ -361,12 +392,32 @@ impl EditMode for SurfaceEditMode {
                 Intercept::Interrupt if self.phase.get() == EditPhase::Busy => {
                     return ReedlineEvent::ExecuteHostCommand(INTERRUPT_COMMAND.to_string());
                 }
-                Intercept::Editor | Intercept::SteerBusy | Intercept::Interrupt => {}
+                Intercept::Cancel if self.phase.get() == EditPhase::Busy => {
+                    return ReedlineEvent::ExecuteHostCommand(BUSY_CANCEL_COMMAND.to_string());
+                }
+                Intercept::Editor
+                | Intercept::SteerBusy
+                | Intercept::Interrupt
+                | Intercept::Cancel => {}
             }
         }
 
         match ReedlineRawEvent::try_from(raw) {
-            Ok(event) => self.editor.parse_event(event),
+            Ok(event) => {
+                let parsed = self.editor.parse_event(event);
+                if self.phase.get() != EditPhase::Modal
+                    && matches!(&parsed, ReedlineEvent::Edit(commands)
+                        if matches!(commands.first(), Some(EditCommand::Backspace | EditCommand::BackspaceWord)))
+                {
+                    self.status.lock().expect("surface status lock").erasing = true;
+                    ReedlineEvent::Multiple(vec![
+                        parsed,
+                        ReedlineEvent::Menu(ACTION_MENU.to_owned()),
+                    ])
+                } else {
+                    parsed
+                }
+            }
             // Unreachable in practice: the only rejected event is a key
             // release, and `raw` came out of a `ReedlineRawEvent`, which is
             // the type that already excluded one.

@@ -1,5 +1,6 @@
 use super::*;
-use crate::render::{Capabilities, Depth, Style};
+use crate::render::{Capabilities, Depth, Palette, Style};
+use std::collections::BTreeMap;
 use unicode_width::UnicodeWidthStr;
 
 #[derive(Clone, Copy)]
@@ -15,7 +16,7 @@ pub(super) enum PickerRole {
 pub(super) fn picker_row(text: impl Into<String>, role: PickerRole, depth: Depth) -> String {
     let style = match role {
         PickerRole::Question | PickerRole::Label => Style::PLAIN,
-        PickerRole::Selected => Style::PLAIN.reverse().bold(),
+        PickerRole::Selected => Style::fg(Palette::HEADING).bold(),
         PickerRole::Description | PickerRole::Hint => Style::PLAIN.dim(),
     };
     crate::render::Line::styled(text, style).render(depth)
@@ -50,6 +51,16 @@ pub(super) fn run_model_picker(
     } else {
         EditPhase::Idle
     };
+    let saved_keys = crate::config::ego_home()
+        .map(|home| saved_key_connections(&home))
+        .unwrap_or_default();
+    let accounts = crate::config::ego_home()
+        .and_then(|home| crate::auth::saved_key_accounts_at(&home).ok())
+        .unwrap_or_default();
+    picker
+        .lock()
+        .expect("model picker lock")
+        .set_live_accounts(accounts);
     let saved = enter_modal(editor, phase, status);
     let previous_picker = status
         .lock()
@@ -67,6 +78,7 @@ pub(super) fn run_model_picker(
         .map(|(column, row)| usize::from(row) + usize::from(column > 0));
     let result = loop {
         let view = picker.lock().expect("model picker lock").view();
+        let notice = status.lock().expect("surface status lock").notice.clone();
         let caps = picker_capabilities(status);
         let terminal = crossterm::terminal::size().ok();
         let width = caps.width;
@@ -75,7 +87,14 @@ pub(super) fn run_model_picker(
             start_row,
         );
         let prompt = Question::new(
-            model_picker_prompt(&view, width, height, caps.depth),
+            model_picker_prompt(
+                &view,
+                notice.as_deref(),
+                width,
+                height,
+                caps.depth,
+                &saved_keys,
+            ),
             Arc::clone(status),
         );
         let line = answer(false, suspend::read_line(editor, &prompt, status));
@@ -170,14 +189,57 @@ fn model_picker_input(command: &str) -> Option<PickerInput> {
 /// Model rows a terminal must still show before the typing hint is dropped.
 const MIN_VISIBLE_MODELS: usize = 3;
 
+/// A live observation for guidance only. Never feeds the session's selection or
+/// resolver: an external config change needs a new admission.
+fn saved_key_connections(home: &std::path::Path) -> BTreeMap<String, usize> {
+    let mut by_provider = BTreeMap::new();
+    let Ok(config) = crate::auth::connection_layer_at(home) else {
+        return by_provider;
+    };
+    let Ok(entries) = crate::auth::AuthStore::new(home).read_observed() else {
+        return by_provider;
+    };
+    for (id, connection) in &config.connections {
+        if connection.access == ego_core::config::ConnectionAccess::Key
+            && connection.key_env.is_none()
+            && connection.validate(id).is_ok()
+            && entries
+                .get(&crate::auth::connection_storage_key(id))
+                .is_some_and(crate::auth::AuthEntry::has_api_key)
+        {
+            by_provider
+                .entry(connection.vendor.clone())
+                .or_insert_with(|| {
+                    config
+                        .connections
+                        .values()
+                        .filter(|entry| entry.vendor == connection.vendor)
+                        .count()
+                });
+        }
+    }
+    by_provider
+}
+
 fn model_picker_prompt(
     view: &ModelPickerView,
+    notice: Option<&str>,
     width: usize,
     height: usize,
     depth: Depth,
+    saved_keys: &BTreeMap<String, usize>,
 ) -> String {
     let width = width.max(40);
-    let mut rows = Vec::new();
+    // The prompt owns every row of the modal, so the status notice is part of
+    // the frame and takes its rows out of the frame budget.
+    let mut rows = notice
+        .map(|notice| wrap_instruction(notice, width))
+        .unwrap_or_default();
+    let height = height.saturating_sub(rows.len());
+    rows = rows
+        .into_iter()
+        .map(|row| picker_row(row, PickerRole::Hint, depth))
+        .collect();
     match view.focus {
         PickerFocus::Model => {
             let (full, compact) = if view.persistent_only {
@@ -197,7 +259,7 @@ fn model_picker_prompt(
                 instructions = wrap_instruction(compact, width);
             }
             let visible_rows = height.saturating_sub(2 + instructions.len()).max(1);
-            let (models, start, end) = model_window(view, width, visible_rows, depth);
+            let (models, start, end) = model_window(view, width, visible_rows, depth, saved_keys);
             let title = format!(
                 "Select model ({}-{end} of {})",
                 if end == 0 { 0 } else { start + 1 },
@@ -286,6 +348,59 @@ fn model_picker_prompt(
                     .map(|row| picker_row(row, PickerRole::Hint, depth)),
             );
         }
+        PickerFocus::Account => {
+            let heading = wrap_instruction(
+                &format!(
+                    "Select account for {}",
+                    view.selected_model
+                        .as_deref()
+                        .unwrap_or("the selected model")
+                ),
+                width,
+            );
+            let instructions = wrap_instruction(
+                "Up/Down or number selects. Enter continues; Esc cancels.",
+                width,
+            );
+            let visible_rows = height
+                .saturating_sub(heading.len() + instructions.len() + 1)
+                .max(1);
+            let selected = view
+                .account_numbers
+                .iter()
+                .position(|number| view.current_id.as_deref() == Some(number.to_string().as_str()));
+            let (start, end) = window_bounds(view.account_numbers.len(), visible_rows, selected);
+            rows.extend(
+                heading
+                    .into_iter()
+                    .map(|row| picker_row(row, PickerRole::Question, depth)),
+            );
+            rows.extend(view.account_numbers[start..end].iter().enumerate().map(
+                |(offset, number)| {
+                    let index = start + offset;
+                    let marker = if view.current_id.as_deref() == Some(number.to_string().as_str())
+                    {
+                        ">"
+                    } else {
+                        " "
+                    };
+                    picker_row(
+                        format!("{marker} {}. account {number}", index + 1),
+                        if marker == ">" {
+                            PickerRole::Selected
+                        } else {
+                            PickerRole::Label
+                        },
+                        depth,
+                    )
+                },
+            ));
+            rows.extend(
+                instructions
+                    .into_iter()
+                    .map(|row| picker_row(row, PickerRole::Hint, depth)),
+            );
+        }
     }
     rows.join("\n")
 }
@@ -310,6 +425,7 @@ fn model_window(
     width: usize,
     visible: usize,
     depth: Depth,
+    saved_keys: &BTreeMap<String, usize>,
 ) -> (Vec<String>, usize, usize) {
     let mut lines = Vec::new();
     let mut groups = Vec::new();
@@ -326,10 +442,14 @@ fn model_window(
         };
         if group != previous {
             heading = group.map_or_else(Vec::new, |(provider, cause)| {
-                provider_unavailable(provider, cause)
-                    .lines()
-                    .flat_map(|line| wrap_instruction(line, width))
-                    .collect()
+                provider_unavailable(
+                    &row.slug,
+                    cause,
+                    saved_keys.get(provider).copied().unwrap_or_default(),
+                )
+                .lines()
+                .flat_map(|line| wrap_instruction(line, width))
+                .collect()
             });
             for (part, text) in heading.iter().enumerate() {
                 lines.push(text.clone());
@@ -395,13 +515,37 @@ fn model_window(
 }
 
 fn provider_unavailable(
-    provider: &str,
+    slug: &ego_ai::catalogue::ModelSlug,
     cause: ego_ai::catalogue::ModelAvailabilityCause,
+    saved_keys: usize,
 ) -> String {
     use ego_ai::catalogue::ModelAvailabilityCause;
+    let provider = &slug.provider;
     let remedy = match cause {
+        ModelAvailabilityCause::MissingCredential if saved_keys != 0 => {
+            let model = slug.to_string();
+            let model = if model
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
+            {
+                model.as_str()
+            } else {
+                "PROVIDER/MODEL"
+            };
+            let next = if saved_keys == 1 {
+                format!("Open a new session: ego -m {model}")
+            } else {
+                format!(
+                    "Press Enter to choose an account, or see 'ego auth status {provider}' and run: ego --account N -m {model}"
+                )
+            };
+            format!("saved API key not available in this session\n{next}")
+        }
         ModelAvailabilityCause::MissingCredential => {
             format!("not signed in\nSign in with 'ego auth login {provider}'")
+        }
+        ModelAvailabilityCause::SessionAccountBound => {
+            "session bound to another account\nOpen a new session to use this provider".to_owned()
         }
         ModelAvailabilityCause::SourceUnreachable => {
             format!(
@@ -427,14 +571,9 @@ fn model_row(marker: &str, index: usize, slug: &str, suffix: &str, width: usize)
 }
 
 pub(super) fn truncate_cells(text: &str, width: usize) -> String {
-    let line = crate::render::Line::plain(text);
-    if line.width() <= width {
-        return text.to_owned();
-    }
-    if width == 0 {
-        return String::new();
-    }
-    format!("{}…", line.truncate_to(width - 1).text())
+    crate::render::table::plain_table_with_width(vec![vec![text.into()]], width)
+        .pop()
+        .unwrap_or_default()
 }
 
 fn wrap_instruction(instruction: &str, width: usize) -> Vec<String> {
@@ -482,12 +621,20 @@ mod tests {
                 },
             ],
             reasoning: Vec::new(),
+            account_numbers: Vec::new(),
             persistent_only: true,
         }
     }
 
     fn model_picker_prompt(view: &ModelPickerView, width: usize, height: usize) -> String {
-        super::model_picker_prompt(view, width, height, Depth::TrueColor)
+        super::model_picker_prompt(
+            view,
+            None,
+            width,
+            height,
+            Depth::TrueColor,
+            &BTreeMap::new(),
+        )
     }
 
     fn plain_picker(rendered: &str) -> String {
@@ -505,6 +652,58 @@ mod tests {
             }
         }
         plain
+    }
+
+    // Catches: a selected picker row still inverts the terminal background.
+    #[test]
+    fn selected_model_uses_muted_foreground_without_reverse_video() {
+        let view = view();
+        for depth in [Depth::TrueColor, Depth::Ansi256, Depth::Ansi16, Depth::None] {
+            let rendered = super::model_picker_prompt(&view, None, 80, 24, depth, &BTreeMap::new());
+            let selected = rendered
+                .lines()
+                .find(|row| plain_picker(row).starts_with("> 1. openai-codex/"))
+                .expect("selected model row");
+            assert!(!selected.contains("\u{1b}[7m"), "{selected:?}");
+            assert!(!selected.contains("\u{1b}[1;7"), "{selected:?}");
+            assert!(!selected.contains("\u{1b}[48;"), "{selected:?}");
+            if depth == Depth::TrueColor {
+                assert!(
+                    selected.contains("\u{1b}[1;38;2;155;181;204m"),
+                    "{selected:?}"
+                );
+            }
+            if depth == Depth::None {
+                assert_eq!(selected, "> 1. openai-codex/gpt-5.6-sol current");
+            }
+        }
+    }
+
+    // Catches: a notice stored for the picker is never part of the frame.
+    #[test]
+    fn picker_frame_carries_the_notice_within_eighty_columns() {
+        let notice = "provider 'ollama' has no startup default; choose an available model below";
+        for width in [40, 80] {
+            let rendered = super::model_picker_prompt(
+                &view(),
+                Some(notice),
+                width,
+                24,
+                Depth::TrueColor,
+                &BTreeMap::new(),
+            );
+            let plain = plain_picker(&rendered);
+            assert!(
+                plain
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .contains("no startup default; choose an available model below"),
+                "{plain}"
+            );
+            assert!(plain.lines().all(|line| line.width() <= width), "{plain}");
+            assert!(plain.lines().count() <= 24, "{plain}");
+        }
     }
 
     // Catches: scrolled model rows depend on a legend for a bare pipe and symbol.
@@ -528,6 +727,62 @@ mod tests {
                     .all(|line| line.width() <= width)
             );
         }
+    }
+
+    // Catches: returning to /model after external login still asks the owner to
+    // sign in again, or treats an OAuth entry as a stored API key.
+    #[test]
+    fn saved_key_picker_explains_fresh_admission_without_offering_a_live_switch() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(
+            home.path().join("config.toml"),
+            "[connections.gemini_work]\nname='Work'\nvendor='gemini'\naccess='key'\n",
+        )
+        .unwrap();
+        let store = crate::auth::AuthStore::new(home.path());
+        let mut view = view();
+        view.models[1].slug = ModelSlug::parse("gemini/gemini-3.8-flash").unwrap();
+        let render = || {
+            plain_picker(&super::model_picker_prompt(
+                &view,
+                None,
+                100,
+                24,
+                Depth::TrueColor,
+                &saved_key_connections(home.path()),
+            ))
+        };
+        store
+            .put(
+                "connection:gemini_work",
+                crate::auth::AuthEntry::OAuth {
+                    access: "synthetic-oauth-not-key".into(),
+                    refresh: None,
+                    expires: None,
+                    scope_binding: None,
+                },
+            )
+            .unwrap();
+        assert!(render().contains("ego auth login gemini"));
+        store
+            .put(
+                "connection:gemini_work",
+                crate::auth::AuthEntry::ApiKey {
+                    key: "synthetic-registered-key".into(),
+                },
+            )
+            .unwrap();
+        let rendered = render();
+        assert!(
+            rendered.contains("gemini — unavailable: saved API key not available in this session"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("ego -m gemini/") && !rendered.contains("gemini_work"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("ego auth login gemini"));
+        assert!(!rendered.contains("synthetic-registered-key"));
     }
 
     // Catches: unavailable provider rows omit the reason and recovery command.
@@ -577,6 +832,7 @@ mod tests {
     #[test]
     fn provider_failures_name_their_own_recovery_not_credentials() {
         for cause in [
+            ModelAvailabilityCause::SessionAccountBound,
             ModelAvailabilityCause::SourceUnreachable,
             ModelAvailabilityCause::SourceMalformed,
             ModelAvailabilityCause::IncompleteFacts,
@@ -594,13 +850,11 @@ mod tests {
             assert!(!text.contains("private discovery details"), "{text}");
             assert!(!text.contains("login"));
             assert!(!text.contains(&format!("{cause:?}")));
-            assert!(
-                text.contains(if cause == ModelAvailabilityCause::MappingUnavailable {
-                    "choose another provider"
-                } else {
-                    "ego models --provider ollama --refresh"
-                })
-            );
+            assert!(text.contains(match cause {
+                ModelAvailabilityCause::SessionAccountBound => "Open a new session",
+                ModelAvailabilityCause::MappingUnavailable => "choose another provider",
+                _ => "ego models --provider ollama --refresh",
+            }));
         }
     }
 
@@ -674,6 +928,7 @@ mod tests {
         let (background_wake, background_ready) = bounded(1);
         let seat = Seat {
             kind: SeatKind::Live(Box::new(LiveSeat {
+                ingress: _ingress,
                 input,
                 inspections,
                 background_ready,
@@ -681,7 +936,7 @@ mod tests {
                 inspection_waker: Arc::new(futures::task::AtomicWaker::new()),
                 control,
                 activated: AtomicBool::new(false),
-                break_signal: Arc::new(AtomicBool::new(false)),
+                break_signal: BreakSignal::default(),
                 phase: phase.clone(),
                 status: Arc::new(Mutex::new(SurfaceStatus::with_registry(Arc::clone(
                     &registry,

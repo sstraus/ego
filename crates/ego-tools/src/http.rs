@@ -5,7 +5,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+const STREAM_IDLE_LIMIT: Duration = Duration::from_secs(300);
 
 use ego_core::permit::{
     DnsResolution, HttpHeader, HttpRequest, HttpScheme, NetworkTarget, OneHop, OneHopResponse,
@@ -107,6 +109,8 @@ pub(crate) struct OneShotHttpTransport {
     run_deadline: Option<Instant>,
     confinement: RunConfinement,
     proxy: Option<ProviderProxy>,
+    #[cfg(test)]
+    idle_limit: std::time::Duration,
 }
 
 impl OneShotHttpTransport {
@@ -124,6 +128,19 @@ impl OneShotHttpTransport {
             run_deadline,
             confinement,
             proxy: None,
+            #[cfg(test)]
+            idle_limit: STREAM_IDLE_LIMIT,
+        }
+    }
+
+    fn idle_limit(&self) -> Duration {
+        #[cfg(test)]
+        {
+            self.idle_limit
+        }
+        #[cfg(not(test))]
+        {
+            STREAM_IDLE_LIMIT
         }
     }
 
@@ -181,8 +198,10 @@ impl Resolver for OneShotHttpTransport {
     }
 }
 
+mod probe;
 mod proxy;
 mod websocket;
+pub use probe::{Layer as ProbeLayer, Reached, Unreached, probe as probe_reachability};
 pub use proxy::ProviderProxy;
 
 impl OneHop for OneShotHttpTransport {
@@ -204,15 +223,10 @@ impl OneHop for OneShotHttpTransport {
     }
 
     fn admit_mcp(&self) -> Result<(), TransportError> {
-        if self.confinement.admits_mcp_http() {
+        if self.confinement.admits_mcp() {
             return Ok(());
         }
-        let failure = if self.confinement.offline() {
-            TransportFailure::Offline
-        } else {
-            TransportFailure::AuthorityMismatch
-        };
-        Err(definitely_unsent(failure))
+        Err(definitely_unsent(TransportFailure::Offline))
     }
 
     fn begin_call(&self) -> Instant {
@@ -283,7 +297,15 @@ impl OneHop for OneShotHttpTransport {
                 }
                 None => None,
             };
-            execute_one_hop(connect, request, cancel, deadline, proxy).await
+            execute_one_hop(
+                connect,
+                request,
+                cancel,
+                deadline,
+                proxy,
+                transport.idle_limit(),
+            )
+            .await
         }));
         Box::pin(async move {
             (&mut task.0).await.map_err(|error| {
@@ -323,6 +345,7 @@ async fn execute_one_hop(
     cancel: CancelToken,
     deadline: Instant,
     proxy: Option<(ProviderProxy, SocketAddr)>,
+    idle_limit: Duration,
 ) -> Result<OneHopResponse, TransportError> {
     // Resolution can consume the entire call budget; do not open a socket then.
     if cancel.is_cancelled() {
@@ -344,6 +367,11 @@ async fn execute_one_hop(
     };
     let url = format!("{scheme}://{authority}{}", request.path());
     let selected = SocketAddr::new(connect.selected(), target.port());
+    // The socket the OS dials: the proxy when one is configured, else the provider address.
+    let dialled = DialledRoute {
+        address: proxy.as_ref().map_or(selected, |(_, socket)| *socket),
+        proxied: proxy.is_some(),
+    };
     let builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -376,7 +404,7 @@ async fn execute_one_hop(
     let mut send = Box::pin(outgoing.send());
     let response = loop {
         tokio::select! {
-            result = &mut send => break result.map_err(exchange_error)?,
+            result = &mut send => break result.map_err(|error| exchange_error(error, dialled))?,
             _ = deadline_elapsed(deadline) => {
                 return Err(possibly_sent(TransportFailure::TimedOut));
             }
@@ -401,9 +429,16 @@ async fn execute_one_hop(
     let (mut sender, receiver) = futures::channel::mpsc::channel(1);
     let task = AbortOnDrop(runtime_handle().spawn(async move {
         let mut body = response.bytes_stream();
+        let idle = tokio::time::sleep(idle_limit);
+        tokio::pin!(idle);
         loop {
             let next = tokio::select! {
+                biased;
                 item = body.next() => item,
+                _ = &mut idle => {
+                    let _ = sender.send(Err(possibly_sent(TransportFailure::IdleTimeout))).await;
+                    return;
+                }
                 _ = deadline_elapsed(deadline) => {
                     let _ = sender.send(Err(possibly_sent(TransportFailure::TimedOut))).await;
                     return;
@@ -423,11 +458,15 @@ async fn execute_one_hop(
                     if sender.send(Ok(chunk.to_vec())).await.is_err() {
                         return;
                     }
+                    // Backpressure prevents observing incoming bytes, so do not
+                    // count time blocked on the consumer as provider silence.
+                    idle.as_mut()
+                        .reset(tokio::time::Instant::now() + idle_limit);
                 }
                 Some(Err(error)) => {
                     let _ = sender
                         .send(Err(possibly_sent(TransportFailure::ResponseBody(
-                            error.to_string(),
+                            url_free_chain(error),
                         ))))
                         .await;
                     return;
@@ -474,21 +513,31 @@ fn response_headers(
         .collect()
 }
 
-fn exchange_error(error: reqwest::Error) -> TransportError {
+/// The endpoint a connect attempt dials, kept so a connect failure can be attributed.
+#[derive(Clone, Copy)]
+struct DialledRoute {
+    address: SocketAddr,
+    proxied: bool,
+}
+
+impl std::fmt::Display for DialledRoute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let family = if self.address.is_ipv6() {
+            "IPv6"
+        } else {
+            "IPv4"
+        };
+        let proxied = if self.proxied { "yes" } else { "no" };
+        write!(f, "{} ({family}, proxy: {proxied})", self.address)
+    }
+}
+
+fn exchange_error(error: reqwest::Error, dialled: DialledRoute) -> TransportError {
     let unsent = error.is_builder() || error.is_connect();
     let connect = error.is_connect();
-    // Request URLs can contain query secrets. Only the admitted host is added
-    // by the protocol layer; retain the URL-free TCP/TLS source chain here.
-    let error = error.without_url();
-    let mut detail = error.to_string();
-    let mut source = std::error::Error::source(&error);
-    while let Some(cause) = source {
-        use std::fmt::Write as _;
-        let _ = write!(detail, ": {cause}");
-        source = cause.source();
-    }
+    let detail = url_free_chain(error);
     let failure = if connect {
-        TransportFailure::Connect(detail)
+        TransportFailure::Connect(format!("dialling {dialled}: {detail}"))
     } else {
         TransportFailure::Exchange(detail)
     };
@@ -497,6 +546,20 @@ fn exchange_error(error: reqwest::Error) -> TransportError {
     } else {
         possibly_sent(failure)
     }
+}
+
+/// Request URLs can contain query secrets. Only the admitted host is added
+/// by the protocol layer; retain the URL-free TCP/TLS source chain here.
+fn url_free_chain(error: reqwest::Error) -> String {
+    let error = error.without_url();
+    let mut detail = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        use std::fmt::Write as _;
+        let _ = write!(detail, ": {cause}");
+        source = cause.source();
+    }
+    detail
 }
 
 fn definitely_unsent(failure: TransportFailure) -> TransportError {
