@@ -1,0 +1,978 @@
+//! Pure authority cases through continuation admission, persistence and execution.
+use super::*;
+use crate::support;
+use ego_core::event::id::ItemId;
+use ego_core::permit::{
+    BackendIdentity, CanonPath, Confinement, ExecCaps, ExecObservation, ExecutionPolicy,
+    HumanApprover, PermissionDecision, PermissionRequest, PolicyDigest, ProfileRoot, RootAccess,
+    RunConfinement,
+};
+
+#[derive(Debug)]
+struct Human {
+    allow: bool,
+    questions: Mutex<usize>,
+}
+
+impl HumanApprover for Human {
+    fn decide<'a>(
+        &'a self,
+        _item: ItemId,
+        question: &'a PermissionRequest,
+    ) -> BoxFuture<'a, PermissionDecision> {
+        assert!(question.tool().contains("Execution policy changed"));
+        *self.questions.lock().unwrap() += 1;
+        Box::pin(future::ready(if self.allow {
+            PermissionDecision::Allow
+        } else {
+            PermissionDecision::Deny
+        }))
+    }
+}
+
+fn observation(
+    policy: &RunConfinement,
+    backend: &str,
+    caps: ExecCaps,
+    digit: &str,
+) -> ExecObservation {
+    ExecObservation::new(
+        BackendIdentity::new(backend, "1"),
+        caps,
+        PolicyDigest::try_from(digit.repeat(64)).unwrap(),
+    )
+    .with_policy(ExecutionPolicy::capture(policy, Vec::new()))
+}
+
+// Catches: removing a nested read deny is mistaken for narrowing the root list.
+#[test]
+fn removing_a_nested_read_restriction_requires_readmission() {
+    let workspace = CanonPath::new(support::native("/workspace"));
+    let open = RunConfinement::new(Confinement::Workspace, false, workspace.clone()).unwrap();
+    let frozen = open.clone().with_roots(vec![ProfileRoot::new(
+        CanonPath::new(support::native("/workspace/frozen")),
+        RootAccess::Read,
+    )]);
+    let open = ExecutionPolicy::capture(&open, Vec::new());
+    let frozen = ExecutionPolicy::capture(&frozen, Vec::new());
+    assert!(!open.not_more_permissive_than(&frozen));
+    assert!(frozen.not_more_permissive_than(&frozen));
+}
+
+// Catches: a saved exact read consent also excuses a sibling path, write access,
+// or a backend change at the fresh-process execution-policy gate.
+#[test]
+fn root_consent_only_readmits_the_exact_measured_root() {
+    let base = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(support::native("/workspace")),
+    )
+    .unwrap();
+    let approved = ProfileRoot::new(CanonPath::new("/outside/approved"), RootAccess::Read);
+    let sibling = ProfileRoot::new(CanonPath::new("/outside/sibling"), RootAccess::Read);
+    let caps = Confinement::Workspace.required_caps();
+    let old = observation(&base, "sandbox", caps, "1");
+    let exact = observation(
+        &base.clone().with_roots(vec![approved.clone()]),
+        "sandbox",
+        caps,
+        "2",
+    );
+    let with_sibling = observation(
+        &base.clone().with_roots(vec![approved.clone(), sibling]),
+        "sandbox",
+        caps,
+        "2",
+    );
+    let writable = observation(
+        &base.clone().with_roots(vec![ProfileRoot::new(
+            approved.path().clone(),
+            RootAccess::ReadWrite,
+        )]),
+        "sandbox",
+        caps,
+        "2",
+    );
+    let changed_backend = observation(&base.with_roots(vec![approved.clone()]), "other", caps, "2");
+    assert!(!exact.not_more_permissive_than(&old));
+    assert!(exact.not_more_permissive_than_with_roots(&old, std::slice::from_ref(&approved)));
+    for forbidden in [with_sibling, writable, changed_backend] {
+        assert!(
+            !forbidden.not_more_permissive_than_with_roots(&old, std::slice::from_ref(&approved))
+        );
+    }
+}
+
+// Catches: an exact approved read-to-write upgrade asks again, or its receipt
+// silently removes another read-only restriction. Older read receipts cannot
+// cancel a later approved write when session and permanent receipts are merged.
+#[test]
+fn root_consent_upgrades_only_the_exact_readonly_root() {
+    let base = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(support::native("/workspace")),
+    )
+    .unwrap();
+    let frozen = ProfileRoot::new(
+        CanonPath::new(support::native("/workspace/frozen")),
+        RootAccess::Read,
+    );
+    let sibling = ProfileRoot::new(
+        CanonPath::new(support::native("/workspace/sibling")),
+        RootAccess::Read,
+    );
+    let approved = ProfileRoot::new(frozen.path().clone(), RootAccess::ReadWrite);
+    let caps = Confinement::Workspace.required_caps();
+    let old = observation(
+        &base
+            .clone()
+            .with_roots(vec![frozen.clone(), sibling.clone()]),
+        "sandbox",
+        caps,
+        "1",
+    );
+    let exact = observation(
+        &base.clone().with_roots(vec![approved.clone(), sibling]),
+        "sandbox",
+        caps,
+        "2",
+    );
+    assert!(!exact.not_more_permissive_than(&old));
+    assert!(!exact.not_more_permissive_than_with_roots(&old, std::slice::from_ref(&frozen)));
+    for receipts in [
+        vec![approved.clone()],
+        vec![frozen.clone(), approved.clone()],
+        vec![approved.clone(), frozen],
+    ] {
+        assert!(exact.not_more_permissive_than_with_roots(&old, &receipts));
+    }
+    let removed_sibling = observation(
+        &base.with_roots(vec![approved.clone()]),
+        "sandbox",
+        caps,
+        "2",
+    );
+    assert!(!removed_sibling.not_more_permissive_than_with_roots(&old, &[approved]));
+}
+
+// Catches: equal/narrower policies being refused or wider/unknown authority bypassing consent.
+#[test]
+fn changed_policy_uses_normal_permission_only_when_narrowing_cannot_be_proven() {
+    let (completed, result) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        readmission_cases();
+        let _ = completed.send(());
+    });
+    result.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("policy admission/execution must finish; a closed executor gate or unanswered permission must fail, not hang");
+}
+
+fn readmission_cases() {
+    let root = CanonPath::new(fixture_root("policy").as_path());
+    let base = RunConfinement::new(Confinement::Workspace, false, root.clone()).unwrap();
+    let wider = base.clone().with_roots(vec![ProfileRoot::new(
+        CanonPath::new("/extra"),
+        RootAccess::ReadWrite,
+    )]);
+    let offline = RunConfinement::new(Confinement::Workspace, true, root).unwrap();
+    let caps = Confinement::Workspace.required_caps();
+    let old = observation(&base, "sandbox", caps, "1");
+    let mutate = |old: &ExecObservation, field: &str, value: serde_json::Value| {
+        let mut current = serde_json::to_value(old).unwrap();
+        current["policy_digest"] =
+            serde_json::to_value(PolicyDigest::try_from("2".repeat(64)).unwrap()).unwrap();
+        current["policy"][field] = value;
+        serde_json::from_value::<ExecObservation>(current).unwrap()
+    };
+    let root_read = base.clone().with_roots(vec![ProfileRoot::new(
+        CanonPath::new("/extra"),
+        RootAccess::Read,
+    )]);
+    let read_observation = observation(&root_read, "sandbox", caps, "1");
+    let offline_observation = observation(&offline, "sandbox", caps, "1");
+    let unconfined =
+        RunConfinement::new(Confinement::Off, false, base.workspace().clone()).unwrap();
+    let null_before = observation(&unconfined, "null", ExecCaps::null(), "1");
+    let null_revision = |old: &ExecObservation| {
+        let mut current = serde_json::to_value(old).unwrap();
+        current["backend"]["revision"] = serde_json::json!("2");
+        serde_json::from_value::<ExecObservation>(current).unwrap()
+    };
+    let null_offline =
+        RunConfinement::new(Confinement::Off, true, base.workspace().clone()).unwrap();
+    let mut cases = vec![
+        (
+            "null revision with wider network policy",
+            observation(&null_offline, "null", ExecCaps::null(), "1"),
+            null_revision(&null_before),
+            true,
+        ),
+        (
+            "null revision with changed workspace",
+            null_before.clone(),
+            null_revision(&mutate(
+                &null_before,
+                "workspace",
+                serde_json::to_value(CanonPath::new("/other-workspace")).unwrap(),
+            )),
+            true,
+        ),
+        (
+            "null revision with unknown historical policy",
+            ExecObservation::new(
+                null_before.backend().clone(),
+                ExecCaps::null(),
+                null_before.policy_digest().clone(),
+            ),
+            null_revision(&null_before),
+            true,
+        ),
+        (
+            "null revision loses a recorded guarantee",
+            observation(&unconfined, "null", ExecCaps::NO_IP_NETWORK, "1"),
+            null_revision(&null_before),
+            true,
+        ),
+        (
+            "equal",
+            old.clone(),
+            observation(&base, "sandbox", caps, "2"),
+            false,
+        ),
+        (
+            "workspace to read-only",
+            old.clone(),
+            observation(
+                &RunConfinement::new(Confinement::Ro, false, base.workspace().clone()).unwrap(),
+                "sandbox",
+                Confinement::Ro.required_caps(),
+                "2",
+            ),
+            false,
+        ),
+        (
+            "narrower roots",
+            observation(&wider, "sandbox", caps, "1"),
+            observation(&base, "sandbox", caps, "2"),
+            false,
+        ),
+        (
+            "wider roots",
+            old.clone(),
+            observation(&wider, "sandbox", caps, "2"),
+            true,
+        ),
+        (
+            "root access only",
+            read_observation.clone(),
+            mutate(
+                &read_observation,
+                "roots",
+                serde_json::to_value(wider.roots()).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "workspace only",
+            old.clone(),
+            mutate(
+                &old,
+                "workspace",
+                serde_json::to_value(CanonPath::new("/other-workspace")).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "exec paths only",
+            old.clone(),
+            mutate(
+                &old,
+                "exec_paths",
+                serde_json::to_value(vec![CanonPath::new("/extra-exec")]).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "runtime roots only",
+            old.clone(),
+            mutate(
+                &old,
+                "runtime_roots",
+                serde_json::to_value(vec![CanonPath::new("/extra-runtime")]).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "adaptive only",
+            old.clone(),
+            mutate(
+                &old,
+                "adaptive",
+                serde_json::to_value(ego_core::permit::AdaptivePerimeter {
+                    home: CanonPath::new("/home"),
+                    writable: vec![],
+                    credentials: vec![],
+                    controls: vec![],
+                })
+                .unwrap(),
+            ),
+            true,
+        ),
+        (
+            "level only",
+            old.clone(),
+            mutate(
+                &old,
+                "level",
+                serde_json::to_value(Confinement::Off).unwrap(),
+            ),
+            true,
+        ),
+        (
+            "offline only",
+            offline_observation.clone(),
+            mutate(&offline_observation, "offline", serde_json::json!(false)),
+            true,
+        ),
+        (
+            "backend only",
+            old.clone(),
+            observation(&base, "null", caps, "2"),
+            true,
+        ),
+        (
+            "caps only",
+            old.clone(),
+            observation(&base, "sandbox", ExecCaps::empty(), "2"),
+            true,
+        ),
+        (
+            "unknown roots",
+            ExecObservation::new(old.backend().clone(), caps, old.policy_digest().clone()),
+            observation(&base, "sandbox", caps, "2"),
+            true,
+        ),
+    ];
+    for field in ["exec_paths", "runtime_roots"] {
+        let with_root = mutate(
+            &old,
+            field,
+            serde_json::to_value(vec![CanonPath::new("/extra")]).unwrap(),
+        );
+        let child = mutate(
+            &with_root,
+            field,
+            serde_json::to_value(vec![CanonPath::new("/extra/child")]).unwrap(),
+        );
+        cases.push((field, with_root, child, false));
+    }
+    for (name, admitted, observed, asks) in cases {
+        for allow in [true, false] {
+            let store = Arc::new(RecordingSessionStore::default());
+            let executor = Arc::new(ScriptedRunExecutor::default());
+            executor.allow_effects();
+            let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+            let request = StartRequest::new(
+                RequestId::session_id(super::request(500)),
+                fixture_root("policy"),
+                super::request(500),
+                digest("first"),
+                selections().with_sandbox_observation(Confinement::Workspace, admitted.clone()),
+                "first",
+            );
+            let first = admitted_start(&controller, request);
+            let run = first.run_id();
+            execute(&controller, first.into_execution());
+            let before = store
+                .transactions(run.session_id())
+                .last()
+                .unwrap()
+                .revision();
+            *executor.execution_observation.lock().unwrap() = Some(observed.clone());
+            let human = Arc::new(Human {
+                allow,
+                questions: Mutex::new(0),
+            });
+            let answer = futures::executor::block_on(controller.continue_run(
+                ContinueRequest::new(run, super::request(501), digest("second"), before, "second"),
+                bindings().with_human(human.clone()),
+            ));
+            let events: Vec<_> = store.entries.lock().unwrap()[&run.session_id()]
+                .iter()
+                .filter_map(|entry| match entry {
+                    SessionEntry::Event(event) => Some(event.clone()),
+                    _ => None,
+                })
+                .collect();
+            let saved = events.iter().rev().find_map(|event| match &event.kind {
+                ego_core::event::domain::EventKind::ExecutionObserved { observation, .. } => {
+                    Some(observation)
+                }
+                _ => None,
+            });
+            if asks && !allow {
+                assert_ne!(
+                    saved,
+                    Some(&observed),
+                    "{name}: refused authority became the saved observation"
+                );
+            } else {
+                assert_eq!(
+                    saved,
+                    Some(&observed),
+                    "{name}: core continuation omitted durable observation"
+                );
+            }
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| matches!(
+                        event.kind,
+                        ego_core::event::domain::EventKind::PermissionDecided { .. }
+                    ))
+                    .count(),
+                usize::from(asks),
+                "{name}: missing durable permission decision"
+            );
+            assert_eq!(
+                *human.questions.lock().unwrap(),
+                usize::from(asks),
+                "{name}"
+            );
+            if asks && !allow {
+                assert!(
+                    matches!(
+                        answer,
+                        Err(ego_core::run::RunError::ExecutionPolicyDenied { decided: true })
+                    ),
+                    "{name}: denial attribution lost"
+                );
+                assert_eq!(
+                    store
+                        .transactions(run.session_id())
+                        .last()
+                        .unwrap()
+                        .revision(),
+                    before
+                );
+                assert_eq!(executor.prepared_tokens().len(), 1, "denial ran effects");
+            } else {
+                let RunCommandOutcome::Admitted(admission) = answer.unwrap() else {
+                    panic!("new command must admit");
+                };
+                assert_eq!(
+                    admission.snapshot().selections().sandbox_observation(),
+                    Some(&observed)
+                );
+                execute(&controller, admission.into_execution());
+                assert_eq!(
+                    executor.prepared_tokens().len(),
+                    2,
+                    "{name}: approved turn did not run"
+                );
+                let loaded = futures::executor::block_on(controller.status(run)).unwrap();
+                assert_eq!(
+                    loaded.selections().sandbox_observation(),
+                    Some(&observed),
+                    "{name}: durable policy not updated"
+                );
+            }
+        }
+    }
+}
+
+// Catches: an ego upgrade on the unconfined backend blocks unattended continuation.
+#[test]
+fn readmission_null_revision_does_not_request_permission() {
+    #[derive(Default)]
+    struct Notices(Mutex<Vec<String>>);
+    impl EventSinkFactory for Notices {
+        fn create(&self, _: &ModelCapabilities) -> Arc<dyn EventSink> {
+            Arc::new(NullSink)
+        }
+
+        fn execution_policy_notice(&self, message: &str) -> Result<(), String> {
+            self.0.lock().unwrap().push(message.to_owned());
+            Ok(())
+        }
+    }
+
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    executor.allow_effects();
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let root = fixture_root("null-revision-policy");
+    let policy =
+        RunConfinement::new(Confinement::Off, false, CanonPath::new(root.as_path())).unwrap();
+    let measurement = |version| {
+        ExecObservation::new(
+            BackendIdentity::new("null", version),
+            ExecCaps::null(),
+            PolicyDigest::try_from("1".repeat(64)).unwrap(),
+        )
+        .with_policy(ExecutionPolicy::capture(&policy, Vec::new()))
+    };
+    let first = admitted_start(
+        &controller,
+        StartRequest::new(
+            RequestId::session_id(super::request(960)),
+            root,
+            super::request(960),
+            digest("first"),
+            selections().with_sandbox_observation(Confinement::Off, measurement("0.4.7")),
+            "first",
+        ),
+    );
+    let run = first.run_id();
+    execute(&controller, first.into_execution());
+    let revision = store
+        .transactions(run.session_id())
+        .last()
+        .unwrap()
+        .revision();
+    let after = measurement("0.4.8");
+    *executor.execution_observation.lock().unwrap() = Some(after.clone());
+    let notices = Arc::new(Notices::default());
+    let result = futures::executor::block_on(controller.continue_run(
+        ContinueRequest::new(
+            run,
+            super::request(961),
+            digest("second"),
+            revision,
+            "second",
+        ),
+        RunExecutionBindings::new(notices.clone(), None),
+    ));
+    let RunCommandOutcome::Admitted(admission) = result.expect("null revision needs no human seat")
+    else {
+        panic!("continuation must admit");
+    };
+    assert_eq!(
+        admission.snapshot().selections().sandbox_observation(),
+        Some(&after)
+    );
+    execute(&controller, admission.into_execution());
+    assert!(!store.entries.lock().unwrap()[&run.session_id()].iter().any(|entry| matches!(
+        entry,
+        SessionEntry::Event(event) if matches!(event.kind, ego_core::event::domain::EventKind::PermissionRequested { .. })
+    )));
+    let notices = notices.0.lock().unwrap();
+    assert_eq!(notices.len(), 1);
+    assert!(
+        notices[0].contains("ego version 0.4.7 -> 0.4.8"),
+        "{}",
+        notices[0]
+    );
+    assert!(notices[0].contains("Re-admitting under equal or narrower authority."));
+}
+
+// Catches: revision-only backend changes ask for consent with an indistinguishable name transition.
+#[test]
+fn readmission_names_same_backend_revision_change() {
+    for (previous_backend, backend, revision, expected) in [
+        (
+            "seatbelt",
+            "seatbelt",
+            "2",
+            "backend measurement seatbelt revision changed",
+        ),
+        (
+            "landlock",
+            "landlock",
+            "2",
+            "backend measurement landlock revision changed",
+        ),
+        (
+            "other",
+            "other",
+            "2",
+            "backend measurement other revision changed",
+        ),
+        (
+            "seatbelt",
+            "other",
+            "1",
+            "backend measurement seatbelt -> other",
+        ),
+        (
+            "seatbelt",
+            "other",
+            "2",
+            "backend measurement seatbelt -> other",
+        ),
+        (
+            "seatbelt",
+            "null",
+            "2",
+            "backend measurement seatbelt -> null",
+        ),
+    ] {
+        let store = Arc::new(RecordingSessionStore::default());
+        let executor = Arc::new(ScriptedRunExecutor::default());
+        executor.allow_effects();
+        let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+        let root = fixture_root("revision-policy");
+        let policy = RunConfinement::new(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(root.as_path()),
+        )
+        .unwrap();
+        let caps = Confinement::Workspace.required_caps();
+        let before = observation(&policy, previous_backend, caps, "1");
+        let after = ExecObservation::new(
+            BackendIdentity::new(backend, revision),
+            caps,
+            before.policy_digest().clone(),
+        )
+        .with_policy(ExecutionPolicy::capture(&policy, Vec::new()));
+        let first = admitted_start(
+            &controller,
+            StartRequest::new(
+                RequestId::session_id(super::request(950)),
+                root,
+                super::request(950),
+                digest("first"),
+                selections().with_sandbox_observation(Confinement::Workspace, before),
+                "first",
+            ),
+        );
+        let run = first.run_id();
+        execute(&controller, first.into_execution());
+        let revision = store
+            .transactions(run.session_id())
+            .last()
+            .unwrap()
+            .revision();
+        *executor.execution_observation.lock().unwrap() = Some(after);
+        let human = Arc::new(Human {
+            allow: true,
+            questions: Mutex::new(0),
+        });
+        let result = futures::executor::block_on(controller.continue_run(
+            ContinueRequest::new(
+                run,
+                super::request(951),
+                digest("second"),
+                revision,
+                "second",
+            ),
+            bindings().with_human(human.clone()),
+        ));
+        assert!(result.is_ok());
+        assert_eq!(*human.questions.lock().unwrap(), 1);
+        let entries = store.entries.lock().unwrap();
+        let reason = entries[&run.session_id()]
+            .iter()
+            .find_map(|entry| match entry {
+                SessionEntry::Event(event) => match &event.kind {
+                    ego_core::event::domain::EventKind::PermissionDecided { reason, .. } => {
+                        reason.as_deref()
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })
+            .expect("backend identity change must persist its human consent prompt");
+        assert!(reason.contains(expected), "{reason}");
+        assert!(reason.contains("Approval is required"), "{reason}");
+        assert!(!reason.contains("seatbelt -> seatbelt"), "{reason}");
+    }
+}
+
+// Catches: forged readmission selections bypass integrity checks during replay.
+#[test]
+fn forged_readmission_transitions_are_rejected_before_any_effect() {
+    for corruption in [
+        "missing receipt",
+        "missing observation",
+        "wrong previous",
+        "unrelated selection",
+        "start command",
+    ] {
+        let store = Arc::new(RecordingSessionStore::default());
+        let executor = Arc::new(ScriptedRunExecutor::default());
+        executor.allow_effects();
+        let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+        let policy = RunConfinement::new(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(fixture_root("forged-policy").as_path()),
+        )
+        .unwrap();
+        let old = observation(
+            &policy,
+            "sandbox",
+            Confinement::Workspace.required_caps(),
+            "1",
+        );
+        let current = observation(
+            &policy,
+            "sandbox",
+            Confinement::Workspace.required_caps(),
+            "2",
+        );
+        let first = admitted_start(
+            &controller,
+            StartRequest::new(
+                RequestId::session_id(super::request(800)),
+                fixture_root("forged-policy"),
+                super::request(800),
+                digest("first"),
+                selections().with_sandbox_observation(Confinement::Workspace, old.clone()),
+                "first",
+            ),
+        );
+        let run = first.run_id();
+        execute(&controller, first.into_execution());
+        *executor.execution_observation.lock().unwrap() = Some(current);
+        let before = store
+            .transactions(run.session_id())
+            .last()
+            .unwrap()
+            .revision();
+        let next = futures::executor::block_on(controller.continue_run(
+            ContinueRequest::new(run, super::request(801), digest("second"), before, "second"),
+            bindings(),
+        ))
+        .unwrap();
+        let RunCommandOutcome::Admitted(next) = next else {
+            panic!("continuation admission")
+        };
+        execute(&controller, next.into_execution());
+        let transactions = store.transactions(run.session_id());
+        let index = transactions
+            .iter()
+            .position(|transaction| {
+                serde_json::to_value(transaction).unwrap()["selections"]["sandbox_readmission"]
+                    .is_object()
+            })
+            .expect("real readmission transaction");
+        rewrite_transaction(&store, run.session_id(), index, |value| match corruption {
+            "missing receipt" => {
+                value["selections"]["sandbox_readmission"] = serde_json::Value::Null;
+            }
+            "missing observation" => {
+                value["selections"]["sandbox_observation"] = serde_json::Value::Null;
+            }
+            "wrong previous" => {
+                value["selections"]["sandbox_readmission"]["previous"]["policy_digest"] =
+                    serde_json::json!("3".repeat(64));
+            }
+            "unrelated selection" => {
+                value["selections"]["model"] =
+                    serde_json::to_value(model_ref("model/forged")).unwrap();
+            }
+            "start command" => {
+                value["command"]["start"] = serde_json::json!(true);
+            }
+            _ => unreachable!(),
+        });
+        assert_corrupt_run_is_rejected_everywhere(
+            &controller,
+            &executor,
+            &store,
+            run,
+            run.session_id(),
+            802,
+            before,
+        );
+    }
+}
+
+// Catches: an executor without measurement support silently re-admitting saved authority.
+#[test]
+fn missing_execution_observation_refuses_saved_authority_before_effects() {
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    executor.allow_effects();
+    let controller = controller(Arc::clone(&store), Arc::clone(&executor));
+    let policy = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(fixture_root("unmeasured-policy").as_path()),
+    )
+    .unwrap();
+    let old = observation(
+        &policy,
+        "sandbox",
+        Confinement::Workspace.required_caps(),
+        "1",
+    );
+    let first = admitted_start(
+        &controller,
+        StartRequest::new(
+            RequestId::session_id(super::request(900)),
+            fixture_root("unmeasured-policy"),
+            super::request(900),
+            digest("first"),
+            selections().with_sandbox_observation(Confinement::Workspace, old),
+            "first",
+        ),
+    );
+    let run = first.run_id();
+    execute(&controller, first.into_execution());
+    let before = store
+        .transactions(run.session_id())
+        .last()
+        .unwrap()
+        .revision();
+    let answer = futures::executor::block_on(controller.continue_run(
+        ContinueRequest::new(run, super::request(901), digest("second"), before, "second"),
+        bindings(),
+    ));
+    assert!(
+        answer.is_err(),
+        "missing measurement silently admitted saved authority"
+    );
+    assert_eq!(
+        store
+            .transactions(run.session_id())
+            .last()
+            .unwrap()
+            .revision(),
+        before
+    );
+    assert_eq!(
+        executor.prepared_tokens().len(),
+        1,
+        "unmeasured continuation ran effects"
+    );
+}
+
+// Catches: independent core journals allocate duplicate sequences during overlapping decisions.
+#[test]
+fn overlapping_core_readmission_has_one_journal_authority() {
+    #[derive(Debug)]
+    struct HeldHuman {
+        entered: std::sync::mpsc::SyncSender<()>,
+        release: Mutex<Option<futures::channel::oneshot::Receiver<()>>>,
+    }
+    impl HumanApprover for HeldHuman {
+        fn decide<'a>(
+            &'a self,
+            _: ItemId,
+            _: &'a PermissionRequest,
+        ) -> BoxFuture<'a, PermissionDecision> {
+            Box::pin(async move {
+                let release = self.release.lock().unwrap().take().unwrap();
+                self.entered.send(()).unwrap();
+                release.await.unwrap();
+                PermissionDecision::Allow
+            })
+        }
+    }
+    let store = Arc::new(RecordingSessionStore::default());
+    let executor = Arc::new(ScriptedRunExecutor::default());
+    executor.allow_effects();
+    let controller = Arc::new(controller(store.clone(), executor.clone()));
+    let root = fixture_root("overlap-policy");
+    let base = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(root.as_path()),
+    )
+    .unwrap();
+    let caps = Confinement::Workspace.required_caps();
+    let first = admitted_start(
+        &controller,
+        StartRequest::new(
+            RequestId::session_id(super::request(700)),
+            root,
+            super::request(700),
+            digest("first"),
+            selections().with_sandbox_observation(
+                Confinement::Workspace,
+                observation(&base, "sandbox", caps, "1"),
+            ),
+            "first",
+        ),
+    );
+    let run = first.run_id();
+    execute(&controller, first.into_execution());
+    let revision = store
+        .transactions(run.session_id())
+        .last()
+        .unwrap()
+        .revision();
+    *executor.execution_observation.lock().unwrap() =
+        Some(observation(&base, "other-backend", caps, "2"));
+    let (entered, observed) = std::sync::mpsc::sync_channel(1);
+    let (release, receiver) = futures::channel::oneshot::channel();
+    let human = Arc::new(HeldHuman {
+        entered,
+        release: Mutex::new(Some(receiver)),
+    });
+    let left_controller = controller.clone();
+    let left = std::thread::spawn(move || {
+        futures::executor::block_on(left_controller.continue_run(
+            ContinueRequest::new(run, super::request(701), digest("left"), revision, "left"),
+            bindings().with_human(human),
+        ))
+    });
+    observed
+        .recv_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    let right = futures::executor::block_on(controller.continue_run(
+        ContinueRequest::new(run, super::request(702), digest("right"), revision, "right"),
+        bindings(),
+    ));
+    assert!(
+        right.is_err(),
+        "second writer must not enter a competing journal"
+    );
+    release.send(()).unwrap();
+    assert!(left.join().unwrap().is_ok());
+    let entries = store.entries.lock().unwrap();
+    let events: Vec<_> = entries[&run.session_id()]
+        .iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(events.len(), 3);
+    assert!(
+        events
+            .windows(2)
+            .all(|pair| pair[0].env.seq < pair[1].env.seq)
+    );
+    assert_eq!(events[1].env.parent, Some(events[0].env.id));
+}
+
+// Catches: re-admission prints complete Debug policy snapshots and opaque hashes
+// instead of the few changed executable paths the operator must approve.
+#[test]
+fn readmission_diff_names_changed_paths_without_debug_dump() {
+    let base = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(support::native("/work")),
+    )
+    .unwrap();
+    let changed = base.clone().with_exec_paths(vec![
+        CanonPath::new("/tools/one"),
+        CanonPath::new("/tools/two"),
+    ]);
+    let before = observation(
+        &base,
+        "sandbox",
+        Confinement::Workspace.required_caps(),
+        "1",
+    );
+    let after = observation(
+        &changed,
+        "sandbox",
+        Confinement::Workspace.required_caps(),
+        "2",
+    );
+    let diff = after.changes_from(&before);
+    assert!(diff.contains("exec_paths added: /tools/one"), "{diff}");
+    assert!(diff.contains("exec_paths added: /tools/two"), "{diff}");
+    for forbidden in ["CanonPath", "ProfileRoot", &"1".repeat(64), &"2".repeat(64)] {
+        assert!(!diff.contains(forbidden), "{diff}");
+    }
+    assert!(diff.len() < 512, "{diff}");
+}

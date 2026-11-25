@@ -1,0 +1,45 @@
+{
+  "recorded_at": "2026-11-12T04:38:17.759973+00:00",
+  "request": {
+    "method": "POST",
+    "url": "https://api.anthropic.com/v1/messages",
+    "header_names": [
+      "Authorization",
+      "Content-Type",
+      "User-Agent",
+      "anthropic-beta",
+      "anthropic-version"
+    ],
+    "body": {
+      "model": "claude-sonnet-5-5",
+      "max_tokens": 8,
+      "messages": [
+        {
+          "role": "user",
+          "content": "Reply OK only."
+        }
+      ]
+    }
+  },
+  "status": 429,
+  "response_header_names": [
+    "anthropic-organization-id",
+    "anthropic-workspace-id",
+    "cf-cache-status",
+    "cf-ray",
+    "content-length",
+    "content-security-policy",
+    "content-type",
+    "date",
+    "request-id",
+    "server",
+    "server-timing",
+    "strict-transport-security",
+    "traceresponse",
+    "vary",
+    "x-robots-tag",
+    "x-should-retry"
+  ],
+  "quota_headers": {},
+  "body_recorded": false
+}

@@ -60,6 +60,39 @@ pub(crate) fn render(catalogue: &HookCatalogue, json: bool) -> Result<String, se
     }
 }
 
+/// Interactive lists omit provenance bytes; `/hooks details` retains them.
+pub(crate) fn render_summary(catalogue: &HookCatalogue) -> String {
+    let listing = HookListing::from_catalogue(catalogue);
+    if listing.hooks.is_empty() {
+        return String::new();
+    }
+    let mut rows = vec![vec![
+        "Event".into(),
+        "Handler".into(),
+        "Matcher".into(),
+        "Source".into(),
+    ]];
+    rows.extend(listing.hooks.iter().map(|hook| {
+        vec![
+            hook.lifecycle.into(),
+            hook.handler_kind.into(),
+            hook.matcher.clone().unwrap_or_else(|| "-".into()),
+            hook.source_authority.into(),
+        ]
+    }));
+    format!(
+        "Hooks · {} admitted\n{}\n/hooks details — full identity and provenance",
+        listing.hooks.len(),
+        crate::render::table::plain_table(rows).join("\n")
+    )
+}
+
+pub(crate) fn render_details(catalogue: &HookCatalogue) -> String {
+    // Details are intentionally lossless, not another truncated inventory.
+    serde_json::to_string_pretty(&HookListing::from_catalogue(catalogue))
+        .expect("hook listing serializes")
+}
+
 #[derive(Debug, Serialize)]
 struct HookListing {
     v: u8,

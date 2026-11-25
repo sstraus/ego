@@ -1,22 +1,72 @@
-# Builtin model defaults and tombstones; generated capabilities live in `models.generated.toml`.
+# The bootstrap model catalogue, compiled into the binary: startup defaults and
+# tombstones here, capability rows in `models.generated.toml`.
 #
-# System and user model files override this weakest layer per slug. Builtin capabilities contain
-# published facts, not prices or invented unknown values. `policy.toml` and
-# `scripts/catalogue.py` select current generations; retired builtin rows retain tombstones.
+# Read `crates/ego-cli/src/facts.rs` first: this file is the *lowest* of three
+# layers. `/etc/ego/models.toml` overrides it and `$EGO_HOME/models.toml`
+# overrides both, per slug. Nothing here is authority over what an operator
+# states; it exists so that a machine with an API key and no files can run.
 #
-# Supplied providers enumerate configured rows. Discovery providers obtain their own catalogues.
-# OpenRouter stays dynamic rather than carrying an arbitrary builtin subset.
+# ## What may be written here
 #
-# `BUILTIN_CATALOGUE_REVISION` in `facts.rs` must equal the revision below.
-# revision = 2026-10-15
+# Capability rows are not written here. `models.generated.toml` holds them, one per
+# current model, generated from the pinned models.dev snapshot and `policy.toml` by
+# `.agents/skills/model-catalogue-refresh`. Boss decision 2026-10-11: the builtin
+# catalogue lists only current model generations (see `policy.toml` for what that
+# means per provider). A model of an older generation is not listed; an operator
+# states it in `/etc/ego/models.toml` or `$EGO_HOME/models.toml`, and a row ego
+# listed before and no longer lists gets a tombstone below.
+#
+# **No prices.** A rate written from memory is a number the budget gate would
+# trust and nothing could check, and
+# `docs/internals/decisions/2026-08-21-what-a-model-resolves-to.md` §1 forbids it.
+# models.dev states a literal 0 for the coding plans, so the snapshot omits every
+# price. A run with a money ceiling and no operator rates therefore still refuses
+# with `NoPricingQuote`, which is the correct answer: unknown price is not free
+# price.
+#
+# A fact nobody published stays absent. `max_tools` is omitted rather than
+# guessed, `image_input = "unknown"` fails closed rather than inventing a
+# media-type list. `docs/decisions/2026-08-25-...` §provenance: "Missing
+# numeric or reasoning facts remain `None` or `ReasoningEffortSupport::
+# Unknown`; zero, a maximum, or `Any` is never used as a presentation default."
+#
+# ## Which providers appear
+#
+# Rows exist for `openai`, `openai-codex`, `anthropic`, `gemini`, `github-copilot`,
+# `xai-oauth`, `minimax-oauth`, `bedrock`, `vertex` and `deepseek`: their resolvers (`Supplied`, `SubscriptionSupplied`)
+# list only supplied rows, so a provider with no row lists nothing. `ollama` and
+# `kimi-coding` discover their models from the provider, so a row here would be a
+# second answer to a question the provider already answers. `nous` has no public
+# catalogue and stays operator-supplied.
+#
+# `gemini` is selectable under the published-contract decision in
+# `docs/internals/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`.
+# `docs/internals/23-first-run-model-default-sources.md` records the current capability,
+# replay, and default-thinking evidence used by its built-in row.
+#
+# `openrouter` appears with no rows: it proxies hundreds of models from dozens of
+# vendors, changing weekly, so any handful chosen here would be arbitrary and
+# stale. Boss decision 2026-10-11: OpenRouter stays dynamic and is not listed
+# here.
+#
+# ## Revision
+#
+# `BUILTIN_CATALOGUE_REVISION` in `facts.rs` must equal the date below, and a
+# test holds that. The revision is what a retirement error names, so a stale
+# constant would send an operator to the wrong catalogue.
+#
+# revision = 2026-11-19
 
-# First-run policy refreshed for gpt-6.1-sol on 2026-09-29.
-# Availability is still checked at runtime.
+# First-run policy refreshed on 2026-09-29 for gpt-6.1-sol, released that day;
+# availability is still observed.
+# See docs/internals/decisions/2026-09-26-current-model-bootstrap.md.
 [default_model]
 openai = "openai/gpt-6.1-sol"
 openai-codex = "openai-codex/gpt-6.1-sol"
 anthropic = "anthropic/claude-opus-5-5"
 gemini = "gemini/gemini-3.8-flash"
+bedrock = "bedrock/anthropic.claude-opus-5-5"
+vertex = "vertex/claude-opus-5-5"
 
 # ---------------------------------------------------------------------------
 # Tombstones.
@@ -97,7 +147,7 @@ replacement = "anthropic/claude-sonnet-5-5"
 retired = "2025-07-21"
 
 # These slugs left the builtin catalogue on 2026-10-11 under the current-generation
-# rule (regression): a newer model of the same tier replaced each.
+# rule (story 344-781d): a newer model of the same tier replaced each.
 [retired."anthropic/claude-sonnet-5"]
 replacement = "anthropic/claude-sonnet-5-5"
 retired = "2026-10-11"
@@ -105,3 +155,9 @@ retired = "2026-10-11"
 [retired."anthropic/claude-haiku-4-5"]
 replacement = "anthropic/claude-haiku-5-5"
 retired = "2026-10-11"
+
+# This slug left the builtin catalogue on 2026-11-13: models.dev marks the preview
+# deprecated and lists the released model under the same tier.
+[retired."minimax-oauth/MiniMax-M3.1-Flash-Preview"]
+replacement = "minimax-oauth/MiniMax-M3.1-Flash"
+retired = "2026-11-13"

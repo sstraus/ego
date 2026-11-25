@@ -68,9 +68,56 @@ pub struct RememberPlan {
     pub omitted: Vec<OmittedDimension>,
     candidate_operations: Vec<usize>,
     omitted_operations: Vec<usize>,
+    disclosing_operations: Vec<usize>,
 }
 
 impl RememberPlan {
+    /// `exec(PROGRAM *)`: every command of one program, offered after repeated approvals.
+    pub fn for_exec_family(program: &str) -> Option<Self> {
+        let pattern = ArgvPattern::parse(&format!("{program} *")).ok()?;
+        Some(Self {
+            candidates: vec![Rule::Exec(pattern)],
+            omitted: vec![
+                OmittedDimension::Cwd,
+                OmittedDimension::Timeout,
+                OmittedDimension::Environment,
+            ],
+            candidate_operations: Vec::new(),
+            omitted_operations: Vec::new(),
+            disclosing_operations: Vec::new(),
+        })
+    }
+
+    /// The exact path rule of a sandbox widening, for a deny. Execution has no path rule.
+    pub fn for_sandbox_path(grant: &crate::permit::SandboxGrant) -> Option<Self> {
+        let make: fn(PathPattern) -> Rule = match grant.access {
+            crate::permit::SandboxAccess::Read => Rule::Read,
+            crate::permit::SandboxAccess::Write => Rule::Write,
+            crate::permit::SandboxAccess::Exec => return None,
+        };
+        let pattern = PathPattern::from_path(grant.path.as_path(), false)?;
+        Some(Self {
+            candidates: vec![make(pattern)],
+            omitted: Vec::new(),
+            candidate_operations: Vec::new(),
+            omitted_operations: Vec::new(),
+            disclosing_operations: Vec::new(),
+        })
+    }
+
+    /// What every remember surface states when [`discloses_values`](Self::discloses_values).
+    pub const DISCLOSURE_NOTICE: &'static str = "Remembering shows the values of the named credential file: an exact user rule discloses them.";
+
+    /// Operations whose exact `read`/`search` rule would disclose credential
+    /// values (an exact user rule is the owner's disclosure approval).
+    pub fn disclosure_rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.disclosing_operations.iter().copied()
+    }
+
+    pub fn discloses_values(&self) -> bool {
+        !self.disclosing_operations.is_empty()
+    }
+
     /// Explicit alternative to the tool-specific plan, never the default.
     /// Transport/process candidates stay exact; only tools of the named server widen.
     pub fn server_scope(&self) -> Option<Self> {
@@ -355,7 +402,13 @@ impl RuleManagement {
         let mut candidate_operations = Vec::new();
         let mut omitted = Vec::new();
         let mut omitted_operations = Vec::new();
+        let mut disclosing_operations = Vec::new();
         for (operation, op) in call.ops().iter().enumerate() {
+            if let Op::Read { path } | Op::Search { root: path, .. } = op
+                && Ruleset::is_credential_path(path)
+            {
+                disclosing_operations.push(operation);
+            }
             for (candidate, dimensions) in derive(op)? {
                 if !candidates.contains(&candidate) {
                     candidates.push(candidate);
@@ -378,6 +431,7 @@ impl RuleManagement {
             omitted,
             candidate_operations,
             omitted_operations,
+            disclosing_operations,
         })
     }
 
@@ -389,13 +443,8 @@ impl RuleManagement {
         match op {
             Op::Write { path, .. } => {
                 ensure_workspace(path.as_path(), workspace)?;
-                let text = workspace
-                    .to_str()
-                    .map(|text| text.trim_end_matches('/'))
-                    .filter(|text| !text.is_empty() && !text.contains('*'))
+                let pattern = PathPattern::from_path(workspace, true)
                     .ok_or_else(|| RuleManagementError::NonPersistible(op.name()))?;
-                let pattern = PathPattern::parse(&format!("{text}/**"))
-                    .map_err(|_| RuleManagementError::NonPersistible(op.name()))?;
                 Ok((Rule::Write(pattern), vec![OmittedDimension::Change]))
             }
             Op::Spawn { spec } => match exec_prefix(spec.argv()) {
@@ -424,14 +473,8 @@ impl RuleManagement {
     ) -> Result<(Rule, Vec<OmittedDimension>), RuleManagementError> {
         let path_rule = |path: &Path, make: fn(PathPattern) -> Rule| {
             ensure_workspace(path, workspace)?;
-            let text = path
-                .to_str()
+            let pattern = PathPattern::from_path(path, false)
                 .ok_or_else(|| RuleManagementError::NonPersistible(op.name()))?;
-            let pattern = PathPattern::parse(text)
-                .map_err(|_| RuleManagementError::NonPersistible(op.name()))?;
-            if text.contains('*') {
-                return Err(RuleManagementError::NonPersistible(op.name()));
-            }
             Ok(make(pattern))
         };
 

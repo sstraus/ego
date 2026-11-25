@@ -1,7 +1,7 @@
 //! Composition of provider HTTP authority with one run's OS effect ports.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ego_ai::http::{Http, HttpCall, HttpProfileFingerprint, HttpWebSocket, PreparedHttpCall};
 use ego_core::event::id::SessionId;
@@ -18,7 +18,9 @@ use ego_mcp::{
     McpHttpEffects, McpRegistryController, McpRegistryRuntime, McpStdioSession,
 };
 use ego_tools::clock::SystemClock;
-use ego_tools::credentials::{OsGenerationPolicyCaptureStore, OsResumeKey};
+use ego_tools::credentials::{
+    OsGenerationPolicyCaptureStore, OsResumeKey, SelectedCredentialBackend,
+};
 use ego_tools::exec::{ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts};
 use ego_tools::http::{InferenceHttpPorts, SystemResolver};
 use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
@@ -28,6 +30,7 @@ use ego_tools::store::{OsIo, SessionEvidenceStore};
 use futures::future::BoxFuture;
 
 const COMMAND_EVIDENCE_CAPACITY: u64 = 64 * 1024 * 1024;
+const MCP_MANAGEMENT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The CLI-owned adapter joining provider authority to one run's raw ports.
 pub struct ProviderHttpAdapter {
@@ -90,6 +93,46 @@ impl ProviderHttpAdapter {
 }
 
 impl Http for ProviderHttpAdapter {
+    fn observe_rate_limits(
+        &self,
+        provider: &str,
+        credential: &str,
+        headers: &[ego_core::permit::HttpHeader],
+    ) {
+        use ego_core::event::time::Clock;
+        if let Some(home) = crate::config::ego_home()
+            && let Some(value) = ego_ai::usage_limits::subscription_response_limits(
+                provider,
+                credential,
+                headers,
+                SystemClock.now().as_millis(),
+            )
+            && let Err(error) = crate::quota::QuotaStore::new(home).observe(value)
+        {
+            tracing::warn!(%error, "could not save subscription quota");
+        }
+    }
+
+    fn observe_rate_limit_event(
+        &self,
+        provider: &str,
+        credential: &str,
+        event: &serde_json::Value,
+    ) {
+        use ego_core::event::time::Clock;
+        if let Some(home) = crate::config::ego_home()
+            && let Some(value) = ego_ai::usage_limits::subscription_event_limits(
+                provider,
+                credential,
+                event,
+                SystemClock.now().as_millis(),
+            )
+            && let Err(error) = crate::quota::QuotaStore::new(home).observe(value)
+        {
+            tracing::warn!(%error, "could not save subscription quota");
+        }
+    }
+
     fn open_websocket(
         &self,
         call: PreparedHttpCall,
@@ -319,27 +362,38 @@ pub struct McpProcessScope {
     runtime: Arc<McpRegistryRuntime>,
     /// Present for a run: its stdio servers keep one child across tool calls.
     stdio: Option<Arc<McpStdioSession>>,
+    /// Present when the user opted in to MCP Tasks: the run's live tasks.
+    tasks: Option<Arc<ego_core::mcp::McpTaskLedger>>,
 }
 
 impl McpProcessScope {
     pub async fn online(cancel: CancelToken) -> Result<Self, String> {
         let effects = CommandHttpScope::online(cancel).await?;
-        Self::from_effects(effects, false)
+        Self::from_effects(effects, false, false, MCP_MANAGEMENT_TIMEOUT)
     }
 
     pub(crate) async fn for_run(
         confinement: RunConfinement,
         cancel: CancelToken,
         run_deadline: Option<Instant>,
+        tasks: bool,
     ) -> Result<Self, McpProcessScopeError> {
         let effects = CommandHttpScope::confined(confinement, cancel, run_deadline, None).await?;
-        Self::from_effects(effects, true).map_err(McpProcessScopeError::Setup)
+        Self::from_effects(effects, true, tasks, MCP_DEFAULT_OPERATION_TIMEOUT)
+            .map_err(McpProcessScopeError::Setup)
     }
 
-    fn from_effects(effects: CommandHttpScope, retain_stdio: bool) -> Result<Self, String> {
-        let root = crate::config::ego_home()
-            .ok_or_else(|| "MCP needs EGO_HOME or HOME for its machine journals".to_owned())?
-            .join("mcp");
+    fn from_effects(
+        effects: CommandHttpScope,
+        retain_stdio: bool,
+        tasks: bool,
+        timeout: Duration,
+    ) -> Result<Self, String> {
+        let home = crate::config::ego_home()
+            .ok_or_else(|| "MCP needs EGO_HOME or HOME for its machine journals".to_owned())?;
+        let backend = SelectedCredentialBackend::from_environment(home.join("secrets"))
+            .map_err(str::to_owned)?;
+        let root = home.join("mcp");
         let journal = Arc::new(JsonlMcpRegistryJournal::new(&root, Box::new(OsIo)))
             as Arc<dyn McpRegistryJournal>;
         let continuation_journal =
@@ -373,13 +427,14 @@ impl McpProcessScope {
             McpRegistryRuntime::new(
                 journal,
                 continuation_journal,
-                Arc::new(OsGenerationPolicyCaptureStore::default()),
+                Arc::new(OsGenerationPolicyCaptureStore::new(backend.clone())),
                 http,
                 stdio,
-                Arc::new(OsResumeKey::open(&root)),
+                Arc::new(OsResumeKey::new(backend, root.join("mcp-resume-key.lock"))),
                 Arc::new(SystemClock),
                 MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
-                MCP_DEFAULT_OPERATION_TIMEOUT,
+                timeout,
+                tasks,
             )
             .map_err(|error| format!("the MCP server registry could not be opened: {error}"))?,
         );
@@ -387,7 +442,15 @@ impl McpProcessScope {
             _effects: effects,
             runtime,
             stdio: session,
+            tasks: tasks.then(|| Arc::new(ego_core::mcp::McpTaskLedger::new())),
         })
+    }
+
+    /// The delivery port for this run's MCP tasks, when the user opted in.
+    pub(crate) fn task_port(&self) -> Option<Arc<dyn ego_core::mcp::McpTaskPort>> {
+        self.tasks
+            .as_ref()
+            .map(|ledger| Arc::clone(ledger) as Arc<dyn ego_core::mcp::McpTaskPort>)
     }
 
     /// Reap every retained stdio child before the run's effect scope goes away.

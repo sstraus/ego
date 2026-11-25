@@ -1,6 +1,11 @@
 //! Markdown, rendered by the harness — because nobody else can.
 //!
-//! Markdown rendering separates style from literal text. Two rules:
+//! The captures behind
+//! `docs/internals/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` settle
+//! what would otherwise be a matter of taste. A model emits
+//! `**Step 13.5 spedito** (` a9b84ad `)`; what reaches the terminal is
+//! `ESC[1mStep 13.5 spedito ESC[22m ( ESC[38;2;174;185;213ma9b84ad ESC[39m )`.
+//! Two rules, and they are rules rather than preferences:
 //!
 //! - `**strong**` is **weight and no colour**.
 //! - `` `code` `` is **colour and no weight**.
@@ -12,6 +17,8 @@
 //! Everything here returns [`Line`]s. The model's text never becomes a string
 //! with escapes in it before layout, because layout has to be able to measure
 //! it — see [`super::line`].
+
+use std::borrow::Cow;
 
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -85,6 +92,46 @@ pub(super) fn options() -> Options {
     // Not `ENABLE_SMART_PUNCTUATION`: a model that wrote `"` meant `"`, and a
     // renderer that turns it into `"` has edited the answer.
     options
+}
+
+/// Opaque citation handles are not URLs. Keep their reference visible without
+/// pretending to resolve them; real source URLs arrive as ordinary Markdown links.
+/// Called only for parsed prose, never inline or block code.
+fn citation_text(text: &str) -> Cow<'_, str> {
+    const OPEN: &str = "\u{e200}cite";
+    if !text.contains(OPEN) {
+        return Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(OPEN) {
+        out.push_str(&rest[..at]);
+        rest = &rest[at + OPEN.len()..];
+        if rest.is_empty() {
+            out.push_str("[source]");
+            break;
+        }
+        if let Some(body) = rest.strip_prefix('\u{e202}') {
+            let end = body.find('\u{e201}');
+            let handles = &body[..end.unwrap_or(body.len())];
+            let valid = handles.split('\u{e202}').all(|handle| {
+                (end.is_none() && handle.is_empty())
+                    || handle.strip_prefix("turn").is_some_and(|id| {
+                        (end.is_none() || !id.is_empty())
+                            && id.chars().all(|ch| ch.is_ascii_alphanumeric())
+                    })
+            });
+            if valid {
+                out.push_str("[source]");
+                rest = end.map_or("", |at| &body[at + '\u{e201}'.len_utf8()..]);
+                continue;
+            }
+        }
+        // Unknown/malformed syntax is content, not permission to remove text.
+        out.push_str(OPEN);
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
 }
 
 /// The list the renderer is inside, if any.
@@ -299,7 +346,7 @@ impl Renderer {
                         }
                     }
                 } else {
-                    self.text(&text);
+                    self.text(&citation_text(&text));
                 }
             }
             Event::Code(code) => {
@@ -440,7 +487,10 @@ impl Renderer {
                 });
             }
             Tag::Image { dest_url, .. } => {
-                // Without image protocol support, name the image instead of dropping it.
+                // No image path exists: TUIC decodes `alacritty_terminal`,
+                // which implements neither the kitty graphics protocol nor
+                // sixel (ADR §4). The alternative to naming the image is
+                // silently dropping it.
                 self.text("🖼 ");
                 self.start_link(dest_url.as_ref());
                 let actionable = self.link.is_some();
@@ -623,6 +673,48 @@ mod tests {
             &render(source, at(width, OscProfile::Tuic), None),
             Depth::TrueColor,
         )
+    }
+
+    // Catches: opaque web citation controls reach terminal prose instead of readable references.
+    #[test]
+    fn citation_controls_render_as_source_references_without_editing_literals() {
+        let marker = "\u{e200}cite\u{e202}turn368169search1\u{e201}";
+        assert_eq!(
+            text(&format!("> appena creato. {marker} Fine."), 120),
+            ["▌ appena creato. [source] Fine."]
+        );
+        assert_eq!(
+            text(
+                "one \u{e200}cite\u{e202}turn1search0\u{e202}turn2search1\u{e201} two \u{e200}cite\u{e202}turn3view0\u{e201}.",
+                120,
+            ),
+            ["one [source] two [source]."]
+        );
+        assert_eq!(text(&format!("`{marker}`"), 120), [marker]);
+        assert_eq!(
+            text(&format!("```\n{marker}\n```"), 120),
+            [format!("  {marker}")]
+        );
+        assert_eq!(
+            text(&format!("    {marker}\n"), 120),
+            [format!("  {marker}")]
+        );
+        let unrelated = "keep \u{e200}literal\u{e201} and \u{e123} and \u{e200}cite\u{e202}not a source\u{e201}";
+        assert_eq!(text(unrelated, 120), [unrelated]);
+    }
+
+    // Catches: incomplete citation handles leak at end-of-answer, or malformed controls eat prose.
+    #[test]
+    fn citation_controls_truncated_at_end_keep_the_surrounding_prose() {
+        for tail in [
+            "\u{e200}cite",
+            "\u{e200}cite\u{e202}",
+            "\u{e200}cite\u{e202}turn368169search1",
+        ] {
+            assert_eq!(text(&format!("before {tail}"), 120), ["before [source]"]);
+        }
+        let malformed = "before \u{e200}cite\u{e202}turn1search0 after";
+        assert_eq!(text(malformed, 120), [malformed]);
     }
 
     // Catches: non-TUIC profiles accidentally retain marker-specific Markdown boundaries.
@@ -867,7 +959,8 @@ mod tests {
         assert!(!out.contains('~'));
     }
 
-    /// At `Depth::None`, every construct renders as plain text.
+    /// Every construct at `Depth::None` is the text and nothing else — the
+    /// property `CLI.md` §4.5 turns on.
     #[test]
     fn nothing_escapes_at_depth_none() {
         let source = "# h\n\n**b** *i* `c` [l](http://x) ~~s~~\n\n> q\n\n- i\n\n| a |\n|---|\n| 1 |\n\n---\n";

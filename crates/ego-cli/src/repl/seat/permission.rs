@@ -172,11 +172,19 @@ pub(super) fn read_permission_field(
 ) -> PermissionField {
     let saved = enter_modal(editor, phase, status);
     let prompt = Question::new(text.to_owned(), Arc::clone(status));
-    let field = match answer(false, suspend::read_line(editor, &prompt, status)) {
-        Line::Submitted(value) => PermissionField::Value(value),
-        line @ (Line::Ended | Line::ExternalBreak(_)) => PermissionField::Propagate(line),
-        Line::Blank | Line::Interrupted | Line::Refused(_) | Line::HostCommand(_) => {
-            PermissionField::Cancelled
+    let field = loop {
+        match answer(false, suspend::read_line(editor, &prompt, status)) {
+            // A consumed selector burst can leave Reedline wakes behind. This
+            // scalar field has no selector; those wakes must not cancel it and
+            // send its following value into the busy prompt queue.
+            Line::HostCommand(HostCommand::QuestionSelector(_)) => continue,
+            Line::Submitted(value) => break PermissionField::Value(value),
+            line @ (Line::Ended | Line::ExternalBreak(_)) => {
+                break PermissionField::Propagate(line);
+            }
+            Line::Blank | Line::Interrupted | Line::Refused(_) | Line::HostCommand(_) => {
+                break PermissionField::Cancelled;
+            }
         }
     };
     leave_modal(
@@ -308,12 +316,26 @@ pub(super) fn select_permission_value(
     if choices.is_empty() {
         return PermissionField::Cancelled;
     }
+    let width = super::picker_surface::picker_capabilities(status)
+        .width
+        .saturating_sub(8)
+        .max(1);
     let request = QuestionRequest::new(
         prompt,
         QuestionMode::Single,
         choices
             .iter()
-            .map(|(id, label)| QuestionOption::new(*id, *label))
+            .map(|(id, label)| {
+                QuestionOption::new(
+                    *id,
+                    crate::render::table::plain_table_with_width(
+                        vec![vec![(*label).into()]],
+                        width,
+                    )
+                    .pop()
+                    .unwrap_or_default(),
+                )
+            })
             .collect(),
         false,
     );
@@ -472,7 +494,7 @@ pub(super) fn choose_policy_mode(
 pub(crate) enum Confirmation {
     Confirmed,
     Declined,
-    Propagate(Line),
+    Propagate(Box<Line>),
 }
 
 pub(super) fn confirm_surface_action(
@@ -496,7 +518,7 @@ pub(super) fn confirm_surface_action(
             }
             Line::Interrupted | Line::Blank => break Confirmation::Declined,
             line @ (Line::Ended | Line::ExternalBreak(_)) => {
-                break Confirmation::Propagate(line);
+                break Confirmation::Propagate(Box::new(line));
             }
             Line::Refused(_) | Line::HostCommand(_) => {}
         }

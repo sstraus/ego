@@ -176,9 +176,8 @@ pub(super) fn answer_control(
         control => control,
     };
     let control = match control {
-        Control::SessionPicker { sessions, reply } => {
-            let selected =
-                super::session_picker::run_session_picker(editor, phase, surface.status, sessions);
+        Control::SessionPicker { source, reply } => {
+            let selected = super::session_picker::run_session_picker(editor, surface, source);
             let _ = reply.send(selected);
             return true;
         }
@@ -274,11 +273,15 @@ pub(super) fn answer_control(
             context,
             reply,
         } => {
+            let width = picker_capabilities(surface.status).width;
+            let context = crate::output::wrap_notice(&context, Some(width.saturating_sub(1)));
+            // Leave room for the separator, the longest answer, and the cursor.
+            let question = crate::output::wrap_notice(
+                &format!("Trust project files in {workspace}? [y/N]"),
+                Some(width.saturating_sub(" yes".len() + 1).max(1)),
+            );
             let prompt = Question::new(
-                crate::output::wrap_notice(
-                    &format!("{context}\nTrust project files in {workspace}? [y/N] "),
-                    Some(picker_capabilities(surface.status).width.saturating_sub(1)),
-                ),
+                format!("{context}\n{question} "),
                 Arc::clone(surface.status),
             );
             let trust = loop {
@@ -302,8 +305,9 @@ pub(super) fn answer_control(
             let prompt = Question::new(
                 crate::output::wrap_notice(
                     &format!(
-                        "Windows execution is unconfined in {workspace}; filesystem and network \
-                         isolation are not enforced. Continue? [y/N] "
+                        "Windows execution is unconfined: filesystem and network isolation are \
+                         not enforced in {workspace} or in any other workspace. Remember this \
+                         answer for this user and continue? [y/N] "
                     ),
                     Some(picker_capabilities(surface.status).width.saturating_sub(1)),
                 ),
@@ -656,15 +660,51 @@ fn answer_question_selector(
         let queued = queued_selector_line(surface.status);
         match queued.unwrap_or_else(|| permission_line(editor, surface, &prompt)) {
             Line::HostCommand(HostCommand::QuestionSelector(command)) => {
-                let Some(key) = next_selector_key(surface.status, &command) else {
+                let command = if command == PICKER_KEYS {
+                    let mut status = surface.status.lock().expect("surface status lock");
+                    if status.picker_keys.is_empty() {
+                        continue;
+                    }
+                    status.picker_keys.remove(0)
+                } else {
+                    command
+                };
+                let setup = request
+                    .options
+                    .iter()
+                    .all(|option| option.id.starts_with("setup:"));
+                if setup
+                    && command == "save"
+                    && request
+                        .options
+                        .iter()
+                        .any(|option| option.id == "setup:save")
+                {
+                    break QuestionOutcome::Answered(QuestionAnswer::single("setup:save"));
+                }
+                let key = match command.as_str() {
+                    "page-up" if setup => Some(SelectorKey::PageUp(10)),
+                    "page-down" if setup => Some(SelectorKey::PageDown(10)),
+                    other => question_selector_key(other),
+                };
+                let Some(key) = key else {
                     continue;
                 };
                 let mut guard = selector.lock().expect("question selector lock");
-                guard.key(key);
+                let applied = guard.key(key);
+                let number_answers = !setup
+                    && kind == SelectorKind::Single
+                    && matches!(key, SelectorKey::Number(_))
+                    && applied.consumed()
+                    // Other is a text-entry transition, not an answer option.
+                    && guard.current_id() != Some(OTHER_ID);
+                if number_answers {
+                    guard.key(SelectorKey::Enter);
+                }
                 if key == SelectorKey::Escape {
                     break QuestionOutcome::Cancelled;
                 }
-                if key != SelectorKey::Enter {
+                if key != SelectorKey::Enter && !number_answers {
                     drop(guard);
                     surface.status.lock().expect("surface status lock").notice = None;
                     repaint_status(surface.status);
@@ -726,7 +766,7 @@ fn answer_question_selector(
 /// the empty id names the `Other` row without colliding with a real option.
 const OTHER_ID: &str = "";
 const OTHER_LABEL: &str = "Other";
-const OTHER_DESCRIPTION: &str = "Type your own answer";
+const OTHER_DESCRIPTION: &str = "Press Enter to type your own answer";
 
 /// The `Other` row exists only where the schema lets the model accept free
 /// text alongside the options.
@@ -785,6 +825,8 @@ fn question_selector_key(command: &str) -> Option<SelectorKey> {
     match command {
         "up" => Some(SelectorKey::Up),
         "down" => Some(SelectorKey::Down),
+        "home" => Some(SelectorKey::Home),
+        "end" => Some(SelectorKey::End),
         "space" => Some(SelectorKey::Space),
         "enter" => Some(SelectorKey::Enter),
         "escape" => Some(SelectorKey::Escape),
@@ -839,8 +881,42 @@ pub(super) fn question_selector_prompt(
     let multiple = request.mode == QuestionMode::Multiple;
     let other = offers_other(request)
         .then(|| QuestionOption::new(OTHER_ID, OTHER_LABEL).with_description(OTHER_DESCRIPTION));
-    let mut rows = wrapped(&request.prompt, PickerRole::Question);
-    for (index, option) in request.options.iter().chain(other.as_ref()).enumerate() {
+    let setup = request
+        .options
+        .iter()
+        .all(|option| option.id.starts_with("setup:"));
+    let page_start = if setup {
+        request
+            .options
+            .iter()
+            .position(|option| Some(option.id.as_str()) == current)
+            .unwrap_or(0)
+            / 10
+            * 10
+    } else {
+        0
+    };
+    let heading = if setup && request.options.len() > 10 {
+        format!(
+            "{} · {}–{} of {}",
+            request.prompt,
+            page_start + 1,
+            (page_start + 10).min(request.options.len()),
+            request.options.len()
+        )
+    } else {
+        request.prompt.clone()
+    };
+    let mut rows = wrapped(&heading, PickerRole::Question);
+    for (index, option) in request
+        .options
+        .iter()
+        .chain(other.as_ref())
+        .enumerate()
+        .filter(|(index, option)| {
+            !setup || (page_start..page_start + 10).contains(index) || option.id == "setup:save"
+        })
+    {
         let marker = if current == Some(option.id.as_str()) {
             ">"
         } else {
@@ -862,8 +938,13 @@ pub(super) fn question_selector_prompt(
         } else {
             PickerRole::Label
         };
+        let label = if setup {
+            crate::setup_terminal::fit(&option.label, width.saturating_sub(indent.len()).max(1))
+        } else {
+            option.label.clone()
+        };
         rows.extend(
-            crate::render::Line::plain(&option.label)
+            crate::render::Line::plain(&label)
                 .wrap(width.saturating_sub(indent.len()).max(1))
                 .into_iter()
                 .enumerate()
@@ -895,10 +976,14 @@ pub(super) fn question_selector_prompt(
         }
     }
     rows.extend(wrapped(
-        if request.mode == QuestionMode::Multiple {
+        if setup && request.options.iter().any(|option| option.id == "setup:save") {
+            "PgUp/PgDn page    Home/End first/last\n↑↓ move  Enter choose  S review/save  Esc cancel"
+        } else if setup {
+            "PgUp/PgDn page    Home/End first/last\n↑↓ move  Enter choose  Esc cancel"
+        } else if request.mode == QuestionMode::Multiple {
             "Up/Down moves; Space or number toggles; Enter answers; Esc cancels."
         } else {
-            "Up/Down or number selects; Enter answers; Esc cancels."
+            "Number answers immediately; Up/Down selects; Enter answers; Esc cancels."
         },
         PickerRole::Hint,
     ));
@@ -1014,7 +1099,11 @@ fn permission_line(
     line
 }
 
-fn modal_line(editor: &mut Reedline, surface: &mut ModalSurface<'_>, prompt: &dyn Prompt) -> Line {
+pub(super) fn modal_line(
+    editor: &mut Reedline,
+    surface: &mut ModalSurface<'_>,
+    prompt: &dyn Prompt,
+) -> Line {
     #[cfg(test)]
     if let Some(line) = TERMINAL_SCRIPT.with_borrow_mut(|script| {
         script.as_mut().map(|script| {
@@ -1497,6 +1586,8 @@ pub(super) enum PermissionWord {
     Deny,
     Amend,
     Remember,
+    KeepBlocked,
+    Generalize,
 }
 
 pub(super) fn parse_trust(answer: &str) -> Option<Trust> {
@@ -1513,6 +1604,8 @@ pub(super) fn parse_permission(answer: &str) -> Option<PermissionWord> {
         "d" | "deny" | "n" | "no" => Some(PermissionWord::Deny),
         "m" | "amend" | "e" | "edit" => Some(PermissionWord::Amend),
         "r" | "remember" => Some(PermissionWord::Remember),
+        "k" | "block" => Some(PermissionWord::KeepBlocked),
+        "g" | "general" => Some(PermissionWord::Generalize),
         _ => None,
     }
 }
@@ -1584,16 +1677,52 @@ fn remember_permission(
         .map_err(|error| error.to_string())
 }
 
+/// `g`: store the rule for the whole program family the owner already approved repeatedly.
+fn generalize(
+    surface: &mut ModalSurface<'_>,
+    request: &PermissionRequest,
+) -> Result<String, String> {
+    let plan = request
+        .generalized_plan()
+        .ok_or_else(|| "no program family is offered for this request".to_owned())?;
+    let application = surface
+        .status
+        .lock()
+        .map_err(|_| "the permission surface is unavailable".to_owned())?
+        .permission_rules
+        .clone()
+        .ok_or_else(|| "the atomic permission-rule application is unavailable".to_owned())?;
+    application
+        .remember_allow(plan)
+        .map_err(|error| error.to_string())
+}
+
+/// `k`: persist a deny for what the request names, so it is not asked again.
+fn keep_blocked(
+    surface: &mut ModalSurface<'_>,
+    request: &PermissionRequest,
+) -> Result<String, String> {
+    let plan = request
+        .keep_blocked_plan()
+        .ok_or_else(|| "no rule can name this request".to_owned())?;
+    let application = surface
+        .status
+        .lock()
+        .map_err(|_| "the permission surface is unavailable".to_owned())?
+        .permission_rules
+        .clone()
+        .ok_or_else(|| "the atomic permission-rule application is unavailable".to_owned())?;
+    application
+        .remember_deny(plan)
+        .map_err(|error| error.to_string())
+}
+
 /// Write one out-of-band signal straight to the terminal.
 ///
 /// Called only from the terminal owner, between reads, so nothing else is
 /// painting. It does not go through the row output: that holds text until a
 /// newline, and a wait has no more rows coming.
-pub(super) fn tell_host(status: &SharedStatus, signal: impl FnOnce(Osc, bool) -> String) {
-    tell_host_current(status, |osc, quiet, _| signal(osc, quiet));
-}
-
-fn tell_host_current(
+pub(super) fn tell_host_current(
     status: &SharedStatus,
     signal: impl FnOnce(Osc, bool, &SurfaceStatus) -> String,
 ) {
@@ -1641,6 +1770,32 @@ fn settle_permission(
                 .expect("surface status lock")
                 .permission_modal = false;
             amendment(editor, surface, request, notice)
+        }
+        PermissionWord::Generalize => match generalize(surface, request) {
+            Ok(receipt) => {
+                *notice = Some(receipt);
+                PermissionDecision::Allow
+            }
+            Err(error) => {
+                *notice = Some(format!("Not remembered, and the call was refused: {error}"));
+                PermissionDecision::Deny
+            }
+        },
+        PermissionWord::KeepBlocked => match keep_blocked(surface, request) {
+            Ok(receipt) => {
+                *notice = Some(receipt);
+                PermissionDecision::DenyAlways
+            }
+            Err(error) => {
+                *notice = Some(format!(
+                    "Not kept blocked, but this call is refused: {error}"
+                ));
+                PermissionDecision::Deny
+            }
+        },
+        // A sandbox widening has no rule to save: `a` keeps the path grant for the workspace.
+        PermissionWord::Remember if request.persistable_sandbox_grant().is_some() => {
+            PermissionDecision::AllowAlways
         }
         PermissionWord::Remember => match remember_permission(editor, surface, request) {
             Ok(receipt) => {
@@ -1752,9 +1907,14 @@ fn status_right(status: &SharedStatus) -> String {
         .unwrap_or_default()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one row keeps identity, execution facts, counters and terminal geometry explicit"
+)]
 fn child_activity_row(
     name: &str,
     identity: Option<&str>,
+    profile: Option<&ego_core::model_catalogue::ExecutionProfile>,
     activity: &str,
     elapsed: Duration,
     output_tokens: u64,
@@ -1773,6 +1933,48 @@ fn child_activity_row(
     let right = format!("{elapsed} · ↓ {tokens} tokens");
     let right_width = crate::render::Line::plain(&right).width();
     let left_budget = width.saturating_sub(right_width + 2);
+    if let Some(profile) = profile {
+        // Execution facts outrank optional activity and counters at narrow widths.
+        let label = identity.map(|id| format!(" [{id}]")).unwrap_or_default();
+        let full = format!(
+            "○ {}{label} · {} · {} · {}",
+            clean(name),
+            clean(&profile.model.0),
+            profile.effort.as_str(),
+            clean(activity)
+        );
+        let compact = format!(
+            "○ {} {}{label}",
+            profile.effort.as_str(),
+            clean(&profile.model.0)
+        );
+        let compact_with_activity = format!("{compact} · {}", clean(activity));
+        let content = if crate::render::Line::plain(&full).width() <= left_budget {
+            full
+        } else if crate::render::Line::plain(&compact_with_activity).width() <= left_budget {
+            compact_with_activity
+        } else {
+            compact
+        };
+        let text = if right_width + 2 <= width {
+            let content = picker_surface::truncate_cells(&content, left_budget);
+            format!(
+                "{content}{}{right}",
+                " ".repeat(width - crate::render::Line::plain(&content).width() - right_width)
+            )
+        } else {
+            picker_surface::truncate_cells(&content, width)
+        };
+        return format!(
+            "{}\n",
+            crate::render::Line::styled(
+                text,
+                crate::render::Style::fg(crate::render::Rgb(0, 255, 255))
+            )
+            .render(depth)
+        );
+    }
+    let activity = format!("{} · resolving", clean(activity));
     let display_name = if let Some(identity) = identity {
         let suffix = format!(" [{identity}]");
         let budget = left_budget.saturating_sub(2 + suffix.len());
@@ -1784,7 +1986,7 @@ fn child_activity_row(
         picker_surface::truncate_cells(&clean(name), left_budget.saturating_sub(4).min(28))
     };
     let left = picker_surface::truncate_cells(
-        &format!("○ {display_name}  {}", clean(activity)),
+        &format!("○ {display_name}  {}", clean(&activity)),
         left_budget,
     );
     let left_width = crate::render::Line::plain(&left).width();
@@ -1820,16 +2022,30 @@ fn status_row(status: &SurfaceStatus) -> String {
         status.width
     }
     .saturating_sub(1);
+    if status.activity && status.retry.is_none() {
+        for line in &status.shell_preview {
+            ephemeral.push_str(&line.truncate_to(width).text());
+            ephemeral.push('\n');
+        }
+    }
     for child in status.children.values() {
         ephemeral.push_str(&child_activity_row(
             &child.name,
             None,
+            child.profile.as_ref(),
             &child.activity,
             child.started.elapsed(),
             child.output_tokens,
             width,
             status.permission_capabilities.depth,
         ));
+    }
+    if let Some(alias) = status.background_children.attached_alias() {
+        ephemeral.push_str(&picker_surface::truncate_cells(
+            &format!("Attached to {alias} · /detach returns to parent"),
+            width,
+        ));
+        ephemeral.push('\n');
     }
     let children = &status.background_children.rows;
     let height = crossterm::terminal::size()
@@ -1843,7 +2059,7 @@ fn status_row(status: &SurfaceStatus) -> String {
         children.len()
     };
     let identities: Vec<_> = children.keys().map(ToString::to_string).collect();
-    for ((_, child), identity) in children.iter().zip(&identities).take(visible) {
+    for ((id, child), identity) in children.iter().zip(&identities).take(visible) {
         let length = (8..=identity.len())
             .find(|length| {
                 identities
@@ -1855,7 +2071,13 @@ fn status_row(status: &SurfaceStatus) -> String {
             .unwrap_or(identity.len());
         ephemeral.push_str(&child_activity_row(
             &child.name,
-            Some(&identity[identity.len() - length..]),
+            Some(
+                status
+                    .background_children
+                    .alias(id)
+                    .unwrap_or(&identity[identity.len() - length..]),
+            ),
+            child.profile.as_ref(),
             &child.activity,
             child.elapsed_before.saturating_add(child.started.elapsed()),
             child.output_tokens,
@@ -1935,18 +2157,34 @@ fn live_plan_rows(status: &SurfaceStatus, status_rows: &str) -> String {
 
 fn activity_or_status_row(status: &SurfaceStatus) -> String {
     if let Some((message, started, delay_ms)) = &status.retry {
+        let width = if status.width == 0 {
+            status.permission_capabilities.width
+        } else {
+            status.width
+        }
+        .saturating_sub(1);
         let remaining = delay_ms.saturating_sub(started.elapsed().as_millis() as u64);
-        let message = if let Some((cause, rest)) =
-            message.split_once(" — connection problem, retrying in ")
-        {
-            let counter = rest
-                .split_once(" (")
-                .map(|(_, counter)| counter)
-                .unwrap_or("");
-            format!(
-                "{cause} — connection problem, retrying in {:.1}s ({counter}",
-                remaining as f64 / 1000.0
-            )
+        let message = if let Some((cause, head, rest)) = [
+            " — connection problem, retrying in ",
+            " — provider at capacity, retrying in ",
+        ]
+        .into_iter()
+        .find_map(|phrase| {
+            message
+                .split_once(phrase)
+                .map(|(cause, rest)| (cause, phrase.trim_start_matches(" — "), rest))
+        }) {
+            // Keep everything after the counted seconds: the next attempt's
+            // clock time, when shown, and the attempt counter.
+            let tail = rest.split_once('s').map_or("", |(_, tail)| tail);
+            let countdown = format!("{head}{:.1}s", remaining as f64 / 1000.0);
+            let countdown = if crate::render::line::cells(&countdown) > width {
+                format!("retry in {:.1}s", remaining as f64 / 1000.0)
+            } else {
+                countdown
+            };
+            // The cause may be long; keep the countdown before anything that can be clipped.
+            format!("{countdown} — {cause}{tail}")
         } else {
             message.clone()
         };
@@ -1958,14 +2196,7 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
         ));
         return format!(
             "{}\n",
-            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
-                .render(status.permission_capabilities.depth)
-        );
-    }
-    if let Some(line) = &status.shell {
-        return format!(
-            "{}\n",
-            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
+            line.truncate_to(width)
                 .render(status.permission_capabilities.depth)
         );
     }
@@ -1984,8 +2215,9 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
             .map(|started| format!(" · thinking started {}s ago", started.elapsed().as_secs()))
             .unwrap_or_default();
         let activity = format!(
-            "{} Working {}{tokens}{thinking} ",
+            "{} {} {}{tokens}{thinking} ",
             ACTIVITY_FRAMES[(elapsed.as_secs() as usize) % ACTIVITY_FRAMES.len()],
+            status.activity_kind.label(),
             crate::render::duration(elapsed)
         );
         let width = if status.width == 0 {
@@ -1996,10 +2228,29 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
         .saturating_sub(1);
         let hint = "· Esc to interrupt";
         let line = crate::render::line::Line::plain(&activity);
-        if line.width() + hint.len() <= width {
-            return format!("{activity}\x1b[2m{hint}\x1b[22m\n");
+        let hint_width = crate::render::line::cells(hint);
+        if line.width() + hint_width <= width {
+            let separator = " · ";
+            let available = width
+                .saturating_sub(line.width() + hint_width + crate::render::line::cells(separator));
+            let requested = status.shell.as_ref().map_or_else(String::new, |line| {
+                let text = line.truncate_to(available).text();
+                if text.is_empty() {
+                    String::new()
+                } else {
+                    format!("{separator}{text}")
+                }
+            });
+            return format!("{activity}\x1b[2m{hint}\x1b[22m{requested}\n");
         }
         return format!("{}\n", line.truncate_to(width).text());
+    }
+    if let Some(line) = &status.shell {
+        return format!(
+            "{}\n",
+            line.truncate_to(status.permission_capabilities.width.saturating_sub(1))
+                .render(status.permission_capabilities.depth)
+        );
     }
     let text = status
         .painter
@@ -2016,7 +2267,10 @@ fn activity_or_status_row(status: &SurfaceStatus) -> String {
 impl Prompt for Waiting {
     fn supports_indicator_row_updates(&self) -> bool {
         let status = self.status.lock().expect("surface status lock");
-        (status.activity || !status.background_children.rows.is_empty()) && !status.permission_modal
+        (status.activity
+            || !status.background_children.rows.is_empty()
+            || status.background_children.attached_alias().is_some())
+            && !status.permission_modal
     }
 
     fn render_prompt_footer(&self) -> Cow<'_, str> {
@@ -2039,8 +2293,20 @@ impl Prompt for Waiting {
     }
 
     fn render_prompt_submission(&self, buffer: &str, width: u16) -> Option<String> {
-        background_notice::row(buffer, usize::from(width).saturating_sub(1))
-            .or_else(|| Some(format!("> {}", buffer.replace('\n', "\n… "))))
+        background_notice::row(buffer, usize::from(width).saturating_sub(1)).or_else(|| {
+            let text = buffer.replace('\n', "\n… ");
+            let depth = self
+                .status
+                .lock()
+                .expect("surface status lock")
+                .permission_capabilities
+                .depth;
+            if depth == crate::render::Depth::None {
+                Some(format!("> {text}"))
+            } else {
+                Some(format!("\x1b[36m>\x1b[39m \x1b[1m{text}\x1b[0m"))
+            }
+        })
     }
 
     fn render_prompt_left(&self) -> Cow<'_, str> {
@@ -2061,7 +2327,23 @@ impl Prompt for Waiting {
             PromptEditMode::Vi(reedline::PromptViMode::Insert) => "[INSERT] ",
             _ => "",
         };
-        Cow::Owned(format!("{plan}{row}{}{mode}> ", status_prefix(&status)))
+        let queued = status
+            .queued_previews
+            .iter()
+            .filter(|preview| preview.admitted)
+            .map(|preview| {
+                let mut text = format!("> {}\n", preview.text.replace('\n', "\n… "));
+                if let Some(label) = crate::render::attachments::label(preview.images) {
+                    text.push_str(&label);
+                    text.push('\n');
+                }
+                text
+            })
+            .collect::<String>();
+        Cow::Owned(format!(
+            "{plan}{queued}{row}{}{mode}> ",
+            status_prefix(&status)
+        ))
     }
 
     /// Alt+Enter and a bracketed paste both put a real newline in the buffer,
@@ -2226,7 +2508,7 @@ mod permission_edit_form_tests {
         let form = PermissionEditForm::new(
             exec_schema(),
             json!({
-                "argv": ["project-tool", "tasks.js", "show", "regression"],
+                "argv": ["wiz-run", "stories-cli.js", "show", "128-3573"],
                 "cwd": "/workspace",
                 "timeout_ms": 30000,
                 "environment": { "LANG": "C" }
@@ -2243,7 +2525,7 @@ mod permission_edit_form_tests {
                 (
                     "argv",
                     PermissionFieldKind::StringArray,
-                    "project-tool tasks.js show regression"
+                    "wiz-run stories-cli.js show 128-3573"
                 ),
                 ("cwd", PermissionFieldKind::String, "/workspace"),
                 ("timeout_ms", PermissionFieldKind::Integer, "30000"),
@@ -2257,7 +2539,7 @@ mod permission_edit_form_tests {
         assert_eq!(
             form.validate().unwrap(),
             json!({
-                "argv": ["project-tool", "tasks.js", "show", "regression"],
+                "argv": ["wiz-run", "stories-cli.js", "show", "128-3573"],
                 "cwd": "/workspace",
                 "timeout_ms": 30000,
                 "environment": { "LANG": "C" }
@@ -2635,5 +2917,119 @@ mod image_admission_tests {
         assert_eq!(status.lock().unwrap().images.labels(), before);
         assert_eq!(phase.get(), EditPhase::Busy);
         assert_eq!(TERMINAL_SCRIPT.take().unwrap().prompts.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod task_profile_row_tests {
+    use super::*;
+
+    // Catches: the elapsed counter hiding the state label at a minute-width boundary.
+    #[test]
+    fn child_working_label_survives_elapsed_width_changes() {
+        let profile = ego_core::model_catalogue::ExecutionProfile {
+            model: ego_core::config::ModelRef("provider/actual-model".into()),
+            effort: ego_core::generator::types::ThinkingLevel::High,
+        };
+        for (seconds, elapsed) in [
+            (69, "1m 9s"),
+            (70, "1m 10s"),
+            (119, "1m 59s"),
+            (120, "2m 0s"),
+        ] {
+            let row = child_activity_row(
+                "worker",
+                Some("t1"),
+                Some(&profile),
+                "Working",
+                Duration::from_secs(seconds),
+                17,
+                75,
+                crate::render::Depth::None,
+            );
+            for part in [
+                "Working",
+                "provider/actual-model",
+                "high",
+                "[t1]",
+                elapsed,
+                "↓ 17 tokens",
+            ] {
+                assert!(row.contains(part), "missing {part} in {row:?}");
+            }
+            assert!(crate::render::Line::plain(row.trim_end()).width() <= 75);
+        }
+    }
+
+    // Catches: requested/default model labels replacing the observed profile,
+    // profile updates not reaching cyan rows, and narrow rows losing effort or counters.
+    #[test]
+    fn task_profile_row_shows_observed_identity_effort_and_bounded_cyan_output() {
+        let profile = ego_core::model_catalogue::ExecutionProfile {
+            model: ego_core::config::ModelRef("provider/actual-model".into()),
+            effort: ego_core::generator::types::ThinkingLevel::High,
+        };
+        let row = child_activity_row(
+            "worker",
+            Some("t1"),
+            Some(&profile),
+            "Thinking",
+            Duration::from_secs(3),
+            17,
+            120,
+            crate::render::Depth::None,
+        );
+        assert!(row.contains("provider/actual-model · high"), "{row}");
+        assert!(
+            row.contains("[t1]") && row.contains("3s · ↓ 17 tokens"),
+            "{row}"
+        );
+        let cyan = child_activity_row(
+            "worker",
+            Some("t1"),
+            Some(&profile),
+            "Thinking",
+            Duration::ZERO,
+            0,
+            120,
+            crate::render::Depth::TrueColor,
+        );
+        assert!(cyan.contains("\x1b[38;2;0;255;255m"), "{cyan:?}");
+        let unknown = child_activity_row(
+            "worker",
+            None,
+            None,
+            "Starting",
+            Duration::ZERO,
+            0,
+            120,
+            crate::render::Depth::None,
+        );
+        assert!(unknown.contains("resolving") && !unknown.contains("actual-model"));
+        for (width, seconds, tokens, suffix) in [
+            (12, 0, 0, None),
+            (24, 0, 0, Some("0s · ↓ 0 tokens")),
+            (40, 3, 17, Some("3s · ↓ 17 tokens")),
+            (80, 86, 51_200, Some("1m 26s · ↓ 51.2k tokens")),
+        ] {
+            let row = child_activity_row(
+                "worker",
+                Some("t1"),
+                Some(&profile),
+                "Thinking",
+                Duration::from_secs(seconds),
+                tokens,
+                width,
+                crate::render::Depth::None,
+            );
+            assert!(row.contains("high"), "{width}: {row}");
+            if let Some(suffix) = suffix {
+                assert!(row.contains(suffix), "{width}: {row}");
+            }
+            assert!(
+                crate::render::Line::plain(row.trim_end()).width() <= width,
+                "{width}: {row}"
+            );
+        }
     }
 }

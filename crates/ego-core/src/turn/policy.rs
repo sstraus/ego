@@ -43,6 +43,7 @@ pub struct GenerationPolicySnapshot {
     workspace: CanonPath,
     roots: Vec<ProfileRoot>,
     read_perimeter: crate::permit::ReadPerimeter,
+    root_ceilings: crate::permit::RootCeilings,
     mode: Mode,
     ruleset: Ruleset,
     canonical: SecretMaterial,
@@ -80,6 +81,7 @@ impl GenerationPolicySnapshot {
             self.mode,
             self.ruleset.clone(),
             self.read_perimeter.clone(),
+            self.root_ceilings.clone(),
         )?
         .digest())
     }
@@ -90,6 +92,10 @@ impl GenerationPolicySnapshot {
 
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    pub fn root_ceilings(&self) -> &crate::permit::RootCeilings {
+        &self.root_ceilings
     }
 
     pub(crate) fn validate_task_roots(
@@ -129,9 +135,11 @@ impl GenerationPolicySnapshot {
             workspace,
             roots,
             read_perimeter,
+            root_ceilings,
             mode,
             allow,
             deny,
+            web_private_network,
         } = serde_json::from_slice(encoded)
             .map_err(|_| GenerationPolicyCaptureError::InvalidSnapshot)?;
         if version != WIRE_VERSION {
@@ -141,8 +149,16 @@ impl GenerationPolicySnapshot {
         let ruleset = Ruleset {
             allow: decode_rules(allow)?,
             deny: decode_rules(deny)?,
+            web_private_network,
         };
-        let snapshot = Self::from_semantics(workspace, roots, mode, ruleset, read_perimeter)?;
+        let snapshot = Self::from_semantics(
+            workspace,
+            roots,
+            mode,
+            ruleset,
+            read_perimeter,
+            root_ceilings,
+        )?;
         if snapshot.canonical.expose_secret_bytes() != encoded {
             return Err(GenerationPolicyCaptureError::NonCanonicalSnapshot);
         }
@@ -155,8 +171,16 @@ impl GenerationPolicySnapshot {
         mode: Mode,
         ruleset: Ruleset,
         read_perimeter: crate::permit::ReadPerimeter,
+        root_ceilings: crate::permit::RootCeilings,
     ) -> Result<Self, GenerationPolicyCaptureError> {
-        let wire = PolicyWire::from_semantics(&workspace, &roots, mode, &ruleset, &read_perimeter);
+        let wire = PolicyWire::from_semantics(
+            &workspace,
+            &roots,
+            mode,
+            &ruleset,
+            &read_perimeter,
+            &root_ceilings,
+        );
         let canonical =
             serde_json::to_vec(&wire).map_err(|_| GenerationPolicyCaptureError::EncodingFailed)?;
         if canonical.len() > MAX_GENERATION_POLICY_SNAPSHOT_BYTES {
@@ -167,6 +191,7 @@ impl GenerationPolicySnapshot {
             workspace,
             roots,
             read_perimeter,
+            root_ceilings,
             mode,
             ruleset,
             canonical: SecretMaterial::new(canonical),
@@ -218,6 +243,7 @@ impl GenerationPolicyCapture {
                 mode,
                 ruleset,
                 crate::permit::ReadPerimeter::default(),
+                crate::permit::RootCeilings::default(),
             )?),
             human,
         )
@@ -226,6 +252,18 @@ impl GenerationPolicyCapture {
     pub fn restore(
         snapshot: Arc<GenerationPolicySnapshot>,
         human: Option<Arc<dyn HumanApprover>>,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        Self::restore_with_session_approvals(
+            snapshot,
+            human,
+            crate::permit::SessionApprovals::default(),
+        )
+    }
+
+    fn restore_with_session_approvals(
+        snapshot: Arc<GenerationPolicySnapshot>,
+        human: Option<Arc<dyn HumanApprover>>,
+        approvals: crate::permit::SessionApprovals,
     ) -> Result<Self, GenerationPolicyCaptureError> {
         let policy = match human.clone() {
             Some(human) => PolicyEngine::with_human(
@@ -240,13 +278,23 @@ impl GenerationPolicyCapture {
                 snapshot.ruleset.clone(),
             ),
         }
+        .with_session_approvals(approvals)
         .with_profile_roots(snapshot.roots.clone())
-        .with_read_perimeter(snapshot.read_perimeter.clone());
+        .with_read_perimeter(snapshot.read_perimeter.clone())
+        .with_root_ceilings(snapshot.root_ceilings.clone());
         Ok(Self {
             policy: Arc::new(policy),
             snapshot,
             human,
         })
+    }
+
+    /// Attach live-session decisions without serializing them into the snapshot.
+    pub fn with_session_approvals(
+        self,
+        approvals: crate::permit::SessionApprovals,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        Self::restore_with_session_approvals(self.snapshot, self.human, approvals)
     }
 
     /// Pin the admitted sandbox read authority in both engine and snapshot.
@@ -260,8 +308,31 @@ impl GenerationPolicyCapture {
             self.snapshot.mode,
             self.snapshot.ruleset.clone(),
             read_perimeter,
+            self.snapshot.root_ceilings.clone(),
         )?;
-        Self::restore(Arc::new(snapshot), self.human)
+        let approvals = self.policy.session_approvals();
+        Self::restore_with_session_approvals(Arc::new(snapshot), self.human, approvals)
+    }
+
+    /// Intersect administrator write bounds across capture, resume and child turns.
+    pub fn with_root_ceilings(
+        self,
+        root_ceilings: crate::permit::RootCeilings,
+    ) -> Result<Self, GenerationPolicyCaptureError> {
+        let root_ceilings = self.snapshot.root_ceilings.clone().intersect(root_ceilings);
+        if root_ceilings == self.snapshot.root_ceilings {
+            return Ok(self);
+        }
+        let snapshot = GenerationPolicySnapshot::from_semantics(
+            self.snapshot.workspace.clone(),
+            self.snapshot.roots.clone(),
+            self.snapshot.mode,
+            self.snapshot.ruleset.clone(),
+            self.snapshot.read_perimeter.clone(),
+            root_ceilings,
+        )?;
+        let approvals = self.policy.session_approvals();
+        Self::restore_with_session_approvals(Arc::new(snapshot), self.human, approvals)
     }
 
     /// Pin the session's public MCP output directory with read-only authority.
@@ -283,8 +354,10 @@ impl GenerationPolicyCapture {
             self.snapshot.mode,
             self.snapshot.ruleset.clone(),
             self.snapshot.read_perimeter.clone(),
+            self.snapshot.root_ceilings.clone(),
         )?;
-        Self::restore(Arc::new(snapshot), self.human)
+        let approvals = self.policy.session_approvals();
+        Self::restore_with_session_approvals(Arc::new(snapshot), self.human, approvals)
     }
 
     pub fn policy(&self) -> Arc<PolicyEngine> {
@@ -321,8 +394,10 @@ impl GenerationPolicyCapture {
             mode,
             ruleset,
             self.snapshot.read_perimeter.clone(),
+            self.snapshot.root_ceilings.clone(),
         )?;
-        Self::restore(Arc::new(snapshot), self.human)
+        let approvals = self.policy.session_approvals();
+        Self::restore_with_session_approvals(Arc::new(snapshot), self.human, approvals)
     }
 
     pub fn snapshot(&self) -> Arc<GenerationPolicySnapshot> {
@@ -496,12 +571,20 @@ struct PolicyWire {
         skip_serializing_if = "crate::permit::ReadPerimeter::is_default"
     )]
     read_perimeter: crate::permit::ReadPerimeter,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::permit::RootCeilings::is_unbounded"
+    )]
+    root_ceilings: crate::permit::RootCeilings,
     // Snapshot v1 is a content-addressed authority format, not public UI grammar.
     // Keep its original spelling so old edits sessions retain the exact digest.
     #[serde(serialize_with = "snapshot_mode")]
     mode: Mode,
     allow: Vec<RuleWire>,
     deny: Vec<RuleWire>,
+    /// Absent when false, so a policy without the owner setting keeps its digest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    web_private_network: bool,
 }
 
 fn snapshot_mode<S: serde::Serializer>(mode: &Mode, serializer: S) -> Result<S::Ok, S::Error> {
@@ -519,15 +602,18 @@ impl PolicyWire {
         mode: Mode,
         ruleset: &Ruleset,
         read_perimeter: &crate::permit::ReadPerimeter,
+        root_ceilings: &crate::permit::RootCeilings,
     ) -> Self {
         Self {
             version: WIRE_VERSION,
             workspace: workspace.clone(),
             roots: roots.to_vec(),
             read_perimeter: read_perimeter.clone(),
+            root_ceilings: root_ceilings.clone(),
             mode,
             allow: encode_rules(&ruleset.allow),
             deny: encode_rules(&ruleset.deny),
+            web_private_network: ruleset.web_private_network,
         }
     }
 }

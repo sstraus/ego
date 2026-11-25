@@ -1,12 +1,14 @@
 //! `Permit`: an unforgeable, scoped grant, minted only by [`PolicyEngine`].
 //!
-//! A tool never constructs or widens its own `Permit`: both of `Permit`'s fields are
-//! private to this module, and its only public constructor lives behind [`Sealed`], whose
-//! own constructor is private to this module too. No code outside `grant.rs` — not
-//! `tool.rs`, not `fs.rs`, not a consumer crate — can name `Sealed(())`, so the only way
-//! to produce a `Permit` anywhere in the program is this module's private `mint`, and the
-//! only way to reach *that* is [`PolicyEngine::classify`], which derives the scope from
-//! the call.
+//! See `ARCHITECTURE.md` §3.2 (R1: effects enforced, not declared) and
+//! §3.4. A tool never constructs or widens its own `Permit`: both of
+//! `Permit`'s fields are private to this module, and its only public
+//! constructor lives behind [`Sealed`], whose own constructor is private to
+//! this module too. No code outside `grant.rs` — not `tool.rs`, not
+//! `fs.rs`, not a consumer crate — can name `Sealed(())`, so the only way
+//! to produce a `Permit` anywhere in the program is this module's private
+//! `mint`, and the only way to reach *that* is
+//! [`PolicyEngine::classify`], which derives the scope from the call.
 
 use std::fmt::{self, Write as _};
 use std::sync::Arc;
@@ -56,17 +58,24 @@ struct Sealed(());
 /// source of truth: `Permit` is not `Clone`, `Sealed` is not exported, and no
 /// widening constructor is public.
 ///
-/// This leg does not prove that the scope is enforced. Leg 1 is only about where permits
-/// come from.
+/// This leg does not prove that the scope is enforced. That is the
+/// `GuardedEffects` responsibility and `POTENTIALS.md` P23 open window: a
+/// permit that cannot be widened, checked against a path that is re-resolved
+/// between the check and the open, is still a hole. Leg 1 is only about where
+/// permits come from.
 #[derive(Debug)]
 pub struct Permit {
     scope: Scope,
     read_perimeter: super::ReadPerimeter,
+    /// Credential paths whose values the owner explicitly approved: an exact
+    /// user-layer rule for the operation this permit was minted for.
+    disclosed: Vec<CanonPath>,
     call_fingerprint: Option<[u8; 32]>,
     _sealed: Sealed,
 }
 
-/// Names the operation a [`Permit`] refused.
+/// Names the operation a [`Permit`] refused. `ARCHITECTURE.md` §3.2: a
+/// denial must name what was denied, not just that something was.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PermitDenied {
     Write {
@@ -181,13 +190,21 @@ impl Permit {
     }
 
     /// Checks a read against [`Scope::read_paths`].
+    /// An exact protected root passed owner admission; descendants still face
+    /// the perimeter, so approving a scan root cannot disclose its children.
     pub fn allows_read(&self, path: &CanonPath) -> Result<(), PermitDenied> {
-        if self.read_perimeter.refuses(path) {
+        if self.read_perimeter.refuses(path) && !self.scope.read_paths.contains(path) {
             return Err(PermitDenied::Read { path: path.clone() });
         }
         Self::allows(&self.scope.read_paths, path, |path| PermitDenied::Read {
             path,
         })
+    }
+
+    /// Did the owner explicitly approve disclosing the values in `path`?
+    /// Without it a credential file is projected to key names.
+    pub fn discloses(&self, path: &CanonPath) -> bool {
+        self.disclosed.contains(path)
     }
 
     /// Checks an enumeration against [`Scope::list_paths`].
@@ -197,7 +214,7 @@ impl Permit {
     /// be enumerated, and inferring one from the other is how least privilege
     /// quietly stops being enforced.
     pub fn allows_list(&self, path: &CanonPath) -> Result<(), PermitDenied> {
-        if self.read_perimeter.refuses(path) {
+        if self.read_perimeter.refuses(path) && !self.scope.list_paths.contains(path) {
             return Err(PermitDenied::List { path: path.clone() });
         }
         Self::allows(&self.scope.list_paths, path, |path| PermitDenied::List {
@@ -207,7 +224,7 @@ impl Permit {
 
     /// Checks a search against [`Scope::search_paths`].
     pub fn allows_search(&self, path: &CanonPath) -> Result<(), PermitDenied> {
-        if self.read_perimeter.refuses(path) {
+        if self.read_perimeter.refuses(path) && !self.scope.search_paths.contains(path) {
             return Err(PermitDenied::Search { path: path.clone() });
         }
         Self::allows(&self.scope.search_paths, path, |path| {
@@ -293,6 +310,11 @@ impl Permit {
         }
     }
 
+    /// Whether the owner named this exact endpoint, so a non-public address is admitted.
+    pub(crate) fn owner_private_network(&self) -> bool {
+        self.scope.owner_private_network
+    }
+
     pub(crate) fn allows_secret_egress(
         &self,
         authority: &super::SecretEgressAuthority,
@@ -322,8 +344,13 @@ impl Permit {
 
 /// A call and the grant that answers it, as one value.
 ///
-/// Pair a permit with its prepared call structurally. A caller must not be
-/// able to combine the grant for call A with call B.
+/// [`Invariant W`](PolicyEngine) says a permit belongs to a call. Until this
+/// type existed nothing in the types said so: `classify` handed back a bare
+/// [`Permit`], and a caller holding the permit from call A alongside call B
+/// had two values it could pass in either combination. Pairing them here
+/// makes the correspondence structural — the same argument
+/// `2026-08-21-attempt-accounting-ledger.md` used to keep a reservation
+/// inside its `GenerationAttempt` rather than beside it.
 ///
 /// No `Clone` and no public constructor: an `Authorized` is produced by
 /// [`PolicyEngine::classify`] and by nothing else.
@@ -340,6 +367,45 @@ pub struct Authorized {
     call: PreparedCall,
     permit: Permit,
     by: Authority,
+}
+
+/// What an MCP task ticket keeps of the authorization that let the original
+/// `tools/call` run: its scope, perimeter, disclosures and authority. A poll or
+/// a cancel of that task inherits it without a second classification, so an
+/// original that a human approved is not asked about again at every poll.
+/// Crate-private: only [`crate::mcp::McpTaskTicket`] holds one.
+#[derive(Debug, Clone)]
+pub(crate) struct InheritedGrant {
+    scope: Scope,
+    read_perimeter: super::ReadPerimeter,
+    disclosed: Vec<CanonPath>,
+    by: Authority,
+}
+
+impl InheritedGrant {
+    pub(crate) fn of(permit: &Permit, by: &Authority) -> Self {
+        Self {
+            scope: permit.scope.clone(),
+            read_perimeter: permit.read_perimeter.clone(),
+            disclosed: permit.disclosed.clone(),
+            by: by.clone(),
+        }
+    }
+
+    /// The same grant, answering `call`. The ceiling is the original's scope.
+    pub(crate) fn mint(&self, call: PreparedCall) -> Authorized {
+        Authorized {
+            call,
+            permit: Permit {
+                scope: self.scope.clone(),
+                read_perimeter: self.read_perimeter.clone(),
+                disclosed: self.disclosed.clone(),
+                call_fingerprint: None,
+                _sealed: Sealed(()),
+            },
+            by: self.by.clone(),
+        }
+    }
 }
 
 impl Authorized {
@@ -384,6 +450,7 @@ impl Authorized {
         let permit = Permit {
             scope: scope_of(&call),
             read_perimeter: super::ReadPerimeter::default(),
+            disclosed: Vec::new(),
             call_fingerprint: None,
             _sealed: Sealed(()),
         };
@@ -392,14 +459,17 @@ impl Authorized {
 
     pub(crate) fn with_verified_resume_parameters(
         mut self,
-        parameters: &serde_json::Value,
+        request_state: String,
+        input_responses: serde_json::Value,
     ) -> Result<Self, crate::mcp::McpProjectionError> {
-        self.call.apply_verified_resume_parameters(parameters)?;
+        self.call
+            .apply_verified_resume_parameters(request_state, input_responses)?;
         Ok(self)
     }
 }
 
-/// Why policy refused to authorise a call.
+/// Why policy refused to authorise a call. Names the operation, never just
+/// the fact of a refusal — `ARCHITECTURE.md` §3.2.
 ///
 /// Every arm is a **settled** answer: the question was asked and the answer is
 /// no. A call nobody in this run can answer is not here — it is
@@ -407,14 +477,20 @@ impl Authorized {
 /// type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDenied {
+    /// A non-bypassable floor, without effect details.
+    HardFloor { class: &'static str },
     /// A deny rule covers this operation. Carries the rule's ID, because
     /// "denied" without it leaves an operator grepping their config for which
     /// of forty lines did it — and the ID is exactly what `ego rules revoke`
     /// takes.
     ///
-    /// Include rule origins with the ID. Equal predicates share an ID across
-    /// layers, but the operator needs provenance to know which source can lift
-    /// a denial before the run exits.
+    /// It also carries **where the rule came from**, because the ID alone does
+    /// not answer the question an operator actually has. `RuleId` hashes the
+    /// predicate, so the same rule written in two layers has one ID by
+    /// construction — its own doc says the origin "is metadata that `rules ls`
+    /// shows" — and a run that ends at exit 3 has no second invocation in
+    /// which to show it. See
+    /// `docs/internals/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md`.
     Denied {
         tool: String,
         op: OpName,
@@ -457,9 +533,15 @@ pub enum PolicyDenied {
         tool: String,
         op: OpName,
         path: CanonPath,
+        root: ProfileRoot,
     },
-    /// An asked party refused. Distinguish this from a matching deny rule so operators are not
-    /// sent looking for configuration nobody wrote. `by` records the actual party.
+    /// A party that was asked said no. Distinct from `Denied` because nobody
+    /// wrote a rule: there is nothing to grep for and nothing to revoke, and
+    /// telling an operator to look for a rule that does not exist is worse
+    /// than saying less.
+    ///
+    /// `by` names *who* refused. §5 deferred this field to "the audit event
+    /// that needs it"; that event has arrived, so the field has.
     Refused {
         tool: String,
         op: OpName,
@@ -500,7 +582,10 @@ pub enum PolicyDenied {
 impl PolicyDenied {
     /// A read, list or search the workspace boundary refused.
     ///
-    /// The caller returns it to the model as a failed tool result and the turn goes on.
+    /// The one refusal the model can act on and nobody can lift mid-run: no
+    /// mode, rule or answer moves the boundary (`CLI.md` §4.4), and the call
+    /// changed nothing, so the turn has nothing to stop for. The caller
+    /// returns it to the model as a failed tool result and the turn goes on.
     pub fn is_unreachable_read(&self) -> bool {
         matches!(
             self,
@@ -519,6 +604,7 @@ impl PolicyDenied {
     /// the *allow* case, where nothing stops early.
     pub fn authority(&self) -> Authority {
         match self {
+            PolicyDenied::HardFloor { .. } => Authority::Boundary,
             PolicyDenied::Denied { by, from, also, .. }
             | PolicyDenied::DeniedSubject { by, from, also, .. } => Authority::Rules {
                 rules: vec![RuleAuthority {
@@ -544,6 +630,42 @@ impl PolicyDenied {
 impl fmt::Display for PolicyDenied {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            PolicyDenied::HardFloor { class } => return write!(f, "blocked: {class}"),
+            PolicyDenied::ModeForbids { .. } | PolicyDenied::ModeForbidsSubject { .. } => {
+                return f.write_str("blocked: mode floor");
+            }
+            PolicyDenied::ProtectedRead { .. } => return f.write_str("blocked: credential floor"),
+            PolicyDenied::OutsideWorkspace { path, .. } if Ruleset::is_credential_path(path) => {
+                return f.write_str("blocked: credential floor");
+            }
+            PolicyDenied::Denied {
+                from: Source::Default,
+                path,
+                ..
+            } if Ruleset::is_credential_path(path) => {
+                return f.write_str("blocked: credential floor");
+            }
+            PolicyDenied::Denied {
+                from: Source::Default,
+                ..
+            } => return f.write_str("blocked: default floor"),
+            PolicyDenied::Denied {
+                from: Source::System,
+                ..
+            }
+            | PolicyDenied::DeniedSubject {
+                from: Source::System,
+                ..
+            } => return f.write_str("blocked: system floor"),
+            PolicyDenied::ReadOnlyRoot { root, .. }
+                if root.ceiling_source().is_some() || root.source() == Some(Source::Flags) =>
+            {
+                return f.write_str("blocked: root ceiling");
+            }
+            _ => {}
+        }
+        match self {
+            PolicyDenied::HardFloor { class } => write!(f, "blocked: {class}"),
             PolicyDenied::Denied {
                 tool,
                 op,
@@ -610,31 +732,61 @@ impl fmt::Display for PolicyDenied {
             }
             PolicyDenied::OutsideWorkspace { tool, op, path } => {
                 write!(f, "{tool} may not {op} {path}: it is outside the workspace")?;
-                // A read the shell could still do under Adaptive: name the
-                // grant, because the model otherwise falls back to `cat`.
-                // Not for credentials: the defaults keep denying those.
-                if self.is_unreachable_read() && !Ruleset::is_credential_path(path) {
-                    let quoted_path = path.to_string().replace('\'', "'\\''");
-                    write!(
-                        f,
-                        "; ask the user to run `ego roots add --access read '{quoted_path}'`, \
-                         then exit and resume the session"
-                    )?;
-                } else if *op == OpName::Write && !Ruleset::is_credential_path(path) {
-                    let quoted_path = path.to_string().replace('\'', "'\\''");
-                    write!(
-                        f,
-                        "; ask the user to run `ego roots add --access read-write '{quoted_path}'`, \
-                         then exit and resume the session"
-                    )?;
+                // Name the grant, because the model otherwise falls back to
+                // `cat` or `tee`. Not for credentials: the defaults keep
+                // denying those.
+                if !Ruleset::is_credential_path(path) {
+                    let access = match op {
+                        OpName::Read | OpName::List | OpName::Search => Some("read"),
+                        OpName::Write => Some("read-write"),
+                        _ => None,
+                    };
+                    if let Some(access) = access {
+                        let quoted_path = path.to_string().replace('\'', "'\\''");
+                        write!(
+                            f,
+                            "; the user can grant this root with the Session or Permanent \
+                             prompt or `ego roots add --access {access} '{quoted_path}'`; \
+                             ego rebuilds the session with the root when the turn ends, \
+                             no restart. Only the owner grants a root: tell the user and \
+                             do not run ego commands that change roots yourself"
+                        )?;
+                        // The three remedies as exact commands, for a run nobody can ask.
+                        let (short, rule) = match op {
+                            OpName::Write => ("rw", "write"),
+                            OpName::List => ("ro", "list"),
+                            OpName::Search => ("ro", "search"),
+                            _ => ("ro", "read"),
+                        };
+                        write!(
+                            f,
+                            "; allow for this run: add `--allow-dir '{quoted_path}:{short}'` to \
+                             the same command; keep blocked: `ego rules deny '{rule}({quoted_path})'`"
+                        )?;
+                    }
                 }
                 Ok(())
             }
-            PolicyDenied::ReadOnlyRoot { tool, op, path } => {
+            PolicyDenied::ReadOnlyRoot {
+                tool,
+                op,
+                path,
+                root,
+            } => {
                 write!(
                     f,
-                    "{tool} may not {op} {path}: it is inside a read-only root"
-                )
+                    "{tool} may not {op} {path}: it is inside a read-only root {}",
+                    root.path()
+                )?;
+                if let Some(source) = root.source() {
+                    write!(f, " declared in the {source} config")?;
+                } else {
+                    write!(f, " (source unavailable)")?;
+                }
+                if let Some(ceiling) = root.ceiling_source() {
+                    write!(f, "; write access was reduced by the {ceiling}")?;
+                }
+                Ok(())
             }
             PolicyDenied::Refused { tool, op, path, .. } => {
                 write!(f, "{tool} may not {op} {path}: permission was refused")
@@ -678,9 +830,13 @@ impl std::error::Error for PolicyDenied {}
 
 /// Why a call could not be settled without asking somebody.
 ///
-/// Call-scoped permit construction remains private.
+/// A value and not a `bool` because `ARCHITECTURE.md` §3.4 requires the
+/// *reason* to reach both the human and the audit event: they produce
+/// different prompts and different headless behaviours.
 ///
-/// Terminal settlement errors remain distinct from pending approver states.
+/// **Two arms, not four.** `2026-08-21-a-permit-nobody-can-widen.md` §4 also
+/// names "the judge was unavailable" and "the judge was uncertain". There is
+/// no judge in this build, so those have no producer and are not declared.
 ///
 /// The two that *are* declared are the two steps that can decline: the rules,
 /// and then the mode. They are chained rather than alternative — a question
@@ -697,7 +853,8 @@ pub enum Escalation {
     /// No allow rule covered it. `PolicyEngine::classify` is the producer:
     /// steps 0 to 3 ran and none of them settled it.
     NoRuleCovers { op: OpName, path: CanonPath },
-    /// The mode does not auto-approve the operation. Produced by `ModeApprover`.
+    /// The mode does not auto-approve this operation. `ModeApprover` is the
+    /// producer, at §6 step 5.
     ModeAsks {
         mode: Mode,
         op: OpName,
@@ -761,7 +918,11 @@ impl fmt::Display for Escalation {
             Escalation::ModeAsksSubject { mode, op, subject } => {
                 write!(f, "{mode} mode does not approve {op} {subject} on its own")
             }
+        }?;
+        if self.op() == OpName::Spawn {
+            f.write_str("; no exact owner-approved command in this session; process effects may include file changes or network access")?;
         }
+        Ok(())
     }
 }
 
@@ -778,6 +939,10 @@ pub struct PermissionRequest {
     presentation: Option<Box<PermissionPresentation>>,
     child_name: Option<String>,
     explicit_answer: bool,
+    /// The sandbox widening this request asks for, when a person may keep it for the workspace.
+    sandbox_scope: Option<super::SandboxGrant>,
+    /// A program family the owner approved often enough to offer allowing as a whole.
+    family_offer: Option<&'static str>,
 }
 
 /// Display-only facts retained for a human permission decision.
@@ -857,6 +1022,8 @@ impl PermissionRequest {
             presentation: None,
             child_name: None,
             explicit_answer: false,
+            sandbox_scope: None,
+            family_offer: None,
         }
     }
 
@@ -884,7 +1051,7 @@ impl PermissionRequest {
     pub fn sandbox_grant(grant: &super::SandboxGrant, command: &str) -> Self {
         let mut request = Self::new(
             format!(
-                "sandbox {grant} for this session. The command will run again and may repeat prior effects: {command}"
+                "sandbox {grant} for this session. No command will be retried; prior effects may already have occurred: {command}"
             ),
             Vec::new(),
             Escalation::NoRuleCovers {
@@ -893,7 +1060,30 @@ impl PermissionRequest {
             },
         );
         request.explicit_answer = true;
+        // Execution is a session-only widening: no stored root grants exec.
+        request.sandbox_scope = (grant.access != super::SandboxAccess::Exec).then(|| grant.clone());
         request
+    }
+
+    /// The deny rules `[k]` would keep: the exact path of a sandbox widening, else the
+    /// rules the call itself would be remembered under. `None` when no rule can name it.
+    pub fn keep_blocked_plan(&self) -> Option<super::super::config::rule_management::RememberPlan> {
+        match &self.sandbox_scope {
+            Some(grant) => {
+                super::super::config::rule_management::RememberPlan::for_sandbox_path(grant)
+            }
+            None => self.presentation()?.suggested_remember_plan().ok().cloned(),
+        }
+    }
+
+    /// The rule `[g]` would store for the whole program family, once the owner approved it often.
+    pub fn generalized_plan(&self) -> Option<super::super::config::rule_management::RememberPlan> {
+        super::super::config::rule_management::RememberPlan::for_exec_family(self.family_offer?)
+    }
+
+    /// The path grant `[a]` would keep for this workspace, if any.
+    pub fn persistable_sandbox_grant(&self) -> Option<&super::SandboxGrant> {
+        self.sandbox_scope.as_ref()
     }
 
     pub const fn requires_explicit_answer(&self) -> bool {
@@ -917,6 +1107,37 @@ impl PermissionRequest {
 
     pub fn presentation(&self) -> Option<&PermissionPresentation> {
         self.presentation.as_deref()
+    }
+
+    /// The three remedies as exact commands, for a run nobody could ask:
+    /// allow for this run, allow always, keep blocked. `None` when the exact
+    /// rules would disclose credential values or no rule can be formed.
+    pub fn remedies(&self) -> Option<String> {
+        let plan = self.presentation()?.remember_plan().ok()?;
+        if plan.discloses_values() || plan.candidates.is_empty() {
+            return None;
+        }
+        let rules: Vec<String> = plan.candidates.iter().map(ToString::to_string).collect();
+        let flags = |flag: &str| {
+            rules
+                .iter()
+                .map(|rule| format!("{flag} '{rule}'"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        let commands = |verb: &str| {
+            rules
+                .iter()
+                .map(|rule| format!("ego rules {verb} '{rule}'"))
+                .collect::<Vec<_>>()
+                .join(" && ")
+        };
+        Some(format!(
+            "\nremedies:\n- allow for this run: add {} to the same command\n- allow always: {}\n- keep blocked: {}",
+            flags("--allow"),
+            commands("allow"),
+            commands("deny"),
+        ))
     }
 }
 
@@ -969,21 +1190,34 @@ impl fmt::Display for PermissionRequest {
                             content.len(),
                             EscapedBytes(content)
                         )?,
-                        Change::Replace {
-                            replace_all,
-                            old_string,
-                            new_string,
+                        Change::Generated {
+                            media_type,
+                            producer,
                         } => write!(
                             f,
-                            "\n  replace {} old text: {}\n  with new text: {}\n  final content depends on the file at execution time",
-                            if *replace_all {
-                                "all original non-overlapping occurrences of"
-                            } else {
-                                "exactly one occurrence of"
-                            },
-                            TerminalSafe(old_string),
-                            TerminalSafe(new_string)
+                            "\n  generated {} from {}; the bytes are produced at execution time",
+                            TerminalSafe(media_type),
+                            TerminalSafe(producer)
                         )?,
+                        Change::Replace {
+                            replace_all,
+                            chunks,
+                        } => {
+                            for chunk in chunks {
+                                write!(
+                                    f,
+                                    "\n  replace {} old text: {}\n  with new text: {}",
+                                    if *replace_all {
+                                        "all original non-overlapping occurrences of"
+                                    } else {
+                                        "exactly one occurrence of"
+                                    },
+                                    TerminalSafe(&chunk.old_string),
+                                    TerminalSafe(&chunk.new_string)
+                                )?;
+                            }
+                            write!(f, "\n  final content depends on the file at execution time")?;
+                        }
                     }
                 }
                 Op::Spawn { spec } => {
@@ -1040,9 +1274,17 @@ impl fmt::Display for EscapedBytes<'_> {
     }
 }
 
-/// An unsettled call with sealed fields and no `Clone`. Only the engine constructs it and
-/// converts it into a permit. Scope is re-derived from the sealed call, never nominated by the
-/// loop or approver.
+/// A call that reached the end of the evaluation order without being settled.
+///
+/// No `Clone`, private fields, and constructible only in this module. A loop
+/// can carry one and hand it back; it cannot open one, and it cannot turn one
+/// into a [`Permit`] — [`PolicyEngine::classify`] remains the only path to
+/// one, so §5's separation is enforced by visibility rather than by a comment.
+///
+/// It deliberately carries no computed [`Scope`]. A mode or human approval
+/// decides whether the call proceeds; the engine derives the scope again from
+/// the still-sealed call when it mints. Thus neither the loop nor either party
+/// can nominate or widen the authority being approved.
 #[derive(Debug)]
 pub struct Pending {
     call: PreparedCall,
@@ -1119,7 +1361,7 @@ pub enum Resolution {
     },
 }
 
-/// Classify every hard refusal before consulting approvers.
+/// The sole minter of [`Permit`]s (`ARCHITECTURE.md` §3.2, §3.4).
 ///
 /// # Invariant W
 ///
@@ -1148,6 +1390,7 @@ pub struct PolicyEngine {
     /// Extra roots a profile opened, beyond the workspace. Empty for a run
     /// with no profile roots, which keeps the single-boundary behaviour.
     roots: Vec<ProfileRoot>,
+    root_ceilings: super::RootCeilings,
     read_perimeter: super::ReadPerimeter,
     mode: Mode,
     /// Both lists intact, matched per call. `resolve` no longer subtracts one
@@ -1155,12 +1398,17 @@ pub struct PolicyEngine {
     /// and `deny = ["exec(git *)"]` left `allow = ["exec(git push)"]` standing.
     allow: Vec<SourcedRule>,
     deny: Vec<SourcedRule>,
-    /// Mode approval is built by `new` from resolved configuration, not injected by the caller.
-    /// See `ModeApprover` for the visibility boundary.
+    /// §6 step 5, built from `mode` by [`new`](Self::new) and reachable no
+    /// other way. See [`ModeApprover`]'s doc for why there is no constructor
+    /// that takes one: a port that let its holder pick the implementation
+    /// would have moved the mode out of the config and into the caller.
     approver: Box<dyn Approver>,
     /// The final party, absent in headless runs. It is separate from
     /// `approver` so no caller can replace the mode derived from config.
     human: Option<Arc<dyn HumanApprover>>,
+    session_approvals: super::SessionApprovals,
+    /// The owner turned the web private-address block off (`Ruleset`).
+    web_private_network: bool,
 }
 
 impl fmt::Debug for PolicyEngine {
@@ -1178,17 +1426,32 @@ impl PolicyEngine {
     /// A policy that decides `mode`'s way, under `permissions`, inside
     /// `workspace`.
     pub fn new(workspace: CanonPath, mode: Mode, permissions: Ruleset) -> Self {
-        let permissions = permissions.with_credential_defaults();
+        let permissions = permissions
+            .with_credential_defaults()
+            .with_development_host_defaults();
         Self {
             approver: Box::new(ModeApprover::new(mode, workspace.clone())),
             workspace,
             roots: Vec::new(),
+            root_ceilings: super::RootCeilings::default(),
             read_perimeter: super::ReadPerimeter::default(),
             mode,
             allow: permissions.allow,
             deny: permissions.deny,
             human: None,
+            session_approvals: super::SessionApprovals::default(),
+            web_private_network: permissions.web_private_network,
         }
+    }
+
+    /// Keep owner-approved commands across captures within one live session.
+    pub fn with_session_approvals(mut self, approvals: super::SessionApprovals) -> Self {
+        self.session_approvals = approvals;
+        self
+    }
+
+    pub(crate) fn session_approvals(&self) -> super::SessionApprovals {
+        self.session_approvals.clone()
     }
 
     /// The same engine with the profile's admitted roots.
@@ -1201,12 +1464,43 @@ impl PolicyEngine {
         Self { roots, ..self }
     }
 
+    /// Pin the canonical administrator bounds, independently of approval mode.
+    pub fn with_root_ceilings(self, root_ceilings: super::RootCeilings) -> Self {
+        Self {
+            root_ceilings,
+            ..self
+        }
+    }
+
     /// Pin the read authority derived from the admitted run confinement.
     pub fn with_read_perimeter(self, read_perimeter: super::ReadPerimeter) -> Self {
         Self {
             read_perimeter,
             ..self
         }
+    }
+
+    /// Human answers of this session, then the persistent allow rules.
+    pub(crate) fn judge_precedents(&self) -> Vec<String> {
+        let mut precedents = self.session_approvals.precedents();
+        precedents.extend(
+            self.allow
+                .iter()
+                .take(64)
+                .map(|rule| format!("persistent allow rule: {}", rule.rule())),
+        );
+        precedents
+    }
+
+    /// The workspace directory, for the repository profile.
+    pub(crate) fn judge_workspace(&self) -> &std::path::Path {
+        self.workspace.as_path()
+    }
+
+    /// The root that anchors relative rule patterns when this engine matches
+    /// a rule against an operation.
+    pub(crate) fn rule_root(&self) -> &std::path::Path {
+        self.workspace.as_path()
     }
 
     pub(crate) fn judge_roots(&self) -> Vec<String> {
@@ -1252,7 +1546,11 @@ impl PolicyEngine {
         }
         if self.roots.iter().any(|root| {
             root.restricts_writes(&self.workspace, &self.roots) && path.is_or_under(root.path())
-        }) {
+        }) && !self
+            .roots
+            .iter()
+            .any(|root| root.terminal_write() && path == root.path())
+        {
             return Some(RootAccess::Read);
         }
         let depth = |base: &CanonPath| base.as_path().components().count();
@@ -1263,6 +1561,105 @@ impl PolicyEngine {
             .filter(|(base, _)| path.is_or_under(base))
             .max_by_key(|(base, _)| depth(base))
             .map(|(_, access)| access)
+    }
+
+    /// The path of an outside-workspace write that reaches a question, not a
+    /// refusal. Never lifted by an allow rule: the owner answers it.
+    fn outside_write_path<'a>(&self, op: &'a Op) -> Option<&'a CanonPath> {
+        match op {
+            Op::Write { path, .. } if self.reach(path).is_none() => Some(path),
+            _ => None,
+        }
+    }
+
+    /// An outside write is a question unless a floor, the `ro` sandbox or a
+    /// yolo run that the sandbox keeps from writing there says no. Credentials,
+    /// git control files and instruction files stay refused: a root grant never lifts them.
+    /// A read that only prepares such a write (`edit`) asks with it.
+    fn outside_write_may_ask(&self, op: &Op, call: &PreparedCall) -> bool {
+        let target = match op {
+            Op::Read { path } => call.ops().iter().find_map(|other| match other {
+                Op::Write { path: written, .. } if written == path => Some(written),
+                _ => None,
+            }),
+            other => self.outside_write_path(other),
+        };
+        target.is_some_and(|path| {
+            self.reach(path).is_none()
+                && !Ruleset::is_credential_path(path)
+                && !self.read_perimeter.refuses(path)
+                && !self.read_perimeter.read_only()
+                && !super::write_floor::is_control_path(path)
+                && (self.mode != Mode::Yolo || self.read_perimeter.broad())
+        })
+    }
+
+    /// A root question cannot lift a mode, sandbox, credential, or control-file floor.
+    pub(crate) fn root_offer_floor(&self, op: OpName, path: &CanonPath) -> Option<&'static str> {
+        if Ruleset::is_credential_path(path) {
+            return Some("credential floor");
+        }
+        if self.read_perimeter.refuses(path) {
+            return Some("sandbox floor");
+        }
+        if op == OpName::Write {
+            if self.mode == Mode::Plan {
+                return Some("mode floor");
+            }
+            if !self.root_ceilings.allows_write(path, &self.workspace) {
+                return Some("root ceiling");
+            }
+            if self.read_perimeter.read_only() {
+                return Some("sandbox floor");
+            }
+            if super::write_floor::is_control_path(path) {
+                return Some("control floor");
+            }
+        }
+        None
+    }
+
+    /// A terminal may offer an exact write grant only when no independent
+    /// denial or immutable confinement prevents the operation.
+    pub(crate) fn readonly_write_may_ask(&self, call: &PreparedCall) -> bool {
+        self.mode != Mode::Plan
+            && !self.read_perimeter.read_only()
+            && call.ops().iter().all(|op| {
+                self.matching(&self.deny, op).is_none()
+                    && op.subject_path(&self.workspace).is_none_or(|path| {
+                        !Ruleset::is_credential_path(path)
+                            && !super::write_floor::is_control_path(path)
+                            && !self.read_perimeter.refuses(path)
+                    })
+            })
+    }
+
+    /// The tool and path of an outside write that needs owner root approval.
+    /// Yolo with confinement off settles ordinary writes through the mode,
+    /// without adding a root. Classification still checks every deny and floor.
+    pub(crate) fn outside_write_target(&self, call: &PreparedCall) -> Option<(String, CanonPath)> {
+        if self.mode == Mode::Yolo && self.read_perimeter.unrestricted() {
+            return None;
+        }
+        call.ops()
+            .iter()
+            .find_map(|op| self.outside_write_path(op))
+            .map(|path| (call.tool().to_owned(), path.clone()))
+    }
+
+    fn read_only_root(&self, path: &CanonPath) -> Option<&ProfileRoot> {
+        self.roots
+            .iter()
+            .find(|root| {
+                root.restricts_writes(&self.workspace, &self.roots) && path.is_or_under(root.path())
+            })
+            .or_else(|| {
+                self.roots
+                    .iter()
+                    .filter(|root| path.is_or_under(root.path()))
+                    .max_by_key(|root| root.path().as_path().components().count())
+                    .filter(|root| root.access() == RootAccess::Read)
+            })
     }
 
     /// Classify an effect call while retaining only the display facts needed
@@ -1339,23 +1736,24 @@ impl PolicyEngine {
         }
     }
 
-    /// Test-only alternative approver exercises verdicts the production mode does not produce.
-    /// This constructor is absent from release builds and inaccessible to other crates.
+    /// The same engine with a different party at §6 step 5, for tests that
+    /// need a verdict the mode cannot produce.
+    ///
+    /// **`#[cfg(test)]`, and only `ego-core`'s own test profile compiles it.**
+    /// It exists because `Verdict::Deny` has no production producer — the
+    /// mode never denies at step 5, since `plan`'s refusal is the floor at
+    /// step 2 — and an arm of `settle` that nothing could reach would be
+    /// untested code that reads as a decided behaviour. This is the seam that
+    /// makes it a decided behaviour.
+    ///
+    /// It is not a relaxation of the rule above it. No release build contains
+    /// this function, no other crate can call it, and the one caller is a
+    /// test in this file asserting what a refusal turns into.
     #[cfg(test)]
     fn with_approver(self, approver: Box<dyn Approver>) -> Self {
         Self { approver, ..self }
     }
 
-    /// Decide what a prepared call may do and return its corresponding grant.
-    /// Derive scope from the call and return it inside [`Authorized`], preserving
-    /// the structural permit/call pairing. Classification is pure and synchronous.
-    /// Check boundary, deny and mode floor for every operation before any operation
-    /// may ask an approver. Otherwise an early ordinary question could hide a later
-    /// out-of-boundary operation and approval would authorize the whole call.
-    /// After hard refusals, explicit allows and [`settle`](Self::settle) handle
-    /// unresolved operations. System denies cannot be cleared by higher layers.
-    /// Supporting foreign transport may reuse an already admitted delegation,
-    /// never bypass an independent operation's decision.
     /// A shell command submitted by the terminal owner, not by a model tool.
     /// The editor is the approval party; boundary, deny rules and confinement
     /// remain in force. Only the turn loop may call this for its own `exec`.
@@ -1377,6 +1775,64 @@ impl PolicyEngine {
         }))
     }
 
+    /// Decide what a prepared call may do, and hand back the grant that says
+    /// so (`docs/internals/decisions/2026-08-21-the-turn-loop.md` §1).
+    ///
+    /// This is the method that makes this an engine rather than a stamp. The
+    /// scope is derived *from the call*, so a permit can never allow more
+    /// than the call asked for — with [`mint`](Self::mint) alone, whoever
+    /// chose the `Scope` was the real policy, and the caller is the turn
+    /// loop, which has no business holding that authority.
+    ///
+    /// Takes the call **by value** and gives it back inside the
+    /// [`Authorized`], so the pairing is the only thing a caller can hold.
+    ///
+    /// **Pure and sync**, which is what lets the async decision be somebody
+    /// else's problem: nothing here awaits, opens anything or reads a clock.
+    ///
+    /// The order is fixed
+    /// (`docs/internals/decisions/2026-08-21-a-permit-nobody-can-widen.md` §6), first
+    /// match wins, and it is evaluated **per operation**. The sole exception
+    /// is a structurally supporting foreign transport after every opaque
+    /// identity is allowed; its authority is the same delegation, not a
+    /// second operator decision. Every independent operation must still be
+    /// answered before the call is authorised. That is why §4 of the rule ADR
+    /// refuses a conjunction across heads: it would be a second way to write
+    /// what the loop below already does.
+    ///
+    /// ```text
+    /// 0. the workspace boundary   (not a rule; no mode lifts it)
+    /// 1. deny                     (system denies are unioned in by resolve)
+    /// 2. mode floor               (plan refuses every mutating op)
+    /// 3. allow
+    /// →  ask
+    /// ```
+    ///
+    /// Steps 1 and 2 of the ADR's seven are one step here, and nothing is lost
+    /// by it: `resolve` unions the system layer's denies into the deny list
+    /// through a ceiling no higher layer can clear, and deny precedes allow
+    /// either way. What a separate step would buy is *attribution* in the
+    /// audit event, and that arrives with the event.
+    ///
+    /// **Step 5 — the mode ceiling — is not here, and it used to be.** It is
+    /// the first implementation of the [`Approver`] port, consulted by
+    /// [`settle`](Self::settle). The reason is in the ADR's §5 amendment and
+    /// it is not tidiness: with the ceiling inside this method, a `Pending`
+    /// could only ever be constructed *after* the mode had declined, so an
+    /// approver derived from the mode had exactly one reachable answer. The
+    /// port existed and the seat had no occupant.
+    ///
+    /// Step 6 (the judge) has no producer. Step 7 (the human) is optional, so
+    /// a headless engine still returns the question rather than answering it.
+    /// **Two passes, and the order between them is the point.** Every
+    /// operation is put through steps 0 to 2 before any of them is allowed to
+    /// raise a question, because "first match wins, top down" is a claim about
+    /// the *steps*, not about the order the ops happen to be in. A single pass
+    /// returns a question about op one and never reaches op two — so a call
+    /// that reads a workspace file and `/etc/shadow` would arrive at an
+    /// approver as an ordinary question, and a mode that answers yes would
+    /// authorise the whole call, boundary included. A refusal anywhere refuses
+    /// the call.
     pub fn classify(&self, call: PreparedCall) -> Classification {
         if matches!(call.ops(), [Op::ReadEvidence { .. }]) {
             let permit = self.mint(scope_of(&call));
@@ -1408,6 +1864,16 @@ impl PolicyEngine {
                 return Classification::Settled(Err(*denied));
             }
         }
+        // Reuse only after every boundary, deny and mode floor has been checked.
+        if self.session_approvals.contains(&call) {
+            let literal = names_address_literal(&call);
+            let permit = self.mint(owner_scope_of(&call, literal));
+            return Classification::Settled(Ok(Authorized {
+                call,
+                permit,
+                by: Authority::Party,
+            }));
+        }
         // Every rule that covered an independent op, not the first one to
         // match. A foreign transport structurally supporting wholly allowed
         // opaque identities contributes no second rule authority. A denial is
@@ -1419,8 +1885,11 @@ impl PolicyEngine {
                 .filter(|op| matches!(op, Op::Opaque { .. }))
                 .all(|op| self.matching_allow(op).is_some())
         });
+        // Outside writes needing a root question cannot be settled by allow rules.
+        let outside_write = self.outside_write_target(&call).is_some();
         let mut rules: Vec<RuleAuthority> = Vec::new();
         let mut yolo_authorized_secret_egress = false;
+        let mut owner_net_rule = false;
         for (index, op) in call.ops().iter().enumerate() {
             if delegated_support == Some(index) {
                 continue;
@@ -1428,22 +1897,30 @@ impl PolicyEngine {
             // A conditional replacement reads the same file it writes. Its
             // matching write allow covers that supporting read, but the first
             // pass still checks read denies and boundaries independently.
-            let supporting_write = match (call.ops(), op) {
+            let supporting_write = match (op, call.ops().get(index + 1)) {
                 (
-                    [
-                        Op::Read { path: read },
+                    Op::Read { path: read },
+                    Some(
                         write @ Op::Write {
                             path,
                             change: Change::Replace { .. } | Change::Notebook(_),
                         },
-                    ],
-                    Op::Read { .. },
+                    ),
                 ) if read == path => Some(write),
                 _ => None,
             };
-            let Some(entries) = self
-                .matching_allow(op)
-                .or_else(|| supporting_write.and_then(|write| self.matching_allow(write)))
+            let Some(entries) = Some(())
+                .filter(|()| !outside_write)
+                .and_then(|()| {
+                    self.matching_allow(op)
+                        .or_else(|| supporting_write.and_then(|write| self.matching_allow(write)))
+                })
+                // A wildcard rule never covers a change of ego's own authority.
+                .filter(|entries| {
+                    self.mode == Mode::Yolo
+                        || !super::owner_administration::is_owner_administration_op(op)
+                        || entries.iter().all(|entry| entry.is_exact_exec())
+                })
             else {
                 if self.mode == Mode::Yolo && matches!(op, Op::SecretEgress { .. }) {
                     yolo_authorized_secret_egress = true;
@@ -1461,6 +1938,7 @@ impl PolicyEngine {
                 };
                 return Classification::Ask(self.pending(call, why));
             };
+            owner_net_rule |= entries.iter().any(|entry| entry.owner_net_allow(op));
             for entry in entries {
                 let authority = RuleAuthority::of(entry);
                 if !rules.contains(&authority) {
@@ -1468,7 +1946,7 @@ impl PolicyEngine {
                 }
             }
         }
-        let permit = self.mint(scope_of(&call));
+        let permit = self.mint(owner_scope_of(&call, owner_net_rule));
         Classification::Settled(Ok(Authorized {
             call,
             permit,
@@ -1480,9 +1958,17 @@ impl PolicyEngine {
         }))
     }
 
-    /// Consult the next policy party and interpret its verdict. Only the engine derives permit
-    /// scope. Escalation returns a question that the turn must persist before asking the human,
-    /// so a crash cannot erase the request.
+    /// Put the question to the next party in §6's order and act on the answer.
+    ///
+    /// The mode-party await. What this module still owns, and does not
+    /// delegate, is *which* party is consulted and what its answer means: a
+    /// verdict is a party's opinion, and only this engine turns one into a
+    /// [`Permit`] — from a scope derived, as always, from the call.
+    ///
+    /// `Escalate` returns the mode's question. The turn must durably record it
+    /// before consulting the human decision step; keeping that append between
+    /// the two parties means a crash while the human is thinking cannot erase
+    /// the fact that the request was raised.
     pub async fn settle(&self, pending: Pending) -> Resolution {
         match self.approver.approve(&pending).await {
             Verdict::Allow { by } => {
@@ -1496,16 +1982,34 @@ impl PolicyEngine {
                 by,
             ))),
             Verdict::Escalate { why } => {
-                if self.mode == Mode::Auto
+                let administration = self.mode != Mode::Yolo
+                    && pending
+                        .call()
+                        .ops()
+                        .iter()
+                        .any(super::owner_administration::is_owner_administration_op);
+                if !administration
+                    && self.mode == Mode::Auto
+                    && self.outside_write_target(pending.call()).is_none()
                     && (self.risk(pending.call()).class <= super::analysis::RiskClass::Bounded
                         || pending
                             .call()
                             .ops()
                             .iter()
                             .all(|operation| match operation {
-                                Op::Spawn { spec } => super::shell::trusted_read_only(spec),
+                                Op::Spawn { spec } => {
+                                    super::shell::trusted_read_only(spec)
+                                        || super::dev_commands::is_development_command(spec)
+                                }
                                 _ => false,
                             }))
+                    || (!administration
+                        && matches!(self.mode, Mode::Auto | Mode::Default | Mode::Plan)
+                        && pending
+                            .call()
+                            .ops()
+                            .iter()
+                            .all(|op| self.read_only_exec(op)))
                 {
                     let call = pending.call;
                     let permit = self.mint(scope_of(&call));
@@ -1544,11 +2048,11 @@ impl PolicyEngine {
                 let permit = self.mint(scope_of(&call));
                 Resolution::Settled(Ok(Authorized { call, permit, by }))
             }
-            super::judge::JudgeOutcome::Deny { .. } => Resolution::Settled(Err(refused(
-                pending.call.into_parts().0,
-                &pending.ask.why,
-                by,
-            ))),
+            // A judge deny is an opinion, never the last word: the user may know
+            // better, so the question goes to the human with the judge's reason.
+            super::judge::JudgeOutcome::Deny { reason } => Resolution::Ask(
+                pending.with_judge_reason(&format!("the judge advises against it: {reason}")),
+            ),
             super::judge::JudgeOutcome::Escalate { .. } => Resolution::Ask(pending),
         }
     }
@@ -1573,9 +2077,20 @@ impl PolicyEngine {
         let mut request = pending.request().clone();
         request.child_name = child_name.map(str::to_owned);
         match human.decide(item, &request).await {
-            PermissionDecision::Allow => {
+            decision @ (PermissionDecision::Allow
+            | PermissionDecision::AllowOnce
+            | PermissionDecision::AllowAlways) => {
                 let call = pending.call;
-                let permit = self.mint(scope_of(&call));
+                self.session_approvals.record_answer(
+                    &call,
+                    true,
+                    decision == PermissionDecision::Allow,
+                );
+                if decision == PermissionDecision::Allow {
+                    self.session_approvals.record(&call);
+                }
+                let literal = names_address_literal(&call);
+                let permit = self.mint(owner_scope_of(&call, literal));
                 Resolution::HumanSettled {
                     request,
                     result: Ok(Authorized {
@@ -1585,27 +2100,38 @@ impl PolicyEngine {
                     }),
                 }
             }
-            PermissionDecision::Deny => Resolution::HumanSettled {
-                request,
-                result: Err(refused(
-                    pending.call.into_parts().0,
-                    &pending.ask.why,
-                    Authority::Party,
-                )),
-            },
-            PermissionDecision::DenyWithInstruction { instruction } => Resolution::HumanSettled {
-                request,
-                result: Err(PolicyDenied::Redirected {
-                    tool: pending.call.into_parts().0,
-                    instruction,
-                }),
-            },
+            PermissionDecision::Deny | PermissionDecision::DenyAlways => {
+                self.session_approvals
+                    .record_answer(pending.call(), false, false);
+                Resolution::HumanSettled {
+                    request,
+                    result: Err(refused_call(
+                        pending.call,
+                        &pending.ask.why,
+                        Authority::Party,
+                    )),
+                }
+            }
+            PermissionDecision::DenyWithInstruction { instruction } => {
+                self.session_approvals
+                    .record_answer(pending.call(), false, false);
+                Resolution::HumanSettled {
+                    request,
+                    result: Err(PolicyDenied::Redirected {
+                        tool: pending.call.into_parts().0,
+                        instruction,
+                    }),
+                }
+            }
             PermissionDecision::Amend { params } => Resolution::Reclassify { request, params },
         }
     }
 
-    /// The only constructor of `Pending`. Keeping it private prevents callers from choosing
-    /// their own approval party.
+    /// The question, addressed to whoever is next.
+    ///
+    /// Private, and the only constructor of a [`Pending`] anywhere: §5's
+    /// property is that the engine decides who is asked, and a `Pending` a
+    /// caller could build is a caller nominating its own approver.
     fn pending(&self, call: PreparedCall, why: Escalation) -> Pending {
         Pending {
             ask: PermissionRequest {
@@ -1615,6 +2141,8 @@ impl PolicyEngine {
                 presentation: None,
                 child_name: None,
                 explicit_answer: false,
+                sandbox_scope: None,
+                family_offer: self.session_approvals.family_offer(&call),
             },
             call,
         }
@@ -1629,14 +2157,29 @@ impl PolicyEngine {
     ) -> Result<(), Box<PolicyDenied>> {
         let path = op.subject_path(&self.workspace);
 
-        // 0. The workspace boundary. Evaluated before the rules because it is not one of
-        // them: no operator wrote it, `--allow` cannot widen it, and `yolo` does not lift
-        // it.
+        // 0. The workspace boundary. Evaluated before the rules because it is
+        //    not one of them: no operator wrote it, `--allow` cannot widen it,
+        //    and `yolo` does not lift it. `yolo` bypasses *asking*; the
+        //    sandbox (`ARCHITECTURE.md` §3.4 axis 4) is the axis that widens
+        //    or narrows where ego may reach, and it is a separate control.
         if let Some(path) = path
             && !matches!(op, Op::Spawn { .. })
         {
+            if matches!(op, Op::Write { .. })
+                && !self.root_ceilings.allows_write(path, &self.workspace)
+            {
+                return Err(Box::new(PolicyDenied::HardFloor {
+                    class: "root ceiling",
+                }));
+            }
             let is_read = matches!(op, Op::Read { .. } | Op::List { .. } | Op::Search { .. });
-            if is_read && self.read_perimeter.refuses(path) {
+            if is_read
+                && self.read_perimeter.refuses(path)
+                && !self
+                    .allow
+                    .iter()
+                    .any(|entry| entry.exact_owner_allow(op, self.workspace.as_path()))
+            {
                 return Err(Box::new(PolicyDenied::ProtectedRead {
                     tool: call.tool().to_owned(),
                     op: op.name(),
@@ -1647,6 +2190,7 @@ impl PolicyEngine {
                 .reach(path)
                 .or_else(|| (is_read && self.read_perimeter.broad()).then_some(RootAccess::Read))
             {
+                None if self.outside_write_may_ask(op, call) => {}
                 None => {
                     return Err(Box::new(PolicyDenied::OutsideWorkspace {
                         tool: call.tool().to_owned(),
@@ -1659,6 +2203,10 @@ impl PolicyEngine {
                         tool: call.tool().to_owned(),
                         op: op.name(),
                         path: path.clone(),
+                        root: self
+                            .read_only_root(path)
+                            .expect("read-only reach has a root")
+                            .clone(),
                     }));
                 }
                 Some(_) => {}
@@ -1691,7 +2239,7 @@ impl PolicyEngine {
         // 2. The mode floor. Above the allow list, so an allow rule cannot
         //    relax it: `plan` means the run does not change anything, and a
         //    mode a rule could switch off would not mean that.
-        if !user_exec && self.mode == Mode::Plan && op.mutates() {
+        if !user_exec && self.mode == Mode::Plan && op.mutates() && !self.read_only_exec(op) {
             return Err(Box::new(match path {
                 Some(path) => PolicyDenied::ModeForbids {
                     tool: call.tool().to_owned(),
@@ -1711,6 +2259,22 @@ impl PolicyEngine {
         Ok(())
     }
 
+    /// An exec the shell proof shows to be read-only. With the sandbox in force
+    /// (`!unrestricted`) the OS refuses credential and control files, so content
+    /// readers and repository inspection qualify; with sandbox `off` only the
+    /// narrower proof does. Such an exec asks no question in `default` and is
+    /// not refused by `plan` (story 956-a721).
+    fn read_only_exec(&self, op: &Op) -> bool {
+        match op {
+            Op::Spawn { spec } => {
+                super::shell::trusted_read_only(spec)
+                    || (!self.read_perimeter.unrestricted()
+                        && super::shell::sandboxed_read_only(spec))
+            }
+            _ => false,
+        }
+    }
+
     fn matching_allow(&self, op: &Op) -> Option<Vec<&SourcedRule>> {
         SourcedRule::allowing(&self.allow, op, self.workspace.as_path())
     }
@@ -1720,28 +2284,67 @@ impl PolicyEngine {
     /// First match wins, in the order the lists were resolved. Matching is
     /// against the canonical operation and never against rendered text.
     fn matching<'r>(&self, rules: &'r [SourcedRule], op: &Op) -> Option<&'r SourcedRule> {
-        rules
-            .iter()
-            .find(|entry| entry.denies(op, self.workspace.as_path(), &self.allow))
+        rules.iter().find(|entry| {
+            // Off removes built-in credential floors, never an operator deny.
+            !(self.read_perimeter.unrestricted()
+                && entry.origins() == OriginSet::just(Source::Default)
+                && matches!(op, Op::Read { path } if Ruleset::is_credential_path(path)))
+                && entry.denies(op, self.workspace.as_path(), &self.allow)
+        })
     }
 
     /// Mint a permit for an explicit scope.
     ///
-    /// Private minting preserves call-scoped grants. Bypassing a prompt changes
-    /// whether to ask, not what the call may access; callers must not construct
-    /// an arbitrary wide `Scope` and mint authority for it.
+    /// **Private to `grant.rs`, and that is the load-bearing half of
+    /// Invariant W.** It used to be `pub`, reserved for "a later bypass mode
+    /// (`--yolo`) minting a deliberately wide grant". §1 of
+    /// `docs/internals/decisions/2026-08-21-a-permit-nobody-can-widen.md` removed that
+    /// use: bypass is a decision *whether to ask*, and a bypassed call is
+    /// still scoped from the call, so nothing anywhere needs a wide grant.
+    /// What was left was a public widening primitive kept for its own sake —
+    /// any holder of a `&PolicyEngine` could compose a `Scope` covering the
+    /// whole disk and get a `Permit` for it.
     ///
     /// With it private, [`classify`](Self::classify) is the only path to a
     /// `Permit` in the entire program, and `classify` derives the scope from
     /// the call. A loop that chooses its own `Scope` is a loop that is its own
     /// policy, and now it cannot.
-    fn mint(&self, scope: Scope) -> Permit {
+    fn mint(&self, mut scope: Scope) -> Permit {
+        scope.owner_private_network |= self.web_private_network && scope.network.is_some();
+        let disclosed = self.disclosed(&scope);
         Permit {
             scope,
             read_perimeter: self.read_perimeter.clone(),
+            disclosed,
             call_fingerprint: None,
             _sealed: Sealed(()),
         }
+    }
+}
+
+impl PolicyEngine {
+    /// Credential paths of `scope` that an exact user rule covers for the
+    /// operation the scope carries. Project rules, broad patterns, modes and
+    /// session approvals never disclose.
+    fn disclosed(&self, scope: &Scope) -> Vec<CanonPath> {
+        let ops = scope
+            .read_paths
+            .iter()
+            .map(|path| Op::Read { path: path.clone() })
+            .chain(scope.search_paths.iter().map(|path| Op::Search {
+                root: path.clone(),
+                query: String::new(),
+            }));
+        ops.filter_map(|op| {
+            let path = op.subject_path(&self.workspace)?.clone();
+            (Ruleset::is_credential_path(&path)
+                && self
+                    .allow
+                    .iter()
+                    .any(|entry| entry.exact_owner_allow(&op, self.workspace.as_path())))
+            .then_some(path)
+        })
+        .collect()
     }
 }
 
@@ -1853,6 +2456,25 @@ fn delegated_supporting_op(call: &PreparedCall) -> Option<usize> {
         })
 }
 
+/// A refusal names what was refused: for a spawn that is the command, never the
+/// directory it would run in.
+fn refused_call(call: PreparedCall, why: &Escalation, by: Authority) -> PolicyDenied {
+    let process = call.ops().iter().find_map(|op| match op {
+        Op::Spawn { spec } if why.op() == OpName::Spawn => Some(Subject::Process(spec.clone())),
+        _ => None,
+    });
+    let tool = call.into_parts().0;
+    match process {
+        Some(subject) => PolicyDenied::RefusedSubject {
+            tool,
+            op: why.op(),
+            subject,
+            by,
+        },
+        None => refused(tool, why, by),
+    }
+}
+
 fn refused(tool: String, why: &Escalation, by: Authority) -> PolicyDenied {
     match why {
         Escalation::NoRuleCovers { path, .. } | Escalation::ModeAsks { path, .. } => {
@@ -1876,8 +2498,10 @@ fn refused(tool: String, why: &Escalation, by: Authority) -> PolicyDenied {
 /// The authority a call's own operations contribute — **the** definition,
 /// called once and never inlined at a second site.
 ///
-/// Scope comes only from the prepared call. Matching rules cannot widen it.
-/// Every operation has already been approved before scope construction.
+/// §1 of `2026-08-21-a-permit-nobody-can-widen.md`: the scope comes from the
+/// call, so a permit can never allow more than the call asked for and a rule
+/// that matched could not widen it if it wanted to. Nothing decides here; by
+/// the time this runs, every operation has already been approved.
 ///
 /// Scoped to the paths this call named, not to the workspace: a tool that
 /// asked to read one file is not thereby allowed to read the repository.
@@ -1935,11 +2559,36 @@ fn scope_of(call: &PreparedCall) -> Scope {
     scope
 }
 
+/// [`scope_of`] for a call the owner approved.
+///
+/// Web admission may dial a non-public address only for a destination the
+/// owner named (`owner_named`): a user `net` rule that names hosts, or an owner
+/// approval of an address literal. An approved *name* is not enough, because a
+/// name resolving to a local service is exactly what a rebinding page
+/// arranges; a project rule or bare `net(*)` names nothing for the owner.
+fn owner_scope_of(call: &PreparedCall, owner_named: bool) -> Scope {
+    let mut scope = scope_of(call);
+    scope.owner_private_network = owner_named && scope.network.is_some();
+    scope
+}
+
+/// Whether the call's network target is an address literal, not a name.
+fn names_address_literal(call: &PreparedCall) -> bool {
+    scope_of(call)
+        .network
+        .is_some_and(|target| target.ip().is_some())
+}
+
 /// Scope mechanics, and the one place `mint` can still be called.
 ///
-/// These tests need private `PolicyEngine::mint`, so they stay inside this
-/// module. They check independent path authorities, component-wise path
-/// containment and guarded rechecks without exposing grant construction.
+/// These tests live inside `grant.rs` rather than under `tests/` because
+/// they need [`PolicyEngine::mint`], and `mint` is private to this module —
+/// that privacy is half of §2 of
+/// `docs/internals/decisions/2026-08-21-a-permit-nobody-can-widen.md`, and a test
+/// binary that could reach it would be proof it is not private at all. What
+/// they check is what a `Scope` *means* once minted: the four path lists do
+/// not imply one another, `is_or_under` is component-wise and not a string
+/// prefix, and the guarded seam rechecks at use time.
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
@@ -2072,6 +2721,11 @@ mod tests {
             assert_eq!(plan.candidates.len(), 1);
             assert_eq!(plan.candidates[0].to_string(), "net(example.com:443)");
             assert_eq!(plan.omitted, vec![OmittedDimension::RequestDigest]);
+            // Catches: a run nobody could ask names no way to unblock or keep blocked.
+            let remedies = pending.request().remedies().expect("a literal endpoint");
+            assert!(remedies.contains("--allow 'net(example.com:443)'"));
+            assert!(remedies.contains("ego rules allow 'net(example.com:443)'"));
+            assert!(remedies.contains("ego rules deny 'net(example.com:443)'"));
         }
     }
 
@@ -2260,9 +2914,13 @@ mod tests {
     /// The second implementation of [`Approver`], and the only producer of
     /// [`Verdict::Deny`] anywhere.
     ///
-    /// `Approver` is a public port and must express refusal as well as approval.
-    /// Its `Deny` result must remain reachable for external parties even when
-    /// the mode approver does not produce it.
+    /// The mode never denies at §6 step 5 — `plan`'s refusal is the floor at
+    /// step 2, inside `classify` — so without a party that can say no, the
+    /// `Deny` arm of [`PolicyEngine::settle`] would be code nothing could
+    /// reach. `2026-08-21-a-permit-nobody-can-widen.md` §5's amendment records
+    /// why the arm ships anyway: `Approver` is a public port, and one whose
+    /// vocabulary cannot express a refusal is a port the human seat at step 7
+    /// would have to break in order to use it.
     ///
     /// It answers without asking anybody, which is the property the trait had
     /// to keep: an approver is a *party*, not a prompt, and a party that could
@@ -2277,6 +2935,59 @@ mod tests {
                 by: Authority::Party,
             }))
         }
+    }
+
+    // Catches implicit read authority leaking across paths or overriding an explicit deny.
+    #[test]
+    fn adjacent_conditional_writes_cover_only_their_own_reads_and_never_denies() {
+        use crate::config::{ConfigLayer, Source};
+        let engine = |deny: &str| {
+            let layer = ConfigLayer::parse(
+                Source::Project,
+                &format!("[permissions]\nallow=[\"write(/ws/**)\"]\ndeny=[{deny}]"),
+            )
+            .unwrap()
+            .value
+            .permissions
+            .unwrap();
+            PolicyEngine::new(
+                CanonPath::new("/ws"),
+                Mode::Default,
+                Ruleset::from_layer(layer, Source::Project),
+            )
+        };
+        let pair = |path: &str| {
+            (
+                Op::Read {
+                    path: CanonPath::new(path),
+                },
+                Op::Write {
+                    path: CanonPath::new(path),
+                    change: Change::Replace {
+                        replace_all: false,
+                        chunks: vec![],
+                    },
+                },
+            )
+        };
+        let (a, aw) = pair("/ws/a");
+        let (b, bw) = pair("/ws/b");
+        let call = PreparedCall::new("edit", a)
+            .with_op(aw)
+            .with_op(b)
+            .with_op(bw);
+        assert!(matches!(
+            engine("").classify(call.clone()),
+            Classification::Settled(Ok(_))
+        ));
+        assert!(matches!(
+            engine("\"read(/ws/b)\"").classify(call.clone()),
+            Classification::Settled(Err(_))
+        ));
+        let stray = call.with_op(Op::Read {
+            path: CanonPath::new("/ws/stray"),
+        });
+        assert!(matches!(engine("").classify(stray), Classification::Ask(_)));
     }
 
     fn write_call(path: &str) -> PreparedCall {
@@ -2305,6 +3016,8 @@ mod tests {
             presentation: None,
             child_name: None,
             explicit_answer: false,
+            sandbox_scope: None,
+            family_offer: None,
         };
 
         assert_eq!(
@@ -2338,8 +3051,10 @@ mod tests {
                     path: CanonPath::new("/ws/edit.txt"),
                     change: Change::Replace {
                         replace_all: false,
-                        old_string: "old\n".to_string(),
-                        new_string: "new\t".to_string(),
+                        chunks: vec![crate::permit::ReplaceChunk {
+                            old_string: "old\n".to_string(),
+                            new_string: "new\t".to_string(),
+                        }],
                     },
                 },
             ],
@@ -2350,6 +3065,8 @@ mod tests {
             presentation: None,
             child_name: None,
             explicit_answer: false,
+            sandbox_scope: None,
+            family_offer: None,
         };
 
         assert_eq!(
@@ -2365,6 +3082,50 @@ mod tests {
                 "  final content depends on the file at execution time",
             )
         );
+    }
+
+    // Catches: operator text drops, reorders, or mislabels a later replacement chunk.
+    #[test]
+    fn permission_request_displays_ordered_replacement_chunks_and_modes() {
+        for (replace_all, mode) in [
+            (false, "exactly one occurrence of"),
+            (true, "all original non-overlapping occurrences of"),
+        ] {
+            let request = PermissionRequest {
+                tool: "edit".to_string(),
+                ops: vec![Op::Write {
+                    path: CanonPath::new("/ws/edit.txt"),
+                    change: Change::Replace {
+                        replace_all,
+                        chunks: vec![
+                            crate::permit::ReplaceChunk {
+                                old_string: "first old".into(),
+                                new_string: "first new".into(),
+                            },
+                            crate::permit::ReplaceChunk {
+                                old_string: "second old".into(),
+                                new_string: "second new".into(),
+                            },
+                        ],
+                    },
+                }],
+                why: Escalation::NoRuleCovers {
+                    op: OpName::Write,
+                    path: CanonPath::new("/ws/edit.txt"),
+                },
+                presentation: None,
+                child_name: None,
+                explicit_answer: false,
+                sandbox_scope: None,
+                family_offer: None,
+            };
+            assert_eq!(
+                request.to_string(),
+                format!(
+                    "edit needs permission: no rule covers write /ws/edit.txt\n- write /ws/edit.txt\n  replace {mode} old text: first old\n  with new text: first new\n  replace {mode} old text: second old\n  with new text: second new\n  final content depends on the file at execution time"
+                )
+            );
+        }
     }
 
     #[test]
@@ -2519,8 +3280,9 @@ mod tests {
         let err = block_on(tool.execute(call, &guarded)).unwrap_err();
         assert_eq!(
             err,
-            ToolError::Denied(PermitDenied::Write {
-                path: CanonPath::new("/ws/secret/passwords.txt"),
+            ToolError::Fs(crate::permit::FsError::Io {
+                path: CanonPath::new("/ws/allowed/file.txt"),
+                message: "prepared target changed before use".into(),
             })
         );
         assert!(
@@ -2596,7 +3358,7 @@ mod tests {
         guarded
             .write(&CanonPath::new("/ws/allowed"), b"root")
             .unwrap();
-        //...and so is a nested descendant, arbitrarily deep.
+        // ...and so is a nested descendant, arbitrarily deep.
         guarded
             .write(&CanonPath::new("/ws/allowed/nested/deep/file.txt"), b"deep")
             .unwrap();

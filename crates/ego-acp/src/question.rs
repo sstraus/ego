@@ -23,6 +23,7 @@ pub use ego_core::question::QuestionRequest;
 pub struct CapabilityCapture {
     form: bool,
     child_activity: bool,
+    compacted: bool,
 }
 
 impl CapabilityCapture {
@@ -30,11 +31,13 @@ impl CapabilityCapture {
         Self {
             form: true,
             child_activity: false,
+            compacted: false,
         }
     }
 
     pub fn capture_initialize(&mut self, capabilities: &ClientCapabilities) {
         self.child_activity = crate::negotiate::child_activity_requested(capabilities);
+        self.compacted = crate::negotiate::compacted_requested(capabilities);
         self.form = capabilities
             .elicitation
             .as_ref()
@@ -44,6 +47,10 @@ impl CapabilityCapture {
 
     pub fn child_activity_available(&self) -> bool {
         self.child_activity
+    }
+
+    pub fn compacted_available(&self) -> bool {
+        self.compacted
     }
 
     pub fn form_available(&self) -> bool {
@@ -397,6 +404,61 @@ impl Elicitor for AcpQuestionAdapter {
         request: QuestionRequest,
     ) -> Pin<Box<dyn Future<Output = Result<QuestionOutcome, ElicitorError>> + Send + 'a>> {
         Box::pin(self.elicit_live(question, request))
+    }
+
+    fn confirm_root<'a>(
+        &'a self,
+        question: ItemId,
+        request: QuestionRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<QuestionOutcome, ElicitorError>> + Send + 'a>> {
+        Box::pin(async move {
+            request
+                .validate()
+                .map_err(|error| ElicitorError::new(error.to_string()))?;
+            let connection = self
+                .connection
+                .as_ref()
+                .ok_or_else(|| ElicitorError::new("ACP root confirmation has no connection"))?;
+            let call = v1::ToolCallUpdate::new(
+                v1::ToolCallId::new(format!("root-{question}")),
+                v1::ToolCallUpdateFields::new().title(request.prompt.clone()),
+            );
+            let options = request
+                .options
+                .iter()
+                .map(|option| {
+                    let kind = match option.id.as_str() {
+                        "permanent" => v1::PermissionOptionKind::AllowAlways,
+                        "session" => v1::PermissionOptionKind::AllowOnce,
+                        _ => v1::PermissionOptionKind::RejectOnce,
+                    };
+                    v1::PermissionOption::new(
+                        v1::PermissionOptionId::new(option.id.clone()),
+                        option.label.clone(),
+                        kind,
+                    )
+                })
+                .collect();
+            let response = connection
+                .send_request(v1::RequestPermissionRequest::new(
+                    self.session.clone(),
+                    call,
+                    options,
+                ))
+                .block_task()
+                .await
+                .map_err(|error| ElicitorError::new(error.to_string()))?;
+            let v1::RequestPermissionOutcome::Selected(selected) = response.outcome else {
+                return Ok(QuestionOutcome::Cancelled);
+            };
+            let answer = selected.option_id.0.to_string();
+            if !request.options.iter().any(|option| option.id == answer) {
+                return Err(ElicitorError::new(
+                    "ACP returned an unknown root confirmation option",
+                ));
+            }
+            Ok(QuestionOutcome::Answered(QuestionAnswer::Single(answer)))
+        })
     }
 }
 

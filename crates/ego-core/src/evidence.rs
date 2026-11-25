@@ -580,6 +580,9 @@ fn operation_ordinal(operation: McpOperationKind) -> u8 {
         McpOperationKind::CallTool => 0,
         McpOperationKind::ReadResource => 1,
         McpOperationKind::GetPrompt => 2,
+        McpOperationKind::GetTask => 3,
+        McpOperationKind::CancelTask => 4,
+        McpOperationKind::UpdateTask => 5,
     }
 }
 

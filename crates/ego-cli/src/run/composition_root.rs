@@ -1,5 +1,6 @@
 //! Wire prepared CLI authority into executable run inputs.
 
+use super::driver_runtime::activate_headless_successor;
 use super::*;
 
 pub(super) fn run_budget_spec(budget: &Budget) -> Result<String, RunTermination> {
@@ -30,7 +31,7 @@ pub struct CliPrepared {
     pub(super) fallbacks: Vec<ModelRef>,
     pub(super) max_turns: Option<u32>,
     pub(super) goal: Option<String>,
-    pub(super) goal_turns: u32,
+    pub(super) goal_turns: Option<u32>,
     pub(super) goal_check_command: Option<Vec<String>>,
     pub(super) run_deadline: Option<std::time::Instant>,
     pub(super) root: PathBuf,
@@ -44,9 +45,13 @@ pub struct CliPrepared {
     /// `trusted` for admit its hooks under `Untrusted` anyway.
     pub(super) trust: Trust,
     pub(super) profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
+    /// `--no-hooks`: no hook is admitted, whatever the layers hold.
+    pub(super) no_hooks: bool,
+    pub(super) no_skill_safety_check: bool,
     /// The exact ACP session fact to compare during effect construction.
     pub(super) admitted_sandbox_observation: Option<ExecObservation>,
     pub(super) effective: Effective,
+    connection_binding: Option<String>,
     pub(super) system: Option<SystemPrompt>,
     pub(super) registry: Vec<RegisteredTool>,
     pub(super) compiled: Option<schema::Schema>,
@@ -119,6 +124,9 @@ fn apply_preparation_selections(
     args: &mut Args,
     selections: &RunSelections,
 ) -> Result<(), RunTermination> {
+    if let Some(id) = selections.connection() {
+        args.connection = Some(id.to_owned());
+    }
     if let Some(model) = selections.model() {
         args.model = Some(model.0.clone());
     }
@@ -307,8 +315,11 @@ impl CliPrepared {
                 confinement,
                 trust,
                 profile_layers,
+                no_hooks: args.no_hooks,
+                no_skill_safety_check: args.no_skill_safety_check,
                 admitted_sandbox_observation: request.selections.sandbox_observation().cloned(),
                 effective,
+                connection_binding: request.selections.connection_binding().map(str::to_owned),
                 system,
                 registry,
                 compiled,
@@ -332,10 +343,6 @@ impl CliPrepared {
         let artifacts = self.artifacts.clone();
         let child_root = RunRoot::new(self.root.clone())
             .map_err(|error| RunExecutorError::new(error.to_string()))?;
-        let child_executor = Arc::new(
-            self.child_executor
-                .with_child_authority(&self.effective, &self.confinement),
-        );
         let clock = SystemClock;
         let opened = Opened::Durable(Box::new(
             session::open(self.store.as_ref(), &self.session_id, &clock)
@@ -343,29 +350,87 @@ impl CliPrepared {
         ));
         let repair_note = opened.repair_note();
         let opening = opened.state();
-        let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
-            .map_err(|error| RunExecutorError::new(error.to_string()))?;
-        let (ports, observation, probe_evidence) = match run_effect_ports(
-            self.confinement.clone(),
-            active.evidence().clone(),
-            cancel.clone(),
-            self.run_deadline,
-            self.admitted_sandbox_observation.as_ref(),
-            bindings.sandbox_grants(),
-            bindings.residual_desk(),
-        )
-        .await
-        {
-            Ok(effects) => effects,
-            Err(error @ ProcessError::ConfinementChanged { .. }) => {
-                return Ok(RunSettlement::Interrupted {
-                    diagnostic: Some(error.to_string()),
+        if let Some(pending) = opening.pending_question() {
+            if cancel.is_cancelled() {
+                return settlement(cancelled_termination(cancel));
+            }
+            if let Some(termination) = super::composition::expired(self.run_deadline) {
+                return settlement(termination);
+            }
+            // A pending pause still needs the normal turn boundary to record
+            // its durable hold. Otherwise refuse before provider resolution,
+            // effect ports, hooks or attachment acquisition can do any work.
+            if pause.requested().is_none() && opening.pause.request().is_none() {
+                return settlement(RunTermination::QuestionRequired {
+                    question: Box::new(QuestionReport::from_request(
+                        pending.item_id(),
+                        pending.target(),
+                        pending.request(),
+                    )),
                 });
             }
-            Err(error) => {
-                return settlement(process_error_termination(error, &self.confinement, cancel));
+        }
+        for grant in &opening.session_roots {
+            let actual = ego_core::permit::resolve_root(
+                grant.path().as_path(),
+                grant.access(),
+                &ego_tools::fs::OsFs,
+            )
+            .map_err(|error| {
+                RunExecutorError::new(format!("session root could not be re-admitted: {error}"))
+            })?;
+            if &actual != grant.path() {
+                return Err(RunExecutorError::new(
+                    "session root changed since approval".to_owned(),
+                ));
             }
-        };
+            self.effective
+                .roots
+                .retain(|root| root.path != actual.as_path());
+            self.effective.roots.push(ego_core::permit::RootCfg {
+                path: actual.as_path().to_path_buf(),
+                access: grant.access(),
+                consent: None,
+            });
+        }
+        if !opening.session_roots.is_empty() {
+            let mut roots =
+                super::profile_roots::admit(&self.effective, self.confinement.workspace())
+                    .map_err(RunExecutorError::new)?;
+            for root in &mut roots {
+                if opening.session_roots.contains(root) {
+                    *root = root.clone().with_terminal_write();
+                }
+            }
+            if opening
+                .session_roots
+                .iter()
+                .any(|grant| !roots.contains(grant))
+            {
+                return Err(RunExecutorError::new(
+                    "session root is outside the admitted ceiling".to_owned(),
+                ));
+            }
+            self.confinement = self.confinement.clone().with_roots(roots);
+        }
+        let mut active = ActiveSession::durable(opened, opening.clone(), EVIDENCE_CAP)
+            .map_err(|error| RunExecutorError::new(error.to_string()))?;
+        if let Some(desk) = bindings.residual_desk() {
+            desk.configure_limits(self.effective.residual_limits);
+        }
+        let mut effects = Some(
+            match segment_effects(
+                &self.confinement,
+                self.run_deadline,
+                self.admitted_sandbox_observation.as_ref(),
+                (&active, &bindings, cancel),
+            )
+            .await
+            {
+                Ok(effects) => effects,
+                Err(settled) => return settled,
+            },
+        );
         if let Some(note_text) = repair_note {
             Stderr.note(&note_text);
         }
@@ -376,6 +441,7 @@ impl CliPrepared {
                 session_id: self.session_id,
                 confinement: &self.confinement,
                 effective: &self.effective,
+                connection_binding: self.connection_binding.as_deref(),
                 slug: self.slug.clone(),
                 cancel,
                 run_deadline: self.run_deadline,
@@ -387,7 +453,7 @@ impl CliPrepared {
         .await;
         let GenerationPreflight {
             source,
-            selection: _,
+            selection,
             capabilities: model_capabilities,
             judge_available,
             proof_directory,
@@ -411,6 +477,15 @@ impl CliPrepared {
         };
         drop(proof_directory);
         drop(proof_evidence);
+        let child_executor = Arc::new(
+            self.child_executor
+                .with_pinned_child_authority(
+                    &self.effective,
+                    &self.confinement,
+                    selection.connection(),
+                )
+                .with_live_child_selection(Arc::clone(&selection)),
+        );
         let mcp_errors = bindings.mcp_errors().to_vec();
         let admitted_tools = bindings.admitted_tools();
         let mcp_runtime = bindings.mcp_runtime();
@@ -420,25 +495,27 @@ impl CliPrepared {
                 .retain(|tool| !matches!(tool, RegisteredTool::Task | RegisteredTool::Skill(_)));
         }
         let sink = bindings.sink_factory.create(&model_capabilities);
-        sink.publish(
-            &PublicEvent::SessionStarted {
-                v: PUBLIC_EVENT_VERSION,
-                session: active.id(),
-                capabilities: capabilities(
-                    &self.registry,
-                    self.system.is_some(),
-                    self.compiled.is_some(),
-                ),
-                mcp_errors,
-                hook_errors: Vec::new(),
-                instructions: self
-                    .system
-                    .as_ref()
-                    .map(|system| system.sources.clone())
-                    .unwrap_or_default(),
-            },
-            &opening,
+        let started_capabilities = capabilities(
+            &self.registry,
+            self.system.is_some(),
+            self.compiled.is_some(),
+            self.no_hooks,
         );
+        let instructions = self
+            .system
+            .as_ref()
+            .map(|system| system.sources.clone())
+            .unwrap_or_default();
+        // The source and every compaction successor open with the same header.
+        let session_started = |session| PublicEvent::SessionStarted {
+            v: PUBLIC_EVENT_VERSION,
+            session,
+            capabilities: started_capabilities.clone(),
+            mcp_errors: mcp_errors.clone(),
+            hook_errors: Vec::new(),
+            instructions: instructions.clone(),
+        };
+        sink.publish(&session_started(active.id()), &opening);
 
         let mode = self.effective.mode.unwrap_or(Mode::Default);
         let policy_selection =
@@ -448,17 +525,18 @@ impl CliPrepared {
         // permission stays exit 3; an ACP run hands in the connected host, so
         // an escalation becomes a question the operator can answer instead of
         // an internal error the host can only render as a failure.
-        let profile_roots =
-            super::profile_roots::admit(&self.effective, self.confinement.workspace())
+        let (profile_roots, config_notes) =
+            super::profile_roots::admit_noted(&self.effective, self.confinement.workspace())
                 .map_err(RunExecutorError::new)?;
         let policy_source: Arc<dyn GenerationPolicySource> = Arc::new(
             CliGenerationPolicySource::new(
-                policy_selection,
+                policy_selection.clone(),
                 CanonPath::new(&self.root),
                 bindings.human(),
             )
             .with_profile_roots(profile_roots)
-            .with_read_perimeter(&self.confinement),
+            .with_read_perimeter(&self.confinement)
+            .with_root_ceilings(super::profile_roots::write_ceilings(&self.effective).0),
         );
         let config = TurnConfig {
             cache: self.effective.cache,
@@ -468,6 +546,7 @@ impl CliPrepared {
                 sandbox: self.confinement.level(),
                 offline: self.confinement.offline(),
                 host: bindings.host(),
+                config_notes,
             }),
             token_ceiling: self.effective.ceilings.tokens,
             retry: self.retry,
@@ -490,65 +569,225 @@ impl CliPrepared {
                 currency,
             ))
         });
-        let (termination, state, result) = match drive_headless_turn(
-            HeadlessSession {
-                active: &mut active,
-                opening,
-                clock: &clock,
-                sink: sink.as_ref(),
-                cancel,
-                pause,
-                control: bindings.take_interactive_control(),
-            },
-            HeadlessGeneration {
-                source,
-                admission,
-                invocation,
-                config,
-                provider_recovery: self.provider_recovery,
-                goal: self.goal,
-                goal_turns: self.goal_turns,
-                goal_check_command: self.goal_check_command,
-                goal_ceilings: self.effective.ceilings.clone(),
-                gate,
-                hook_layers: self.profile_layers.as_deref(),
-                hook_trust: self.trust,
-                policy_source,
-                judge_available,
-            },
-            HeadlessChild {
-                parent_run: run_id,
-                root: child_root,
-                store: Arc::clone(&self.store),
-                executor: child_executor,
-                inherited_effect_tools,
-            },
-            HeadlessEffects {
-                mcp_runtime,
-                registry: &self.registry,
-                admitted_tools,
-                cwd: &self.cwd,
-                confinement: &self.confinement,
-                run_deadline: self.run_deadline,
-                ports,
-                observation,
-                probe_evidence,
-                elicitor: bindings.elicitor,
-            },
-            HeadlessTurn {
-                turns: &turns,
-                attachment_specs: &[],
-                input: HeadlessInput::Prompt(prompt),
-                diagnostics: &Stderr,
-            },
-        )
-        .await
-        {
-            Ok(outcome) => outcome,
-            Err(termination) => return run_settlement(termination, self.child),
+        // A host that follows the transition gets the in-process compaction of
+        // `ego run`; any other host keeps explicit recovery with `_ego/compact`.
+        let compaction_host = !self.child && bindings.sink_factory.follows_session_transitions();
+        // DEFERRED (2026-11-04) — only the first segment takes the host's
+        // steering control: a `_ego/steer` accepted while the summary is
+        // written is not delivered to the successor (story 850-9beb review F2).
+        let mut control = bindings.take_interactive_control();
+        let mut opening = opening;
+        let mut input = HeadlessInput::Prompt(prompt);
+        let mut turns_taken: u32 = 0;
+        let (termination, state, result) = loop {
+            let (ports, observation, probe_evidence) = match effects.take() {
+                Some(effects) => effects,
+                None => match segment_effects(
+                    &self.confinement,
+                    self.run_deadline,
+                    self.admitted_sandbox_observation.as_ref(),
+                    (&active, &bindings, cancel),
+                )
+                .await
+                {
+                    Ok(effects) => effects,
+                    Err(settled) => return settled,
+                },
+            };
+            // Session roots cannot cross an in-process session transition.
+            let automatic_compaction = (compaction_host && opening.session_roots.is_empty())
+                .then_some(self.effective.compaction.threshold);
+            let segment_turns = Turns {
+                parent_cancel: turns.parent_cancel.clone(),
+                schema: turns.schema,
+                retries: turns.retries,
+                max_turns: turns.max_turns.map(|max| max.saturating_sub(turns_taken)),
+                deadline: turns.deadline,
+            };
+            let driven = drive_headless_turn(
+                HeadlessSession {
+                    active: &mut active,
+                    opening,
+                    clock: &clock,
+                    sink: sink.as_ref(),
+                    cancel,
+                    pause,
+                    control: control.take(),
+                },
+                HeadlessGeneration {
+                    source: Arc::clone(&source),
+                    model_ceiling: bindings.model_selection_ceiling().cloned(),
+                    model_catalogue: bindings.model_catalogue(),
+                    admission: Arc::clone(&admission),
+                    invocation,
+                    config: config.clone(),
+                    provider_recovery: self.provider_recovery,
+                    goal: self.goal.clone(),
+                    goal_turns: self.goal_turns,
+                    goal_check_command: self.goal_check_command.clone(),
+                    goal_ceilings: self.effective.ceilings.clone(),
+                    child_defaults: self.effective.task.clone(),
+                    gate: gate.clone(),
+                    hook_layers: self.profile_layers.as_deref(),
+                    hooks_off: self.no_hooks,
+                    skill_review: self.effective.skill_safety_review && !self.no_skill_safety_check,
+                    hook_trust: self.trust,
+                    policy_source: Arc::clone(&policy_source),
+                    judge_available,
+                },
+                HeadlessChild {
+                    worker: self.child,
+                    parent_run: run_id,
+                    root: child_root.clone(),
+                    store: Arc::clone(&self.store),
+                    executor: Arc::clone(&child_executor),
+                    inherited_effect_tools: inherited_effect_tools.clone(),
+                },
+                HeadlessEffects {
+                    mcp_runtime: mcp_runtime.clone(),
+                    registry: &self.registry,
+                    admitted_tools: admitted_tools.clone(),
+                    cwd: &self.cwd,
+                    confinement: &self.confinement,
+                    run_deadline: self.run_deadline,
+                    ports,
+                    observation,
+                    probe_evidence,
+                    elicitor: bindings.elicitor.clone(),
+                    root_grants: if !self.child
+                        && bindings.human().is_some()
+                        && !self.effective.deny_prompts
+                    {
+                        bindings.elicitor.as_ref().map(|elicitor| {
+                            let target = self.effective.active_profile.as_ref().map_or(
+                                UserConfigTarget::Base,
+                                |profile| {
+                                    UserConfigTarget::Profile(
+                                        ego_core::config::ProfileName::parse(&profile.name).expect(
+                                            "the active profile was validated at admission",
+                                        ),
+                                    )
+                                },
+                            );
+                            Arc::new(SeatRootGrants {
+                                resume_turn: false,
+                                transition: None,
+                                elicitor: Arc::clone(elicitor),
+                                effective: self.effective.clone(),
+                                workspace: CanonPath::new(&self.root),
+                                rule_writer: crate::config::ego_home().and_then(|home| {
+                                    let layers = self.profile_layers.as_ref()?;
+                                    Some(Arc::new(
+                                        crate::acp_permission::CliAcpPermissionRules::new(
+                                            home.join("config.toml"),
+                                            target.clone(),
+                                        )
+                                        .with_live_policy(
+                                            policy_selection.clone(),
+                                            Arc::new(FrozenRuleResolver::new(
+                                                layers.clone(),
+                                                self.trust,
+                                                self.effective.active_profile.as_ref().map(
+                                                    |profile| {
+                                                        (profile.name.clone(), profile.selected_by)
+                                                    },
+                                                ),
+                                                policy_selection.clone(),
+                                            )),
+                                        ),
+                                    )
+                                        as Arc<dyn ego_acp::permission::PermissionRuleWriter>)
+                                }),
+                                target,
+                                store_root: self.store.root().to_path_buf(),
+                            }) as Arc<dyn ego_core::turn::RootGrantPort>
+                        })
+                    } else {
+                        None
+                    },
+                },
+                HeadlessTurn {
+                    turns: &segment_turns,
+                    attachment_specs: &[],
+                    input,
+                    diagnostics: &Stderr,
+                    automatic_compaction,
+                },
+            )
+            .await;
+            let (termination, state, result, compaction) = match driven {
+                Ok(outcome) => outcome,
+                Err(termination) => return run_settlement(termination, self.child),
+            };
+            let Some(compaction) = compaction else {
+                break (termination, state, result);
+            };
+            active.replace_state(state);
+            if let Err(termination) = activate_headless_successor(
+                &mut active,
+                &compaction.receipt,
+                self.store.as_ref(),
+                &clock,
+                (self.admission.as_ref(), &Some(self.run_context.clone())),
+            ) {
+                return run_settlement(termination, self.child);
+            }
+            opening = active.state().clone();
+            sink.publish(
+                &PublicEvent::SessionCompacted {
+                    source: compaction.receipt.source,
+                    source_seq: compaction.receipt.source_seq,
+                    target: active.id(),
+                },
+                &opening,
+            );
+            sink.publish(&session_started(active.id()), &opening);
+            turns_taken = turns_taken.saturating_add(compaction.turns_taken);
+            input = HeadlessInput::Checkpoint {
+                request: compaction.request,
+            };
         };
         active.replace_state(state);
         settle_run_artifact(termination, artifacts, run_id, result, self.child)
+    }
+}
+
+/// Effect ports, exec observation and probe evidence of one session segment.
+type SegmentEffects = (
+    Arc<RunEffectPorts>,
+    ExecObservation,
+    Option<ego_core::store::evidence::EvidenceRef>,
+);
+
+/// The effect ports of the active session; an error is already the run's settlement.
+async fn segment_effects(
+    confinement: &RunConfinement,
+    run_deadline: Option<std::time::Instant>,
+    admitted_observation: Option<&ExecObservation>,
+    (active, bindings, cancel): (&ActiveSession<'_>, &RunExecutionBindings, &CancelToken),
+) -> Result<SegmentEffects, Result<RunSettlement, RunExecutorError>> {
+    match run_effect_ports(
+        confinement.clone(),
+        active.evidence().clone(),
+        cancel.clone(),
+        run_deadline,
+        admitted_observation,
+        bindings.sandbox_grants(),
+        bindings.residual_desk(),
+    )
+    .await
+    {
+        Ok(effects) => Ok(effects),
+        Err(error @ ProcessError::ConfinementChanged { .. }) => {
+            Err(Ok(RunSettlement::Interrupted {
+                diagnostic: Some(error.to_string()),
+            }))
+        }
+        Err(error) => Err(settlement(process_error_termination(
+            error,
+            confinement,
+            cancel,
+        ))),
     }
 }
 
@@ -623,6 +862,7 @@ pub(super) struct ExecutionPreflight {
     pub(super) ci: Option<CiInvocation>,
     pub(super) chosen: Chosen,
     pub(super) refresh: ego_mcp::McpRegistryRefresh,
+    pub(super) mcp_refusals: Vec<McpServerName>,
     pub(super) ready: Option<ExecutionReady>,
 }
 
@@ -683,8 +923,31 @@ pub(super) async fn select_startup_model(
         scope.http(),
         &crate::onboarding::ProcessEnvironment,
         &observed,
+        settings.effective.connection.as_deref(),
+        None,
+        &settings.effective,
     )
     .await?;
+    if !settings.effective.connections.is_empty() {
+        let selected = ego_core::config::select_connection(
+            &settings.effective.connections,
+            settings.effective.connection.as_deref(),
+            None,
+        )
+        .map_err(|message| RunTermination::UsageError { message })?;
+        if let Some((_, connection)) = selected {
+            let route = crate::auth::connection_route(connection);
+            let model = defaults
+                .get(&route)
+                .ok_or_else(|| RunTermination::UsageError {
+                    message: format!(
+                        "selected account has no default model; pass --model for route {route}"
+                    ),
+                })?;
+            settings.effective.model = Some(ModelRef(model.to_string()));
+            return Ok(());
+        }
+    }
     let usable = snapshot
         .models
         .iter()
@@ -707,6 +970,14 @@ pub(super) async fn select_startup_model(
             return Err(RunTermination::UsageError {
                 message: error.to_string(),
             });
+        }
+        crate::onboarding::StartupDecision::UseForRun(model) => {
+            diagnostics.note(&format!(
+                "using {}, the default model of the only usable provider, for this run; it is not saved; pass --model to pin a model",
+                model.0
+            ));
+            settings.effective.model = Some(model);
+            return Ok(());
         }
         crate::onboarding::StartupDecision::AutoSelect(model) => (Some(model), None),
         crate::onboarding::StartupDecision::Pick(snapshot, notice) => {
@@ -800,8 +1071,6 @@ pub(super) async fn execution_preflight(
         diagnostics,
     )
     .map_err(usage)?;
-    admit_windows_unconfined_start(args, &mut settings, driver, home.as_deref(), diagnostics)
-        .map_err(usage)?;
     let ci = ci_invocation(args, &settings, driver).map_err(usage)?;
     let chosen = chosen(
         args,
@@ -809,6 +1078,28 @@ pub(super) async fn execution_preflight(
         ci.as_ref().map(|ci| ci.session_root.as_path()),
     )
     .map_err(usage)?;
+    let mut resumed = args.clone();
+    let resume_connection =
+        super::execution::restore_resume_connection(&mut resumed, &chosen).map_err(usage)?;
+    if resumed.connection != args.connection {
+        let trust = settings.trust;
+        settings = rooted_settings(&resumed, settings.cwd.clone(), |_| trust, diagnostics)
+            .map_err(usage)?;
+    }
+    super::execution::admit_resume_connection(&resume_connection, &settings.effective, &chosen.id)
+        .map_err(usage)?;
+    let args = &resumed;
+    admit_windows_unconfined_start(args, &mut settings, driver, home.as_deref(), diagnostics)
+        .map_err(usage)?;
+    if ci.is_none() {
+        crate::session::start_cold_storage(
+            Arc::clone(&chosen.store),
+            &crate::session::cold_storage_config(
+                &settings.effective.sessions,
+                args.no_session_compression,
+            ),
+        );
+    }
     if args.answers.is_empty() {
         select_startup_model(args, &mut settings, driver, cancel, diagnostics).await?;
     }
@@ -820,8 +1111,15 @@ pub(super) async fn execution_preflight(
     )
     .map_err(usage)?;
     if !args.quiet {
-        note_refused_mcp(diagnostics, &attachment.refused);
+        note_mcp_attachment(diagnostics, &attachment);
     }
+    settings.confinement =
+        with_selected_mcp_executables(settings.confinement.clone(), &attachment.attached);
+    let mcp_refusals = attachment
+        .refused
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
     let selected_mcp = ego_tools::mcp::materialize_admissions(attachment.attached);
     let refresh = ego_mcp::McpRegistryRefresh::new(
         selected_mcp,
@@ -837,6 +1135,7 @@ pub(super) async fn execution_preflight(
             ci,
             chosen,
             refresh,
+            mcp_refusals,
             ready: None,
         });
     }
@@ -850,11 +1149,13 @@ pub(super) async fn execution_preflight(
     } = materials(
         &settings,
         args,
-        matches!(driver, Driver::Interactive { .. }),
+        driver,
         Arc::new(chosen.store.history()),
         diagnostics,
     )
-    .map_err(usage)?;
+    .map_err(|err| {
+        super::composition::expired(settings.run_deadline).unwrap_or_else(|| usage(err))
+    })?;
     let GenerationPreflight {
         source,
         selection,
@@ -868,6 +1169,7 @@ pub(super) async fn execution_preflight(
             session_id: SessionId::new(),
             confinement: &settings.confinement,
             effective: &settings.effective,
+            connection_binding: None,
             slug,
             cancel,
             run_deadline: settings.run_deadline,
@@ -885,6 +1187,7 @@ pub(super) async fn execution_preflight(
         ci,
         chosen,
         refresh,
+        mcp_refusals,
         ready: Some(ExecutionReady {
             system,
             registry,
@@ -907,17 +1210,12 @@ pub(super) fn admit_mcp_transports(
 ) -> Result<(), UsageError> {
     for (name, config, _) in selected {
         match config {
-            McpServerConfig::Http(_) if !confinement.admits_mcp_http() && confinement.offline() => {
+            McpServerConfig::Http(_) if !confinement.admits_mcp() => {
                 return Err(UsageError(format!(
                     "MCP HTTP server `{name}` is unavailable under --offline"
                 )));
             }
-            McpServerConfig::Http(_) if !confinement.admits_mcp_http() => {
-                return Err(UsageError(format!(
-                    "MCP HTTP server `{name}` requires --sandbox off"
-                )));
-            }
-            McpServerConfig::Stdio(_) if !confinement.admits_mcp_stdio() => {
+            McpServerConfig::Stdio(_) if !confinement.admits_mcp() => {
                 return Err(UsageError(format!(
                     "MCP stdio server `{name}` is unavailable under --offline"
                 )));
@@ -931,7 +1229,8 @@ pub(super) fn admit_mcp_transports(
 pub(super) type McpSelection = Vec<(McpServerName, McpServerConfig, McpConfigProvenance)>;
 
 /// The servers a session attaches: every explicit `--mcp` selection plus every
-/// enabled configured server. Both pass `admit_mcp_transports`. An explicit
+/// enabled configured server (none under `--mcp-only`), unless the run has no tools. Both pass
+/// `admit_mcp_transports`. An explicit
 /// refusal is a usage error; a refused configured server is returned in
 /// `refused` with its cause so the session continues without it.
 pub(super) struct McpAttachment {
@@ -945,10 +1244,21 @@ pub(super) fn attach_mcp(
     confinement: &RunConfinement,
     cwd: &Path,
 ) -> Result<McpAttachment, UsageError> {
-    let mut attached = config::selected_mcp(args, effective, cwd)?;
+    if args.exclusive_read_only || selected_tools(args, effective).is_some_and(Vec::is_empty) {
+        return Ok(McpAttachment {
+            attached: Default::default(),
+            refused: Vec::new(),
+        });
+    }
+    let mut attached = config::selected_mcp(&args.mcp, effective, cwd)?;
     admit_mcp_transports(confinement, &attached)?;
     let mut refused = Vec::new();
-    for entry in config::configured_mcp(effective) {
+    let configured = if args.mcp_only {
+        Vec::new()
+    } else {
+        config::configured_mcp(effective)
+    };
+    for entry in configured {
         if attached.iter().any(|(name, _, _)| name == &entry.0) {
             continue;
         }
@@ -961,12 +1271,211 @@ pub(super) fn attach_mcp(
     Ok(McpAttachment { attached, refused })
 }
 
-/// Tell the user once why a configured server did not start.
-pub(super) fn note_refused_mcp(
-    diagnostics: &dyn Diagnostics,
-    refused: &[(McpServerName, UsageError)],
-) {
-    for (name, error) in refused {
+/// The sandbox exec perimeter plus the exact canonical executable of each stdio server
+/// this invocation attached (`--mcp NAME|@FILE` or an enabled configured entry).
+///
+/// The user chose these servers, so the sandbox must not refuse to start them. Each
+/// command is resolved once, here, against the host `PATH`: no directory, wildcard or
+/// later lookup is admitted. A command that does not resolve adds nothing and fails at
+/// spawn with its own diagnostic. An argument that names an existing file (the server's
+/// script) is admitted the same way.
+pub(super) fn with_selected_mcp_executables(
+    confinement: RunConfinement,
+    attached: &McpSelection,
+) -> RunConfinement {
+    let mut paths = confinement.exec_paths().to_vec();
+    for (_, config, _) in attached {
+        let McpServerConfig::Stdio(stdio) = config else {
+            continue;
+        };
+        // The server's script (`python server.py`, `node server.js`) is part of what
+        // the user selected: an interpreter that cannot read it fails to start.
+        // A bare argument is looked up in the working directory only, never on `PATH`.
+        let candidates =
+            std::iter::once(stdio.command.clone()).chain(stdio.args.iter().map(|arg| {
+                if arg.contains('/') {
+                    arg.clone()
+                } else {
+                    format!("./{arg}")
+                }
+            }));
+        for candidate in candidates {
+            if let Some(path) = resolve_executable(&candidate, stdio.cwd.as_deref()) {
+                let path = CanonPath::new(path);
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+    }
+    confinement.with_exec_paths(paths)
+}
+
+fn resolve_executable(command: &str, cwd: Option<&Path>) -> Option<PathBuf> {
+    let candidates: Vec<PathBuf> = if command.contains('/') {
+        let base = match cwd {
+            Some(cwd) => cwd.to_path_buf(),
+            None => std::env::current_dir().ok()?,
+        };
+        vec![base.join(command)]
+    } else {
+        std::env::split_paths(&std::env::var_os("PATH")?)
+            .map(|directory| directory.join(command))
+            .collect()
+    };
+    candidates
+        .into_iter()
+        .filter_map(|candidate| std::fs::canonicalize(candidate).ok())
+        .find(|resolved| resolved.is_file())
+}
+
+/// Tell the user once why a configured server did not start, and which
+/// attached server sends its OAuth credential unencrypted.
+pub(super) fn note_mcp_attachment(diagnostics: &dyn Diagnostics, attachment: &McpAttachment) {
+    for (name, error) in &attachment.refused {
         diagnostics.note(&format!("MCP server '{name}' was not connected: {error}"));
+    }
+    for (name, config, _) in &attachment.attached {
+        if let McpServerConfig::Http(http) = config
+            && let Some(warning) = crate::mcp::plaintext_credential_warning(name, http)
+        {
+            diagnostics.note(&warning);
+        }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod selected_mcp_exec_tests {
+    use super::*;
+    use ego_core::config::{McpStdioConfig, Source};
+    use ego_core::permit::Confinement;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn executable(directory: &Path) -> PathBuf {
+        std::fs::create_dir_all(directory).unwrap();
+        let path = directory.join("srv");
+        std::fs::write(&path, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::canonicalize(path).unwrap()
+    }
+
+    /// Story 957-0130. Catches: the sandbox refusing the server the user selected, and
+    /// the selection widening the perimeter to a different file with the same name.
+    #[test]
+    fn only_the_selected_server_executable_joins_the_exec_perimeter() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(base.path()).unwrap().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let selected = executable(&base.path().join("selected"));
+        let other = executable(&base.path().join("other"));
+        let stdio = McpStdioConfig::new(selected.display().to_string(), vec![], None, vec![])
+            .expect("stdio config");
+        let attached: McpSelection = vec![(
+            "srv".parse::<McpServerName>().unwrap(),
+            McpServerConfig::Stdio(stdio),
+            McpConfigProvenance::Layer {
+                source: Source::Flags,
+            },
+        )];
+        let before = ego_tools::exec::admit_confinement(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(&workspace),
+        )
+        .unwrap();
+        let reachable = |policy: &RunConfinement, path: &Path| {
+            ego_tools::exec::setup_exec_reachable(policy, &CanonPath::new(path)).unwrap()
+        };
+        assert!(!reachable(&before, &selected), "fixture must start refused");
+        let after = with_selected_mcp_executables(before, &attached);
+        assert!(reachable(&after, &selected));
+        assert!(
+            !reachable(&after, &other),
+            "same basename elsewhere stays refused"
+        );
+        assert_eq!(after.exec_paths(), [CanonPath::new(&selected)]);
+    }
+
+    /// Story 957-0130. Catches: a selected `interpreter script` server failing to start
+    /// under the workspace sandbox because its script sits outside the workspace, and the
+    /// script's neighbours joining the perimeter with it.
+    #[test]
+    fn the_selected_server_script_joins_the_exec_perimeter() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(base.path()).unwrap().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let directory = std::fs::canonicalize(base.path()).unwrap().join("scripts");
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("server.py");
+        std::fs::write(&script, "print()\n").unwrap();
+        let neighbour = directory.join("other.py");
+        std::fs::write(&neighbour, "print()\n").unwrap();
+        let stdio = McpStdioConfig::new(
+            "/bin/sh".to_owned(),
+            vec![script.display().to_string(), "--flag".to_owned()],
+            None,
+            vec![],
+        )
+        .expect("stdio config");
+        let attached: McpSelection = vec![(
+            "srv".parse::<McpServerName>().unwrap(),
+            McpServerConfig::Stdio(stdio),
+            McpConfigProvenance::Layer {
+                source: Source::Flags,
+            },
+        )];
+        let before = ego_tools::exec::admit_confinement(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(&workspace),
+        )
+        .unwrap();
+        let after = with_selected_mcp_executables(before, &attached);
+        assert!(after.exec_paths().contains(&CanonPath::new(&script)));
+        assert!(!after.exec_paths().contains(&CanonPath::new(&neighbour)));
+    }
+
+    /// Story 957-0130. Catches: a `python server.py` server with a `cwd` outside the
+    /// workspace and a bare script name staying unstartable, because only arguments
+    /// containing `/` were admitted.
+    #[test]
+    fn a_bare_script_name_resolves_in_the_server_cwd_only() {
+        let base = tempfile::tempdir().unwrap();
+        let workspace = std::fs::canonicalize(base.path()).unwrap().join("ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let directory = std::fs::canonicalize(base.path()).unwrap().join("scripts");
+        std::fs::create_dir_all(&directory).unwrap();
+        let script = directory.join("server.py");
+        std::fs::write(&script, "print()\n").unwrap();
+        std::fs::write(directory.join("other.py"), "print()\n").unwrap();
+        let stdio = McpStdioConfig::new(
+            "/bin/sh".to_owned(),
+            vec!["server.py".to_owned(), "sh".to_owned()],
+            Some(directory.clone()),
+            vec![],
+        )
+        .expect("stdio config");
+        let attached: McpSelection = vec![(
+            "srv".parse::<McpServerName>().unwrap(),
+            McpServerConfig::Stdio(stdio),
+            McpConfigProvenance::Layer {
+                source: Source::Flags,
+            },
+        )];
+        let before = ego_tools::exec::admit_confinement(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(&workspace),
+        )
+        .unwrap();
+        let after = with_selected_mcp_executables(before, &attached);
+        assert!(after.exec_paths().contains(&CanonPath::new(&script)));
+        assert!(
+            !after
+                .exec_paths()
+                .contains(&CanonPath::new(directory.join("other.py")))
+        );
+        // `sh` as an argument must not resolve through PATH to /bin/sh's twin.
+        assert_eq!(after.exec_paths().len(), 2);
     }
 }

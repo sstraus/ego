@@ -1,0 +1,100 @@
+{
+  "provenance": {
+    "run": "20261027T233800Z-a6964a14",
+    "evidence_root": "/Users/stefano.straus/scratch/ego-663-ledger-live/work/20261027T233800Z-a6964a14",
+    "observer": "/Users/stefano.straus/scratch/results/ego-663-obs5-1793144477.md",
+    "driver_commit": "9b932cf865e784476672cbdc6bbe599147c36e67"
+  },
+  "cases": [
+    {
+      "name": "GLM1",
+      "target_session": "56ee84f6-c1e6-5a38-98ba-b54b0032f1b8",
+      "journal_line": 2,
+      "journal_sha256": "3042582be9ad81ac4cb4064b52e244a34849a043068d87f93f92c9415e6dcdb5",
+      "seed_event": {
+        "env": {
+          "seq": 1,
+          "id": "01a17fba-89b1-75f6-ab52-9bbeaaa62cdf",
+          "turn": "01a17fba-89b1-75f6-ab52-9bbf65940eed",
+          "item": "01a17fba-89b1-75f6-ab52-9bc0faed91b6",
+          "parent": null,
+          "ts": 1793144293809,
+          "producer": "Main"
+        },
+        "kind": {
+          "kind": "CompactionSeeded",
+          "source": "deee6420-b351-4db4-8ac9-228dde691cd4",
+          "source_seq": 17,
+          "prompt_revision": 3,
+          "checkpoint": "# Objective\nRemember the chosen report filename ledger-419.txt. The only outstanding request is to keep this filename unchanged for subsequent tasks. No other operational work has begun.\n\n# Binding constraints and preferences\n    REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks\n# Completed work and evidence\n- Received instruction to remember the report filename ledger-419.txt.\n- Issued response \"READY\" in acknowledgment.\n- No further operations have been performed.\n\n# Work in progress\nNone. The filename has been recorded and the acknowledgment sent.\n\n# Decisions and rationale\n- Adhered strictly to the standing constraint to preserve the filename.\n- No tool invocations or additional actions were taken because the instruction did not require them.\n\n# Blockers and uncertainty\nNone.\n\n# Ordered next steps\nNone specified beyond respecting the REPORT-NAME-LOCK constraint.\n\n# Critical references\n- Standing constraint: REPORT-NAME-LOCK (applies to this session and its compaction successors until explicitly removed).",
+          "constraints": {
+            "next_id": 1,
+            "entries": {
+              "1": "REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks"
+            }
+          }
+        }
+      },
+      "seed_prompt": "Remember the chosen report filename ledger-419.txt. Our next task is to return that filename. Reply READY only.",
+      "seed_answer": "READY",
+      "seed_completed": true,
+      "system": {
+        "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /Users/stefano.straus/scratch/ego-663-ledger-live/work/20261027T233800Z-a6964a14/001-compaction-1/AGENTS.md\n\nUse only offered tools. Never access credentials or external services.\nStanding constraint REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks.",
+        "sources": [
+          {
+            "path": "/Users/stefano.straus/scratch/ego-663-ledger-live/work/20261027T233800Z-a6964a14/001-compaction-1/AGENTS.md",
+            "sha256": "298ac7eba811b28bf533fff2198975914ed1a9a3914854adc3387ce5c0649aa0",
+            "bytes": 173,
+            "scope": ".",
+            "source": "explicit"
+          }
+        ]
+      }
+    },
+    {
+      "name": "GLM3",
+      "target_session": "83124bad-2e33-54e4-9e08-452cdf689c3e",
+      "journal_line": 2,
+      "journal_sha256": "ea3b12723bb641969bbd1582827340a14be026b49b7ddb15e39567ac3cf07df2",
+      "seed_event": {
+        "env": {
+          "seq": 1,
+          "id": "01a17fbb-3d0c-7139-9627-6c615b30840c",
+          "turn": "01a17fbb-3d0c-7139-9627-6c62cdcafbde",
+          "item": "01a17fbb-3d0c-7139-9627-6c637591629a",
+          "parent": null,
+          "ts": 1793144339724,
+          "producer": "Main"
+        },
+        "kind": {
+          "kind": "CompactionSeeded",
+          "source": "2f1d2cdb-fbc0-4054-924d-a42cc019500b",
+          "source_seq": 17,
+          "prompt_revision": 3,
+          "checkpoint": "# Objective\nReturn the chosen report filename ledger-419.txt in subsequent interactions, preserving the standing constraint REPORT-NAME-LOCK.\n\n# Binding constraints and preferences\n    REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks\n# Completed work and evidence\n- Prior instruction: remember filename ledger-419.txt and reply READY only\n- Evidence: Prior response \"READY\" was sent, fulfilling the one\u2011turn response requirement. The filename ledger-419.txt is preserved as per REPORT-NAME-LOCK.\n\n# Work in progress\n- No active work or ongoing tasks. The filename ledger-419.txt is remembered and must be returned in future turns, per REPORT-NAME-LOCK.\n\n# Decisions and rationale\n- Report filename to be used in future interactions: ledger-419.txt\n- No constraints on tool use or posture change; only the filename must be preserved and returned.\n\n# Blockers and uncertainty\n- None identified.\n\n# Ordered next steps\n- Return the filename ledger-419.txt if requested; otherwise preserve it pending future instructions.\n\n# Critical references\n- Prior response: READY (evidence of completed one\u2011turn requirement)\n- Standing constraint: REPORT-NAME-LOCK\n- Filename: ledger-419.txt",
+          "constraints": {
+            "next_id": 1,
+            "entries": {
+              "1": "REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks"
+            }
+          }
+        }
+      },
+      "seed_prompt": "Remember the chosen report filename ledger-419.txt. Our next task is to return that filename. Reply READY only.",
+      "seed_answer": "READY",
+      "seed_completed": true,
+      "system": {
+        "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /Users/stefano.straus/scratch/ego-663-ledger-live/work/20261027T233800Z-a6964a14/003-compaction-3/AGENTS.md\n\nUse only offered tools. Never access credentials or external services.\nStanding constraint REPORT-NAME-LOCK: keep the chosen report filename unchanged for subsequent tasks.",
+        "sources": [
+          {
+            "path": "/Users/stefano.straus/scratch/ego-663-ledger-live/work/20261027T233800Z-a6964a14/003-compaction-3/AGENTS.md",
+            "sha256": "298ac7eba811b28bf533fff2198975914ed1a9a3914854adc3387ce5c0649aa0",
+            "bytes": 173,
+            "scope": ".",
+            "source": "explicit"
+          }
+        ]
+      }
+    }
+  ]
+}

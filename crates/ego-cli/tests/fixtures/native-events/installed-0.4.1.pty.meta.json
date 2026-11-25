@@ -1,0 +1,31 @@
+{
+  "version": "ego 0.4.1",
+  "command": [
+    "/Users/stefano.straus/.local/bin/ego",
+    "run",
+    "--bare",
+    "--offline",
+    "--no-tools",
+    "--thinking",
+    "off",
+    "--model",
+    "ollama/fixture",
+    "--session-dir",
+    "/Users/stefano.straus/Gits/.tmp/ego-771-capture/sessions",
+    "--retry",
+    "0",
+    "--timeout",
+    "15s",
+    "--output",
+    "text",
+    "Report readiness."
+  ],
+  "geometry": [
+    80,
+    24
+  ],
+  "tuic_socket_present": true,
+  "exit": 0,
+  "order": "raw PTY byte order",
+  "fixture_provider": "owned loopback server"
+}

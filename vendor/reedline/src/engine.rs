@@ -220,16 +220,16 @@ pub struct Reedline {
 
     // External break signal: when set to `true`, `read_line()` will return
     // `Signal::ExternalBreak` with the current buffer contents.
-    break_signal: Option<Arc<AtomicBool>>,
+    break_signal: Option<BreakSignal>,
 
     // External repaint signal: when triggered, the prompt is re-evaluated
     // and repainted in place while `read_line()` is running.
     repaint_signal: Option<RepaintSignal>,
 
-    // Maximum time to block on input before yielding control for features that
-    // require periodic processing (external printer, idle callback).
-    // Only used when external_printer or idle_callback is configured.
+    // Deadline for work that still needs a timer: in-flight completion, a
+    // periodic idle callback, or an unbuffered external printer.
     poll_interval: Duration,
+    periodic_idle_callback: bool,
 
     #[cfg(feature = "external_printer")]
     external_printer: Option<ExternalPrinter<String>>,
@@ -279,6 +279,20 @@ impl DeferredMenuCompletion {
     }
 }
 
+/// An external request to return the current edit buffer to the host.
+#[derive(Clone, Debug, Default)]
+pub struct BreakSignal {
+    flag: Arc<AtomicBool>,
+}
+
+impl BreakSignal {
+    /// Publish the break before waking the terminal owner.
+    pub fn request_break(&self) {
+        self.flag.store(true, Ordering::Release);
+        let _ = event::wake();
+    }
+}
+
 /// Call [`request_repaint`](RepaintSignal::request_repaint) once
 /// new prompt data is ready! The next iteration of the input loop re-evaluates
 /// the [`Prompt`] and redraws it without interrupting the current line edit.
@@ -290,12 +304,13 @@ pub struct RepaintSignal {
 impl RepaintSignal {
     /// Request that the prompt is re-evaluated and repainted in place.
     pub fn request_repaint(&self) {
-        self.flag.store(true, Ordering::Relaxed);
+        self.flag.store(true, Ordering::Release);
+        let _ = event::wake();
     }
 
     /// Consume a pending repaint request.
     fn take(&self) -> bool {
-        self.flag.swap(false, Ordering::Relaxed)
+        self.flag.swap(false, Ordering::Acquire)
     }
 }
 
@@ -395,6 +410,7 @@ impl Reedline {
             break_signal: None,
             repaint_signal: None,
             poll_interval: DEFAULT_POLL_INTERVAL,
+            periodic_idle_callback: false,
             #[cfg(feature = "external_printer")]
             external_printer: None,
             #[cfg(feature = "idle_callback")]
@@ -795,11 +811,11 @@ impl Reedline {
 
     /// A builder that configures an external break signal.
     ///
-    /// When the [`AtomicBool`] is set to `true` by an external thread,
+    /// When [`BreakSignal::request_break`] is called by an external thread,
     /// [`Reedline::read_line()`] will return [`Signal::ExternalBreak`] with the
     /// current buffer contents. The flag is automatically reset to `false`
     /// after being consumed.
-    pub fn with_break_signal(mut self, signal: Arc<AtomicBool>) -> Self {
+    pub fn with_break_signal(mut self, signal: BreakSignal) -> Self {
         self.break_signal = Some(signal);
         self
     }
@@ -1023,27 +1039,18 @@ impl Reedline {
             .is_some_and(RepaintSignal::take)
     }
 
-    /// Whether the input loop must poll with a timeout instead of blocking
-    /// indefinitely, so external triggers (break signal, repaint signal,
-    /// external printer, idle callback) are noticed while waiting for input.
+    /// Only legacy periodic callbacks and rendezvous printers need a timer.
+    /// Break, repaint and buffered printer producers wake the terminal source.
     fn input_needs_polling(&self) -> bool {
-        #[allow(unused_mut)] // Dependent on feature flags
-        let mut poll = self.break_signal.is_some()
-            || self
-                .repaint_signal
-                .as_ref()
-                .is_some_and(|sig| Arc::strong_count(&sig.flag) > 1);
-
+        #[allow(unused_mut)]
+        let mut poll = self.periodic_idle_callback;
         #[cfg(feature = "external_printer")]
         {
-            poll |= self.external_printer.is_some();
+            poll |= self
+                .external_printer
+                .as_ref()
+                .is_some_and(|printer| printer.receiver().capacity() == Some(0));
         }
-
-        #[cfg(feature = "idle_callback")]
-        {
-            poll |= self.idle_callback.is_some();
-        }
-
         poll
     }
 
@@ -1080,7 +1087,7 @@ impl Reedline {
             }
 
             if let Some(ref signal) = self.break_signal {
-                if signal.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                if signal.flag.swap(false, Ordering::Acquire) {
                     let buffer = self.editor.get_buffer().to_string();
                     self.input_mode = InputMode::Regular;
                     self.last_render_snapshot = None;
@@ -1114,9 +1121,8 @@ impl Reedline {
                 }
             }
 
-            // Determine if we need to poll (non-blocking) or can block on input.
-            // We need polling if external_printer or idle_callback is configured,
-            // using the shared poll_interval for the timeout.
+            // Completion work has no wake producer yet. Poll only while it is
+            // in flight; an idle completer must not install a periodic timer.
             let status = self.completer.poll_completion();
             // Anything BUT idle means work is in flight. We need to keep polling.
             let completer_pending = status != CompletionStatus::Idle;
@@ -1145,12 +1151,9 @@ impl Reedline {
             let mut events: Vec<Event> = vec![];
 
             if !self.immediately_accept && self.pending_events.is_empty() {
-                if self.input_needs_polling() || completer_pending {
-                    if event::poll(self.poll_interval)? {
-                        events.push(crossterm::event::read()?);
-                    }
-                } else {
-                    // Block until we receive an event
+                let timeout =
+                    (self.input_needs_polling() || completer_pending).then_some(self.poll_interval);
+                if event::poll_interruptible(timeout)? {
                     events.push(crossterm::event::read()?);
                 }
 
@@ -2635,6 +2638,7 @@ impl Reedline {
             &hint,
         );
 
+        let prompt_indicator = lines.prompt_indicator.clone();
         // Updating the working details of the active menu
         for menu in self.menus.iter_mut() {
             if menu.is_active() {
@@ -2662,6 +2666,9 @@ impl Reedline {
                 // so on the frame a menu opens that width lags by one paint.
                 if menu.is_visible() {
                     lines.prompt_indicator = menu.indicator().to_owned().into();
+                } else {
+                    // An edit can close the menu; retire its indicator in the same frame.
+                    lines.prompt_indicator = prompt_indicator.clone();
                 }
             }
         }
@@ -2758,6 +2765,7 @@ impl Reedline {
     /// ```
     #[cfg(feature = "idle_callback")]
     pub fn with_idle_callback(mut self, mut callback: Box<dyn FnMut() + Send>) -> Self {
+        self.periodic_idle_callback = true;
         self.idle_callback = Some(Box::new(move || {
             callback();
             true
@@ -2767,11 +2775,13 @@ impl Reedline {
 
     /// Set an idle callback that reports whether it changed terminal geometry.
     /// Return false for nonprinting work or cursor-preserving metadata only.
+    /// This callback runs on input or `crossterm::event::wake`, not on a timer.
     #[cfg(feature = "idle_callback")]
     pub fn with_geometry_idle_callback(
         mut self,
         callback: Box<dyn FnMut() -> bool + Send>,
     ) -> Self {
+        self.periodic_idle_callback = false;
         self.idle_callback = Some(callback);
         self
     }
@@ -3546,7 +3556,7 @@ mod tests {
 
     #[test]
     fn break_signal_builder_pattern() {
-        let signal = Arc::new(AtomicBool::new(false));
+        let signal = BreakSignal::default();
         let _reedline = Reedline::create()
             .with_quick_completions(true)
             .with_break_signal(signal)
@@ -3556,7 +3566,7 @@ mod tests {
     #[test]
     fn break_signal_is_send() {
         fn f<S: Send>(_: S) {}
-        let signal = Arc::new(AtomicBool::new(false));
+        let signal = BreakSignal::default();
         f(Reedline::create().with_break_signal(signal));
     }
 
@@ -3584,7 +3594,7 @@ mod tests {
     }
 
     #[test]
-    fn repaint_signal_switches_input_loop_to_polling() {
+    fn repaint_signal_does_not_require_periodic_polling() {
         let mut reedline = Reedline::create();
         assert!(
             !reedline.input_needs_polling(),
@@ -3593,8 +3603,8 @@ mod tests {
 
         let _signal = reedline.repaint_signal();
         assert!(
-            reedline.input_needs_polling(),
-            "a repaint handle must switch the loop to polling so requests are noticed"
+            !reedline.input_needs_polling(),
+            "a repaint handle wakes the input source without periodic polling"
         );
     }
 
@@ -3670,10 +3680,7 @@ mod tests {
     fn repaint_signal_is_independent_of_break_signal() {
         // The two out-of-band triggers must not interfere: arming a repaint
         // request must not be mistaken for a break, and vice versa.
-        use std::sync::atomic::AtomicBool;
-        use std::sync::Arc;
-
-        let mut reedline = Reedline::create().with_break_signal(Arc::new(AtomicBool::new(false)));
+        let mut reedline = Reedline::create().with_break_signal(BreakSignal::default());
         let repaint = reedline.repaint_signal();
 
         repaint.request_repaint();
@@ -3683,21 +3690,19 @@ mod tests {
                 .break_signal
                 .as_ref()
                 .unwrap()
-                .load(std::sync::atomic::Ordering::Relaxed),
+                .flag
+                .load(Ordering::Acquire),
             "repaint must not toggle the break flag"
         );
 
-        reedline
-            .break_signal
-            .as_ref()
-            .unwrap()
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        reedline.break_signal.as_ref().unwrap().request_break();
         assert!(
             reedline
                 .break_signal
                 .as_ref()
                 .unwrap()
-                .swap(false, std::sync::atomic::Ordering::Relaxed),
+                .flag
+                .swap(false, Ordering::Acquire),
             "break flag must be independently observable"
         );
         assert!(

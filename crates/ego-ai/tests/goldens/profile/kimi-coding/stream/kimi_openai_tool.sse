@@ -1,0 +1,12 @@
+: schema-derived from Kimi's current Chat Completions stream
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_kimi","type":"function","function":{"name":"read_file","arguments":""}}]},"finish_reason":null}],"usage":null}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":"}}]},"finish_reason":null}],"usage":null}
+
+data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"README.md\"}"}}]},"finish_reason":null}],"usage":null}
+
+data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}],"usage":null}
+
+data: {"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}
+
+data: [DONE]

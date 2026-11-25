@@ -11,7 +11,7 @@ use ego_core::turn::{
 use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::store::{AtomicReplacePublication, PrivateLogWriter, StoreIo};
+use crate::store::{AtomicReplacePublication, PrivateLogWriter, StoreIo, committed_jsonl_prefix};
 
 const JOURNAL_FILE: &str = "registry.jsonl";
 const LOCK_FILE: &str = "registry.lock";
@@ -111,7 +111,7 @@ impl JsonlMcpRegistryJournal {
         bytes: &[u8],
         operation: McpRegistryJournalOperation,
     ) -> Result<(), McpRegistryJournalError> {
-        let committed_len = committed_prefix(bytes).len();
+        let committed_len = committed_jsonl_prefix(bytes).len();
         if committed_len == bytes.len() {
             return Ok(());
         }
@@ -138,7 +138,7 @@ impl JsonlMcpRegistryJournal {
             .read(&self.path)
             .map_err(|_| Self::error(operation, McpRegistryJournalErrorKind::Unavailable))?
         {
-            decode_committed(committed_prefix(&bytes), operation)?;
+            decode_committed(committed_jsonl_prefix(&bytes), operation)?;
             self.recover_torn_tail(&bytes, operation)?;
         }
 
@@ -167,7 +167,7 @@ impl JsonlMcpRegistryJournal {
             return Ok(Vec::new());
         };
 
-        decode_committed(committed_prefix(&bytes), operation)
+        decode_committed(committed_jsonl_prefix(&bytes), operation)
     }
 }
 
@@ -252,13 +252,6 @@ impl McpRegistryJournal for JsonlMcpRegistryJournal {
             self.replay_locked(McpRegistryJournalOperation::Replay)
         })
     }
-}
-
-fn committed_prefix(bytes: &[u8]) -> &[u8] {
-    bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(&[][..], |last| &bytes[..=last])
 }
 
 fn decode_committed(

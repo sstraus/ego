@@ -1,0 +1,1 @@
+/bin/bash: /Users/stefano.straus/scratch/ego-690/executable-script.sh: Operation not permitted

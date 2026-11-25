@@ -1,0 +1,30 @@
+{
+  "choices": [
+    {
+      "delta": {
+        "content": ""
+      },
+      "finish_reason": "tool_calls",
+      "index": 0,
+      "logprobs": null
+    }
+  ],
+  "created": 1793084907,
+  "id": "golden-deepseek",
+  "model": "deepseek-flash",
+  "object": "chat.completion.chunk",
+  "system_fingerprint": "golden",
+  "usage": {
+    "completion_tokens": 41,
+    "completion_tokens_details": {
+      "reasoning_tokens": 25
+    },
+    "prompt_cache_hit_tokens": 256,
+    "prompt_cache_miss_tokens": 56,
+    "prompt_tokens": 312,
+    "prompt_tokens_details": {
+      "cached_tokens": 256
+    },
+    "total_tokens": 353
+  }
+}

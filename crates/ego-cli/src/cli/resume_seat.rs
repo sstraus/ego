@@ -7,14 +7,7 @@ impl Invocation {
     pub fn with_terminal(self, stdin_terminal: bool, stdout_terminal: bool) -> Self {
         let mut args = match self {
             Self::Resume(args) => args,
-            Self::Interactive(args)
-                if matches!(
-                    args.session,
-                    SessionChoice::Resume(_) | SessionChoice::ResumeLatest
-                ) =>
-            {
-                args
-            }
+            Self::Interactive(args) if matches!(args.session, SessionChoice::Resume(_)) => args,
             other => return other,
         };
         if stdin_terminal
@@ -24,6 +17,8 @@ impl Invocation {
             && args.answers.is_empty()
             && args.agent_file.is_none()
             && args.profile.as_deref() != Some("ci")
+            && !args.queue
+            && !args.fork_for_prompt
         {
             if args.provider_recovery {
                 args.retry = super::INTERACTIVE_PROVIDER_RETRIES;
@@ -33,7 +28,7 @@ impl Invocation {
             // Only an implicit interactive default enables recovery; an explicit
             // --retry (including zero) already selected its finite allowance.
             if args.provider_recovery {
-                args.retry = 0;
+                args.retry = super::HEADLESS_PROVIDER_RETRIES;
                 args.provider_recovery = false;
             }
             Self::Resume(args)
@@ -61,13 +56,13 @@ mod tests {
             vec!["continue", "continue the task"],
             vec![
                 "resume",
-                "00000000-0000-7000-8000-000000020002",
+                "01a17d73-8517-77b2-890c-881d2ef90158",
                 "continue the task",
             ],
             // The managed tuic-spawn.sh --resume argv shape from the live case.
             vec![
                 "resume",
-                "00000000-0000-7000-8000-000000020002",
+                "01a17d73-8517-77b2-890c-881d2ef90158",
                 "--thinking",
                 "medium",
                 "--sandbox",
@@ -120,7 +115,7 @@ mod tests {
                 else {
                     panic!("headless resume: {tokens:?}");
                 };
-                if args.retry != 0 || args.provider_recovery {
+                if args.retry != 3 || args.provider_recovery {
                     failures.push(format!(
                         "{tokens:?}, terminal=({stdin}, {stdout}): retry={}, recovery={}",
                         args.retry, args.provider_recovery

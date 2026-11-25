@@ -142,7 +142,9 @@ impl std::error::Error for MalformedId {}
 impl std::str::FromStr for SessionId {
     type Err = MalformedId;
 
-    /// Typed event, turn, item and session identities.
+    /// A session id the caller supplied — `CLI.md` §3's `--session-id UUID`,
+    /// "no capture-then-resume dance", and the id an ACP host names when it
+    /// reattaches.
     ///
     /// Any UUID is accepted, not only a v7. The version is what makes an id
     /// this crate *mints* sortable by time, and refusing a v4 would refuse a
@@ -198,6 +200,12 @@ impl GoalId {
 impl Default for GoalId {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl std::fmt::Display for GoalId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
 

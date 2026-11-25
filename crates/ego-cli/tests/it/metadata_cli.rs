@@ -1,0 +1,84 @@
+//! contract for non-interactive Story 085 resume metadata grammar.
+
+use ego_cli::cli::{Invocation, parse};
+
+const SOME_ID: &str = "0192f3a1-1c2b-7d3e-9a4f-5b6c7d8e8c41";
+
+fn argv(words: &[&str]) -> Vec<String> {
+    std::iter::once("ego")
+        .chain(words.iter().copied())
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn resume_metadata_operations_are_non_interactive_for_every_output_format() {
+    for operation in ["show", "set=Release candidate", "clear"] {
+        for output in ["text", "json", "jsonl"] {
+            let parsed = parse(argv(&[
+                "resume", SOME_ID, "--name", operation, "--output", output,
+            ]));
+            assert!(parsed.is_ok());
+            assert!(!matches!(parsed.unwrap(), Invocation::Interactive(_)));
+        }
+    }
+    for operation in [
+        "show",
+        "set=Ship the product",
+        "achieve",
+        "resume",
+        "block=API unavailable",
+    ] {
+        for output in ["text", "json", "jsonl"] {
+            let parsed = parse(argv(&[
+                "resume",
+                SOME_ID,
+                "--goal-operation",
+                operation,
+                "--output",
+                output,
+            ]));
+            assert!(parsed.is_ok());
+            assert!(!matches!(parsed.unwrap(), Invocation::Interactive(_)));
+        }
+    }
+}
+
+#[test]
+fn resume_metadata_rejects_prompt_answers_mixed_operations_and_malformed_values() {
+    for words in [
+        vec!["resume", SOME_ID, "prompt", "--name", "show"],
+        vec![
+            "resume",
+            SOME_ID,
+            "--answer",
+            "yes",
+            "--goal-operation",
+            "show",
+        ],
+        vec![
+            "resume",
+            SOME_ID,
+            "--name",
+            "show",
+            "--goal-operation",
+            "show",
+        ],
+        vec!["resume", SOME_ID, "--name", "set="],
+        vec!["resume", SOME_ID, "--goal-operation", "set="],
+        vec!["resume", SOME_ID, "--goal-operation", "block="],
+        // Catches: accepting the retired finite goal-turn extension operation.
+        vec!["resume", SOME_ID, "--goal-operation", "extend=3"],
+        vec!["resume", SOME_ID, "--goal-operation", "extend="],
+        vec!["resume", SOME_ID, "--goal-operation", "extend=0"],
+        vec!["resume", SOME_ID, "--goal-operation", "extend=-1"],
+        vec!["resume", SOME_ID, "--goal-operation", "extend=4294967296"],
+        vec!["resume", SOME_ID, "--name", "rename=old"],
+        vec!["resume", SOME_ID, "--goal-operation", "finish"],
+    ] {
+        assert!(
+            parse(argv(&words)).is_err(),
+            "accepted invalid metadata argv: {words:?}"
+        );
+    }
+}

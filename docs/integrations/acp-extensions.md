@@ -19,8 +19,8 @@ The official repository was read with `gh api`, at commit
 
 Protocol version and schema package version are different numbers. ego serves
 protocol **1**. It depends on Rust SDK 2.0.0, schema crate 1.5.0, and HTTP adapter
-2.0.0. See `crates/ego-acp/Cargo.toml:10` and
-`crates/ego-acp/src/negotiate.rs:49`. The current upstream site also has v2
+2.0.0. See `crates/ego-acp/Cargo.toml` and
+`crates/ego-acp/src/negotiate.rs`. The current upstream site also has v2
 pages; their presence does not change the version ego serves. The code's older
 comments about upstream draft status are not a fresh upstream status check.
 
@@ -43,13 +43,40 @@ Transport policy, permission choices, and standard-field interpretations are
 listed separately below. There are no ego-named notification methods in the
 router: extensions are carried by standard `session/update` notifications.
 
-JSON examples with `S`, `R`,
+Source citations below name the repository-relative file that holds each
+implementation (`crates/ego-acp/src/serve.rs` carries no line numbers, because they
+moved after every edit); search that file for the extension name. Citations of
+other files name the source file or symbol instead of unstable line numbers.
+Test citations identify existing source evidence.
+The current review reads these contracts; it does not claim a new integration run. JSON examples with `S`, `R`,
 `T`, or `M` stand for valid non-nil session, request, target, or message UUIDs;
 replace these labels before sending a request. Examples of metadata show the
 containing standard object fragment, not a complete JSON-RPC envelope.
 
 ## Advertised capabilities
 
+### Explicit MCP admission retry
+
+After repairing a supplied MCP server, the owner can ask the ACP client to repeat
+`session/new`, `session/load`, `session/resume`, or `session/fork` with
+`"_meta": {"ego": {"mcpRetry": true}}`. This request bypasses only the failed
+selection's admission cooldown. It is a request-local boolean, not a saved grant
+or an inferred consequence of receiving the same request again. Omit it or use
+`false` for automatic retries. Other value types receive invalid-params.
+
+The flag does not authorize new servers or relax workspace trust, confinement, transport admission, or tool
+permissions. Concurrent attempts for a failing selection still share the active
+attempt's result. Ordinary retries keep exponential backoff from 60 seconds to
+15 minutes; the retry map remains bounded to 64 failed or active selections.
+An explicit failure still updates backoff for subsequent automatic requests.
+No failed tool operation is replayed by this admission retry.
+
+If repair is incomplete, inspect the named server with `ego mcp ls`, correct its
+configuration or process failure, and explicitly retry again. An active attempt
+is joined rather than started again; capacity and admission errors still apply.
+
+Source: `crates/ego-acp/src/serve.rs`. Test:
+`crates/ego-acp/tests/it/session_lifecycle.rs::initialize_advertises_exactly_the_composed_v1_lifecycle_surface`.
 The production durable composition advertises:
 
 ```json
@@ -66,12 +93,13 @@ The production durable composition advertises:
     "retry": {"version": 1, "method": "_ego/retry"},
     "childActivity": {"version": 1, "update": "session_info_update", "field": "_meta.ego.childActivity"},
     "compact": {"version": 1, "method": "_ego/compact"},
+    "compacted": {"version": 1, "update": "session_info_update", "field": "_meta.ego.compacted"},
     "hold": {"version": 1, "pause": "_ego/pause", "resume": "_ego/resume"}
   }}
 }
 ```
 
-`_meta.ego.steer`, `.retry`, `.compact`, `.hold`, and the fork capability's
+`_meta.ego.steer`, `.retry`, `.compact`, `.compacted`, `.hold`, and the fork capability's
 `_meta.ego.atMessage` are E → C capability extensions. `steer` is always
 advertised by this router. `compact` requires the compaction port. `hold`,
 `loadSession`, and the session lifecycle capabilities require the lifecycle
@@ -119,6 +147,11 @@ Fallback: when the capability is absent, wait for the turn and use
 `session/prompt`. Do not automatically resend `accepted` text after cancellation
 or an uncertain transport result.
 
+Implementation: `crates/ego-acp/src/serve.rs`.
+Tests: `crates/ego-cli/tests/it/acp_steer.rs::steer_during_tool_batch_reaches_next_provider_request`,
+`idle_steer_returns_not_busy_without_starting_turn`, and
+`cancel_after_steer_preserves_pending_text_in_durable_journal`.
+
 ### `_ego/compact`
 
 ```json
@@ -142,6 +175,54 @@ are invalid-params; service failure is internal-error. Profile restoration can
 also refuse the request. Fallback: no standard compaction request is served by
 this build. Hide the control or start a separate chat; do not treat cancellation
 as compaction.
+
+Implementation: `crates/ego-acp/src/serve.rs`;
+publication shape: `TargetPublication` in `crates/ego-core/src/session.rs`.
+Tests: `crates/ego-acp/tests/it/compaction_extension.rs::compact_json_rpc_denies_unknown_request_fields_at_deserialization`
+and `an_agent_without_the_compaction_port_neither_advertises_nor_serves_compact`.
+The test `compaction_response_names_source_sequence_target_and_successor` uses
+a hand-written JSON value; it is not a live receipt serialization test.
+Successor authority is covered by
+`crates/ego-cli/tests/it/acp_profile_ceiling.rs::acp_profile_ceiling_survives_fork_and_compaction_successors`.
+
+### Automatic compaction: `_meta.ego.compacted`
+
+Advertised with `compact`. When a prompt reaches the compaction threshold, or
+the provider reports a full context window, the agent compacts the session in
+process and continues the same `session/prompt` in the successor. The prompt
+answers the stop reason of the continuation. Before the first continuation
+update, the agent sends one standard notification on the client's session id:
+
+```json
+{"sessionId":"S","update":{"sessionUpdate":"session_info_update","_meta":{"ego":{"compacted":{"version":1,"sourceSessionId":"S","sourceSeq":42,"targetSessionId":"T"}}}}}
+```
+
+The remaining updates of that prompt also use `S`. After the prompt settles,
+this connection rebinds `S` to `T`: `session/prompt`, `session/cancel`,
+`_ego/steer`, `_ego/retry`, `_ego/compact`, `_ego/pause`, and `_ego/resume`
+that name `S` reach `T`, and so does `session/set_config_option`. The next
+prompt starts a new run in `T`; a re-delivered earlier prompt is new work. `T`
+receives the profile, ceiling profile and prompt options of `S`, as with
+`_ego/compact`; if they cannot be restored, or the run settles uncertain, `S`
+is not rebound. `session/fork`, `session/close`, and `session/delete` keep
+operating on the session they name. A second compaction in the same chain sends a new
+update whose `sourceSessionId` is the previous target. The rebinding is not
+durable: after a reconnect, `session/load S` opens `S` itself. A client that
+keeps the conversation must store `targetSessionId` and continue there.
+
+Known limits: a `_ego/steer` accepted while the summary is written is not
+delivered to the continuation, and a `session/cancel` during the summary ends
+the prompt with the context-overflow error instead of `cancelled`.
+
+Fallback: a client that ignores the update keeps working on this connection.
+A compaction that fails sends no update, and the prompt answers the
+context-overflow error of `_ego/compact`. Child runs and sessions with session
+roots keep explicit recovery.
+
+Implementation: `crates/ego-acp/src/prompt_turn.rs` (`TransitionSinkFactory`),
+`crates/ego-acp/src/project.rs` (`project_compacted_v1`), and
+`crates/ego-cli/src/run/composition_root.rs` (`CliPrepared::submit`).
+Tests: `crates/ego-cli/tests/it/acp_compaction.rs`.
 
 ### `_ego/pause` and `_ego/resume`
 
@@ -169,6 +250,13 @@ controls when the advertisement is absent. Standard `session/resume` is a
 history-free attachment; it is **not** the release operation. Standard cancel
 is not pause.
 
+Implementation: `crates/ego-acp/src/serve.rs`.
+Tests: `crates/ego-acp/tests/it/host_hold.rs::pausing_an_idle_session_records_the_boundary_and_answers_paused`,
+`pausing_a_running_turn_answers_pending_and_not_paused`,
+`a_resume_that_already_released_replays_its_answer_instead_of_refusing`,
+`a_pause_redelivered_after_its_release_replays_rather_than_holding_again`, and
+`a_hold_outlives_the_connection_that_asked_for_it`.
+
 ### Error codes `-32010` and `-32011`
 
 These are E → C ego server errors, not standard ACP error assignments.
@@ -184,6 +272,11 @@ boundary. Offer `_ego/resume`, not an automatic prompt retry. Do not parse
 error text as the discriminator. A plain client can show the error but cannot
 release a hold without the extension. When these codes are absent, follow the
 standard error contract; do not infer an ego hold from generic cancellation.
+
+Implementation: `crates/ego-acp/src/serve.rs`,
+`crates/ego-acp/src/prompt_turn.rs`.
+Tests: `crates/ego-acp/tests/it/host_hold.rs::a_refusal_names_a_missing_session_and_a_busy_one_as_what_they_are`
+and `crates/ego-acp/tests/it/settlement.rs::held_session_is_discoverable_on_list_and_load_and_prompt_has_a_dedicated_code`.
 
 ## Session creation metadata
 
@@ -206,6 +299,11 @@ Failure to record an attestation logs a warning; it does not grant remembered
 trust. A non-object `_meta.ego` is refused by the session-profile parser.
 Fallback: omit the key and use normal form trust elicitation. Without form
 support the session stays untrusted; there is no terminal-input fallback.
+
+Implementation: `crates/ego-acp/src/serve.rs`,
+`crates/ego-cli/src/acp.rs`, `crates/ego-cli/src/acp_trust.rs`.
+Tests: `crates/ego-cli/tests/it/acp_host_trust.rs::selected_profile_attestation_loads_instructions_without_elicitation`
+and `unprofiled_attestation_is_ignored_and_the_form_is_used`.
 
 ### `_meta.ego.profile`, `.ceilingProfile`, `.effective`, `.warnings`
 
@@ -241,6 +339,13 @@ launch behavior; without `ceilingProfile`, a profile adds no host clamp. If the
 result keys are absent, do not assume that a host ceiling was applied. There
 is no capability key for profile support in the current advertisement.
 
+Implementation: `crates/ego-acp/src/serve.rs`;
+`crates/ego-cli/src/acp_confinement.rs`.
+Tests: `crates/ego-cli/tests/it/acp_profile_ceiling.rs::acp_profile_ceiling_clamps_with_warnings_and_keeps_narrower_roots`,
+`acp_profile_ceiling_rejects_bad_names_and_preserves_absent_ceiling`,
+`acp_profile_ceiling_survives_load_and_resume_on_fresh_connections`, and
+`acp_profile_ceiling_missing_on_reopen_refuses_instead_of_widening`.
+
 ## Session and history metadata
 
 All entries in this section travel E → C unless an input is explicitly named.
@@ -261,6 +366,10 @@ fall back to the tip. Errors are invalid-params for malformed UUIDs or invalid
 fork boundaries, with lifecycle errors for missing/busy source sessions.
 Fallback: without `.atMessage`, offer only tip forks if `fork` itself exists.
 Do not send a message selector to an agent that has not advertised it.
+
+Implementation: `crates/ego-acp/src/serve.rs`.
+Tests: `crates/ego-acp/tests/it/session_lifecycle.rs::message_fork_replays_the_cutoff_before_local_history_even_after_parent_deletion`
+and `invalid_message_forks_publish_no_child`.
 
 ### `_meta.ego.hold.state`, `.summary`, and `.lineage`
 
@@ -288,6 +397,11 @@ the completed turn. Fallback: use standard title and `updatedAt` for the picker;
 show no tree or hold status when the keys are absent. Absence of hold metadata
 is not evidence that a held session was released.
 
+Implementation: `crates/ego-acp/src/serve.rs`.
+Tests: `crates/ego-acp/tests/it/settlement.rs::held_session_is_discoverable_on_list_and_load_and_prompt_has_a_dedicated_code`,
+`crates/ego-cli/tests/it/acp_synopsis.rs::first_idle_publishes_a_durable_title_and_bounded_summary`,
+and `crates/ego-acp/tests/it/session_lifecycle.rs::compaction_children_project_lineage_in_list_and_load_info`.
+
 ### `_meta.ego.inherited`
 
 On replayed message/thought chunks and tool creation/update objects inherited
@@ -303,6 +417,9 @@ to the child. Errors are replay/lifecycle errors, not a new metadata error.
 Fallback: render the standard messages in arrival order; do not require this
 key to display them. Its absence does not prove that a session has no ancestry.
 
+Implementation: `project_replay_v1` in `crates/ego-acp/src/project.rs`.
+Test: `crates/ego-acp/tests/it/session_lifecycle.rs::critic_nested_fork_keeps_each_cutoff_and_local_ids_after_ancestor_deletion`.
+
 ## Live update metadata
 
 ### `_meta.ego.providerRetry`
@@ -310,10 +427,14 @@ key to display them. Its absence does not prove that a session has no ancestry.
 E → C, as a `session_info_update` patch:
 
 ```json
-{"sessionUpdate":"session_info_update","_meta":{"ego":{"providerRetry":{"state":"waiting","attempt":2,"limit":6,"delayMs":1500,"kind":"transient","cause":"Server overloaded","text":"Server overloaded — connection problem, retrying in 2s (attempt 2/6)"}}}}
+{"sessionUpdate":"session_info_update","_meta":{"ego":{"providerRetry":{"state":"waiting","attempt":2,"limit":6,"delayMs":120000,"kind":"transient","capacity":true,"cause":"Server overloaded","text":"Server overloaded — provider at capacity, retrying in 120s (attempt 2/6)"}}}}
 ```
 
-The status reports the next retry wait. Display text rounds milliseconds up to
+The status reports the next retry wait. `capacity` is true for a capacity
+refusal (HTTP 429, 503 or 529, or a typed overload or rate-limit error, retried
+after 1, 2 and 5 minutes) and false for any other transient failure, such as
+another 5xx status, a failed connection or a lost stream (seconds of backoff,
+text `connection problem`). Display text rounds milliseconds up to
 seconds. A later patch sets `providerRetry` to **null** to clear the status when
 an item starts, changes, completes, or the turn completes. Merge this as a
 property patch; do not erase the title, lineage, or other ego metadata. It is
@@ -321,6 +442,12 @@ not transcript content. Errors: notification delivery can fail; the sink logs
 the first delivery failure and does not manufacture receipt. Fallback: ignore
 the key and retain standard session state. Absence of this extension cannot
 show whether a provider is waiting.
+
+Implementation: `provider_retry_v1` and `provider_retry_cleared_v1` in
+`crates/ego-acp/src/project.rs`, and `AcpSink::publish` in
+`crates/ego-acp/src/sink.rs`.
+Test: `crates/ego-acp/tests/it/provider_retry_projection.rs::a_retry_is_a_session_info_patch_with_the_counter_the_wait_and_the_cause`.
+This test covers projection and null clearing, not a live provider outage.
 
 ### Recovery and `_ego/retry`
 
@@ -331,7 +458,8 @@ transient failure. `providerRetry` adds `phase` (`recovery` or `finite`),
 increasing counter, not a value bounded by the legacy finite `limit` field.
 Use `phase` and `recoveryRemainingMs` to render recovery rather than an
 exhausted finite allowance. `delayMs` is the next actual wait, including jitter.
-Local waits grow to 120 seconds; provider waits are not shortened.
+Local waits grow to 120 seconds, capacity waits to 5 minutes; provider waits are
+not shortened.
 
 The initialize capability `_meta.ego.retry` advertises the version and method.
 A host, including TUIC, can send this request while `session/prompt` is pending:
@@ -372,21 +500,34 @@ failure; it does not prove the host did not see the card. Fallback: render the
 ordinary ACP message/tool/thought update; do not require an ego action handler.
 No custom notification name is involved.
 
+Implementation: `project_notice_v1` and `activity_meta` in
+`crates/ego-acp/src/project.rs`; `crates/ego-acp/src/serve.rs`.
+Tests: `crates/ego-acp/tests/it/notice_projection.rs::card_notice_is_a_standard_message_with_an_open_result_action`,
+`crates/ego-acp/tests/it/tool_projection.rs::tool_activity_is_marked_on_creation_and_progress_without_changing_acp_fields`,
+`reasoning_and_failed_tool_completion_remain_collapsible_activity`, and
+`crates/ego-acp/tests/it/session_lifecycle.rs::journal_failure_does_not_report_success_after_the_notice_was_queued`.
+The answer/approve action serialization variants are **untested** by the named
+notice projection test.
+
 ### `_meta.ego.goalId` and `.goalState`
 
-E → C on the single plan entry for the current durable goal:
+E → C in a `session_info_update` for the current durable goal:
 
 ```json
-{"sessionUpdate":"plan","entries":[{"content":"Fix the cache","priority":"medium","status":"pending","_meta":{"ego":{"goalId":"M","goalState":"blocked"}}}]}
+{"sessionUpdate":"session_info_update","_meta":{"ego":{"objective":"Fix the cache","goalId":"M","goalState":"blocked","goalStop":null,"goalContinuationTurns":0,"goalStatus":"running"}}}
 ```
 
 `goalId` identifies the goal. `goalState` is `active`, `achieved`, or `blocked`.
-Standard status is respectively `in_progress`, `completed`, or `pending`.
-Attachments and live turn boundaries publish the full entry, not invented
-substeps. No goal produces no goal plan update. Errors are lifecycle read or
-notification delivery errors. Fallback: show the ordinary plan entry and its
-standard status; without metadata, `pending` does not distinguish a blocked
-ego goal from other pending work.
+Attachments and live turn boundaries publish objective metadata without
+inventing plan steps. No goal produces no objective update. Errors are lifecycle
+read or notification delivery errors. Fallback: a client that does not support
+this metadata can ignore the update; it cannot infer the goal state from plan
+entries.
+
+Implementation: `project_objective_v1` in `crates/ego-acp/src/project.rs`;
+`crates/ego-acp/src/serve.rs`.
+Tests: `crates/ego-acp/tests/it/session_lifecycle.rs::loading_a_goal_emits_objective_metadata_without_fabricating_plan_steps`
+and the goal projection cases in `crates/ego-acp/tests/it/acp_golden.rs::live_turn_boundaries_project_the_current_goal_status_without_inventing_steps`.
 
 ## Standard vs ego
 
@@ -394,23 +535,26 @@ This table includes standard-field interpretations and deployment policies.
 They are not extra `_meta.ego` keys. Fallback means a safe client action, not a
 second protocol implementation.
 
-| Surface and direction | Standard baseline | ego shape, semantics, errors, and fallback |
-| --- | --- | --- |
-| `initialize`, C → E → C | Negotiate a supported protocol version; report capabilities. | `{"protocolVersion":1}` for supported asks at or above 1. Version 0 is refused by the SDK. Do not assume that compiled v2 projections are served. Use the returned version or refuse the connection. |
-| `cwd`, C → E on session setup | Absolute path required by the compared schema. | Production also accepts a relative path, for example `{"cwd":"repo","mcpServers":[]}`, relative to the launch base. It canonicalizes and requires an existing directory. Load/resume require the durable session root to match. Bad roots are invalid-params. Portable clients must send an absolute path. This is a permissive difference, not an advertised extension. |
-| `additionalDirectories`, C → E | Optional extra roots, subject to capability negotiation. | Any non-empty array, such as `{"additionalDirectories":["/other"]}`, is invalid-params before root resolution or MCP effects, for new/load/resume/fork. Omit it or send `[]`; it is not a way to loosen the profile perimeter. |
-| `mcpServers`, C → E | Client supplies MCP server descriptions. HTTP/SSE are capability-gated. | Example stdio entry: `{"name":"tools","command":"/usr/bin/tool-server","args":[],"env":[]}`. ego requires absolute stdio commands, valid case-insensitively unique names/env names, valid HTTP URLs and headers, no duplicate or wire-owned HTTP headers, and non-empty ACP server IDs. Plain HTTP is limited to exact loopback. Explicit SSE selects the legacy profile; unknown transports refuse; the raw-versus-parsed count check prevents silently dropped servers. Invalid selection is refused atomically. Omit unsupported servers rather than assume partial admission. |
-| `session/prompt` content, C → E | Text and resource links are baseline; images are advertised. | `[{"type":"resource_link","uri":"file:///workspace/a","name":"a"}]` becomes URI text, not an automatic file read. Text joins with newlines. Embedded text accepts absent MIME or text/plain, text/markdown, text/html, text/csv, application/json; binary resources accept JPEG/PNG/GIF/WebP only. Host bytes are used directly: no file read or URI fetch. Image positions survive durable blob metadata as UTF-8 text offsets and provider reconstruction. Resource provenance is a URI digest; each embedded resource is explicitly labeled host-supplied untrusted data, not instructions. Raw URI, annotations and `_meta` are discarded. See [IDE setup](ide.md) for selection, diagnostic and edit-review snapshots. URI metadata must be nonempty, at most 4096 bytes and free of control characters. Joined text is limited to 1 MiB; images to 100 and 64 MiB total decoded bytes. JPEG/PNG/GIF/WebP require valid base64 and matching decoded media. Audio accepts explicit `audio/wav` blocks only: at most four clips and 10 MiB total, with valid PCM16 WAV bytes (mono/stereo, at most 48 kHz and 60 seconds per clip). Mixed audio/image prompts and unsupported resource media refuse before a turn. The selected provider/model must support the admitted audio contract. Model limits still apply. Send text-only if image support is absent. |
-| Prompt admission, C → E | One prompt request settles its turn. | A second simultaneous prompt is invalid-request, not a queue. Unopened sessions are invalid-params. Correlation uses request content digest as well as identity; changed content is new work. Use advertised steering for busy input, otherwise wait. |
-| Load/resume, C → E → C | Load replays history; resume does not. | `{"sessionId":"S","cwd":"/workspace/repo","mcpServers":[]}` reattaches durable execution and restores creation profile authority. Load replays ordered projectable history and at most one final reduced usage update; resume emits current info but no history/usage replay. Same-connection active replacement refuses. Uncertain effects require close/new, not replay. With no resume capability, use advertised load; never use standard resume to release a hold. |
-| Permission options, E → C request, C → E answer | Option IDs are opaque; option kind indicates allow/reject once/always. | `{"outcome":{"outcome":"selected","optionId":"allow-session"}}` grants transient session approval, despite its standard kind `allow_always`. IDs `allow-once`, `reject-once`, `allow-session`, and when rememberable `allow-always`/`reject-always` are distinct. Remembered answers write displayed user rules in the active profile. Cancellation, unknown IDs, no seat, transport failure, or persistence failure deny. No timeout is imposed on a legitimate open permission question. Render offered labels and return the exact ID; never infer persistence from kind alone. Fallback is once-only choices when that is all the agent offers, not terminal input. |
-| Sandbox path permissions, E → C request, C → E answer | Standard permission response envelope. | `{"outcome":{"outcome":"selected","optionId":"sandbox-session"}}` permits the shown path for this attachment. `sandbox-always` persists the workspace grant; `sandbox-deny` refuses. The question shows the command that will run again. Transport/unknown answer/persistence failures deny. Ordinary tool approval does not imply a sandbox path grant. Render the offered choices; do not synthesize an unoffered grant. |
-| Config options, E → C offer, C → E selection | Standard select controls and optional categories. | `{"sessionId":"S","configId":"sandbox","value":"workspace"}` selects only a currently offered value. IDs are `model`, `effort`, `mode`, `sandbox`; sandbox uses category `sandbox`, not mode. `__ego_unselected__` is an offered no-op only while model/effort is unset. Boolean, unoffered values, and unknown IDs refuse. Absent seat is method-not-found. Full replacement options return and publish after acceptance; mode also publishes current-mode update. Sandbox can narrow but not exceed the ceiling and cannot change after stdio MCP pins it. Read the offer; do not hard-code choices or send `session/set_mode`. |
-| Durable model selection, C → E → C | Config selection changes the session model. | Model selection is journaled before acknowledgement and restored on load/resume, including before the first prompt. Effort and mode remain connection-bound; generation changes apply at safe boundaries. Provider fallback does not become an operator selection. Use returned options after reattachment instead of assuming all picks persisted. |
-| Turn settlement, E → C | Standard stop reasons describe model completion/cancellation. | `{"stopReason":"cancelled"}` is not used to hide a failed turn. Budget, permission, question, context overflow, and execution failures answer errors rather than invented success or model max-tokens. A pause uses `-32011`. Keep valid durable history and show recovery guidance; do not discard it as a model refusal. |
-| Form elicitation, E → C request | Client advertises form support; accepts, declines, or cancels. | `{"action":"accept","content":{"answer":"choice-id"}}` is validated against the actual question. Single uses string `answer`; multiple uses string-array `answers`; form schemas must round-trip exactly through the pinned ACP schema. Unsupported/malformed answers fail, never grant authority. No form support produces unavailable question state; workspace trust remains untrusted. Display the explicit pending-question recovery rather than guess an answer. |
-| Session time, E → C | `updatedAt` is standard RFC 3339 activity time; list order is not guaranteed. | Example `{"updatedAt":"2026-10-10T14:20:08.123Z"}` comes from the session's last durable event, not listing time. Sort by this field, not arrival order. Missing data must not be replaced with fabricated activity. |
-| Usage, E → C | Standard `usage_update` with available usage/cost. | `{"sessionUpdate":"usage_update","used":1000,"size":20000}` uses the reporting generation's context window, including fallback models. Unknown monetary rates are not USD zero. Absent facts are omitted. Do not infer cost from token count or treat absent usage as zero. |
+| Surface and direction | Standard baseline | ego shape, semantics, errors, and fallback | Source and existing test |
+| --- | --- | --- | --- |
+| `initialize`, C → E → C | Negotiate a supported protocol version; report capabilities. | `{"protocolVersion":1}` for supported asks at or above 1. Version 0 is refused by the SDK. Do not assume that compiled v2 projections are served. Use the returned version or refuse the connection. | `crates/ego-acp/src/negotiate.rs`; `initialize.rs::the_router_answers_what_negotiate_says_it_answers` |
+| `cwd`, C → E on session setup | Absolute path required by the compared schema. | Production also accepts a relative path, for example `{"cwd":"repo","mcpServers":[]}`, relative to the launch base. It canonicalizes and requires an existing directory. Load/resume require the durable session root to match. Bad roots are invalid-params. Portable clients must send an absolute path. This is a permissive difference, not an advertised extension. | `crates/ego-cli/src/host_ports.rs`; `host_ports.rs::one_resolver_answers_both_front_doors_and_names_the_right_thing`; `session_lifecycle.rs::malformed_unknown_and_wrong_root_requests_return_explicit_errors` |
+| `additionalDirectories`, C → E | Optional extra roots, subject to capability negotiation. | Any non-empty array, such as `{"additionalDirectories":["/other"]}`, is invalid-params before root resolution or MCP effects, for new/load/resume/fork. Omit it or send `[]`; it is not a way to loosen the profile perimeter. | `crates/ego-acp/src/serve.rs`; `session_lifecycle.rs::every_nonempty_additional_directories_field_refuses_before_other_effects` |
+| `mcpServers`, C → E | Client supplies MCP server descriptions. HTTP/SSE are capability-gated. | Example stdio entry: `{"name":"tools","command":"/usr/bin/tool-server","args":[],"env":[]}`. ego requires absolute stdio commands, valid case-insensitively unique names/env names, valid HTTP URLs and headers, no duplicate or wire-owned HTTP headers, and non-empty ACP server IDs. Plain HTTP is limited to exact loopback. Explicit SSE selects the legacy profile; unknown transports refuse; the raw-versus-parsed count check prevents silently dropped servers. Invalid selection is refused atomically. Omit unsupported servers rather than assume partial admission. | `crates/ego-acp/src/serve.rs`; `prompt.rs::invalid_supplied_mcp_servers_are_rejected_atomically_before_session_insert`, `session_new_accepts_exact_loopback_http_and_refuses_other_plaintext_hosts` |
+| `session/prompt` content, C → E | Text and resource links are baseline; images are advertised. | `[{"type":"resource_link","uri":"file:///workspace/a","name":"a"}]` becomes URI text, not an automatic file read. Text joins with newlines. Embedded text accepts absent MIME or text/plain, text/markdown, text/html, text/csv, application/json; binary resources accept JPEG/PNG/GIF/WebP only. Host bytes are used directly: no file read or URI fetch. Image positions survive durable blob metadata as UTF-8 text offsets and provider reconstruction. Resource provenance is a URI digest; each embedded resource is explicitly labeled host-supplied untrusted data, not instructions. Raw URI, annotations and `_meta` are discarded. See [IDE setup](ide.md) for selection, diagnostic and edit-review snapshots. URI metadata must be nonempty, at most 4096 bytes and free of control characters. Joined text is limited to 1 MiB; images to 100 and 64 MiB total decoded bytes. JPEG/PNG/GIF/WebP require valid base64 and matching decoded media. Audio accepts explicit `audio/wav` blocks only: at most four clips and 10 MiB total, with valid PCM16 WAV bytes (mono/stereo, at most 48 kHz and 60 seconds per clip). Mixed audio/image prompts and unsupported resource media refuse before a turn. The selected provider/model must support the admitted audio contract. Model limits still apply. Send text-only if image support is absent. | `crates/ego-acp/src/serve.rs`; `prompt.rs::the_two_block_kinds_every_agent_must_accept_reach_the_turn`, `an_image_whose_bytes_contradict_its_declared_type_is_refused` |
+| Prompt admission, C → E | One prompt request settles its turn. | A second simultaneous prompt is invalid-request, not a queue. Unopened sessions are invalid-params. Correlation uses request content digest as well as identity; changed content is new work. Use advertised steering for busy input, otherwise wait. | `crates/ego-acp/src/prompt_turn.rs`; `prompt.rs::a_second_prompt_while_a_turn_is_running_is_refused_and_starts_nothing`, `session_lifecycle.rs::a_reused_request_id_carrying_a_new_prompt_is_new_work_not_a_replay` |
+| Load/resume, C → E → C | Load replays history; resume does not. | `{"sessionId":"S","cwd":"/workspace/repo","mcpServers":[]}` reattaches durable execution and restores creation profile authority. Load replays ordered projectable history and at most one final reduced usage update; resume emits current info but no history/usage replay. Same-connection active replacement refuses. Uncertain effects require close/new, not replay. With no resume capability, use advertised load; never use standard resume to release a hold. | `crates/ego-acp/src/serve.rs`; `session_lifecycle.rs::load_replays_projectable_history_then_one_final_usage_and_current_info`, `resume_emits_current_info_but_no_history_or_usage`; `uncertain_session.rs::uncertain_session_prompt_names_run_and_close_new_chat_recovery` |
+| Permission options, E → C request, C → E answer | Option IDs are opaque; option kind indicates allow/reject once/always. | `{"outcome":{"outcome":"selected","optionId":"allow-session"}}` grants transient session approval, despite its standard kind `allow_always`. IDs `allow-once`, `reject-once`, `allow-session`, and when rememberable `allow-always`/`reject-always` are distinct. Remembered answers write displayed user rules in the active profile. Cancellation, unknown IDs, no seat, transport failure, or persistence failure deny. No timeout is imposed on a legitimate open permission question. Render offered labels and return the exact ID; never infer persistence from kind alone. Fallback is once-only choices when that is all the agent offers, not terminal input. | `crates/ego-acp/src/permission.rs`; `permission.rs::an_option_ego_never_offered_is_a_denial`; `crates/ego-cli/tests/it/acp_remembered_permissions.rs::session_allow_answers_five_later_calls_without_a_prompt_then_expires`, `allow_always_writes_one_profile_rule_and_revoke_restores_the_question` |
+| Sandbox path permissions, E → C request, C → E answer | Standard permission response envelope. | `{"outcome":{"outcome":"selected","optionId":"sandbox-session"}}` permits the shown path for this session. `sandbox-always` persists the workspace grant; `sandbox-deny` refuses. The question identifies the refused command. Approval does not replay it; a later explicit command can use the grant. Transport/unknown answer/persistence failures deny. Ordinary tool approval does not imply a sandbox path grant. Render the offered choices; do not synthesize an unoffered grant. | `crates/ego-acp/src/sandbox.rs`; `crates/ego-cli/tests/it/acp_sandbox_grants.rs::session_answer_does_not_replay_and_covers_the_next_explicit_command`, `denied_answer_tells_the_model_the_sandbox_refused_and_does_not_run_the_command_again` |
+| Config options, E → C offer, C → E selection | Standard select controls and optional categories. | `{"sessionId":"S","configId":"sandbox","value":"workspace"}` selects only a currently offered value. IDs are `model`, `effort`, `mode`, `sandbox`; sandbox uses category `sandbox`, not mode. `__ego_unselected__` is an offered no-op only while model/effort is unset. Boolean, unoffered values, and unknown IDs refuse. Absent seat is method-not-found. Full replacement options return and publish after acceptance; mode also publishes current-mode update. Sandbox can narrow but not exceed the ceiling and cannot change after stdio MCP pins it. Read the offer; do not hard-code choices or send `session/set_mode`. | `crates/ego-acp/src/controls.rs`; `crates/ego-acp/src/serve.rs`; `controls_router.rs::an_unoffered_value_is_refused_before_the_seat_is_asked`, `an_opaque_unselected_answer_is_a_wire_noop_without_staging`; `crates/ego-cli/tests/it/acp_mcp_scope_critic.rs::sandbox_pick_after_stdio_admission_is_refused_but_free_without_servers` |
+| Durable model selection, C → E → C | Config selection changes the session model. | Model selection is journaled before acknowledgement and restored on load/resume, including before the first prompt. Effort and mode remain connection-bound; generation changes apply at safe boundaries. Provider fallback does not become an operator selection. Use returned options after reattachment instead of assuming all picks persisted. | `crates/ego-cli/src/acp_controls.rs`; `crates/ego-cli/tests/it/acp_model_load.rs::selected_model_survives_load_before_the_first_prompt`, `resumed_session_sends_and_meters_the_selected_model` |
+| Turn settlement, E → C | Standard stop reasons describe model completion/cancellation. | `{"stopReason":"cancelled"}` is not used to hide a failed turn. Budget, permission, question, context overflow, and execution failures answer errors rather than invented success or model max-tokens. A pause uses `-32011`. Keep valid durable history and show recovery guidance; do not discard it as a model refusal. | `crates/ego-acp/src/project.rs`, `crates/ego-acp/src/prompt_turn.rs`; `prompt.rs::an_integrity_failure_answers_an_error_and_not_a_cancelled_stop`, `settlement.rs::reject_permission_without_cancel_remains_a_single_refusal` |
+| Form elicitation, E → C request | Client advertises form support; accepts, declines, or cancels. | `{"action":"accept","content":{"answer":"choice-id"}}` is validated against the actual question. Single uses string `answer`; multiple uses string-array `answers`; form schemas must round-trip exactly through the pinned ACP schema. Unsupported/malformed answers fail, never grant authority. No form support produces unavailable question state; workspace trust remains untrusted. Display the explicit pending-question recovery rather than guess an answer. | `crates/ego-acp/src/question.rs`; `question.rs::accepted_content_is_revalidated_by_core_before_settlement`, `question_live.rs`; `trust.rs::a_host_without_form_elicitation_is_never_asked_and_stays_untrusted` |
+| Session time, E → C | `updatedAt` is standard RFC 3339 activity time; list order is not guaranteed. | Example `{"updatedAt":"2026-10-10T14:20:08.123Z"}` comes from the session's last durable event, not listing time. Sort by this field, not arrival order. Missing data must not be replaced with fabricated activity. | `crates/ego-acp/src/serve.rs`; `session_lifecycle.rs::a_listed_session_states_its_last_activity_as_rfc_3339` |
+| Usage, E → C | Standard `usage_update` with available usage/cost. | `{"sessionUpdate":"usage_update","used":1000,"size":20000}` uses the reporting generation's context window, including fallback models. Unknown monetary rates are not USD zero. Absent facts are omitted. Do not infer cost from token count or treat absent usage as zero. | `crates/ego-acp/src/project.rs`; usage projection cases in `crates/ego-acp/tests/it/acp_golden.rs`; `session_lifecycle.rs::load_replays_projectable_history_then_one_final_usage_and_current_info` |
+
+Test file names without a crate prefix in the table refer to
+`crates/ego-acp/tests/`.
 
 ## Transport and deployment extensions
 
@@ -444,6 +588,27 @@ Fallback: if this transport is unavailable, launch `ego acp` over stdio or use
 an admitted local socket. Do not try unauthenticated TCP or send the token in
 ACP metadata. `--allow-public-bind` does not replace authentication.
 
+An authenticated LAN connection uses the selected sandbox ceiling, just like a
+local connection. `--sandbox` takes precedence over configuration and the
+platform default. A public address does not downgrade `adaptive` or `off` to
+`workspace`. The host can only choose values within that ceiling and the
+backend's measured capabilities; profile and administrator limits still apply.
+`adaptive` remains platform-dependent. Selecting `off` does not grant workspace
+trust or disable explicit permission denies or Plan mode.
+
+`--allow-public-bind` approves network reachability for this listener process,
+not anonymous access or wider run authority. Every TCP connection still needs
+the token, and a missing token or missing bind consent refuses startup before a
+socket opens. To restore a tighter ceiling, stop the listener and restart it
+with `--sandbox workspace` or `--sandbox ro`. To remove LAN reachability, restart
+without a public bind and use stdio, loopback or an admitted local socket.
+
+Implementation: `crates/ego-acp/src/auth.rs`;
+`crates/ego-acp/src/serve.rs`.
+Tests: `crates/ego-acp/tests/it/auth.rs::empty_acp_secret_is_refused_and_debug_is_redacted`,
+`crates/ego-acp/tests/it/listener_transport.rs::tcp_authentication_rejects_missing_wrong_and_non_websocket_requests_before_factory`
+and `authenticated_websocket_initialize_uses_the_sdk_client`.
+
 ### Listener resource bounds
 
 Direction: deployment configuration controls incoming connections. These are
@@ -461,9 +626,15 @@ configuration. No ACP error receipt is promised for transport exhaustion.
 Fallback: reconnect, renegotiate, and reconcile session state using load/resume.
 Do not automatically replay an uncertain effect or an accepted steer request.
 
+Implementation: `crates/ego-listen/src/limits.rs`;
+`crates/ego-acp/src/serve.rs`.
+Tests: `crates/ego-acp/tests/it/listener_transport.rs::authenticated_websocket_factory_is_fresh_and_the_permit_survives_http_101`,
+`connection_lifetime_closes_one_connection_but_the_listener_survives`, and
+`ingress_shutdown_closes_only_the_exhausted_connection`.
+
 ## Not implemented
 
-The current router excludes:
+The router does not implement:
 
 - Client filesystem `fs/read_text_file` and `fs/write_text_file`, and client
   `terminal/*` effects. ego executes through its own rooted tools instead.
@@ -489,10 +660,10 @@ make every terminal slash control available to an ACP client.
   permission seat grants or denies; it does not implement core's amendment
   vocabulary.
 
-Evidence: `crates/ego-acp/src/serve.rs:775` and the handler chain beginning at
-`:2896`; `crates/ego-acp/src/negotiate.rs:49`;
-`crates/ego-acp/src/controls.rs:1`, `crates/ego-acp/src/question.rs:32`, and
-`crates/ego-acp/src/permission.rs:198`. Newer stable upstream schema entries
+Evidence: `session_prompt` and its handler chain in `crates/ego-acp/src/serve.rs`;
+`crates/ego-acp/src/negotiate.rs`;
+`crates/ego-acp/src/controls.rs`, `crates/ego-acp/src/question.rs`, and
+`crates/ego-acp/src/permission.rs`. Newer stable upstream schema entries
 must not be mistaken for methods implemented by ego's older pinned SDK.
 
 ## Session initialization prompt
@@ -515,6 +686,11 @@ advertisement. The stable prefix retains the selection across turns; creation
 selections survive restart before the first prompt. Launch-wide `ego acp
 --system TEXT --bare` is also implemented. See the
 [session initialization guide](acp.md#session-initialization-prompt) for details.
+
+Sources: `session_prompt` in `crates/ego-acp/src/serve.rs` and
+`crates/ego-cli/tests/it/acp_system_prompt.rs`, including
+`per_session_prompt_is_isolated_and_stable_across_turns` and
+`creation_prompt_selections_survive_restart_before_first_prompt`.
 
 ### Session deletion
 
@@ -580,4 +756,3 @@ Foreground task lifecycle is live-only; a process restart cannot recover a
 foreground identity that was never durable. A durable snapshot does not claim
 that such a task survived the process. Existing permission and elicitation RPCs
 remain their only human-request owners and are not replayed by this extension.
-The extension does not replace ordinary ACP permission and question handling.

@@ -1,0 +1,18 @@
+: schema-derived from https://api-docs.deepseek.com/api/create-chat-completion and https://api-docs.deepseek.com/guides/thinking_mode (read 2026-11-14)
+: provider deepseek, model deepseek-flash
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"reasoning_content":"Today is 2026-04-19, so tomorrow is 2026-04-20. "},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"reasoning_content":"Now I'll call the weather function for Hangzhou."},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_00_H2SCW6136vWJGq9SQlBuhVt4","type":"function","function":{"name":"get_weather","arguments":""}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"location\": \"Hang"}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"zhou\", \"date\": \"2026-04-20\"}"}}]},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"content":""},"logprobs":null,"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":312,"completion_tokens":41,"total_tokens":353,"prompt_tokens_details":{"cached_tokens":256},"prompt_cache_hit_tokens":256,"prompt_cache_miss_tokens":56,"completion_tokens_details":{"reasoning_tokens":25}}}
+
+data: [DONE]
+

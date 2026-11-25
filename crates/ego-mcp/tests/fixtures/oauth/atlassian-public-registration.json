@@ -1,0 +1,13 @@
+{
+  "client_id": "<redacted client id>",
+  "client_id_issued_at": 1793313400,
+  "client_name": "ego",
+  "client_profile": "ai.dcr3p",
+  "client_secret": "<redacted: nonempty secret returned>",
+  "client_secret_expires_at": 0,
+  "disabled": false,
+  "redirect_uris": [
+    "http://127.0.0.1:52591/callback"
+  ],
+  "token_endpoint_auth_method": "none"
+}

@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use ego_core::config::{McpHttpConfig, McpServerName};
+use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::types::ToolDescriptor;
 use ego_core::permit::{DuplexSettlement, HttpHeader, HttpRequest};
 use futures::StreamExt;
@@ -22,7 +23,7 @@ use rmcp::model::{
     ReadResourceRequest, ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult,
     RequestId, Resource, ServerCapabilities, ServerJsonRpcMessage, ServerResult,
 };
-use rmcp::service::{PeerRequestOptions, RunningService};
+use rmcp::service::{PeerRequestOptions, RunningService, ServiceError};
 use rmcp::transport::common::client_side_sse::NeverRetry;
 use rmcp::transport::streamable_http_client::{
     SseError, StreamableHttpClient, StreamableHttpClientTransport,
@@ -37,28 +38,46 @@ use crate::http::{AdmittedMcpHttpProfile, header, path_and_query};
 use crate::stdio::SharedDuplex;
 use crate::{
     McpAcpEffects, McpDuplexEffects, McpError, McpFailure, McpHttpEffects, McpHttpEnd,
-    McpHttpPurpose, McpHttpSettlement, McpManualOutcome, McpRequestId,
+    McpHttpPurpose, McpHttpSettlement, McpManualOutcome, McpRequestId, McpTaskState,
 };
 
 pub const MCP_PROTOCOL_REVISION: &str = "2026-07-28";
 const MAX_JSON_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+/// Bytes of an HTTP error body that reach the model.
+const MAX_STATUS_BODY_BYTES: usize = 512;
 
-pub(crate) fn current_client_capabilities() -> ClientCapabilities {
-    ClientCapabilities::builder()
-        .enable_elicitation_with(
-            ElicitationCapability::new()
-                .with_form(FormElicitationCapability::new().with_schema_validation(true)),
-        )
-        .build()
+/// The capabilities ego declares. `tasks` adds the MCP Tasks extension
+/// (`io.modelcontextprotocol/tasks`); it is declared only on an HTTP session
+/// whose options ask for it.
+pub(crate) fn client_capabilities(tasks: bool) -> ClientCapabilities {
+    let builder = ClientCapabilities::builder().enable_elicitation_with(
+        ElicitationCapability::new()
+            .with_form(FormElicitationCapability::new().with_schema_validation(true)),
+    );
+    if tasks {
+        builder.enable_tasks().build()
+    } else {
+        builder.build()
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub struct McpClientOptions {
     max_sse_event_size: usize,
     deadline: Instant,
+    tasks: bool,
 }
 
 impl McpClientOptions {
+    /// Declare the MCP Tasks extension on an HTTP session. Stdio and ACP
+    /// sessions never declare it: each call there spawns and settles its own
+    /// server, so a task would be gone before its first poll.
+    #[must_use]
+    pub fn with_tasks(mut self, tasks: bool) -> Self {
+        self.tasks = tasks;
+        self
+    }
+
     pub(crate) fn deadline(&self) -> Instant {
         self.deadline
     }
@@ -73,6 +92,7 @@ impl McpClientOptions {
         Ok(Self {
             max_sse_event_size,
             deadline,
+            tasks: false,
         })
     }
 }
@@ -380,6 +400,27 @@ impl StreamableHttpClient for EgoStreamableHttpClient {
             return Err(unexpected("MCP server attempted to establish a session"));
         }
         let status = response.status();
+        let auth_refusal = match status {
+            401 => Some(
+                "authentication was refused. Ask the operator to check the credentials configured for this server",
+            ),
+            403 => Some(
+                "access was refused. Ask the operator to check access to this server or operation",
+            ),
+            _ => None,
+        };
+        if let Some(reason) = auth_refusal {
+            // A refusal body or challenge may echo credentials. Use only the status.
+            drop(response);
+            guard.settle().await.map_err(StreamableHttpError::Client)?;
+            return Err(StreamableHttpError::Client(McpError::with_delivery(
+                McpFailure::Transport,
+                format!(
+                    "the server answered HTTP {status}: {reason}. Retrying unchanged will not help"
+                ),
+                DeliveryCertainty::PossiblySent,
+            )));
+        }
         if matches!(status, 202 | 204) {
             guard.settle().await.map_err(StreamableHttpError::Client)?;
             return Ok(StreamableHttpPostResponse::Accepted);
@@ -387,6 +428,9 @@ impl StreamableHttpClient for EgoStreamableHttpClient {
         let content_type = response
             .header_value("content-type")
             .map(|value| String::from_utf8_lossy(value).into_owned());
+        let retry_after = response
+            .header_value("retry-after")
+            .map(|value| plain_text(&String::from_utf8_lossy(value)));
         if content_type
             .as_deref()
             .is_some_and(|value| value.starts_with("text/event-stream"))
@@ -398,6 +442,23 @@ impl StreamableHttpClient for EgoStreamableHttpClient {
                 bounded_sse_stream(body, max_sse_event_size, self.options.deadline, guard),
                 None,
             ));
+        }
+        if !(200..300).contains(&status) {
+            // A JSON-RPC error body is the server's own answer and is kept.
+            let bytes = response
+                .into_bytes(MAX_JSON_RESPONSE_BYTES)
+                .await
+                .map_err(StreamableHttpError::Client)?;
+            let answer = serde_json::from_slice::<ServerJsonRpcMessage>(&bytes);
+            guard.settle().await.map_err(StreamableHttpError::Client)?;
+            return match answer {
+                Ok(message) => Ok(StreamableHttpPostResponse::Json(message, None)),
+                Err(_) => Err(StreamableHttpError::Client(http_status_error(
+                    status,
+                    retry_after.as_deref(),
+                    &bytes,
+                ))),
+            };
         }
         if content_type
             .as_deref()
@@ -457,6 +518,88 @@ impl StreamableHttpClient for EgoStreamableHttpClient {
 
 fn http_header(name: &str, value: Vec<u8>) -> Result<HttpHeader, StreamableHttpError<McpError>> {
     header(name, value).map_err(StreamableHttpError::Client)
+}
+
+/// The server answered an MCP request with a non-success HTTP status and no
+/// JSON-RPC body. The answer reached the server, so delivery is uncertain.
+fn http_status_error(status: u16, retry_after: Option<&str>, body: &[u8]) -> McpError {
+    let mut message = format!("the server answered HTTP {status}");
+    if let Some(wait) = retry_after {
+        message.push_str(&format!(" (Retry-After: {wait})"));
+    }
+    let excerpt = plain_text(&String::from_utf8_lossy(
+        &body[..body.len().min(MAX_STATUS_BODY_BYTES)],
+    ));
+    if !excerpt.is_empty() {
+        message.push_str(": ");
+        message.push_str(&excerpt);
+    }
+    McpError::with_delivery(
+        McpFailure::Transport,
+        message,
+        DeliveryCertainty::PossiblySent,
+    )
+}
+
+fn plain_text(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+/// Turn an rmcp request failure into the sentence the model reads. The server's
+/// own words stay; rmcp's type names and wrapper text do not.
+fn service_error(error: ServiceError) -> McpError {
+    match error {
+        ServiceError::TransportSend(failure) => {
+            match failure.error.downcast::<StreamableHttpError<McpError>>() {
+                Ok(inner) => match *inner {
+                    StreamableHttpError::Client(error) => error,
+                    StreamableHttpError::Deserialize(error) => McpError::with_delivery(
+                        McpFailure::InvalidResponse,
+                        format!(
+                            "the server answered with a body that is not a valid MCP message: {error}"
+                        ),
+                        DeliveryCertainty::PossiblySent,
+                    ),
+                    other => McpError::with_delivery(
+                        McpFailure::Transport,
+                        other.to_string(),
+                        DeliveryCertainty::PossiblySent,
+                    ),
+                },
+                Err(other) => McpError::with_delivery(
+                    McpFailure::Transport,
+                    other.to_string(),
+                    DeliveryCertainty::PossiblySent,
+                ),
+            }
+        }
+        ServiceError::TransportClosed => McpError::with_delivery(
+            McpFailure::Transport,
+            "the server closed the connection before it answered",
+            DeliveryCertainty::PossiblySent,
+        ),
+        ServiceError::Timeout { timeout } => McpError::with_delivery(
+            McpFailure::Transport,
+            format!(
+                "the server did not answer within {} seconds",
+                timeout.as_secs()
+            ),
+            DeliveryCertainty::PossiblySent,
+        ),
+        ServiceError::McpError(data) => McpError::with_delivery(
+            McpFailure::Protocol,
+            format!(
+                "the server refused the call with JSON-RPC error {}: {}",
+                data.code.0, data.message
+            ),
+            DeliveryCertainty::DefinitelySent,
+        ),
+        other => McpError::new(McpFailure::Protocol, other.to_string()),
+    }
 }
 
 fn unexpected(message: &'static str) -> StreamableHttpError<McpError> {
@@ -841,8 +984,10 @@ impl McpClient {
         let lifecycle = ClientLifecycleMode::Discover {
             preferred_versions: vec![ProtocolVersion::V_2026_07_28],
         };
+        let tasks = self.options.tasks
+            && matches!(state, ClientState::Pending(PendingTransport::Http { .. }));
         let client_info = ClientInfo::new(
-            current_client_capabilities(),
+            client_capabilities(tasks),
             Implementation::new("ego", env!("CARGO_PKG_VERSION")),
         )
         .with_protocol_version(ProtocolVersion::V_2026_07_28);
@@ -922,7 +1067,7 @@ impl McpClient {
                     }
                     Err(error) => {
                         self.state = ClientState::Failed { duplex: None };
-                        Err(McpError::new(McpFailure::Protocol, error.to_string()))
+                        Err(discover_error(error))
                     }
                 }
             }
@@ -934,7 +1079,23 @@ impl McpClient {
                 self.state = ClientState::Failed {
                     duplex: Some(shared.clone()),
                 };
-                match serve_client_with_lifecycle(client_info, transport, lifecycle).await {
+                // Reconnection can run deep inside a tool request. Poll discovery
+                // in its own task so its stack does not add to that request's.
+                // Dropping the set aborts discovery if its owner is cancelled.
+                let mut task = tokio::task::JoinSet::new();
+                task.spawn(serve_client_with_lifecycle(
+                    client_info,
+                    transport,
+                    lifecycle,
+                ));
+                let outcome = task
+                    .join_next()
+                    .await
+                    .ok_or_else(|| {
+                        McpError::new(McpFailure::Protocol, "MCP discovery task was lost")
+                    })?
+                    .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
+                match outcome {
                     Ok(service) => {
                         self.state = ClientState::Running {
                             service,
@@ -946,7 +1107,7 @@ impl McpClient {
                         self.state = ClientState::Failed {
                             duplex: Some(shared),
                         };
-                        Err(McpError::new(McpFailure::Protocol, error.to_string()))
+                        Err(discover_error(error))
                     }
                 }
             }
@@ -966,7 +1127,7 @@ impl McpClient {
                     }
                     Err(error) => {
                         self.state = ClientState::Failed { duplex: None };
-                        Err(McpError::new(McpFailure::Protocol, error.to_string()))
+                        Err(discover_error(error))
                     }
                 }
             }
@@ -1089,9 +1250,28 @@ impl McpClient {
     pub async fn call_tool_once(
         &mut self,
         params: CallToolRequestParams,
+        egress: Option<&dyn ego_core::egress::EgressFilter>,
     ) -> Result<McpManualOutcome<CallToolResult>, McpError> {
         self.claim_operation()?;
         let wire = serde_json::to_value(&params)?;
+        if let Some(filter) = egress {
+            filter
+                .filter(ego_core::egress::EgressRequest {
+                    direction: "mcp_call",
+                    destination: self.server.as_str(),
+                    payload: wire.clone(),
+                    turn: None,
+                    scope: None,
+                })
+                .await
+                .map_err(|message| {
+                    McpError::with_delivery(
+                        McpFailure::Authority,
+                        message,
+                        ego_core::generator::attempt::DeliveryCertainty::DefinitelyUnsent,
+                    )
+                })?;
+        }
         let action = identity_action(&wire);
         let gate = Arc::clone(&self.identity_retry);
         // Serialize identity reads/repairs so concurrent identical inbox calls
@@ -1165,14 +1345,87 @@ impl McpClient {
                     ));
                 }
             };
-            return McpManualOutcome::from_call(response);
+            return McpManualOutcome::from_call(response, false);
         }
+        let tasks = self.options.tasks;
         let service = self.running_service_mut()?;
         let response = service
             .call_tool_once(params)
             .await
+            .map_err(service_error)?;
+        McpManualOutcome::from_call(response, tasks)
+    }
+
+    /// One `tasks/get` round for a task this session created. HTTP only.
+    pub async fn get_task_once(&mut self, task_id: &str) -> Result<McpTaskState, McpError> {
+        self.claim_operation()?;
+        if !self.options.tasks {
+            return Err(McpError::new(
+                McpFailure::Authority,
+                "MCP Tasks were not declared for this client",
+            ));
+        }
+        let service = self.running_service_mut()?;
+        if !service
+            .peer_info()
+            .is_some_and(|peer| peer.capabilities.supports_tasks())
+        {
+            return Err(McpError::new(
+                McpFailure::Authority,
+                "the discovered server did not advertise MCP Tasks",
+            ));
+        }
+        let result = service
+            .get_task(rmcp::model::GetTaskParams::new(task_id))
+            .await
             .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
-        McpManualOutcome::from_call(response)
+        McpTaskState::from_rmcp(task_id, result.task)
+    }
+
+    /// Send one form response to a task this session created. The acknowledgement
+    /// is not terminal and does not imply that the next poll reflects the update.
+    pub async fn update_task_once(
+        &mut self,
+        params: rmcp::model::UpdateTaskParams,
+    ) -> Result<(), McpError> {
+        self.claim_operation()?;
+        if !self.options.tasks {
+            return Err(McpError::new(
+                McpFailure::Authority,
+                "MCP Tasks were not declared for this client",
+            ));
+        }
+        let service = self.running_service_mut()?;
+        if !service
+            .peer_info()
+            .is_some_and(|peer| peer.capabilities.supports_tasks())
+        {
+            return Err(McpError::new(
+                McpFailure::Authority,
+                "the discovered server did not advertise MCP Tasks",
+            ));
+        }
+        service
+            .update_task(params)
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))
+    }
+
+    /// One `tasks/cancel` round for a task this session created. HTTP only.
+    /// The acknowledgement does not guarantee that the server stops the task.
+    pub async fn cancel_task_once(&mut self, task_id: &str) -> Result<(), McpError> {
+        self.claim_operation()?;
+        if !self.options.tasks {
+            return Err(McpError::new(
+                McpFailure::Authority,
+                "MCP Tasks were not declared for this client",
+            ));
+        }
+        let service = self.running_service_mut()?;
+        service
+            .cancel_task(rmcp::model::CancelTaskParams::new(task_id))
+            .await
+            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))
     }
 
     /// Perform one manual resources/read round without entering rmcp's MRTR
@@ -1429,15 +1682,13 @@ impl McpClient {
                 ),
             )
             .await
-            .map_err(|error| McpError::new(McpFailure::Protocol, error.to_string()))?;
+            .map_err(service_error)?;
         let request_id = handle.id.clone();
         if let Ok(mut active) = control.active_protocol_request.lock() {
             *active = Some(request_id.clone());
         }
         let result = tokio::select! {
-            response = handle.await_response() => response.map_err(|error| {
-                McpError::new(McpFailure::Protocol, error.to_string())
-            }),
+            response = handle.await_response() => response.map_err(service_error),
             () = wait_cancelled(Arc::clone(&control)) => {
                 let _ = service.notify_cancelled(CancelledNotificationParam::new(
                     Some(request_id),
@@ -1675,5 +1926,45 @@ impl McpClientSettlement {
 
     pub fn duplex(&self) -> Option<&DuplexSettlement> {
         self.duplex.as_ref()
+    }
+}
+
+/// Classify a failed `server/discover` startup. Only "method not found" or no
+/// shared protocol version is a version mismatch the user can act on. Any other
+/// JSON-RPC error is the server failing the request (for example, a bridge that
+/// cannot reach its backend), so it stays a protocol failure with its code. A
+/// closed or failed connection is a transport failure, and a malformed answer is
+/// an invalid response.
+fn discover_error(error: rmcp::service::ClientInitializeError) -> McpError {
+    use rmcp::model::ErrorCode;
+    use rmcp::service::ClientInitializeError;
+    match &error {
+        ClientInitializeError::JsonRpcError(data) if data.code != ErrorCode::METHOD_NOT_FOUND => {
+            McpError::new(
+                McpFailure::Protocol,
+                format!(
+                    "server failed 'server/discover' with error {}: {}",
+                    data.code.0, data.message
+                ),
+            )
+        }
+        ClientInitializeError::JsonRpcError(_)
+        | ClientInitializeError::NoCompatibleProtocolVersion { .. } => McpError::new(
+            McpFailure::ProtocolVersion,
+            format!(
+                "server does not implement MCP {MCP_PROTOCOL_REVISION} ('server/discover'): {error}"
+            ),
+        ),
+        ClientInitializeError::ConnectionClosed(_)
+        | ClientInitializeError::TransportError { .. } => {
+            McpError::new(McpFailure::Transport, error.to_string())
+        }
+        ClientInitializeError::ExpectedInitResponse(_)
+        | ClientInitializeError::ExpectedInitResult(_)
+        | ClientInitializeError::ConflictInitResponseId(..)
+        | ClientInitializeError::UncorrelatedErrorResponse { .. } => {
+            McpError::new(McpFailure::InvalidResponse, error.to_string())
+        }
+        _ => McpError::new(McpFailure::Protocol, error.to_string()),
     }
 }

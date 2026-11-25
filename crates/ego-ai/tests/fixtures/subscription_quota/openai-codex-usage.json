@@ -1,0 +1,81 @@
+{
+  "recorded_at": "2026-11-12T04:37:35.892119+00:00",
+  "request": {
+    "method": "GET",
+    "url": "https://chatgpt.com/backend-api/wham/usage",
+    "header_names": [
+      "Accept",
+      "Authorization",
+      "ChatGPT-Account-Id"
+    ]
+  },
+  "status": 200,
+  "response_header_names": [
+    "cf-cache-status",
+    "cf-ray",
+    "content-length",
+    "content-type",
+    "cross-origin-opener-policy",
+    "date",
+    "nel",
+    "referrer-policy",
+    "report-to",
+    "server",
+    "set-cookie",
+    "strict-transport-security",
+    "x-content-type-options",
+    "x-oai-request-id",
+    "x-openai-proxy-wasm"
+  ],
+  "quota_headers": {},
+  "body": {
+    "user_id": "[REDACTED]",
+    "account_id": "[REDACTED]",
+    "email": "[REDACTED]",
+    "plan_type": "pro",
+    "rate_limit": {
+      "allowed": true,
+      "limit_reached": false,
+      "primary_window": {
+        "used_percent": 14,
+        "limit_window_seconds": 604800,
+        "reset_after_seconds": 534248,
+        "reset_at": 1794992503
+      },
+      "secondary_window": null
+    },
+    "code_review_rate_limit": null,
+    "additional_rate_limits": null,
+    "model_usage": {
+      "gpt-6-astra": {
+        "available": true,
+        "available_at": null,
+        "credits_would_enable": false
+      }
+    },
+    "credits": {
+      "has_credits": true,
+      "unlimited": false,
+      "overage_limit_reached": false,
+      "balance": "8418.4673090000",
+      "approx_local_messages": [
+        2105,
+        10944
+      ],
+      "approx_cloud_messages": [
+        337,
+        2105
+      ]
+    },
+    "spend_control": {
+      "reached": false,
+      "individual_limit": null
+    },
+    "rate_limit_reached_type": null,
+    "promo": null,
+    "rate_limit_reset_credits": {
+      "available_count": 1,
+      "applicable_available_count": 0
+    }
+  }
+}

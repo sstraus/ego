@@ -22,7 +22,9 @@ pub struct GlobParams {
     pub path: Option<String>,
 }
 
-/// Finds names with `list` authority, not file contents with `read` authority.
+/// Finds files by name. Holds `list` authority and no `read` authority, so it
+/// cannot read what it found even if it wanted to
+/// (`docs/internals/decisions/2026-08-21-reading-without-reading-everything.md` §1).
 pub struct GlobTool;
 
 impl TypedTool for GlobTool {

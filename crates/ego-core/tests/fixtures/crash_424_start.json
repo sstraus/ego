@@ -1,0 +1,19 @@
+{
+  "env": {
+    "seq": 151,
+    "id": "01a13e58-b68b-7f60-bfcd-3945e8a26481",
+    "turn": "01a13e57-a332-79d0-8f9d-86bc77eca888",
+    "item": null,
+    "parent": null,
+    "ts": 1792047363723,
+    "producer": "Main"
+  },
+  "kind": {
+    "kind": "GenerationStarted",
+    "attempt": {
+      "generation": "01a13e58-b672-7e71-ad8f-9a238281a317",
+      "attempt": "01a13e58-b672-7e71-ad8f-9a346cfb0809"
+    },
+    "role": "main"
+  }
+}

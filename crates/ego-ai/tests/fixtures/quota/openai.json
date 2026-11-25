@@ -1,0 +1,22 @@
+{
+  "provenance": "VendorSchemaDerived",
+  "source": "https://developers.openai.com/api/docs/guides/error-codes",
+  "read": "2026-11-08",
+  "wire": "openai-responses",
+  "cases": [
+    {"name": "credit balance exhausted", "status": 429, "expect": "refused",
+     "body": {"error": {"message": "Your organization has no prepaid credits remaining.", "type": "insufficient_quota", "code": "credit_balance_exhausted"}}},
+    {"name": "organization spend limit", "status": 429, "expect": "refused",
+     "body": {"error": {"message": "Your organization reached its enforced spend limit.", "type": "insufficient_quota", "code": "organization_spend_limit_exceeded"}}},
+    {"name": "project spend limit", "status": 429, "expect": "refused",
+     "body": {"error": {"message": "Your project reached its enforced spend limit.", "type": "insufficient_quota", "code": "project_spend_limit_exceeded"}}},
+    {"name": "organization usage limit", "status": 429, "expect": "refused",
+     "body": {"error": {"message": "Your organization reached its OpenAI-assigned usage limit.", "type": "insufficient_quota", "code": "organization_usage_limit_exceeded"}}},
+    {"name": "quota type only", "status": 429, "expect": "refused",
+     "body": {"error": {"message": "You exceeded your current quota.", "type": "insufficient_quota", "code": null}}},
+    {"name": "rate limit reached", "status": 429, "retry_after": 7, "expect": "transient",
+     "body": {"error": {"message": "Rate limit reached for requests", "type": "requests", "code": "rate_limit_exceeded"}}},
+    {"name": "slow down", "status": 429, "expect": "transient",
+     "body": {"error": {"message": "Your request rate increased too quickly.", "type": "rate_limit_error", "code": "slow_down"}}}
+  ]
+}

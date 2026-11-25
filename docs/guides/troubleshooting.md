@@ -1,5 +1,7 @@
 # Troubleshooting
 
+Read this page in the [hosted user guide](https://ego.tuicommander.com/docs/guides/troubleshooting.html).
+
 Start with the refusal and its owning boundary. A missing credential, unsupported
 model fact, denied effect, and unavailable confinement are different problems;
 changing one cannot safely be assumed to solve another.
@@ -25,7 +27,7 @@ refresh can remain `not_checked` with the command/reason that would establish th
 | Unknown monetary cost | Inspect the cost-anomaly notice; money caps cover known recorded spend only, so use a token bound when prices are unknown |
 | Project settings ignored | Inspect trust/bare posture; headless is untrusted by default |
 | Denied tool despite an allow | Check every prepared operation, immutable denies, control-path rules, and origin of the allow |
-| `perimeter-probe-temp-overlap` | TMPDIR must be outside every granted root for the negative probe. Inspect roots; an explicit user `ego config set 'roots=[]'` selects workspace-only access when that is the intended authority |
+| `perimeter-probe-temp-overlap` | TMPDIR must be outside every granted root for the negative probe. Inspect roots; an explicit user `ego config set 'roots=[]'` clears configured roots, while roots derived from the workspace's own git repository (and, under adaptive, captured toolchain roots) remain |
 | Sandbox unavailable | Check host/backend evidence; do not claim confinement by changing the approval mode |
 | Read-only root beneath writable grant | Inspect backend evidence: Linux Landlock child grants cannot subtract writable ancestor authority; built-in tools retain the read-only restriction |
 | MCP fails or persisted session is quarantined | Inspect exact admitted declaration, authentication and retained failure; reload does not prove no prior effect |
@@ -73,28 +75,43 @@ the macOS confinement boundary. Check
 command resolution in the user's shell first. If it resolves there but not inside
 ego, inspect the perimeter. A read/read-write root does not grant exec.
 
-Use `ego config edit` and extend the user or selected profile's `exec_paths` array
-with the existing canonical tool directories. For a rustup installation,
-these can include `~/.cargo/bin`'s resolved
-target directory, and the selected `~/.rustup/toolchains/...` directory. Use actual
-absolute paths, not literal `~` strings. Grant separate read roots for toolchain
-resources and read-write roots for the caches/build outputs the task needs.
-No toolchain preset or automatic PATH grant is available in the observed build.
-Exit and resume, then ask ego to retry `cargo --version` before a build.
+On macOS, the `workspace` and `adaptive` sandboxes already admit the Rust
+toolchain for execution: `CARGO_HOME/bin` and `RUSTUP_HOME/toolchains`, or
+`~/.cargo/bin` and `~/.rustup/toolchains` when those variables are unset.
+`adaptive` also captures the Cargo and rustup homes and the pnpm and npm caches
+(see [permissions](permissions.md#filesystem-and-network-boundaries)). If Cargo
+still fails there, check that the variables in ego's environment match the
+installation your shell uses.
+
+For a toolchain in another location, under `ro`, or on Linux, use
+`ego config edit` and extend the user or selected profile's `exec_paths` array
+with the existing canonical tool directories: for example the resolved target of
+the `cargo` on your PATH, including any wrapper or shim directory, and the
+selected toolchain directory. Use actual absolute paths, not literal `~` strings.
+Grant separate read roots for toolchain resources and read-write roots for the
+caches/build outputs the task needs. Exit and resume, then ask ego to retry
+`cargo --version` before a build.
 
 ## `fatal: not a git repository: (null)`
 
 In a linked git worktree, `.git` is a file that points to metadata under the main
-repository's common git directory. That directory can be outside the admitted
-workspace. The macOS sandbox then prevents git from reading it.
+repository's common git directory. That directory can be outside the workspace.
 
-In an ordinary user shell at the worktree, run `git rev-parse --git-common-dir`
-and resolve the output to an absolute canonical path. Inspect effective roots:
-if the directory is already covered by an explicit root, no new grant is needed. Otherwise,
-add that directory with `ego roots add /absolute/common/git/dir --access read`
-for inspection, or `--access read-write` for git operations that update metadata.
-Preserve required default roots as described above. Exit and resume to apply it.
-This is a manual recovery; ego does not automatically add linked-worktree metadata.
+ego treats one repository as one workspace. From validated git metadata it
+derives the common git directory, the main checkout and every linked worktree,
+and admits them with the workspace's own access: read-write under `workspace`
+and `adaptive`, read under `ro`. A worktree created during the session is picked
+up before the next command. `roots=[]` does not remove these derived roots, and
+`/config perimeter` lists them as derived. System write ceilings still apply.
+
+The derivation is skipped when the git metadata is not self-consistent (for
+example a `gitdir` pointer that does not point back), when a derived root would
+contain your home directory or `/etc/ego`, and under sandbox `off`. In those
+cases, run `git rev-parse --git-common-dir` in an ordinary shell at the worktree,
+resolve the output to an absolute canonical path, and add it with
+`ego roots add /absolute/common/git/dir --access read` for inspection, or
+`--access read-write` for git operations that update metadata. Exit and resume
+to apply it.
 
 ## Git fails while selecting the macOS developer tools
 
@@ -156,7 +173,7 @@ for the required grants.
 This can be a real Anthropic credit or entitlement failure. It can also be caused
 by non-secret identity headers in `[auth.anthropic.headers]`. In the 2026-10-10
 live check, the same valid `ANTHROPIC_API_KEY` worked in a request without the
-old Claude Code identity headers and failed with those headers. The operator
+old identity headers that imitated another agent client and failed with those headers. The operator
 removed the header overrides. Inspect your own user configuration without
 publishing credentials; remove inappropriate identity overrides with
 `ego config edit`, then restart. This observation does not prove every balance
@@ -176,7 +193,20 @@ before retrying. A reconnect does not prove an earlier tool operation was unsent
 macOS and Linux have OS-specific confinement adapters; guarantees require host
 capability evidence and the actual admitted production path. Windows listener,
 process ownership, and private-state support exist, but Windows filesystem/network
-confinement remain unsupported. An unconfined acknowledgement does not establish confinement.
+confinement and the final cross-platform matrix remain open work. An unconfined
+acknowledgement is not proof of confinement. This documentation task verifies
+its own macOS build and does not claim native Windows/Linux execution.
+
+On Windows, an interactive start with no sandbox chosen asks once whether to
+continue unconfined. A `yes` applies to every workspace of the same user, for the
+current contract revision, and is stored in `$EGO_HOME/windows-unconfined.json`.
+Each later start that relies on it prints a notice that execution is unconfined.
+The acknowledgement does not change other starts: a direct or piped start still
+needs `--sandbox off`, `--offline` still refuses, and an explicit or configured
+`workspace`, `ro` or `adaptive` sandbox still fails because Windows cannot give
+that guarantee. Delete `windows-unconfined.json` to be asked again. A changed
+contract revision or an unreadable file also asks again; an unreadable file is
+never overwritten.
 
 ## Diagnostics
 
@@ -190,9 +220,22 @@ before publication.
 To compare provider request prefixes, set `EGO_LOG=ego::body=debug` and
 `EGO_LOG_FILE` to a private local file. Each `provider request` entry contains
 the JSON body and API path, without HTTP headers. Prompt text and tool results
-remain sensitive. Codex requests use one lineage routing key in both
-`prompt_cache_key` and the `session-id` header; `cache = 'none'` omits both.
+remain sensitive. Subscription requests use one routing key in
+`prompt_cache_key` and the `session-id` and `x-client-request-id` headers. The
+key derives from the model, the system text and the tools, so sessions with the
+same prefix share it; `cache = 'none'` omits all three.
+
+To record a provider refusal that arrives after status 200, set
+`EGO_LOG=ego::body::provider_failure=debug` and `EGO_LOG_FILE` to a private local
+file. When such a stream ends in an error, one entry records the status, the
+response headers and the last 64 KiB of stream frames. Header values other than
+`content-type`, `content-length`, `date`, `retry-after`, `retry-after-ms`,
+`server`, `x-request-id` and `x-ratelimit-*` are replaced with `[redacted]`. In
+JSON frames, values of any type whose key names a token, key, secret, auth value,
+account, user, email, session, password or credential are replaced too, and
+other non-JSON data is dropped. Model text in the frames is kept, so review the
+entry before you share it.
 
 Source: [doctor](../../crates/ego-cli/src/doctor.rs),
 [diagnostics](../../crates/ego-cli/src/diagnostics.rs),
-[confinement diagnostics](../../crates/ego-cli/src/confinement_diagnostics.rs).
+and [confinement diagnostics](../../crates/ego-cli/src/confinement_diagnostics.rs).

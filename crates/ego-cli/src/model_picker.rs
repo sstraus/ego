@@ -7,7 +7,7 @@ use ego_ai::catalogue::{
     ModelCatalogueSourceStatus, ModelSlug,
 };
 use ego_core::config::{ModelRef, UserConfigStore};
-use ego_core::generator::capabilities::ReasoningEffortSupport;
+use ego_core::generator::capabilities::{ReasoningEffortSupport, ReasoningSelectionError};
 use ego_core::generator::types::ThinkingLevel;
 
 use crate::model::GenerationSelection;
@@ -26,6 +26,7 @@ pub struct ModelSwitchRequest {
     target: ModelRef,
     thinking: ThinkingLevel,
     persistent: bool,
+    connection: Option<String>,
 }
 
 impl ModelSwitchRequest {
@@ -36,11 +37,16 @@ impl ModelSwitchRequest {
             target,
             thinking,
             persistent: true,
+            connection: None,
         }
     }
 
     pub fn target(&self) -> ModelRef {
         self.target.clone()
+    }
+
+    pub(crate) fn connection(&self) -> Option<&str> {
+        self.connection.as_deref()
     }
 
     pub fn thinking(&self) -> ThinkingLevel {
@@ -56,6 +62,7 @@ impl ModelSwitchRequest {
 pub enum PickerFocus {
     Model,
     Reasoning,
+    Account,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,6 +101,9 @@ pub struct ModelPickerView {
     pub current_reasoning: Option<ThinkingLevel>,
     pub models: Vec<ModelPickerRow>,
     pub reasoning: Vec<ThinkingLevel>,
+    /// Stable numbers offered at the account step, in display order. Never
+    /// the opaque connection IDs behind them.
+    pub account_numbers: Vec<u32>,
     /// Startup has no active session to scope a selection to.
     pub(crate) persistent_only: bool,
 }
@@ -125,9 +135,16 @@ pub enum PickerError {
         thinking: ThinkingLevel,
     },
     NoSelection,
+    NoAvailableMatch(String),
+    AmbiguousMatch {
+        query: String,
+        matches: Vec<String>,
+    },
+    MissingReasoningDefault(String),
     NoSession,
     PersistenceRequired,
     SelectionRead(String),
+    AccountChoiceRequired,
 }
 
 impl std::fmt::Display for PickerError {
@@ -149,6 +166,16 @@ impl std::fmt::Display for PickerError {
                 write!(f, "model `{slug}` does not accept `{thinking:?}` reasoning")
             }
             Self::NoSelection => f.write_str("no model selection was made"),
+            Self::NoAvailableMatch(query) => write!(f, "no available model matches `{query}`"),
+            Self::AmbiguousMatch { query, matches } => write!(
+                f,
+                "multiple available models match `{query}`: {}; use a longer name or /model",
+                matches.join(", ")
+            ),
+            Self::MissingReasoningDefault(slug) => write!(
+                f,
+                "model `{slug}` has no stated reasoning default; use /model to choose reasoning"
+            ),
             Self::NoSession => f.write_str("the model picker has no active session"),
             Self::PersistenceRequired => {
                 f.write_str("the startup model selection must be saved as the user default")
@@ -159,6 +186,9 @@ impl std::fmt::Display for PickerError {
                     "the current model selection could not be read: {message}"
                 )
             }
+            Self::AccountChoiceRequired => f.write_str(
+                "multiple saved accounts match; select a numbered account in /model, or use --account N in a new session"
+            ),
         }
     }
 }
@@ -181,11 +211,25 @@ struct CurrentSelection {
 #[derive(Debug, Clone)]
 enum ModalState {
     Model(Selector),
-    Reasoning { model: String, selector: Selector },
+    Reasoning {
+        model: String,
+        selector: Selector,
+    },
+    /// The chosen model's vendor has more than one configured account and
+    /// none is yet bound for this session; `numbers` are its stable account
+    /// numbers, never the opaque connection IDs behind them.
+    Account {
+        model: String,
+        selector: Selector,
+        numbers: Vec<u32>,
+    },
 }
 
 pub struct ModelPicker {
     snapshot: Arc<ModelCatalogueSnapshot>,
+    live_accounts: Vec<crate::auth::SavedKeyAccount>,
+    base_snapshot: Arc<ModelCatalogueSnapshot>,
+    chosen_account: Option<String>,
     selection: Option<Arc<GenerationSelection>>,
     config_store: Option<Arc<dyn UserConfigStore>>,
     startup: bool,
@@ -200,6 +244,9 @@ pub struct ModelPicker {
 impl ModelPicker {
     pub fn new(snapshot: Arc<ModelCatalogueSnapshot>) -> Self {
         Self {
+            base_snapshot: Arc::clone(&snapshot),
+            live_accounts: Vec::new(),
+            chosen_account: None,
             snapshot,
             selection: None,
             config_store: None,
@@ -217,6 +264,9 @@ impl ModelPicker {
     pub(crate) fn for_startup(snapshot: Arc<ModelCatalogueSnapshot>) -> Self {
         Self {
             modal: Some(ModalState::Model(model_selector(&snapshot, "", None))),
+            base_snapshot: Arc::clone(&snapshot),
+            live_accounts: Vec::new(),
+            chosen_account: None,
             snapshot,
             selection: None,
             config_store: None,
@@ -249,6 +299,9 @@ impl ModelPicker {
         config_store: Arc<dyn UserConfigStore>,
     ) -> Self {
         Self {
+            base_snapshot: Arc::clone(&snapshot),
+            live_accounts: Vec::new(),
+            chosen_account: None,
             snapshot,
             selection: Some(selection),
             config_store: Some(config_store),
@@ -259,6 +312,53 @@ impl ModelPicker {
             open: false,
             modal: None,
             diagnostic: None,
+        }
+    }
+
+    /// Refresh the live display without admitting a credential. Startup and
+    /// an already bound session cannot adopt another connection here.
+    pub(crate) fn set_live_accounts(&mut self, accounts: Vec<crate::auth::SavedKeyAccount>) {
+        self.live_accounts = accounts;
+        let mut snapshot = self.base_snapshot.as_ref().clone();
+        if self.selection.is_some() && !self.startup {
+            for row in &mut snapshot.models {
+                if matches!(
+                    row.availability,
+                    ModelAvailability::Unavailable {
+                        cause: ModelAvailabilityCause::MissingCredential,
+                        ..
+                    }
+                ) && !self.eligible_keys(&row.slug.provider).is_empty()
+                {
+                    row.availability = ModelAvailability::Available;
+                }
+            }
+        }
+        self.snapshot = Arc::new(snapshot);
+        if matches!(self.modal, Some(ModalState::Model(_))) {
+            self.modal = Some(ModalState::Model(self.model_selector()));
+        }
+    }
+
+    fn eligible_keys(&self, route: &str) -> Vec<&crate::auth::SavedKeyAccount> {
+        let pinned = self.selection.as_ref().and_then(|selection| {
+            let current = selection.snapshot().ok()?;
+            let (current_route, _) = current.identity.0.split_once('/')?;
+            (current_route == route)
+                .then(|| selection.connection())
+                .flatten()
+        });
+        self.live_accounts
+            .iter()
+            .filter(|account| account.route == route && pinned.is_none_or(|id| account.id == id))
+            .collect()
+    }
+
+    fn single_key(&self, route: &str) -> Result<Option<String>, PickerError> {
+        match self.eligible_keys(route).as_slice() {
+            [] => Ok(None),
+            [account] => Ok(Some(account.id.clone())),
+            _ => Err(PickerError::AccountChoiceRequired),
         }
     }
 
@@ -300,6 +400,45 @@ impl ModelPicker {
         })
     }
 
+    /// Resolve only a unique selectable model. Use its stated reasoning
+    /// default or carry the session effort only when the target supports it.
+    pub fn resolve_fragment(&self, query: &str) -> Result<ModelSwitchRequest, PickerError> {
+        let matches = filtered_rows(&self.snapshot, query)
+            .into_iter()
+            .filter(|row| matches!(&row.availability, ModelAvailability::Available))
+            .collect::<Vec<_>>();
+        let row = match matches.as_slice() {
+            [] => return Err(PickerError::NoAvailableMatch(query.to_owned())),
+            [row] => row,
+            _ => {
+                return Err(PickerError::AmbiguousMatch {
+                    query: query.to_owned(),
+                    matches: matches.iter().map(|row| row.slug.to_string()).collect(),
+                });
+            }
+        };
+        let slug = row.slug.to_string();
+        let current_effort = self
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.snapshot().ok().map(|current| current.thinking));
+        let thinking = row
+            .capabilities
+            .resolve_reasoning_effort(row.capabilities.default_reasoning_effort.or(current_effort))
+            .map_err(|error| match error {
+                ReasoningSelectionError::DefaultUnstated => {
+                    PickerError::MissingReasoningDefault(slug.clone())
+                }
+                error => PickerError::SelectionRead(error.to_string()),
+            })?;
+        Ok(ModelSwitchRequest {
+            target: ModelRef(slug),
+            thinking,
+            persistent: false,
+            connection: self.single_key(&row.slug.provider)?,
+        })
+    }
+
     pub fn is_open(&self) -> bool {
         self.open
     }
@@ -310,17 +449,33 @@ impl ModelPicker {
     }
 
     pub fn view(&self) -> ModelPickerView {
-        let (focus, selector, selected_model, reasoning) = match &self.modal {
-            Some(ModalState::Model(selector)) => {
-                (PickerFocus::Model, Some(selector), None, Vec::new())
-            }
+        let (focus, selector, selected_model, reasoning, account_numbers) = match &self.modal {
+            Some(ModalState::Model(selector)) => (
+                PickerFocus::Model,
+                Some(selector),
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
             Some(ModalState::Reasoning { model, selector }) => (
                 PickerFocus::Reasoning,
                 Some(selector),
                 Some(model.clone()),
                 self.reasoning_levels(model).unwrap_or_default(),
+                Vec::new(),
             ),
-            None => (PickerFocus::Model, None, None, Vec::new()),
+            Some(ModalState::Account {
+                model,
+                selector,
+                numbers,
+            }) => (
+                PickerFocus::Account,
+                Some(selector),
+                Some(model.clone()),
+                Vec::new(),
+                numbers.clone(),
+            ),
+            None => (PickerFocus::Model, None, None, Vec::new(), Vec::new()),
         };
         ModelPickerView {
             open: self.open,
@@ -346,6 +501,7 @@ impl ModelPicker {
                 })
                 .collect(),
             reasoning,
+            account_numbers,
             persistent_only: self.startup,
         }
     }
@@ -372,6 +528,9 @@ impl ModelPicker {
                 PickerInput::SessionOnly
             }
             (PickerInput::Char(_) | PickerInput::Backspace, Some(ModalState::Reasoning { .. })) => {
+                return Ok(PickerInputOutcome::Consumed);
+            }
+            (PickerInput::Char(_) | PickerInput::Backspace, Some(ModalState::Account { .. })) => {
                 return Ok(PickerInputOutcome::Consumed);
             }
             (input, _) => input,
@@ -415,6 +574,28 @@ impl ModelPicker {
                     self.modal = Some(ModalState::Model(selector));
                     return Err(PickerError::NoSelection);
                 };
+                let vendor = model
+                    .split_once('/')
+                    .map_or(model.as_str(), |(vendor, _)| vendor);
+                let accounts = self.eligible_keys(vendor);
+                if accounts.len() > 1 {
+                    let mut numbers: Vec<_> = accounts
+                        .iter()
+                        .filter_map(|account| account.number)
+                        .collect();
+                    if numbers.len() != accounts.len() {
+                        self.modal = Some(ModalState::Model(selector));
+                        return Err(PickerError::AccountChoiceRequired);
+                    }
+                    numbers.sort_unstable();
+                    self.modal = Some(ModalState::Account {
+                        model,
+                        selector: account_selector(&numbers),
+                        numbers,
+                    });
+                    return Ok(PickerInputOutcome::FocusChanged(PickerFocus::Account));
+                }
+                self.chosen_account = accounts.first().map(|account| account.id.clone());
                 let (reasoning, default) = match reasoning_configuration(&self.snapshot, &model) {
                     Ok(configuration) => configuration,
                     Err(error) => {
@@ -422,6 +603,63 @@ impl ModelPicker {
                         return Err(error);
                     }
                 };
+                self.modal = Some(ModalState::Reasoning {
+                    model,
+                    selector: reasoning_selector(&reasoning, default),
+                });
+                Ok(PickerInputOutcome::FocusChanged(PickerFocus::Reasoning))
+            }
+            ModalState::Account {
+                model,
+                mut selector,
+                numbers,
+            } => {
+                let key = selector_key(input).ok_or(PickerError::NoSelection)?;
+                selector.key(key);
+                if !matches!(input, PickerInput::Enter | PickerInput::SessionOnly) {
+                    self.modal = Some(ModalState::Account {
+                        model,
+                        selector,
+                        numbers,
+                    });
+                    return Ok(PickerInputOutcome::Consumed);
+                }
+                let Some(number) = selected_id(&selector).and_then(|id| id.parse::<u32>().ok())
+                else {
+                    self.modal = Some(ModalState::Account {
+                        model,
+                        selector,
+                        numbers,
+                    });
+                    return Err(PickerError::NoSelection);
+                };
+                let route = model
+                    .split_once('/')
+                    .map_or(model.as_str(), |(route, _)| route);
+                let account = self
+                    .eligible_keys(route)
+                    .into_iter()
+                    .find(|account| account.number == Some(number));
+                let Some(id) = account.map(|account| account.id.clone()) else {
+                    self.modal = Some(ModalState::Account {
+                        model,
+                        selector,
+                        numbers,
+                    });
+                    return Err(PickerError::AccountChoiceRequired);
+                };
+                let (reasoning, default) = match reasoning_configuration(&self.snapshot, &model) {
+                    Ok(configuration) => configuration,
+                    Err(error) => {
+                        self.modal = Some(ModalState::Account {
+                            model,
+                            selector,
+                            numbers,
+                        });
+                        return Err(error);
+                    }
+                };
+                self.chosen_account = Some(id);
                 self.modal = Some(ModalState::Reasoning {
                     model,
                     selector: reasoning_selector(&reasoning, default),
@@ -475,6 +713,7 @@ impl ModelPicker {
             target: ModelRef(chosen.model),
             thinking: chosen.thinking,
             persistent: persist,
+            connection: self.chosen_account.clone(),
         };
         self.close();
         Ok(PickerOutcome::ModelSwitch(request))
@@ -484,7 +723,9 @@ impl ModelPicker {
         &mut self,
         snapshot: Arc<ModelCatalogueSnapshot>,
     ) -> LocalActionOutcome {
+        self.base_snapshot = Arc::clone(&snapshot);
         self.snapshot = snapshot;
+        self.live_accounts.clear();
         self.chosen = None;
         self.diagnostic = None;
         if self.open {
@@ -495,6 +736,7 @@ impl ModelPicker {
 
     fn close(&mut self) {
         self.open = false;
+        self.chosen_account = None;
         self.chosen = None;
         self.filter.clear();
         self.modal = None;
@@ -697,6 +939,17 @@ fn model_selector(
         selector.key(SelectorKey::Number(row + 1));
     }
     selector
+}
+
+/// Stable numbers only; the connection IDs behind them never reach this list.
+fn account_selector(numbers: &[u32]) -> Selector {
+    Selector::with_options_unselected(
+        SelectorKind::Single,
+        numbers.iter().map(|number| {
+            let id = number.to_string();
+            SelectorOption::new(id.clone(), id)
+        }),
+    )
 }
 
 fn ordered_rows(snapshot: &ModelCatalogueSnapshot) -> Vec<&ModelCatalogueEntry> {

@@ -206,6 +206,53 @@ fn private_directory(root: &Path) -> io::Result<File> {
         Err(error) => return Err(error),
     }
     fs::create_dir_all(private_parent(root))?;
+    #[cfg(windows)]
+    {
+        publish_hardened_directory(root)?;
+        open_directory(root, false)
+    }
+    #[cfg(not(windows))]
+    {
+        create_directory(root)
+    }
+}
+
+/// Windows creates a directory with an inherited DACL and hardens it only
+/// afterwards. A concurrent opener that validated the new path in between saw
+/// a directory that was not owner-only yet and refused it. Harden a uniquely
+/// named sibling first and rename it into place, so the path only ever names
+/// an owner-only directory; a creator that loses the rename uses the winner's.
+#[cfg(windows)]
+fn publish_hardened_directory(root: &Path) -> io::Result<()> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|_| io::Error::other("private name unavailable"))?;
+    let leaf = root
+        .file_name()
+        .ok_or_else(|| io::Error::other("private log root has no name"))?;
+    let staging = private_parent(root).join(format!(
+        ".{}.{:032x}.tmp",
+        leaf.to_string_lossy(),
+        u128::from_ne_bytes(random)
+    ));
+    fs::DirBuilder::new().create(&staging)?;
+    // Close the hardened handle before the rename: it does not share DELETE.
+    let hardened = open_directory(&staging, true).map(drop);
+    let published = hardened.and_then(|()| fs::rename(&staging, root));
+    match published {
+        Ok(()) => Ok(()),
+        Err(_) if root.is_dir() => {
+            let _ = fs::remove_dir(&staging);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_dir(&staging);
+            Err(error)
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn create_directory(root: &Path) -> io::Result<File> {
     let builder = fs::DirBuilder::new();
     #[cfg(unix)]
     let builder = {

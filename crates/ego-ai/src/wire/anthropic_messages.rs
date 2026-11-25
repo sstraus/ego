@@ -1,10 +1,19 @@
 //! The `anthropic-messages` wire format: `POST /messages`, streamed.
 //!
-//! Anthropic's request shape and stream event model require a dedicated
-//! mapping, not a provider flag in another API's mapping.
+//! Anthropic's own shape, and no one else's.
+//! `docs/internals/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §4
+//! allows a provider to differ from a family in exactly three places — a model
+//! fact, a transport fact, or another mapping — and this differs in the
+//! request's *shape* and the stream's *event model*, which is neither of the
+//! first two. So it is the third, and this file is it.
 //!
-//! Field names and enum spellings follow the published Messages API.
-//! Offline fixtures establish encoding and decoding, not live acceptance.
+//! Every field name and enum spelling below was read from the published
+//! Messages API reference on 2026-08-22, not recalled. What that is worth is
+//! `[D]+[S]` in `docs/internals/14-six-wire-protocols.md` §0's evidence classes: no
+//! `ANTHROPIC_API_KEY` exists in this repository, so nothing here has been
+//! observed against a live server, and the row this mapping serves is a
+//! **candidate** — built, tested offline, and absent from the table
+//! `crates/ego-cli/src/model.rs` assembles.
 //!
 //! # The three structural differences, and why none of them is a flag
 //!
@@ -39,8 +48,9 @@
 //! compliance. Reordering here would be the mapping deciding what the caller
 //! meant, and would hide the one case where it mattered.
 //! `ego_core::generator::history` builds histories in that order and merges
-//! consecutive same-role turns as it goes, so the alternation this API expects
-//! holds by construction rather than by repair here.
+//! same-role content where its authority boundaries allow it. Runtime context
+//! and goal continuations can remain separate user messages; this projection
+//! preserves those boundaries rather than merging them.
 //!
 //! # The one event ordering rule
 //!
@@ -51,7 +61,7 @@
 //! emitted when the bytes run out, and the usage figures are the provider's
 //! last word rather than the sum of its restatements.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -80,6 +90,24 @@ use super::{RequestRefused, RequestTarget, WireFormat};
 pub struct AnthropicMessages;
 
 impl WireFormat for AnthropicMessages {
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn supports_default_web_search(
+        &self,
+        _model: &str,
+        base: &url::Url,
+        _credential: &crate::provider::ResolvedCredential,
+        _strategy: &crate::provider::CredentialStrategy,
+    ) -> bool {
+        base.as_str() == crate::provider::ANTHROPIC_BASE
+    }
+
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        super::cache::policy(req, true, false)
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -128,9 +156,11 @@ pub const DIALECT: &str = "anthropic-messages";
 
 /// A `GenRequest` this format cannot express without lying about it.
 ///
-/// Each error prevents silently dropping requested behavior or inventing
-/// behavior before sending. Downstream code cannot detect a mistranslation
-/// that already occurred in the request.
+/// Every variant is a case where the alternative would be to drop something
+/// the caller asked for, or invent something they did not, and send the
+/// request anyway. `docs/internals/08-codex-critique.md` I5 is about exactly that: a
+/// silent mistranslation is worse than a refusal because nothing downstream
+/// can tell it happened.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Inexpressible {
     AudioNotSupported,
@@ -436,7 +466,7 @@ fn wire_block(block: &ContentBlock) -> Result<WireBlock<'_>, Inexpressible> {
                 data: base64::engine::general_purpose::STANDARD.encode(image.bytes()),
             },
         },
-        ContentBlock::Reasoning { state } | ContentBlock::ProviderContent { state } => {
+        ContentBlock::Reasoning { state } | ContentBlock::ProviderContent { state, .. } => {
             if state.dialect != DIALECT {
                 return Err(Inexpressible::ReasoningStateFromAnotherDialect {
                     dialect: state.dialect.clone(),
@@ -779,6 +809,7 @@ enum StartBlock {
     Thinking,
     ToolUse {
         id: String,
+        #[serde(default)]
         name: String,
     },
     /// Server-side tool calls and their results, container uploads, and the
@@ -892,6 +923,9 @@ pub struct StreamDecoder {
     /// three of the six wires can cause.
     output_tokens: u64,
     web_search_requests: u64,
+    /// Completed search calls are a lower bound when terminal usage is lost.
+    /// IDs distinguish retries/repeated blocks from separate searches.
+    observed_search_calls: BTreeSet<String>,
     hosted: bool,
     provider_blocks: BTreeMap<u32, serde_json::Value>,
     provider_inputs: BTreeMap<u32, String>,
@@ -1036,7 +1070,9 @@ impl StreamDecoder {
             // Anthropic bills thinking inside `output_tokens` and publishes no
             // separate count, so this is unknown rather than zero. `None` says
             // so instead of claiming the model reasoned for nothing.
-            web_search_requests: self.web_search_requests,
+            web_search_requests: self
+                .web_search_requests
+                .max(self.observed_search_calls.len() as u64),
             reasoning_tokens: None,
         })
     }
@@ -1196,6 +1232,9 @@ impl StreamDecoder {
                 }
                 let visible = block["type"] == "text";
                 if block["type"] == "server_tool_use" {
+                    if let Some(id) = block["id"].as_str() {
+                        self.observed_search_calls.insert(id.to_owned());
+                    }
                     out.push(AiEvent::WebSearch {
                         call_id: block["id"].as_str().unwrap_or_default().into(),
                         query: block["input"]["query"]
@@ -1214,6 +1253,7 @@ impl StreamDecoder {
                 }
                 out.push(AiEvent::ProviderContent {
                     state: ReasoningState {
+                        connection: None,
                         blob: serde_json::to_string(&block).expect("JSON value"),
                         dialect: DIALECT.into(),
                     },
@@ -1284,6 +1324,7 @@ impl StreamDecoder {
                 })
                 .expect("a struct of strings serialises");
                 out.push(AiEvent::ReasoningState(ReasoningState {
+                    connection: None,
                     blob,
                     dialect: DIALECT.to_string(),
                 }));
@@ -1354,9 +1395,11 @@ fn classify_error(kind: &str) -> ErrorKind {
 /// streaming mapping: what a *response* means is `AttemptStream`'s contract
 /// and not this format's, and only what a *frame* means belongs here.
 ///
-/// Anthropic's row derives cost from token rates, not a reported monetary
-/// figure. `cost` is accepted but unused here; conformance fixtures check
-/// that this agrees with the row's declared cost behavior.
+/// `cost` is accepted and unused, and that is the row's claim rather than an
+/// omission here: Anthropic reports tokens and never a monetary figure
+/// (`docs/internals/12-cline-provider-survey.md` §2.2, from a recorded fixture), so its
+/// row carries `cost: None` and conformance check 5 fails if that ever stops
+/// matching what its transcripts hold.
 pub fn decode(
     response: Result<HttpResponse, HttpError>,
     cost: Option<Arc<dyn ProviderCost>>,
@@ -1400,6 +1443,53 @@ mod tests {
             )),
             "{events:?}"
         );
+        assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
+    }
+
+    #[test]
+    fn anthropic_f3_transport_failure_catches_completed_search_usage_being_erased() {
+        use serde_json::{Value, json};
+
+        let response: Value = serde_json::from_str(include_str!(
+            "../../tests/goldens/hosted-search/anthropic-response.json"
+        ))
+        .unwrap();
+        let mut usage = response["usage"].clone();
+        usage["output_tokens"] = json!(0);
+        usage["server_tool_use"]["web_search_requests"] = json!(0);
+        let frames = [
+            json!({"type":"message_start","message":{"usage":usage}}),
+            json!({"type":"content_block_start","index":0,"content_block":response["content"][1]}),
+            json!({"type":"content_block_stop","index":0}),
+        ];
+        let transcript: String = frames
+            .iter()
+            .map(|frame| format!("data: {frame}\n\n"))
+            .collect();
+        let mut decoder = StreamDecoder::default();
+        let mut events = decoder.push(transcript.as_bytes());
+        events.extend(
+            decoder.finish(Some(test_http_error(TransportError::possibly_sent(
+                TransportFailure::ResponseBody("cut after search".into()),
+            )))),
+        );
+
+        let counts: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event {
+                AiEvent::Usage(usage) => Some(usage.web_search_requests),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(counts, vec![1]);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AiEvent::DeliveryObserved(DeliveryCertainty::PossiblySent)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            AiEvent::Error { message, .. } if message.contains("response stream failed")
+        )));
         assert_eq!(events.last(), Some(&AiEvent::Stop(StopReason::Error)));
     }
 

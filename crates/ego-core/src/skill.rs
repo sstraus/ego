@@ -218,6 +218,7 @@ pub struct SkillResourceRoots {
     system: PathBuf,
     user: PathBuf,
     project: PathBuf,
+    project_dir: Option<PathBuf>,
 }
 
 impl SkillResourceRoots {
@@ -226,7 +227,19 @@ impl SkillResourceRoots {
             system,
             user,
             project,
+            project_dir: None,
         }
+    }
+
+    /// The workspace root a skill may name as `${CLAUDE_PROJECT_DIR}`.
+    #[must_use]
+    pub fn with_project_dir(mut self, directory: PathBuf) -> Self {
+        self.project_dir = Some(directory);
+        self
+    }
+
+    pub(crate) fn project_dir(&self) -> Option<&Path> {
+        self.project_dir.as_deref()
     }
 
     pub(crate) fn root(&self, authority: SkillSourceAuthority) -> &Path {
@@ -235,6 +248,49 @@ impl SkillResourceRoots {
             SkillSourceAuthority::User => &self.user,
             SkillSourceAuthority::Project => &self.project,
         }
+    }
+}
+
+/// The owner's choice to hide skills by name, from `[skills]` in user, system or
+/// flag configuration. A project can never un-hide what the owner hid.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillVisibilityLayer {
+    /// Hidden from the model; the user can still type the skill.
+    #[serde(default)]
+    pub hide: Vec<String>,
+    /// Hidden from the model and from the user.
+    #[serde(default)]
+    pub off: Vec<String>,
+    pub safety_review: Option<bool>,
+}
+
+/// Values a skill body may name with `${CLAUDE_*}` variables besides its own
+/// directory. A value that is absent leaves its variable literal.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SkillRenderContext {
+    session: Option<String>,
+    effort: Option<String>,
+    project_dir: Option<String>,
+}
+
+impl SkillRenderContext {
+    #[must_use]
+    pub fn with_session(mut self, session: impl Into<String>) -> Self {
+        self.session = Some(session.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_effort(mut self, effort: impl Into<String>) -> Self {
+        self.effort = Some(effort.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_project_dir(mut self, directory: impl Into<String>) -> Self {
+        self.project_dir = Some(directory.into());
+        self
     }
 }
 
@@ -308,6 +364,12 @@ impl SkillSpec {
     pub fn with_resource_root(mut self, root: CanonPath) -> Self {
         self.resource_root = Some(root);
         self
+    }
+
+    /// Withdraw the skill from the model while the user keeps it. Descriptor
+    /// identity does not depend on visibility, so the id stays valid.
+    pub fn hide_from_model(&mut self) {
+        self.descriptor.model_invocable = false;
     }
 
     /// The canonical resource directory captured by discovery, if filesystem-backed.
@@ -450,6 +512,14 @@ impl SkillSpec {
     }
 
     pub fn render(&self, operation: &SkillOperation) -> Result<String, SkillError> {
+        self.render_in(operation, &SkillRenderContext::default())
+    }
+
+    pub fn render_in(
+        &self,
+        operation: &SkillOperation,
+        context: &SkillRenderContext,
+    ) -> Result<String, SkillError> {
         let (name, arguments) = match operation {
             SkillOperation::Invoke {
                 name, arguments, ..
@@ -465,7 +535,35 @@ impl SkillSpec {
         }
         let body = std::str::from_utf8(&self.body)
             .map_err(|_| SkillError::new("admitted skill body is not UTF-8"))?;
-        render_once(body, arguments, &self.arguments)
+        let resource_root = self.resource_root.as_ref().map(|root| root.as_path());
+        let skill_dir = resource_root.map(|root| root.to_string_lossy());
+        let variables = SourceVariables {
+            skill_dir: skill_dir.as_deref(),
+            session: context.session.as_deref(),
+            effort: context.effort.as_deref(),
+            project_dir: context.project_dir.as_deref(),
+        };
+        render_once(body, arguments, &self.arguments, &variables)
+    }
+
+    pub(crate) fn review_location(&self) -> String {
+        match self.resource_root.as_ref() {
+            Some(root) => format!("{} ({})", self.descriptor.location.as_str(), root),
+            None => self.descriptor.location.as_str().to_owned(),
+        }
+    }
+
+    pub(crate) fn review_input(&self) -> Option<String> {
+        let body = std::str::from_utf8(&self.body).ok()?;
+        if body.len() > 32 * 1024 {
+            return None;
+        }
+        serde_json::to_string(&serde_json::json!({
+            "source_digest": self.descriptor.source_digest,
+            "instructions": body,
+            "hooks": self.hooks,
+        }))
+        .ok()
     }
 
     pub fn command_template(&self) -> Option<&str> {
@@ -474,8 +572,36 @@ impl SkillSpec {
     }
 }
 
+/// The `${CLAUDE_*}` values that exist for one rendering.
+struct SourceVariables<'a> {
+    skill_dir: Option<&'a str>,
+    session: Option<&'a str>,
+    effort: Option<&'a str>,
+    project_dir: Option<&'a str>,
+}
+
+impl SourceVariables<'_> {
+    /// The value and token length for a variable at the start of `tail`.
+    /// Variables with no value stay literal; a backslash never escapes them.
+    fn expand<'t>(&self, tail: &'t str) -> Option<(&str, &'t str)> {
+        [
+            ("{CLAUDE_SKILL_DIR}", self.skill_dir),
+            ("{CLAUDE_SESSION_ID}", self.session),
+            ("{CLAUDE_EFFORT}", self.effort),
+            ("{CLAUDE_PROJECT_DIR}", self.project_dir),
+        ]
+        .into_iter()
+        .find_map(|(token, value)| Some((value?, tail.strip_prefix(token)?)))
+    }
+}
+
 // Interpret only source tokens: inserted argument bytes are never scanned again.
-fn render_once(body: &str, arguments: &str, names: &[String]) -> Result<String, SkillError> {
+fn render_once(
+    body: &str,
+    arguments: &str,
+    names: &[String],
+    variables: &SourceVariables<'_>,
+) -> Result<String, SkillError> {
     let mut values: Option<Vec<String>> = None;
     let mut rendered = String::with_capacity(body.len().saturating_add(arguments.len()));
     let mut remaining = body;
@@ -483,6 +609,12 @@ fn render_once(body: &str, arguments: &str, names: &[String]) -> Result<String, 
     while let Some(offset) = remaining.find('$') {
         let prefix = &remaining[..offset];
         let tail = &remaining[offset + 1..];
+        if let Some((value, rest)) = variables.expand(tail) {
+            rendered.push_str(prefix);
+            rendered.push_str(value);
+            remaining = rest;
+            continue;
+        }
         let (length, token) = argument_token(tail, names);
         // Exactly one immediately preceding backslash escapes a known token.
         let escaped = prefix.ends_with('\\') && !prefix.ends_with("\\\\");
@@ -923,7 +1055,7 @@ pub struct SkillInvocation {
 }
 
 #[derive(Clone, Copy)]
-struct SkillAdmissionOrigin {
+pub(crate) struct SkillAdmissionOrigin {
     turn: TurnId,
     item: Option<ItemId>,
     parent: Option<EventId>,
@@ -946,7 +1078,7 @@ impl SkillAdmissionOrigin {
         }
     }
 
-    const fn model(turn: TurnId, item: ItemId, parent: EventId) -> Self {
+    pub(crate) const fn model(turn: TurnId, item: ItemId, parent: EventId) -> Self {
         Self {
             turn,
             item: Some(item),
@@ -1001,8 +1133,15 @@ impl SkillInvocation {
         blobs: &dyn BlobStore,
         journal: &SharedJournal<'_>,
     ) -> Result<Self, SkillError> {
-        Self::admit_in_turn(catalogue, operation, blobs, journal, TurnId::new())
-            .map(|(invocation, _)| invocation)
+        Self::admit_in_turn(
+            catalogue,
+            operation,
+            blobs,
+            journal,
+            TurnId::new(),
+            &SkillRenderContext::default(),
+        )
+        .map(|(invocation, _)| invocation)
     }
 
     pub(crate) fn admit_in_turn(
@@ -1011,6 +1150,7 @@ impl SkillInvocation {
         blobs: &dyn BlobStore,
         journal: &SharedJournal<'_>,
         turn: TurnId,
+        context: &SkillRenderContext,
     ) -> Result<(Self, EventId), SkillError> {
         let spec = catalogue.authorize_model(operation.name())?.clone();
         Self::admit_authorized_in_turn(
@@ -1020,6 +1160,7 @@ impl SkillInvocation {
             blobs,
             journal,
             SkillAdmissionOrigin::turn(turn),
+            context,
         )
     }
 
@@ -1028,9 +1169,8 @@ impl SkillInvocation {
         operation: SkillOperation,
         blobs: &dyn BlobStore,
         journal: &SharedJournal<'_>,
-        turn: TurnId,
-        item: ItemId,
-        parent: EventId,
+        origin: SkillAdmissionOrigin,
+        context: &SkillRenderContext,
     ) -> Result<(Self, EventId), SkillError> {
         let spec = catalogue.authorize_model(operation.name())?.clone();
         Self::admit_authorized_in_turn(
@@ -1039,7 +1179,8 @@ impl SkillInvocation {
             operation,
             blobs,
             journal,
-            SkillAdmissionOrigin::model(turn, item, parent),
+            origin,
+            context,
         )
     }
 
@@ -1050,6 +1191,7 @@ impl SkillInvocation {
         journal: &SharedJournal<'_>,
         turn: TurnId,
         item: ItemId,
+        context: &SkillRenderContext,
     ) -> Result<(Self, EventId), SkillError> {
         let spec = catalogue.authorize_user_operation(&operation)?.clone();
         Self::admit_authorized_in_turn(
@@ -1059,6 +1201,7 @@ impl SkillInvocation {
             blobs,
             journal,
             SkillAdmissionOrigin::user(turn, item),
+            context,
         )
     }
 
@@ -1090,8 +1233,15 @@ impl SkillInvocation {
         blobs: &dyn BlobStore,
         journal: &SharedJournal<'_>,
         origin: SkillAdmissionOrigin,
+        context: &SkillRenderContext,
     ) -> Result<(Self, EventId), SkillError> {
-        let rendered = spec.render(&operation)?;
+        let mut context = context.clone();
+        if context.session.is_none()
+            && let Ok(session) = journal.session_id()
+        {
+            context.session = Some(session.to_string());
+        }
+        let rendered = spec.render_in(&operation, &context)?;
         Self::admit_rendered_in_turn(
             catalogue_generation,
             spec,

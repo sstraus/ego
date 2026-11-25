@@ -1,0 +1,20 @@
+{
+  "provenance": "VendorSchemaDerived",
+  "source": "https://platform.claude.com/docs/en/api/errors and https://platform.claude.com/docs/en/api/rate-limits#reaching-your-spend-cap",
+  "read": "2026-11-08",
+  "wire": "anthropic-messages",
+  "cases": [
+    {"name": "tier spend cap", "status": 429, "expect": "refused",
+     "body": {"type": "error", "error": {"type": "rate_limit_error", "message": "You have reached your API usage limits: your organization has crossed its monthly API usage threshold, set based on your organization's API tier. You will regain access on 2026-09-01 at 00:00 UTC.", "details": {"error_code": "enforced_spend_limit_reached"}}, "request_id": "req_018EeWyXxfu5pfWkrYcMdjWG"}},
+    {"name": "rate limit with retry-after", "status": 429, "retry_after": 7, "expect": "transient",
+     "body": {"type": "error", "error": {"type": "rate_limit_error", "message": "This request would exceed the rate limit for your organization."}, "request_id": "req_011CSHoEeqs5C35K2UUqR7Fy"}},
+    {"name": "operator spend limit", "status": 400, "expect": "refused",
+     "body": {"type": "error", "error": {"type": "invalid_request_error", "message": "You have reached your specified API usage limits. You will regain access on 2026-12-01 at 00:00 UTC."}}},
+    {"name": "operator workspace spend limit", "status": 400, "expect": "refused",
+     "body": {"type": "error", "error": {"type": "invalid_request_error", "message": "You have reached your specified workspace API usage limits. You will regain access on 2026-12-01 at 00:00 UTC."}}},
+    {"name": "billing error", "status": 402, "expect": "refused",
+     "body": {"type": "error", "error": {"type": "billing_error", "message": "There's an issue with your billing or payment information."}}},
+    {"name": "ordinary invalid request", "status": 400, "expect": "invalid",
+     "body": {"type": "error", "error": {"type": "invalid_request_error", "message": "adaptive thinking is not supported on this model"}}}
+  ]
+}

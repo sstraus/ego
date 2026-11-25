@@ -1,0 +1,7 @@
+
+✓ $ bash -lc '/Users/stefano.straus/Gits/per… · exit 0 · (timeout 10.0s) · 139ms
+  [stdout]
+  tuic bg: pid=62666
+  log=/Users/stefano.straus/Gits/.tmp/critic-2386-r2-validation.log
+  wake=/Users/stefano.straus/Gits/.tmp/critic-2386-r2-validation.log.wake
+  tuic-bg: you will get BG DONE; end your turn now

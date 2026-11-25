@@ -14,22 +14,28 @@ pub(super) struct HeadlessSession<'run, 'store> {
 
 pub(super) struct HeadlessGeneration<'a> {
     pub(super) source: Arc<model::CliGenerationModelSource>,
+    pub(super) model_ceiling: Option<ego_core::model_catalogue::ModelSelectionCeiling>,
+    pub(super) model_catalogue: Option<Arc<ego_core::model_catalogue::ModelCatalogue>>,
     pub(super) admission: Arc<EvidenceAdmissionService>,
     pub(super) invocation: RunInvocationId,
     pub(super) config: TurnConfig,
     pub(super) provider_recovery: bool,
     pub(super) goal: Option<String>,
-    pub(super) goal_turns: u32,
+    pub(super) goal_turns: Option<u32>,
     pub(super) goal_check_command: Option<Vec<String>>,
     pub(super) goal_ceilings: ego_core::ceiling::Ceilings,
+    pub(super) child_defaults: ego_core::turn::ChildDefaults,
     pub(super) gate: SharedBudgetGate,
     pub(super) hook_layers: Option<&'a [Sourced<ConfigLayer>]>,
+    pub(super) hooks_off: bool,
+    pub(super) skill_review: bool,
     pub(super) hook_trust: Trust,
     pub(super) policy_source: Arc<dyn GenerationPolicySource>,
     pub(super) judge_available: bool,
 }
 
 pub(super) struct HeadlessChild {
+    pub(super) worker: bool,
     pub(super) parent_run: RunId,
     pub(super) root: RunRoot,
     pub(super) store: Arc<JsonlStore>,
@@ -48,6 +54,7 @@ pub(super) struct HeadlessEffects<'a> {
     pub(super) observation: ExecObservation,
     pub(super) probe_evidence: Option<ego_core::store::evidence::EvidenceRef>,
     pub(super) elicitor: Option<Arc<dyn Elicitor>>,
+    pub(super) root_grants: Option<Arc<dyn ego_core::turn::RootGrantPort>>,
 }
 
 pub(super) struct HeadlessTurn<'a> {
@@ -55,7 +62,31 @@ pub(super) struct HeadlessTurn<'a> {
     pub(super) attachment_specs: &'a [String],
     pub(super) input: HeadlessInput<'a>,
     pub(super) diagnostics: &'a dyn Diagnostics,
+    /// The host can activate a compaction successor and continue in it.
+    /// Context percent at which it compacts; `None` keeps explicit recovery.
+    pub(super) automatic_compaction: Option<ego_core::compact::ContextPercent>,
 }
+
+/// A published successor of the driven source session.
+pub(super) struct HeadlessCompaction {
+    pub(super) request: RequestId,
+    pub(super) receipt: CompactionReceipt,
+    /// Source turns driven before the compaction, for the run turn limit.
+    pub(super) turns_taken: u32,
+}
+
+/// What one headless drive produced; a compaction names the session to continue.
+pub(super) type HeadlessDriven = (
+    RunTermination,
+    SessionState,
+    Value,
+    Option<HeadlessCompaction>,
+);
+
+/// Test-only override for comparing headless requests with and without `mcp_batch`.
+#[cfg(test)]
+pub(super) static TEST_MCP_BATCH: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub(super) async fn drive_headless_turn(
     session: HeadlessSession<'_, '_>,
@@ -63,7 +94,7 @@ pub(super) async fn drive_headless_turn(
     child: HeadlessChild,
     effects: HeadlessEffects<'_>,
     turn: HeadlessTurn<'_>,
-) -> Result<(RunTermination, SessionState, Value), RunTermination> {
+) -> Result<HeadlessDriven, RunTermination> {
     let HeadlessSession {
         active,
         opening,
@@ -75,6 +106,8 @@ pub(super) async fn drive_headless_turn(
     } = session;
     let HeadlessGeneration {
         source,
+        model_ceiling,
+        model_catalogue,
         admission,
         invocation,
         config,
@@ -83,13 +116,17 @@ pub(super) async fn drive_headless_turn(
         goal_turns,
         goal_check_command,
         goal_ceilings,
+        child_defaults,
         gate,
         hook_layers,
+        hooks_off,
+        skill_review,
         hook_trust,
         policy_source,
         judge_available,
     } = generation;
     let HeadlessChild {
+        worker,
         parent_run,
         root: child_root,
         store: child_store,
@@ -107,22 +144,29 @@ pub(super) async fn drive_headless_turn(
         observation,
         probe_evidence,
         elicitor,
+        root_grants,
     } = effects;
     let HeadlessTurn {
         turns,
         attachment_specs,
         input,
         diagnostics,
+        automatic_compaction,
     } = turn;
+    let opening_turns = opening.turns.len();
     let recovered_policy = match &input {
         HeadlessInput::Answered { policy, .. } => Some(Arc::clone(policy)),
-        HeadlessInput::Prompt(_) | HeadlessInput::Resumed(_) => None,
+        HeadlessInput::Prompt(_) | HeadlessInput::Resumed(_) | HeadlessInput::Checkpoint { .. } => {
+            None
+        }
     };
     let images = acquire_attachments(
         Attachments {
             inline: match &input {
                 HeadlessInput::Prompt(prompt) => prompt.images(),
-                HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => &[],
+                HeadlessInput::Resumed(_)
+                | HeadlessInput::Answered { .. }
+                | HeadlessInput::Checkpoint { .. } => &[],
             },
             specs: attachment_specs,
         },
@@ -157,8 +201,19 @@ pub(super) async fn drive_headless_turn(
         opening,
     ));
     let instructions_loaded = config.system.is_some();
+    // Fresh instructions and tools of this run seed a compaction successor.
+    let target_system = config.system.clone();
     let runtime = GenerationRuntime {
-        source: source.bind(http, cancel.clone(), run_deadline),
+        source: ego_core::model_catalogue::admit_source(
+            source.bind(http, cancel.clone(), run_deadline),
+            source
+                .selection()
+                .snapshot()
+                .map_err(generation_refusal)?
+                .identity,
+            model_catalogue.clone(),
+            model_ceiling.clone(),
+        ),
         policy_source: Arc::clone(&policy_source),
         gate: gate.clone(),
         config,
@@ -192,6 +247,7 @@ pub(super) async fn drive_headless_turn(
         invocation,
         gate: gate.clone(),
         layers: hook_layers,
+        hooks_off,
         trust: hook_trust,
         source: Arc::clone(&source),
         ports: Arc::clone(&ports),
@@ -208,11 +264,16 @@ pub(super) async fn drive_headless_turn(
     family_executor.token_family = Some(token_family);
     let child_executor = Arc::new(family_executor);
     let family_store = Arc::clone(&child_store);
+    let session_store = Arc::clone(&child_store);
     let mut child_bindings = RunExecutionBindings::new(
         Arc::new(CliChildSinkFactory),
         elicitor.as_ref().map(Arc::clone),
     )
-    .with_budget_gate(gate.clone());
+    .with_budget_gate(gate.clone())
+    .with_model_catalogue(model_catalogue);
+    if let Some(ceiling) = model_ceiling {
+        child_bindings = child_bindings.with_model_selection_ceiling(ceiling);
+    }
     if let (Some(admitted), Some(mcp)) = (admitted_tools.as_ref(), mcp_runtime.as_ref()) {
         child_bindings = child_bindings.with_mcp(Arc::clone(admitted), Vec::new(), Arc::clone(mcp));
     }
@@ -277,7 +338,9 @@ pub(super) async fn drive_headless_turn(
                 catalogue.user_command(&named[..end], named[end..].trim_start())
             })
         }),
-        HeadlessInput::Resumed(_) | HeadlessInput::Answered { .. } => None,
+        HeadlessInput::Resumed(_)
+        | HeadlessInput::Answered { .. }
+        | HeadlessInput::Checkpoint { .. } => None,
     };
     if (command.is_some() || mcp_command.is_some()) && (!images.is_empty() || !audio.is_empty()) {
         return Err(RunTermination::UsageError {
@@ -293,12 +356,22 @@ pub(super) async fn drive_headless_turn(
         }
         None => Tools::from_registry(registry, effect_ports, CanonPath::new(cwd)),
     };
-    let tools = tools.with_named_agents(
-        crate::named_agents::discover(cwd, hook_trust)
-            .map_err(|error| RunTermination::UsageError { message: error.0 })?,
-    );
+    let tools = tools
+        .with_named_agents(
+            crate::named_agents::discover(cwd, hook_trust)
+                .map_err(|error| RunTermination::UsageError { message: error.0 })?,
+        )
+        .with_child_defaults(child_defaults);
     let tools = match mcp_runtime.as_ref().and_then(|mcp| mcp.resume_sealer()) {
-        Some(resume) => tools.with_resume(resume),
+        Some(resume) => {
+            #[cfg(not(test))]
+            let offer_batch = true;
+            #[cfg(test)]
+            let offer_batch = TEST_MCP_BATCH.load(std::sync::atomic::Ordering::SeqCst);
+            tools
+                .with_resume(resume)
+                .with_mcp_batch(offer_batch && !worker)
+        }
         None => tools,
     };
     let loop_ = TurnLoop::from_shared_journal(
@@ -320,13 +393,22 @@ pub(super) async fn drive_headless_turn(
     .map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?
+    .with_skill_review(skill_review)
     .with_goal(goal, goal_turns)
     .with_goal_policy(goal_ceilings, goal_check_command)
+    .with_external_reprompt(super::managed_by_tuic())
     .with_provider_recovery(provider_recovery.then_some(ego_core::turn::PROVIDER_RECOVERY_HORIZON))
     .with_skill_invocation_port(skill_owner.clone())
     .with_background_task_port(skill_owner.clone())
     .with_task_guidance()
     .with_pause_token(pause.clone());
+    let loop_ = loop_.with_orchestration_guidance();
+    let loop_ = match automatic_compaction {
+        Some(threshold) => loop_
+            .with_automatic_compaction()
+            .with_compaction_threshold(threshold),
+        None => loop_,
+    };
     let loop_ = match recovered_policy.as_ref() {
         Some(policy) => loop_
             .with_hook_policy(Arc::clone(policy))
@@ -341,8 +423,19 @@ pub(super) async fn drive_headless_turn(
         Some(replayed) => loop_.with_replayed_context(replayed),
         None => loop_,
     };
+    // Replay can replace the prompt snapshot. Select the worker role only
+    // after that replacement, before the child's first generation.
+    let loop_ = if worker {
+        loop_.with_internal_child_role()
+    } else {
+        loop_
+    };
     let loop_ = match elicitor {
         Some(elicitor) => loop_.with_elicitor(elicitor),
+        None => loop_,
+    };
+    let loop_ = match root_grants {
+        Some(grants) => loop_.with_root_grants(grants),
         None => loop_,
     };
     let loop_ = super::composition::with_permission_analysis(loop_, hook_trust);
@@ -355,6 +448,7 @@ pub(super) async fn drive_headless_turn(
         loop_
     }
     .with_execution_observation(observation, probe_evidence);
+    let has_interactive_input = control.is_some();
     let mut loop_ = match control.as_mut() {
         Some(control) => loop_.with_interactive_control(control),
         None => loop_,
@@ -374,7 +468,14 @@ pub(super) async fn drive_headless_turn(
         })
         .unwrap_or_default();
     sink.context_commands(context_descriptors, &loop_.state());
-    let (termination, result) = match input {
+    let from_checkpoint = match &input {
+        HeadlessInput::Checkpoint { request } => {
+            dispatch_post_compact(&hooks, *request, diagnostics).await;
+            true
+        }
+        _ => false,
+    };
+    let (mut termination, mut result) = match input {
         HeadlessInput::Prompt(_) if mcp_command.is_some() => {
             turns
                 .drive_mcp_context(
@@ -416,6 +517,56 @@ pub(super) async fn drive_headless_turn(
                 .drive_answered(&mut loop_, question, answer, cancel, diagnostics)
                 .await
         }
+        HeadlessInput::Checkpoint { .. } => {
+            turns
+                .drive_checkpoint(&mut loop_, cancel, diagnostics)
+                .await
+        }
+    };
+    // A child with direct human input must not settle while an acknowledged
+    // prompt waits at the final-response barrier. Keep the existing executor
+    // and receiver; the queue owns those messages, never the parent.
+    while has_interactive_input
+        && matches!(termination, RunTermination::Done)
+        && !loop_.state().unacknowledged_prompts().is_empty()
+    {
+        let taken = u32::try_from(loop_.state().turns.len().saturating_sub(opening_turns))
+            .unwrap_or(u32::MAX);
+        let queued_turns = Turns {
+            parent_cancel: turns.parent_cancel.clone(),
+            schema: turns.schema,
+            retries: turns.retries,
+            max_turns: turns.max_turns.map(|max| max.saturating_sub(taken)),
+            deadline: turns.deadline,
+        };
+        (termination, result) = queued_turns
+            .drive_queued(&mut loop_, cancel, diagnostics)
+            .await;
+    }
+    // A successor that overflows before any measured reply would compact the
+    // same checkpoint again; it keeps the typed overflow instead.
+    let compaction = if automatic_compaction.is_some()
+        && matches!(termination, RunTermination::ContextOverflow { .. })
+        && (!from_checkpoint || loop_.state().context.used_tokens.is_some())
+    {
+        let turns_taken = u32::try_from(loop_.state().turns.len().saturating_sub(opening_turns))
+            .unwrap_or(u32::MAX);
+        let target_tools = registry.iter().map(RegisteredTool::descriptor).collect();
+        compact_source(
+            &mut loop_,
+            &hooks,
+            (target_system, target_tools),
+            (active.id(), session_store.as_ref(), clock),
+            diagnostics,
+        )
+        .await
+        .map(|(request, receipt)| HeadlessCompaction {
+            request,
+            receipt,
+            turns_taken,
+        })
+    } else {
+        None
     };
     drop(loop_);
     skill_owner
@@ -445,5 +596,86 @@ pub(super) async fn drive_headless_turn(
     drop(hooks);
     let state = journal.try_into_state().map_err(hook_journal_termination)?;
     session_end?;
-    Ok((termination, state, result))
+    Ok((termination, state, result, compaction))
+}
+
+/// Run the interactive clean-session compaction on the driven source.
+///
+/// A failure is reported and returns `None`: the caller keeps the source's
+/// typed overflow, so the run still exits non-zero.
+async fn compact_source<'session: 'turn, 'turn>(
+    loop_: &mut TurnLoop<'session, 'turn>,
+    hooks: &SessionHookComposition<'_>,
+    target: (Option<SystemPrompt>, Vec<ToolDescriptor>),
+    source: (SessionId, &JsonlStore, &SystemClock),
+    diagnostics: &dyn Diagnostics,
+) -> Option<(RequestId, CompactionReceipt)> {
+    let (target_system, target_tools) = target;
+    let (source, store, clock) = source;
+    let failed = |message: String| {
+        diagnostics.note(&format!(
+            "compaction failed: {message}. The session is unchanged; retry with 'ego compact {source}'."
+        ));
+        None
+    };
+    let request = RequestId::from_uuid(uuid::Uuid::now_v7());
+    if let Err(error) = dispatch_request_hook(
+        &hooks.runtime,
+        request,
+        hooks.turn,
+        None,
+        HookLifecycle::PreCompact,
+    )
+    .await
+    {
+        return failed(format!(
+            "blocked before preparation: {}",
+            error.exit_reason()
+        ));
+    }
+    let future: CompactionFuture<'_, Result<PreparedCompaction, CompactionError>> =
+        Box::pin(loop_.prepare_compaction(target_system, target_tools));
+    let mut preparation = DeferredCompactionPreparation {
+        source,
+        future: Some(future),
+    };
+    let receipt = CompactionTransitionService::new(*clock)
+        .compact(
+            CompactionTransitionRequest {
+                request_id: request,
+                source,
+            },
+            &mut preparation,
+            store,
+        )
+        .await;
+    drop(preparation);
+    match receipt {
+        Ok(receipt) => Some((request, receipt)),
+        Err(error) => failed(error.to_string()),
+    }
+}
+
+/// The successor's first hook boundary, as in an interactive compaction epoch.
+async fn dispatch_post_compact(
+    hooks: &SessionHookComposition<'_>,
+    request: RequestId,
+    diagnostics: &dyn Diagnostics,
+) {
+    // Compaction starts a clean event stream: the source PreCompact closure is
+    // not a parent in this session, and the request identifies the lifecycle.
+    if let Err(error) = dispatch_request_hook(
+        &hooks.runtime,
+        request,
+        hooks.turn,
+        None,
+        HookLifecycle::PostCompact,
+    )
+    .await
+    {
+        diagnostics.note(&format!(
+            "the compaction post hook failed: {}",
+            error.exit_reason()
+        ));
+    }
 }

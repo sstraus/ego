@@ -1,0 +1,16 @@
+{
+  "provenance": "VendorSchemaDerived",
+  "source": "https://aistudio.google.com/docs/api-errors",
+  "read": "2026-11-08",
+  "wire": "gemini-interactions",
+  "cases": [
+    {"name": "daily quota", "status": 429, "expect": "refused",
+     "body": {"error": {"code": "quota_exceeded", "message": "You have exceeded your daily quota."}}},
+    {"name": "per-minute rate limit", "status": 429, "expect": "transient",
+     "body": {"error": {"code": "rate_limit_exceeded", "message": "You have exceeded the per-minute or per-second request or token limit."}}},
+    {"name": "too many requests", "status": 429, "expect": "transient",
+     "body": {"error": {"code": "too_many_requests", "message": "You have made too many requests in a short period of time."}}},
+    {"name": "prepay depleted", "status": 402, "expect": "refused",
+     "body": {"error": {"code": "payment_required", "message": "Your Prepay credit balance is depleted."}}}
+  ]
+}

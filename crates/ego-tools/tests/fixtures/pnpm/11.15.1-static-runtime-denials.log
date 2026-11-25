@@ -1,0 +1,7 @@
+Filtering the log data using "composedMessage CONTAINS[c] "Sandbox:" AND composedMessage CONTAINS[c] "pnpm""
+Timestamp               Ty Process[PID:TID]
+2026-10-25 12:26:35.001 E  kernel[0:5870580] (Sandbox) Sandbox: bash(99003) deny(1) file-write-data /Users/stefano.straus/scratch/.ego-admission-KUSVHx/home/Library/Caches/pnpm/dlx/hash/node_modules/knip/bin/knip.js
+2026-10-25 12:26:35.392 E  kernel[0:587065f] (Sandbox) Sandbox: touch(99131) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-74s07H/home/Library/Caches/pnpm/dlx/probe
+2026-10-25 12:26:37.090 E  kernel[0:587096e] (Sandbox) Sandbox: touch(99562) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-74s07H/xdg-cache/pnpm/dlx/probe
+2026-10-25 12:26:37.564 E  kernel[0:5870abb] (Sandbox) Sandbox: touch(99686) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-74s07H/home/Library/pnpm/store/probe
+2026-10-25 12:26:38.461 E  kernel[0:5870c4a] (Sandbox) Sandbox: touch(99819) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-74s07H/home/Library/Caches/pnpm/dlx/probe

@@ -151,6 +151,14 @@ fn choose_skill_control(
 }
 
 pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> String {
+    render_help(registry, width, false)
+}
+
+pub(crate) fn render_action_help_details(registry: &ActionRegistry, width: usize) -> String {
+    render_help(registry, width, true)
+}
+
+fn render_help(registry: &ActionRegistry, width: usize, details: bool) -> String {
     const SECTIONS: [(&str, &[ActionId]); 6] = [
         (
             "Discover",
@@ -169,6 +177,7 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
                 ActionId::Thinking,
                 ActionId::Fast,
                 ActionId::Usage,
+                ActionId::Context,
             ],
         ),
         (
@@ -200,7 +209,9 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
             "Integrations",
             &[
                 ActionId::Mcp,
+                ActionId::Login,
                 ActionId::Tasks,
+                ActionId::Side,
                 ActionId::Tools,
                 ActionId::Skills,
                 ActionId::Hooks,
@@ -218,68 +229,85 @@ pub(crate) fn render_action_help(registry: &ActionRegistry, width: usize) -> Str
         ),
     ];
     let render = |action: &crate::repl::actions::ActionRegistration| {
-        let labels = registry.shortcut_labels(action.id());
-        let shortcut = if labels.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", labels.join(", "))
+        let availability = match registry.availability(action.id()) {
+            Availability::Disabled { owner } => format!("unavailable: {owner}"),
+            Availability::Busy | Availability::BusyWithReason { .. } => "busy".into(),
+            Availability::Enabled => String::new(),
         };
-        match registry.availability(action.id()) {
-            Availability::Disabled { owner } => format!(
-                "/{}{shortcut} — {} [unavailable: {owner}]",
-                action.name(),
-                action.description_text()
-            ),
-            Availability::Busy | Availability::BusyWithReason { .. } => format!(
-                "/{}{shortcut} — {} [busy]",
-                action.name(),
-                action.description_text()
-            ),
-            Availability::Enabled => format!(
-                "  /{}{shortcut}  {}",
-                action.name(),
-                action.description_text()
-            ),
-        }
+        vec![
+            format!("/{}", action.name()),
+            action.description_text().into(),
+            registry.shortcut_labels(action.id()).join(", "),
+            availability,
+        ]
     };
     let limit = width.max(1);
+    let table = |rows: Vec<Vec<String>>| {
+        if details {
+            let mut rows = rows.into_iter().map(|row| {
+                let row = if row.len() > 2 {
+                    vec![row[0].clone(), format!("{} {} {}", row[1], row[2], row[3])]
+                } else {
+                    row
+                };
+                row.into_iter().map(crate::render::Line::plain).collect()
+            });
+            crate::render::table::Table {
+                header: rows.next().unwrap_or_default(),
+                rows: rows.collect(),
+                align: Vec::new(),
+            }
+            .render(limit, crate::render::Depth::None)
+            .iter()
+            .map(crate::render::Line::text)
+            .collect::<Vec<_>>()
+        } else {
+            crate::render::table::plain_table_with_width(rows, limit)
+        }
+    };
     let mut logical = vec!["εgo commands".to_owned()];
     for (section, ids) in SECTIONS {
+        logical.push(String::new());
         logical.push(section.to_owned());
-        logical.extend(
+        let mut entries = vec![vec![
+            "Command".into(),
+            "Description".into(),
+            "Key".into(),
+            "State".into(),
+        ]];
+        entries.extend(
             registry
                 .iter()
                 .filter(|action| ids.contains(&action.id()))
                 .map(&render),
         );
+        logical.extend(table(entries));
     }
-    let capabilities = registry.skill_menu("");
-    if !capabilities.is_empty() {
-        logical.push("Skills and custom commands".to_owned());
-        logical.extend(
-            capabilities
-                .into_iter()
-                .map(|(name, description)| format!("  /{name}  {description}")),
-        );
+    let capabilities = registry
+        .skill_menu("")
+        .into_iter()
+        .chain(registry.mcp_menu(""));
+    let mut entries = vec![vec!["Command".into(), "Description".into()]];
+    entries.extend(capabilities.map(|(name, description)| vec![format!("/{name}"), description]));
+    if entries.len() > 1 {
+        logical.push("Skills and custom commands".into());
+        logical.extend(table(entries));
     }
-    logical.extend(
-        registry
-            .mcp_menu("")
-            .into_iter()
-            .map(|(name, description)| format!("  /{name}  {description}")),
-    );
     logical.push("Aliases: /resume [ID], /continue [ID], /history QUERY".to_owned());
     logical.push(
         "Unknown slash input is refused locally; add a leading space to send literal text."
             .to_owned(),
     );
     logical.push("Keys".to_owned());
-    logical.extend(
+    let mut keys = vec![vec!["Key".into(), "Action".into()]];
+    keys.extend(
         registry
             .keys()
             .into_iter()
-            .map(|key| format!("  {}  {}", key.label, key.description)),
+            .map(|key| vec![key.label, key.description.into()]),
     );
+    logical.extend(table(keys));
+    logical.push("/help details — full command syntax and key descriptions".into());
     logical.push("─".repeat(limit));
     logical
         .into_iter()
@@ -322,27 +350,73 @@ pub(crate) fn render_key_hints(registry: &ActionRegistry, width: usize) -> Strin
         .join("\n")
 }
 
+/// First-prompt keys only; full and turn-time bindings remain in registry help.
+pub(crate) fn render_startup_key_hints(registry: &ActionRegistry, width: usize) -> String {
+    let width = if width == 0 { 80 } else { width.max(40) };
+    let mut items = registry
+        .keys()
+        .into_iter()
+        .find(|key| key.hint == "interrupts")
+        .map(|key| vec![format!("{} interrupt", key.label)])
+        .unwrap_or_default();
+    if width >= 60 {
+        items.push("Shift+Tab mode".into());
+        if let Some(label) = registry.shortcut_labels(ActionId::Model).first() {
+            items.push(format!("{label} model"));
+        }
+    }
+    let help = format!("/{} keys", registry.help(ActionId::Help).name());
+    while !items.is_empty()
+        && crate::render::Line::plain(format!("  {} · {help}", items.join(" · "))).width() > width
+    {
+        items.pop();
+    }
+    items.push(help);
+    format!("  {}", items.join(" · "))
+}
+
+fn resolve_model_query(status: &SharedStatus, query: &str) -> Result<HostCommand, String> {
+    let picker = status
+        .lock()
+        .expect("surface status lock")
+        .model_picker
+        .clone()
+        .ok_or_else(|| "model selection is unavailable".to_owned())?;
+    let request = picker
+        .lock()
+        .expect("model picker lock")
+        .resolve_fragment(query)
+        .map_err(|error| error.to_string())?;
+    Ok(HostCommand::ModelSwitch(request))
+}
+
 /// Both submission paths enforce the same busy-command boundary.
 pub(super) fn busy_dispatch_refusal(dispatch: &Dispatch) -> Option<&'static str> {
     match dispatch {
-        Dispatch::Details(_) => Some("details are unavailable while a turn is running"),
+        Dispatch::Details(
+            ActionId::Hooks | ActionId::Tools | ActionId::Doctor | ActionId::Help,
+        ) => None,
+        Dispatch::Details(_) => Some("details require an idle session"),
         Dispatch::History(_) | Dispatch::Resume(_) => {
             Some("history is unavailable while a turn is running")
         }
         Dispatch::Skill(_) => Some("a skill cannot be invoked while a turn is running"),
-        Dispatch::Skills(_) => {
-            Some("cannot run skill actions during a reply; wait for it to finish")
-        }
-        Dispatch::Export(_) => Some("cannot export during a reply; wait for it to finish"),
+        Dispatch::Skills(
+            SkillSurfaceAction::List | SkillSurfaceAction::Details | SkillSurfaceAction::Diagnose,
+        ) => None,
+        Dispatch::Skills(_) => Some("skill catalogue replacement requires an idle session"),
         Dispatch::Fork(_) => Some("switching forks is unavailable while a turn is running"),
         Dispatch::McpContext(_) => {
             Some("MCP context commands are unavailable while a turn is running")
         }
-        Dispatch::Mcp(_) => Some("MCP changes are unavailable while a turn is running"),
+        Dispatch::Mcp(arguments) if arguments.trim().is_empty() => None,
+        Dispatch::Mcp(_) => Some("MCP registry and authentication changes require an idle session"),
+        Dispatch::Login(None) => None,
+        Dispatch::Login(Some(_)) => Some("login is unavailable while a turn is running"),
         Dispatch::Setup(_) => Some("setup is unavailable while a turn is running"),
         Dispatch::Init(_) => Some("init is unavailable while a turn is running"),
-        Dispatch::Fast(_) => Some("fast tier cannot change while a turn is running"),
-        Dispatch::Hooks => Some("cannot inspect hooks during a reply; wait for it to finish"),
+        Dispatch::Fast(_) => None,
+        Dispatch::Hooks => None,
         _ => None,
     }
 }
@@ -401,6 +475,18 @@ fn submit_busy_line(
                 false,
             ));
         }
+        Dispatch::ModelQuery(query) => match resolve_model_query(status, &query) {
+            Ok(command) => {
+                editor.run_edit_commands(&[EditCommand::Clear]);
+                status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+                return Some((Line::HostCommand(command), false));
+            }
+            Err(message) => {
+                status.lock().expect("surface status lock").notice = Some(message);
+                repaint_status(status);
+                return None;
+            }
+        },
         Dispatch::Action(action) => {
             let (handled, interrupted) =
                 execute_action_and_modal(editor, phase, status, ingress, action, true);
@@ -416,8 +502,10 @@ fn submit_busy_line(
             return None;
         }
         Dispatch::SessionMetadata(operation) => {
-            route_session_metadata(status, operation, true);
-            return None;
+            let line = route_session_metadata(status, operation, true)?;
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((line, false));
         }
         Dispatch::Config(arguments) => {
             editor.run_edit_commands(&[EditCommand::Clear]);
@@ -434,6 +522,14 @@ fn submit_busy_line(
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
             return Some((Line::HostCommand(HostCommand::Tasks(arguments)), false));
         }
+        Dispatch::Side(question) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((
+                Line::HostCommand(HostCommand::SideQuestion(question)),
+                false,
+            ));
+        }
         Dispatch::UnknownSlash(message) => {
             commit_to_transcript(status, &message);
             return None;
@@ -442,24 +538,65 @@ fn submit_busy_line(
             commit_to_transcript(status, reason);
             return None;
         }
-        Dispatch::Details(_)
-        | Dispatch::History(_)
+        Dispatch::Fast(enabled) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Fast(enabled)), false));
+        }
+        Dispatch::Details(action) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Details(action)), false));
+        }
+        Dispatch::Skills(action) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Skills(action)), false));
+        }
+        Dispatch::Export(selection) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Export(selection)), false));
+        }
+        Dispatch::Mcp(arguments) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Mcp(arguments)), false));
+        }
+        Dispatch::Hooks => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Hooks), false));
+        }
+        Dispatch::Login(None) => {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+            status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+            return Some((Line::HostCommand(HostCommand::Login(None)), false));
+        }
+        Dispatch::History(_)
         | Dispatch::Resume(_)
         | Dispatch::Skill(_)
-        | Dispatch::Skills(_)
-        | Dispatch::Export(_)
         | Dispatch::Fork(_)
         | Dispatch::McpContext(_)
-        | Dispatch::Mcp(_)
+        | Dispatch::Login(Some(_))
         | Dispatch::Setup(_)
-        | Dispatch::Init(_)
-        | Dispatch::Fast(_)
-        | Dispatch::Hooks => unreachable!("busy commands were refused before dispatch"),
+        | Dispatch::Init(_) => unreachable!("busy commands were refused before dispatch"),
         Dispatch::Prompt | Dispatch::Immediate | Dispatch::InteractiveIngress => {}
     }
-    match futures::executor::block_on(ingress.submit(buffer.clone(), Vec::new())) {
+    status
+        .lock()
+        .expect("surface status lock")
+        .stage_queue_preview(buffer.clone(), 0);
+    let result =
+        super::ingress_wait::wait(editor, status, ingress.submit(buffer.clone(), Vec::new()));
+    status
+        .lock()
+        .expect("surface status lock")
+        .settle_queue_preview(result.is_ok());
+    match result {
         Ok(queue) => {
-            if editor.accept_buffer(prompt).is_err() {
+            if let Err(error) = super::accept_queued_buffer(editor, &buffer) {
+                super::report_terminal_failure("queued input", error);
                 return Some((Line::Ended, true));
             }
             let mut current = status.lock().expect("surface status lock");
@@ -475,14 +612,18 @@ fn submit_busy_line(
             }
             // A steer is the submission plus the Esc path: the same
             // durable expedite, not a second delivery mechanism.
-            if steer && request_interrupt(status, ingress) {
+            if steer && request_interrupt(editor, status, ingress) {
                 return Some((Line::HostCommand(HostCommand::Interrupt), false));
             }
         }
         Err(ego_core::turn::ControlError::Closed) => {
             // Busy admission can close before the terminal observes idle.
-            // Hand this submission to the next turn through normal input.
-            editor.run_edit_commands(&[EditCommand::Clear]);
+            // Retire the composer with the normal next-turn receipt and history
+            // before transferring input that has no accepted queue preview.
+            if let Err(error) = editor.accept_buffer(prompt) {
+                super::report_terminal_failure("output", error);
+                return Some((Line::Ended, true));
+            }
             status.lock().expect("surface status lock").origin = InputOrigin::Typed;
             restore_latest_draft(editor, status, drafts);
             return Some((
@@ -518,15 +659,114 @@ pub(super) fn surface_line(
                 commit_to_transcript(status, &format!("{}: {notice}", crate::DISPLAY_NAME));
             }
         } else if phase.get() == EditPhase::Idle {
-            question::tell_host(status, |osc, _| {
+            question::tell_host_current(status, |osc, _, current| {
                 [
-                    osc.state(crate::render::osc::State::Idle),
+                    osc.state(current.native_activity),
                     osc.progress(crate::render::osc::Progress::Cleared),
                 ]
                 .concat()
             });
         }
         let signal = suspend::read_line(editor, prompt, status);
+        // An attachment borrows only the terminal input seat. The parent's
+        // coordinator keeps running, but no attached prompt may fall back to it
+        // (including when the child's receiver has just closed).
+        if phase.get() != EditPhase::Modal
+            && let Some(child) = background::attached_input(status)
+        {
+            let text = match &signal {
+                Ok(reedline::Signal::Success(text)) => Some((text.clone(), false)),
+                Ok(reedline::Signal::HostCommand(command))
+                    if command == BUSY_SUBMIT_COMMAND || command == BUSY_STEER_COMMAND =>
+                {
+                    Some((editor.current_buffer_contents().to_owned(), true))
+                }
+                _ => None,
+            };
+            if let Some((text, accept)) = text {
+                let dispatch = {
+                    let current = status.lock().expect("surface status lock");
+                    current
+                        .actions
+                        .as_ref()
+                        .map_or(Dispatch::Prompt, |actions| {
+                            actions
+                                .registry
+                                .classify(actions.registry.submit(text.clone(), current.origin))
+                        })
+                };
+                if let Dispatch::Tasks(arguments) = dispatch {
+                    status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+                    if accept {
+                        editor.run_edit_commands(&[EditCommand::Clear]);
+                    }
+                    return (Line::HostCommand(HostCommand::Tasks(arguments)), false);
+                }
+                if !matches!(dispatch, Dispatch::Prompt) || text.trim_start().starts_with('!') {
+                    commit_to_transcript(
+                        status,
+                        "While attached, send text, use /tasks, or /detach; parent commands are unavailable.",
+                    );
+                    continue;
+                }
+                if text.trim().is_empty() {
+                    continue;
+                }
+                match super::ingress_wait::wait(
+                    editor,
+                    status,
+                    child.submit(text.clone(), Vec::new()),
+                ) {
+                    Ok(_) => {
+                        status.lock().expect("surface status lock").origin = InputOrigin::Typed;
+                        if accept && editor.accept_buffer(prompt).is_err() {
+                            return (Line::Ended, true);
+                        }
+                        restore_latest_draft(editor, status, drafts);
+                    }
+                    Err(error) => {
+                        // Attached input always submits with accept=true, so the
+                        // typed buffer stays untouched and no parked draft is popped.
+                        commit_to_transcript(
+                            status,
+                            &format!(
+                                "Child input was not accepted: {error}. Use /detach to return."
+                            ),
+                        );
+                    }
+                }
+                continue;
+            }
+            match &signal {
+                Ok(reedline::Signal::CtrlC) => {
+                    if let Err(error) = super::ingress_wait::wait(editor, status, child.interrupt())
+                    {
+                        commit_to_transcript(status, &error.to_string());
+                    }
+                    continue;
+                }
+                // Ctrl+S manages the attached session's own draft namespace.
+                Ok(reedline::Signal::HostCommand(command)) if command == DRAFT_COMMAND => {}
+                Ok(reedline::Signal::HostCommand(command)) => {
+                    if command == BUSY_CANCEL_COMMAND || command == INTERRUPT_COMMAND {
+                        if let Err(error) =
+                            super::ingress_wait::wait(editor, status, child.interrupt())
+                        {
+                            commit_to_transcript(status, &error.to_string());
+                        }
+                    } else {
+                        commit_to_transcript(
+                            status,
+                            "This parent control is unavailable while attached; use /detach first.",
+                        );
+                    }
+                    continue;
+                }
+                // External wakes still service permission/question rendezvous.
+                _ => {}
+            }
+        }
+
         if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == MODE_CYCLE_COMMAND)
         {
             // Preserve intent until the owner consumes this queued command. During
@@ -559,7 +799,7 @@ pub(super) fn surface_line(
                 if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == BUSY_STEER_COMMAND)
                     && phase.get() == EditPhase::Busy
                     && queued
-                    && request_interrupt(status, ingress)
+                    && request_interrupt(editor, status, ingress)
                 {
                     return (Line::HostCommand(HostCommand::Interrupt), false);
                 }
@@ -586,11 +826,15 @@ pub(super) fn surface_line(
         } else {
             signal
         };
+        // Reedline's Ctrl+C cleared the draft before ending the read; the busy
+        // cancel keeps the read suspended, so the host clears it instead.
+        if matches!(&signal, Ok(reedline::Signal::HostCommand(command)) if command == BUSY_CANCEL_COMMAND)
+        {
+            editor.run_edit_commands(&[EditCommand::Clear]);
+        }
         // Hold only the isolated PTY child at the real suspended-read boundary.
         #[cfg(test)]
-        if asked_for_image.load(Ordering::Relaxed)
-            && std::env::var_os("EGO_IMAGE_TEST_HOLD").is_some()
-        {
+        if asked_for_image.load(Ordering::Relaxed) && std::env::var_os("EGO_464_HOLD").is_some() {
             std::fs::write("paste-inspected", "ready").unwrap();
             let deadline = Instant::now() + Duration::from_secs(10);
             while !Path::new("paste-release").exists() {
@@ -627,19 +871,46 @@ pub(super) fn surface_line(
                 current.origin = InputOrigin::Typed;
                 dispatch
             };
+            // The startup session browser precedes session action-sink setup.
+            // Quit is a terminal lifecycle effect, so both browsers use its
+            // existing draft/queue confirmation without a session action sink.
+            if phase.get() == EditPhase::Modal
+                && matches!(&dispatch, Dispatch::Action(ActionId::Quit))
+                && status
+                    .lock()
+                    .expect("surface status lock")
+                    .session_picker_open
+            {
+                if let Some(line) =
+                    apply_surface_effect(editor, phase, status, SurfaceActionEffect::Quit, false)
+                {
+                    return (line, failed);
+                }
+                continue;
+            }
             if phase.get() == EditPhase::Modal {
                 // Unknown slash text is modal data, including absolute paths.
-                // Registered commands never become answers, and only inspections
-                // may cross an outstanding modal wait.
+                // Registered commands never become answers. Explicit concurrent
+                // inspections, goal/root controls, and future-session config
+                // saves may cross without consuming or answering its decision.
                 let command = match dispatch {
                     Dispatch::Prompt
                     | Dispatch::Immediate
                     | Dispatch::InteractiveIngress
                     | Dispatch::UnknownSlash(_) => return (line, failed),
+                    Dispatch::Action(ActionId::Mcp) => Some(HostCommand::Mcp(String::new())),
                     Dispatch::Action(action) => Some(HostCommand::Action(action)),
+                    Dispatch::Details(action) => Some(HostCommand::Details(action)),
+                    Dispatch::Hooks => Some(HostCommand::Hooks),
+                    Dispatch::Skills(action) => Some(HostCommand::Skills(action)),
+                    Dispatch::Mcp(arguments) => Some(HostCommand::Mcp(arguments)),
                     Dispatch::Config(arguments) => Some(HostCommand::Config(arguments)),
                     Dispatch::Tasks(arguments) => Some(HostCommand::Tasks(arguments)),
+                    Dispatch::Side(question) => Some(HostCommand::SideQuestion(question)),
                     Dispatch::Pins(command) => Some(HostCommand::Pins(command)),
+                    Dispatch::SessionMetadata(operation) => {
+                        Some(HostCommand::SessionMetadata(operation))
+                    }
                     Dispatch::Refused { reason } => {
                         commit_to_transcript(status, reason);
                         continue;
@@ -652,7 +923,8 @@ pub(super) fn surface_line(
                     .inspections
                     .clone();
                 if let Some(command) = command.filter(|command| {
-                    command.is_read_only_inspection() || command.is_root_revocation()
+                    command.is_concurrent_native()
+                        && !matches!(command, HostCommand::Tasks(arguments) if !arguments.trim().is_empty())
                 }) && let Some((sender, waker)) = inspections
                 {
                     if sender.send(command).is_err() {
@@ -711,7 +983,9 @@ pub(super) fn surface_line(
                 Dispatch::Skill(operation) => {
                     return (Line::HostCommand(HostCommand::Skill(operation)), failed);
                 }
-                Dispatch::Skills(SkillSurfaceAction::List) if text.trim() == "/skills" => {
+                Dispatch::Skills(SkillSurfaceAction::List)
+                    if text.trim() == "/skills" && phase.get() != EditPhase::Busy =>
+                {
                     if let Some(line) = choose_skill_control(editor, phase, status) {
                         return (line, failed);
                     }
@@ -732,10 +1006,18 @@ pub(super) fn surface_line(
                 Dispatch::Tasks(arguments) => {
                     return (Line::HostCommand(HostCommand::Tasks(arguments)), failed);
                 }
+                Dispatch::Side(question) => {
+                    return (
+                        Line::HostCommand(HostCommand::SideQuestion(question)),
+                        failed,
+                    );
+                }
                 Dispatch::McpContext(command) => {
                     return (Line::HostCommand(HostCommand::McpContext(command)), failed);
                 }
-                Dispatch::Mcp(arguments) if arguments.is_empty() => {
+                Dispatch::Mcp(arguments)
+                    if arguments.is_empty() && phase.get() != EditPhase::Busy =>
+                {
                     if let Some(line) = choose_mcp_control(editor, phase, status) {
                         return (line, failed);
                     }
@@ -743,6 +1025,9 @@ pub(super) fn surface_line(
                 }
                 Dispatch::Mcp(arguments) => {
                     return (Line::HostCommand(HostCommand::Mcp(arguments)), failed);
+                }
+                Dispatch::Login(provider) => {
+                    return (Line::HostCommand(HostCommand::Login(provider)), failed);
                 }
                 Dispatch::Setup(arguments) => {
                     return (Line::HostCommand(HostCommand::Setup(arguments)), failed);
@@ -762,6 +1047,13 @@ pub(super) fn surface_line(
                 Dispatch::Fast(enabled) => {
                     return (Line::HostCommand(HostCommand::Fast(enabled)), failed);
                 }
+                Dispatch::ModelQuery(query) => match resolve_model_query(status, &query) {
+                    Ok(command) => return (Line::HostCommand(command), failed),
+                    Err(message) => {
+                        commit_to_transcript(status, &message);
+                        continue;
+                    }
+                },
                 Dispatch::Hooks => {
                     return (Line::HostCommand(HostCommand::Hooks), failed);
                 }
@@ -793,7 +1085,7 @@ pub(super) fn surface_line(
         }
         let Line::HostCommand(command) = line else {
             if matches!(line, Line::Interrupted) && phase.get() == EditPhase::Busy {
-                match futures::executor::block_on(ingress.interrupt()) {
+                match super::ingress_wait::wait(editor, status, ingress.interrupt()) {
                     Ok(queue) => {
                         let mut current = status.lock().expect("surface status lock");
                         current.queue = queue;
@@ -835,12 +1127,16 @@ pub(super) fn surface_line(
         }
 
         match command {
+            // A selector can consume a whole queued key burst before Reedline
+            // delivers its remaining wakes. They belong to the closed modal,
+            // not to the driver's ordinary command queue.
+            HostCommand::QuestionSelector(_) if phase.get() != EditPhase::Modal => continue,
             HostCommand::Background if phase.get() == EditPhase::Modal => {
                 return (Line::HostCommand(HostCommand::Background), false);
             }
             HostCommand::Background => {
                 let notice = if phase.get() == EditPhase::Busy {
-                    match futures::executor::block_on(ingress.background()) {
+                    match super::ingress_wait::wait(editor, status, ingress.background()) {
                         Ok(id) => format!("background exec id: {id}"),
                         Err(error) => error.to_string(),
                     }
@@ -888,8 +1184,12 @@ pub(super) fn surface_line(
                 repaint_status(status);
             }
             HostCommand::BusyRecall => {
-                match futures::executor::block_on(ingress.recall()) {
-                    Ok(Some((recalled, queue))) => {
+                match super::ingress_wait::wait(editor, status, ingress.recall()) {
+                    Ok(Some(ego_core::turn::RecalledPrompt {
+                        prompt: recalled,
+                        queue,
+                        pending,
+                    })) => {
                         // Do not discard an unsent draft, including an earlier
                         // recalled prompt, when Up withdraws another queue entry.
                         let buffer = editor.current_buffer_contents().to_owned();
@@ -917,6 +1217,7 @@ pub(super) fn surface_line(
                         current.images = super::super::ImageDraft::recalled(recalled.images());
                         current.image_chips = current.images.labels();
                         current.queue = queue;
+                        current.reconcile_queue_previews(pending.iter());
                         current.origin = InputOrigin::BracketedPaste;
                         current.notice = None;
                         if let Some(snapshot) = current.snapshot.as_mut() {
@@ -979,7 +1280,7 @@ pub(super) fn surface_line(
                 }
             }
             HostCommand::Interrupt => {
-                if request_interrupt(status, ingress) {
+                if request_interrupt(editor, status, ingress) {
                     return (Line::HostCommand(HostCommand::Interrupt), false);
                 }
             }
@@ -993,8 +1294,12 @@ pub(super) fn surface_line(
 
 /// Ask the coordinator to expedite the queue and cancel the running turn.
 /// Returns whether it was accepted; a refusal is shown as the notice.
-pub(super) fn request_interrupt(status: &SharedStatus, ingress: &InteractiveIngress) -> bool {
-    match futures::executor::block_on(ingress.interrupt()) {
+pub(super) fn request_interrupt(
+    editor: &mut Reedline,
+    status: &SharedStatus,
+    ingress: &InteractiveIngress,
+) -> bool {
+    match super::ingress_wait::wait(editor, status, ingress.interrupt()) {
         Ok(queue) => {
             let mut current = status.lock().expect("surface status lock");
             current.queue = queue;
@@ -1054,6 +1359,7 @@ pub(super) fn restore_latest_draft(
 }
 
 fn execute_action(
+    editor: &mut Reedline,
     status: &SharedStatus,
     ingress: &InteractiveIngress,
     action: ActionId,
@@ -1061,7 +1367,7 @@ fn execute_action(
 ) -> (bool, bool) {
     if action == ActionId::Retry {
         let notice = if busy {
-            match futures::executor::block_on(ingress.retry_now()) {
+            match super::ingress_wait::wait(editor, status, ingress.retry_now()) {
                 Ok(()) => "retrying provider now".to_owned(),
                 Err(error) => error.to_string(),
             }
@@ -1095,7 +1401,7 @@ fn execute_action(
         | ActionDispatch::Refused { reason } => (false, false, Some(reason.to_string())),
         ActionDispatch::Prompt(payload) => {
             let canonical = format!("/{}", actions.registry.help(payload.id).name());
-            match futures::executor::block_on(ingress.submit(canonical, Vec::new())) {
+            match super::ingress_wait::wait(editor, status, ingress.submit(canonical, Vec::new())) {
                 Ok(queue) => {
                     let mut current = status.lock().expect("surface status lock");
                     current.queue = queue;
@@ -1121,7 +1427,7 @@ fn execute_action_and_modal(
     action: ActionId,
     busy: bool,
 ) -> (bool, Option<Line>) {
-    let (handled, completed) = execute_action(status, ingress, action, busy);
+    let (handled, completed) = execute_action(editor, status, ingress, action, busy);
     if completed {
         let effect = {
             let effects = status
@@ -1217,20 +1523,19 @@ pub(super) fn apply_surface_effect(
         SurfaceActionEffect::Usage => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Usage)));
         }
+        SurfaceActionEffect::Context => {
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Context)));
+        }
         SurfaceActionEffect::New => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::New)));
         }
         SurfaceActionEffect::Export => {
-            if busy {
-                status.lock().expect("surface status lock").notice =
-                    Some("cannot export during a reply; wait for it to finish".to_owned());
-            } else {
-                // The shortcut and the menu carry no words, so they select the
-                // default the slash grammar documents: sanitized markdown.
-                return Some(Line::HostCommand(HostCommand::Export(
-                    crate::repl::actions::ExportSelection::default(),
-                )));
-            }
+            // The shortcut and the menu carry no words, so they select the
+            // default the slash grammar documents: sanitized markdown. Busy
+            // or idle, the command reads only the committed prefix.
+            return Some(Line::HostCommand(HostCommand::Export(
+                crate::repl::actions::ExportSelection::default(),
+            )));
         }
         SurfaceActionEffect::Name => {
             return route_session_metadata(
@@ -1277,36 +1582,19 @@ pub(super) fn apply_surface_effect(
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Help)));
         }
         SurfaceActionEffect::Clear => {
-            let buffer = editor.current_buffer_contents().to_string();
-            if (!buffer.trim().is_empty() && buffer.trim() != "/clear")
-                || !status
-                    .lock()
-                    .expect("surface status lock")
-                    .images
-                    .is_empty()
-            {
-                match confirm_surface_action(
-                    editor,
-                    phase,
-                    status,
-                    "Clear the unsent composer draft? [y/N] ",
-                    busy,
-                ) {
-                    Confirmation::Confirmed => {}
-                    Confirmation::Declined => {
-                        status.lock().expect("surface status lock").notice =
-                            Some("draft kept".to_string());
-                        repaint_status(status);
-                        return None;
-                    }
-                    Confirmation::Propagate(line) => return Some(line),
-                }
+            if busy {
+                status.lock().expect("surface status lock").notice = Some(
+                    "cannot clear the conversation while work is pending; wait for it to finish"
+                        .to_owned(),
+                );
+            } else {
+                editor.run_edit_commands(&[EditCommand::Clear]);
+                let mut current = status.lock().expect("surface status lock");
+                current.images.clear();
+                current.image_chips.clear();
+                drop(current);
+                return Some(Line::HostCommand(HostCommand::Action(ActionId::Clear)));
             }
-            editor.run_edit_commands(&[EditCommand::Clear]);
-            let mut current = status.lock().expect("surface status lock");
-            current.images.clear();
-            current.image_chips.clear();
-            current.notice = Some("Draft cleared; conversation and history unchanged".to_owned());
         }
         SurfaceActionEffect::Statusline => {
             let segments = match choose_statusline_preset(editor, phase, status, busy) {
@@ -1317,25 +1605,16 @@ pub(super) fn apply_surface_effect(
             configure_statusline(status, segments);
             return None;
         }
+        SurfaceActionEffect::Login => {
+            // The menu entry is the bare provider inventory, never a flow;
+            // a running turn admits it through the concurrent inbox.
+            return Some(Line::HostCommand(HostCommand::Login(None)));
+        }
         SurfaceActionEffect::Mcp if !busy => {
             return choose_mcp_control(editor, phase, status);
         }
         SurfaceActionEffect::Mcp => {
-            let actions = status
-                .lock()
-                .expect("surface status lock")
-                .mcp_actions
-                .clone()
-                .expect("the enabled MCP action has an installed handler");
-            let registry_status = actions.registry.status();
-            let inventory = crate::mcp::session_inventory(
-                &registry_status,
-                actions
-                    .servers
-                    .iter()
-                    .map(|(name, disabled)| (name, *disabled)),
-            );
-            status.lock().expect("surface status lock").notice = Some(inventory);
+            return Some(Line::HostCommand(HostCommand::Mcp(String::new())));
         }
         SurfaceActionEffect::Pin => {
             return Some(Line::HostCommand(HostCommand::Pins(
@@ -1350,60 +1629,28 @@ pub(super) fn apply_surface_effect(
         SurfaceActionEffect::Tasks => {
             return Some(Line::HostCommand(HostCommand::Tasks(String::new())));
         }
-        SurfaceActionEffect::Tools if !busy => {
-            return Some(Line::HostCommand(HostCommand::Action(ActionId::Tools)));
+        SurfaceActionEffect::Side => {
+            return Some(Line::Refused(crate::repl::actions::SIDE_GRAMMAR));
         }
         SurfaceActionEffect::Tools => {
-            let actions = status
-                .lock()
-                .expect("surface status lock")
-                .mcp_actions
-                .clone()
-                .expect("the enabled tools action has an installed handler");
-            let notice = match actions.registry.capture() {
-                Ok(captured) => {
-                    let native = actions
-                        .native_tools
-                        .iter()
-                        .map(|tool| format!("native/{}", tool.descriptor().name));
-                    let foreign = captured.tools().iter().map(|tool| {
-                        format!("mcp:{}/{}", captured.generation(), tool.descriptor().name)
-                    });
-                    let catalogue = native.chain(foreign).collect::<Vec<_>>();
-                    if catalogue.is_empty() {
-                        "tools: none".to_string()
-                    } else {
-                        format!(
-                            "tools: {} available; inspect with '/tools' when the current work finishes",
-                            catalogue.len()
-                        )
-                    }
-                }
-                Err(_) => "tools: the available tool list could not be read".to_string(),
-            };
-            status.lock().expect("surface status lock").notice = Some(notice);
+            return Some(Line::HostCommand(HostCommand::Action(ActionId::Tools)));
+        }
+        SurfaceActionEffect::Skills if busy => {
+            return Some(Line::HostCommand(HostCommand::Skills(
+                SkillSurfaceAction::List,
+            )));
         }
         SurfaceActionEffect::Skills => {
-            if busy {
-                status.lock().expect("surface status lock").notice = Some(
-                    "cannot run skill actions during a reply; wait for it to finish".to_owned(),
-                );
-            } else {
-                return choose_skill_control(editor, phase, status);
-            }
+            return choose_skill_control(editor, phase, status);
         }
         SurfaceActionEffect::Hooks => {
-            if busy {
-                status.lock().expect("surface status lock").notice =
-                    Some("cannot inspect hooks during a reply; wait for it to finish".to_owned());
-            } else {
-                return Some(Line::HostCommand(HostCommand::Hooks));
-            }
+            return Some(Line::HostCommand(HostCommand::Hooks));
         }
         SurfaceActionEffect::Init => {
             if !busy {
                 return Some(Line::HostCommand(HostCommand::Init(String::new())));
             }
+            refuse_busy_dispatch(status, &Dispatch::Init(String::new()));
         }
         SurfaceActionEffect::Config => {
             return Some(Line::HostCommand(HostCommand::Action(ActionId::Config)));
@@ -1412,6 +1659,7 @@ pub(super) fn apply_surface_effect(
             if !busy {
                 return Some(Line::HostCommand(HostCommand::Setup(String::new())));
             }
+            refuse_busy_dispatch(status, &Dispatch::Setup(String::new()));
         }
         SurfaceActionEffect::Doctor => {
             // The whole snapshot, not the MCP corner of one. `/doctor` and
@@ -1443,7 +1691,7 @@ pub(super) fn apply_surface_effect(
                         repaint_status(status);
                         return None;
                     }
-                    Confirmation::Propagate(line) => return Some(line),
+                    Confirmation::Propagate(line) => return Some(*line),
                 }
             }
             return Some(Line::Ended);
@@ -1461,7 +1709,7 @@ pub(super) fn route_session_metadata(
     operation: crate::cli::SessionMetadataOperation,
     busy: bool,
 ) -> Option<Line> {
-    if busy {
+    if busy && !HostCommand::SessionMetadata(operation.clone()).is_concurrent_native() {
         status.lock().expect("surface status lock").notice = Some(
             "cannot change the session name or goal during a reply; wait for it to finish"
                 .to_owned(),
@@ -1503,6 +1751,63 @@ mod integration_control_tests {
         ));
         assert_eq!(editor.current_buffer_contents(), "draft");
         assert_eq!(phase.get(), EditPhase::Idle);
+    }
+
+    // Catches: a terminal writer failure resubmits an already-sent busy prompt.
+    #[test]
+    fn busy_submit_writer_failure_does_not_hand_prompt_to_next_turn() {
+        use super::super::ingress_wait::TestOutput;
+        use ego_core::event::domain::CancelCause;
+        use ego_core::turn::interactive_control;
+
+        let (printer, rows) = bounded(1);
+        printer.send("pending output".to_owned()).unwrap();
+        let cancel = CancelToken::new();
+        let written = Arc::new(Mutex::new(TestOutput {
+            fail_writes: true,
+            ..TestOutput::default()
+        }));
+        let status = Arc::new(Mutex::new(SurfaceStatus {
+            printer_output: Some(rows),
+            printer_cancel: Some(cancel.clone()),
+            printer_test_output: Some(Arc::clone(&written)),
+            ..SurfaceStatus::default()
+        }));
+        let (ingress, control) = interactive_control();
+        let owner_status = Arc::clone(&status);
+        let (done, completed) = bounded(1);
+        let owner = std::thread::spawn(move || {
+            let mut editor = Reedline::create();
+            editor.run_edit_commands(&[EditCommand::InsertString("send exactly once".into())]);
+            let result = submit_busy_line(
+                &mut editor,
+                &Waiting::new(Arc::clone(&owner_status)),
+                &SurfacePhase::new(EditPhase::Busy),
+                &owner_status,
+                &ingress,
+                &mut DraftStash::new(SessionId::new()),
+                false,
+            );
+            done.send((
+                result.is_none(),
+                editor.current_buffer_contents().to_owned(),
+            ))
+            .unwrap();
+        });
+        let result = completed.recv_timeout(std::time::Duration::from_secs(2));
+        drop(control);
+        owner.join().unwrap();
+        assert_eq!(result, Ok((true, "send exactly once".to_owned())));
+        assert_eq!(cancel.cause(), Some(CancelCause::Host));
+        assert_eq!(written.lock().unwrap().errors, ["injected writer failure"]);
+        assert!(
+            status
+                .lock()
+                .unwrap()
+                .notice
+                .as_ref()
+                .is_some_and(|notice| notice.contains("terminal output failed"))
+        );
     }
 
     // Catches: canceling a skill selector destroys the draft or runs the default action.

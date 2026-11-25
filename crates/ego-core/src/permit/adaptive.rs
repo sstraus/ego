@@ -18,6 +18,9 @@ pub struct ReadPerimeter {
     broad: bool,
     credential_floor: bool,
     exclusions: Vec<CanonPath>,
+    /// The sandbox is `ro`: nothing mutates, so no question can lift the boundary.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    read_only: bool,
 }
 
 impl ReadPerimeter {
@@ -27,10 +30,8 @@ impl ReadPerimeter {
                 confinement.level(),
                 super::Confinement::Off | super::Confinement::Adaptive
             ),
-            credential_floor: matches!(
-                confinement.level(),
-                super::Confinement::Off | super::Confinement::Adaptive
-            ),
+            credential_floor: confinement.level() == super::Confinement::Adaptive,
+            read_only: confinement.level() == super::Confinement::Ro,
             exclusions: if confinement.level() == super::Confinement::Adaptive {
                 confinement
                     .adaptive_perimeter()
@@ -46,7 +47,16 @@ impl ReadPerimeter {
         self.broad
     }
 
-    pub(crate) fn refuses(&self, path: &CanonPath) -> bool {
+    pub(crate) fn read_only(&self) -> bool {
+        self.read_only
+    }
+
+    pub(crate) fn unrestricted(&self) -> bool {
+        self.broad && !self.credential_floor && self.exclusions.is_empty()
+    }
+
+    /// Whether the admitted read perimeter excludes this canonical path.
+    pub fn refuses(&self, path: &CanonPath) -> bool {
         (self.credential_floor && crate::config::Ruleset::is_credential_path(path))
             || self.exclusions.iter().any(|base| path.is_or_under(base))
     }

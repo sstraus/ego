@@ -30,6 +30,8 @@ pub enum RiskReason {
     ForeignEffectsUnknown,
     NetworkEffectsUnknown,
     SecretRelease,
+    /// The command changes ego's own permissions or configuration.
+    OwnerAdministration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -68,7 +70,12 @@ pub fn assess(call: &PreparedCall) -> RiskAssessment {
                 {
                     risk.reasons.push(RiskReason::DynamicCode);
                 }
-                (RiskClass::Unknown, RiskReason::ProcessEffectsUnknown)
+                if super::owner_administration::is_owner_administration(spec) {
+                    // No judge may approve a change of the perimeter.
+                    (RiskClass::High, RiskReason::OwnerAdministration)
+                } else {
+                    (RiskClass::Unknown, RiskReason::ProcessEffectsUnknown)
+                }
             }
             Op::Opaque { .. } => (RiskClass::Unknown, RiskReason::ForeignEffectsUnknown),
             Op::Connect { .. } | Op::ProtocolConnect { .. } => {

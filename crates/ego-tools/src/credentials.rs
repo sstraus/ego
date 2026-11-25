@@ -1,4 +1,6 @@
-//! Native OS adapter for the core-owned credential-store port.
+//! Credential adapters for the core-owned credential-store port.
+
+pub mod file;
 
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
@@ -29,7 +31,7 @@ const CAPTURE_ENVELOPE_VERSION: u8 = 2;
 const RESUME_USER: &str = "mcp/resume/v1";
 const RESUME_LOCK: &str = "mcp-resume-key.lock";
 
-/// The closed failure surface exposed by a native credential backend.
+/// The closed failure surface exposed by a credential backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialBackendError {
     NoEntry,
@@ -50,17 +52,17 @@ pub enum CredentialBackendError {
 impl std::fmt::Display for CredentialBackendError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::NoEntry => "native credential entry absent",
-            Self::Invalid | Self::TooLong => "native credential request invalid",
-            Self::Ambiguous => "native credential entry ambiguous",
+            Self::NoEntry => "credential entry absent",
+            Self::Invalid | Self::TooLong => "credential request invalid",
+            Self::Ambiguous => "credential entry ambiguous",
             Self::BadEncoding | Self::BadDataFormat | Self::BadStoreFormat => {
-                "native credential data corrupt"
+                "credential data corrupt"
             }
-            Self::NotSupportedByStore => "native credential operation unsupported",
+            Self::NotSupportedByStore => "credential operation unsupported",
             Self::PlatformFailure
             | Self::NoStorageAccess
             | Self::NoDefaultStore
-            | Self::Unavailable => "native credential store unavailable",
+            | Self::Unavailable => "credential store unavailable",
         })
     }
 }
@@ -72,6 +74,84 @@ pub trait CredentialBackend: Send + Sync {
     fn get(&self, service: &str, user: &str) -> Result<Option<Vec<u8>>, CredentialBackendError>;
     fn put(&self, service: &str, user: &str, value: Vec<u8>) -> Result<(), CredentialBackendError>;
     fn delete(&self, service: &str, user: &str) -> Result<bool, CredentialBackendError>;
+}
+
+/// One selected backend for all durable MCP secrets in this process.
+#[derive(Debug, Clone)]
+pub enum SelectedCredentialBackend {
+    File(file::FileCredentialBackend),
+    Native(NativeKeyringBackend),
+    /// An invalid process-level selection refuses credential operations.
+    InvalidSelection,
+}
+
+impl SelectedCredentialBackend {
+    /// Explicit native opt-in. Never fall back to a different backend on error.
+    pub fn from_environment(root: impl AsRef<Path>) -> Result<Self, &'static str> {
+        let setting = std::env::var("EGO_CREDENTIAL_BACKEND");
+        match setting {
+            Ok(ref value) => Self::from_setting(root, Some(value)),
+            Err(std::env::VarError::NotPresent) => Self::from_setting(root, None),
+            Err(_) => Err("EGO_CREDENTIAL_BACKEND must be `file` or `native`"),
+        }
+    }
+
+    fn from_setting(root: impl AsRef<Path>, setting: Option<&str>) -> Result<Self, &'static str> {
+        match setting {
+            Some("native") => Ok(Self::Native(NativeKeyringBackend)),
+            None | Some("file") => Ok(Self::File(file::FileCredentialBackend::new(root))),
+            _ => Err("EGO_CREDENTIAL_BACKEND must be `file` or `native`"),
+        }
+    }
+}
+
+impl CredentialBackend for SelectedCredentialBackend {
+    fn get(&self, service: &str, user: &str) -> Result<Option<Vec<u8>>, CredentialBackendError> {
+        match self {
+            Self::File(backend) => backend.get(service, user),
+            Self::Native(backend) => backend.get(service, user),
+            Self::InvalidSelection => Err(CredentialBackendError::Invalid),
+        }
+    }
+
+    fn put(&self, service: &str, user: &str, value: Vec<u8>) -> Result<(), CredentialBackendError> {
+        match self {
+            Self::File(backend) => backend.put(service, user, value),
+            Self::Native(backend) => backend.put(service, user, value),
+            Self::InvalidSelection => Err(CredentialBackendError::Invalid),
+        }
+    }
+
+    fn delete(&self, service: &str, user: &str) -> Result<bool, CredentialBackendError> {
+        match self {
+            Self::File(backend) => backend.delete(service, user),
+            Self::Native(backend) => backend.delete(service, user),
+            Self::InvalidSelection => Err(CredentialBackendError::Invalid),
+        }
+    }
+}
+
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::*;
+
+    // Catches a default that silently uses the native store or accepts unknown selectors.
+    #[test]
+    fn file_is_default_and_native_requires_explicit_selection() {
+        assert!(matches!(
+            SelectedCredentialBackend::from_setting("unused", None),
+            Ok(SelectedCredentialBackend::File(_))
+        ));
+        assert!(matches!(
+            SelectedCredentialBackend::from_setting("unused", Some("native")),
+            Ok(SelectedCredentialBackend::Native(_))
+        ));
+        assert!(SelectedCredentialBackend::from_setting("unused", Some("other")).is_err());
+        assert_eq!(
+            SelectedCredentialBackend::InvalidSelection.get("ego", "user"),
+            Err(CredentialBackendError::Invalid)
+        );
+    }
 }
 
 // This programmatic override is absent from release builds, even with all

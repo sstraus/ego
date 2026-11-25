@@ -1,6 +1,18 @@
-//! Shared prompt precedence and `@file` handling. Agent files and argv prompts are mutually
-//! exclusive. `-` selects stdin; argv plus piped stdin appends a delimited context block so
-//! piped data cannot impersonate user prompt text. Attachments remain separate content blocks.
+//! The input-precedence algorithm of `CLI.md` §4.5, and the `@file`
+//! convention `--system` and `--schema` share.
+//!
+//! Ratified in `docs/internals/decisions/2026-08-21-where-a-prompt-comes-from.md`, whose
+//! §3.4 is the table [`assemble`] must grow into when `-f` lands: an agent
+//! file's body is the argv prompt's peer and the two together are *refused*
+//! rather than concatenated, while `--attach` never enters this algorithm at
+//! all because an attachment is a content block and not prompt text.
+//!
+//! §2's stdin contract, which the document takes from Codex as "the cleanest
+//! surveyed": the prompt is an argument; `-` reads it from stdin; and with
+//! *both* an argv prompt and piped stdin, stdin is appended as a delimited
+//! context block. The delimiter matters — text a pipe supplied and text a
+//! person typed are different things, and running them together lets the
+//! first impersonate the second.
 
 use std::io::{IsTerminal, Read};
 use std::path::Path;
@@ -25,8 +37,9 @@ pub trait StdinSource {
     fn read(&self) -> std::io::Result<String>;
 }
 
-/// The process's own stdin.
-pub struct ProcessStdin;
+/// The process's own stdin, read no later than the run deadline: an open pipe
+/// that never closes must not outlast `--timeout`.
+pub struct ProcessStdin(pub Option<std::time::Instant>);
 
 impl StdinSource for ProcessStdin {
     fn is_terminal(&self) -> bool {
@@ -34,9 +47,26 @@ impl StdinSource for ProcessStdin {
     }
 
     fn read(&self) -> std::io::Result<String> {
-        let mut text = String::new();
-        std::io::stdin().read_to_string(&mut text)?;
-        Ok(text)
+        let Some(deadline) = self.0 else {
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)?;
+            return Ok(text);
+        };
+        let (send, receive) = std::sync::mpsc::channel();
+        // The reader thread may stay blocked after the deadline; the process
+        // exits right after the timeout, which ends it.
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = send.send(std::io::stdin().read_to_string(&mut text).map(|_| text));
+        });
+        receive
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap_or_else(|_| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "--timeout expired while reading stdin",
+                ))
+            })
     }
 }
 
@@ -172,7 +202,8 @@ fn non_empty(text: &str, why: &str) -> Result<String, UsageError> {
     }
 }
 
-/// Resolve inline text or `@file` content for system and schema inputs.
+/// Resolve a value that may be `@file`, the convention `CLI.md` §3 gives
+/// `--system`, `--append-system` and `--schema`.
 ///
 /// A missing file is a usage error and not a warning: a run whose system
 /// prompt silently became the literal text `@missing.md` has been misled about

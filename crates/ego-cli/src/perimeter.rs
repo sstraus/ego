@@ -31,11 +31,13 @@ pub fn observe(
     let warnings = std::env::var_os("HOME").map_or_else(Vec::new, |home| {
         crate::run::profile_roots::defaults(&mut effective, Path::new(&home))
     });
-    let roots = crate::run::profile_roots::admit(&effective, &workspace).map_err(|error| {
-        UsageError(format!(
-            "warning: configured perimeter roots could not be admitted: {error}"
-        ))
-    })?;
+    let (roots, root_notes) = crate::run::profile_roots::admit_noted(&effective, &workspace)
+        .map_err(|error| {
+            UsageError(format!(
+                "warning: configured perimeter roots could not be admitted: {error}"
+            ))
+        })?;
+    let warnings = warnings.into_iter().chain(root_notes).collect::<Vec<_>>();
     let confinement = ego_tools::exec::admit_confinement(
         effective.sandbox.unwrap_or_default(),
         effective.network == ego_core::config::Network::Off,

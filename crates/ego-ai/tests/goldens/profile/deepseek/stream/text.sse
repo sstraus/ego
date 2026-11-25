@@ -1,0 +1,11 @@
+: schema-derived from https://api-docs.deepseek.com/api/create-chat-completion and https://api-docs.deepseek.com/guides/thinking_mode (read 2026-11-14)
+: provider deepseek, model deepseek-flash, thinking disabled
+: usage keeps the cache hit and miss counts under prompt_tokens_details, where the
+: schema puts them; tool_calls.sse keeps them at the top level, as the example does.
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"content":"ok"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"content":""},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":1,"total_tokens":12,"prompt_tokens_details":{"cached_tokens":0,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":11}}}
+
+data: [DONE]

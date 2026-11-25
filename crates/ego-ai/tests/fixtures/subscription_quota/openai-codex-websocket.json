@@ -1,0 +1,77 @@
+{
+  "recorded_at": "2026-11-14",
+  "recorded_with": "ego 0.4.11 native exploration build (temporary name-only trace, not committed), openai-codex/gpt-6-luna, OAuth login, 'Reply OK only.'",
+  "redaction": "header names, event types, JSON key names and value type classes only; no header values, no event values",
+  "handshake": {
+    "method": "GET (WebSocket upgrade)",
+    "url": "wss://chatgpt.com/backend-api/codex/responses",
+    "status": 101,
+    "response_header_names": [
+      "cf-cache-status",
+      "cf-ray",
+      "connection",
+      "cross-origin-opener-policy",
+      "date",
+      "nel",
+      "referrer-policy",
+      "report-to",
+      "sec-websocket-accept",
+      "server",
+      "set-cookie",
+      "strict-transport-security",
+      "upgrade",
+      "x-codex-websocket-max-message-bytes",
+      "x-content-type-options",
+      "x-models-etag",
+      "x-oai-request-id",
+      "x-openai-proxy-wasm"
+    ]
+  },
+  "event_types_in_order": [
+    "codex.rate_limits",
+    "codex.response.metadata",
+    "response.created",
+    "response.in_progress",
+    "response.output_item.added",
+    "response.content_part.added",
+    "response.output_text.delta",
+    "response.metadata",
+    "response.output_text.done",
+    "response.content_part.done",
+    "response.output_item.done",
+    "responsesapi.websocket_timing",
+    "response.completed"
+  ],
+  "event_skeletons": {
+    "codex.rate_limits": {
+      "type": "string",
+      "plan_type": "string",
+      "rate_limits": {
+        "allowed": "bool",
+        "limit_reached": "bool",
+        "primary": {
+          "used_percent": "int",
+          "window_minutes": "int",
+          "reset_after_seconds": "int",
+          "reset_at": "int"
+        },
+        "secondary": "null"
+      },
+      "code_review_rate_limits": "null",
+      "additional_rate_limits": "null",
+      "credits": {
+        "has_credits": "bool",
+        "unlimited": "bool",
+        "balance": "string"
+      },
+      "promo": "null"
+    },
+    "codex.response.metadata": {
+      "type": "string",
+      "headers": {
+        "x-models-etag": "string",
+        "x-codex-turn-state": "string"
+      }
+    }
+  }
+}

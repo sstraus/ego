@@ -24,8 +24,8 @@ use ego_core::compact::{
 };
 use ego_core::config::rule_management::RuleManagement;
 use ego_core::config::{
-    ConfigLayer, Effective, Limits, McpConfigProvenance, McpServerConfig, McpServerName, Mode,
-    ModelRef, PermCfg, Posture, RuleMutation, RuleSnapshot, Ruleset, Selection, Source, Sourced,
+    ConfigLayer, Effective, McpConfigProvenance, McpServerConfig, McpServerName, Mode, ModelRef,
+    PermCfg, Posture, RuleMutation, RuleSnapshot, Ruleset, Selection, Source, Sourced,
     SystemPrompt, Trust, UserConfigError, UserConfigMutation, UserConfigPublication,
     UserConfigStore, UserConfigTarget, resolve_selected, system_prompt,
 };
@@ -105,23 +105,37 @@ use futures::{FutureExt, StreamExt};
 use serde_json::Value;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+/// TUICommander manages this session: it sets `TUIC_SESSION` for its children
+/// and sends its own reprompt when a turn ends without the report (story 939-8c87).
+pub(crate) fn managed_by_tuic() -> bool {
+    std::env::var_os("TUIC_SESSION").is_some_and(|session| !session.is_empty())
+}
+
+mod background_indicator;
 mod executor;
+mod mcp_task_wake;
+mod provider_switch;
+use provider_switch::{ProviderDestination, ProviderSwitch};
+mod rewind_command;
 mod root_revocation;
 mod session_commands;
+mod startup_failure;
 mod turns;
 mod windows_unconfined;
 
+pub(crate) use composition::captured_session_policy;
 use executor::{
     ChildAuthorityCeiling, DeferredCompactionPreparation, compaction_termination,
     complete_run_context, public_result_artifact, run_executor_error, settlement,
 };
 pub use executor::{CliCompactionCommand, CliRunExecutor};
 pub(crate) use executor::{protocol_args, protocol_effective};
-pub use session_commands::{compact, export, fork, ls, rm};
+pub use rewind_command::rewind;
+pub use session_commands::{compact, export, fork, ls, publish_resume_fork, rm};
 use session_commands::{exported, finalize_ci_bundle, finalize_ci_error};
 use turns::{
-    Driver, InteractiveStatus, RunHost, SeatApprover, SeatRootGrants, SeatSandboxGrants, Turns,
-    last_assistant_message, run_trust,
+    Driver, InteractiveStatus, RootTransitionContext, RootTransitionSlot, RunHost, SeatRootGrants,
+    SeatSandboxGrants, Turns, last_assistant_message, run_trust, seat_human, take_root_transition,
 };
 pub use turns::{InteractiveSeat, PasteboardKind, Reads, stop_signal};
 
@@ -131,7 +145,7 @@ use crate::hook::{CliHookInvocationBinding, RunToollessGenerationService};
 use crate::model_picker::{ModelPicker, ModelSwitchRequest};
 use crate::models;
 use crate::output::{
-    Diagnostics, InteractiveOutput, JsonlSink, Report, Stderr, Stdout, TextOutput, TextSink, note,
+    Diagnostics, InteractiveOutput, JsonlSink, Report, Stderr, Stdout, TextOutput, TextSink,
 };
 use crate::provider_http::{ProviderHttpAdapter, run_effect_ports};
 use crate::render::caps::{Capabilities, Environment, OscProfile, Terminal};
@@ -146,6 +160,7 @@ use crate::session::{self, ActiveSession, Opened};
 use crate::{attachment, config, hooks, model, prompt, repl, schema};
 
 mod interactive_driver;
+pub(crate) use interactive_driver::native_activity;
 use interactive_driver::*;
 pub use interactive_driver::{
     Ended, RunModelSwitchError, RunModelSwitchOwner, apply_resume_answers_once,
@@ -158,6 +173,7 @@ mod port_adapters;
 pub use port_adapters::cancelled_termination;
 use port_adapters::*;
 mod headless_driver;
+mod headless_jsonl;
 use headless_driver::*;
 mod composition_root;
 pub(crate) mod profile_roots;
@@ -165,11 +181,12 @@ pub(crate) mod read_directory;
 use composition_root::*;
 pub use composition_root::{CliPrepared, DirectPreflight, preflight_ci};
 mod execution;
+pub(crate) mod startup_layout;
 use execution::{ActivatedRun, MaterializedRun, ScopedInvocation, execute};
 mod driver_runtime;
 use driver_runtime::{DriverExecution, drive_execution};
 
-/// The run result rendered for JSON completion output.
+/// The result of a run, rendered for `--output json` (`CLI.md` §4.1).
 pub fn report(ended: &Ended) -> Report {
     let mut report = Report::of(
         ended.session,
@@ -191,11 +208,12 @@ pub fn report(ended: &Ended) -> Report {
 /// closed pipe ends as `Signalled(Term)`, which on its own reads as "somebody
 /// sent SIGTERM"; naming the real cause is the difference between a report and
 /// a guess.
-pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
+pub fn diagnose(termination: &RunTermination, out: &Stdout) {
     let message = match termination {
         RunTermination::Done => return,
         RunTermination::TaskFailed => "the task did not complete successfully".to_string(),
         RunTermination::UsageError { message }
+        | RunTermination::Guard { message }
         | RunTermination::Provider { message }
         | RunTermination::ProviderUncertain { message }
         | RunTermination::ContextOverflow { message } => message.clone(),
@@ -230,12 +248,22 @@ pub fn diagnose(termination: &RunTermination, broken: Option<String>) {
         RunTermination::MaxTurns => "stopped: --max-turns was reached".to_string(),
         RunTermination::TimedOut => "stopped: --timeout expired".to_string(),
         RunTermination::Signalled(Signal::Int) => "interrupted".to_string(),
-        RunTermination::Signalled(Signal::Term) => match broken {
+        RunTermination::Signalled(Signal::Term) => match out.broken() {
             Some(why) => format!("stopped: {why}"),
             None => "terminated".to_string(),
         },
     };
-    note(&message);
+    let error = matches!(
+        termination,
+        RunTermination::UsageError { .. }
+            | RunTermination::Guard { .. }
+            | RunTermination::Provider { .. }
+            | RunTermination::ProviderUncertain { .. }
+            | RunTermination::ContextOverflow { .. }
+            | RunTermination::Failed { .. }
+            | RunTermination::TaskFailed
+    );
+    out.final_note(&message, error);
 }
 
 #[cfg(test)]
@@ -245,6 +273,10 @@ mod tests;
 #[cfg(test)]
 #[path = "run/phase_boundary_tests.rs"]
 mod phase_boundary_tests;
+
+#[cfg(test)]
+#[path = "run/mcp_batch_e2e_tests.rs"]
+mod mcp_batch_e2e_tests;
 
 #[cfg(test)]
 #[path = "../tests/support/mod.rs"]
@@ -259,7 +291,7 @@ fn background_tasks(
     use ego_core::event::id::DetachedExecId;
     let words: Vec<_> = arguments.split_whitespace().collect();
     let (selected, cancel) = match words.as_slice() {
-        [] => (None, false),
+        [] | ["details"] => (None, false),
         [id] => (Some(*id), false),
         ["cancel", id] => (Some(*id), true),
         _ => return "usage: /tasks [ID | cancel ID]".into(),
@@ -272,6 +304,7 @@ fn background_tasks(
         return "unknown background exec ID in this session".into();
     }
     let mut rows = Vec::new();
+    let mut table = vec![vec!["Exec".into(), "State".into()]];
     for (id, settled) in &state.detached_execs {
         if selected.is_some_and(|selected| selected != *id) {
             continue;
@@ -300,16 +333,109 @@ fn background_tasks(
             }
             Err(error) => return error.to_string(),
         };
-        rows.push(format!("exec {}", snapshot.model_text()));
+        if selected.is_none() && arguments != "details" {
+            use ego_core::permit::DetachedExecOutcome;
+            let status = match snapshot.outcome.as_ref() {
+                None => "running".into(),
+                Some(DetachedExecOutcome::Exited { code, .. }) => format!("exited {code}"),
+                Some(DetachedExecOutcome::Signalled { .. }) => "signalled".into(),
+                Some(DetachedExecOutcome::Cancelled) => "cancelled".into(),
+                Some(DetachedExecOutcome::TimedOut { .. }) => "timed out".into(),
+                Some(DetachedExecOutcome::Interrupted) => "interrupted".into(),
+                Some(DetachedExecOutcome::Failed { .. }) => "failed".into(),
+            };
+            table.push(vec![
+                format!("…{}", id.to_string().rsplit('-').next().unwrap_or_default()),
+                status,
+            ]);
+        } else {
+            rows.push(format!("exec {}", snapshot.model_text()));
+        }
         if cancel && snapshot.outcome.is_none() {
             rows.push("cancellation requested".into());
         }
+    }
+    if table.len() > 1 {
+        rows.extend(crate::render::table::plain_table(table));
+        rows.push("/tasks details — full identities and output".into());
     }
     if rows.is_empty() {
         "background tasks: none".into()
     } else {
         rows.join("\n")
     }
+}
+
+/// Foreground identities use the existing task item, not durable aliases.
+fn foreground_task_listing(arguments: &str, state: &SessionState) -> Option<String> {
+    let words: Vec<_> = arguments.split_whitespace().collect();
+    let selected = match words.as_slice() {
+        [] | ["details"] => None,
+        [id] => Some(*id),
+        _ => return None,
+    };
+    let mut items: Vec<_> = state
+        .items
+        .iter()
+        .filter(|(id, item)| {
+            item.tool_name.as_deref() == Some("task")
+                && selected.is_none_or(|selected| selected == id.to_string())
+        })
+        .collect();
+    items.sort_by_key(|(_, item)| item.seq);
+    let mut details = Vec::new();
+    let mut rows: Vec<_> = items
+        .into_iter()
+        .filter_map(|(id, item)| {
+            let args: Value = serde_json::from_str(&item.args).ok()?;
+            if args.get("background").and_then(Value::as_bool) == Some(true) {
+                return None;
+            }
+            let name = ego_core::permit::terminal_safe(
+                args.get("name").and_then(Value::as_str).unwrap_or("task"),
+            );
+            let status = match item.ok {
+                None => "running",
+                Some(true) => "completed",
+                Some(false) => "failed",
+            };
+            let profile = state
+                .task_profiles
+                .get(id)
+                .map(|profile| {
+                    format!(
+                        "{} · {}",
+                        ego_core::permit::terminal_safe(&profile.model.0),
+                        profile.effort.as_str()
+                    )
+                })
+                .unwrap_or_else(|| {
+                    if item.ok.is_none() {
+                        "resolving"
+                    } else {
+                        "profile unavailable"
+                    }
+                    .to_owned()
+                });
+            let fork = if args.get("fork").and_then(Value::as_bool) == Some(true) {
+                " · fork"
+            } else {
+                ""
+            };
+            if selected.is_some() || arguments == "details" {
+                details.push(format!("task {id} {name}: {status} · {profile}{fork}"));
+                None
+            } else {
+                Some(vec![name, status.into(), format!("{profile}{fork}")])
+            }
+        })
+        .collect();
+    if !rows.is_empty() {
+        rows.insert(0, vec!["Task".into(), "State".into(), "Profile".into()]);
+        details.extend(crate::render::table::plain_table(rows));
+        details.push("/tasks details — full task identities".into());
+    }
+    (!details.is_empty()).then(|| details.join("\n"))
 }
 
 /// Both idle and busy inspection use the same typed task surface.
@@ -320,9 +446,17 @@ async fn task_listing(
     owner: &CliSkillInvocationOwner<'_>,
 ) -> String {
     let agents = owner.inspect_tasks(arguments, state).await;
+    let foreground = foreground_task_listing(arguments, state);
+    let agents = match (agents, foreground) {
+        (Some(agents), Some(foreground)) => Some(format!("{agents}\n{foreground}")),
+        (Some(rows), None) | (None, Some(rows)) => Some(rows),
+        (None, None) => None,
+    };
     let execs = background_tasks(arguments, state, process);
     match agents {
-        Some(agents) if arguments.trim().is_empty() && !state.detached_execs.is_empty() => {
+        Some(agents)
+            if matches!(arguments.trim(), "" | "details") && !state.detached_execs.is_empty() =>
+        {
             format!("{execs}\n{agents}")
         }
         Some(agents) => agents,

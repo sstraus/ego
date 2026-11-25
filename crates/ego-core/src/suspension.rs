@@ -1064,11 +1064,6 @@ impl OpenedContinuation {
     /// Call only after the protocol owner has validated the stored answer
     /// against the stored correlation schema.
     pub fn into_retry_authorized(self) -> Result<Authorized, ContinuationError> {
-        let mut parameters: serde_json::Value = serde_json::from_slice(&self.original_parameters)
-            .map_err(|_| ContinuationError::InvalidRecord)?;
-        let parameters = parameters
-            .as_object_mut()
-            .ok_or(ContinuationError::InvalidRecord)?;
         let answer = serde_json::from_slice(&self.accepted_answer)
             .map_err(|_| ContinuationError::InvalidAnswer)?;
         let request_state =
@@ -1082,14 +1077,8 @@ impl OpenedContinuation {
         } else {
             serde_json::Value::Object(serde_json::Map::from_iter([(self.correlation_key, answer)]))
         };
-        parameters.insert("inputResponses".to_owned(), responses);
-        parameters.insert(
-            "requestState".to_owned(),
-            serde_json::Value::String(request_state),
-        );
-        let parameters = serde_json::Value::Object(parameters.clone());
         self.authorized
-            .with_verified_resume_parameters(&parameters)
+            .with_verified_resume_parameters(request_state, responses)
             .map_err(|_| ContinuationError::InvalidRecord)
     }
 
@@ -1125,6 +1114,21 @@ pub struct ClaimedContinuation {
 }
 
 impl ClaimedContinuation {
+    /// Reconstitute the exact claim from a durable session publication. This
+    /// token can settle the journal, but cannot authorize a remote retry.
+    pub fn recover_published(
+        record: ContinuationRecord,
+        publication: &crate::state::ForeignQuestionPublication,
+    ) -> Result<Self, ContinuationError> {
+        if record.state() != ContinuationState::Claimed
+            || record.id() != publication.continuation_id()
+            || record.accepted_answer() != Some(publication.canonical_answer().as_bytes())
+        {
+            return Err(ContinuationError::AuthorityMismatch);
+        }
+        Ok(Self { record })
+    }
+
     pub fn id(&self) -> &str {
         self.record.id()
     }

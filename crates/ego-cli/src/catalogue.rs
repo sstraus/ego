@@ -1,11 +1,7 @@
 //! The session catalogue: which sessions belong here, and how they are shown.
 //!
-//! Two commands read it — `ego ls` prints it and `ego resume` selects one row
-//! from it — and they agree about *which* rows because they share
-//! [`in_workspace`] and [`by_recency`] rather than each filtering and sorting
-//! its own way. A list whose first row is not the row `ego resume` would pick
-//! is a list that lies about what the next command does.
-//!
+//! `ego ls` retains authoritative event-time ordering. Resume pages use log
+//! last-write time as a cheap last-use signal, without replaying older sessions.
 
 use std::path::Path;
 
@@ -17,7 +13,7 @@ use serde::Serialize;
 
 use crate::cli::UsageError;
 
-/// The version of the session catalogue JSON schema.
+/// The version of the shape `--output json` writes (`CLI.md` §4.6).
 ///
 /// Its own number, not `PUBLIC_EVENT_VERSION`. That one versions the event
 /// stream a run publishes; this versions a catalogue listing, and the two
@@ -39,8 +35,7 @@ pub fn in_workspace(metas: Vec<SessionMeta>, root: &Path) -> Vec<SessionMeta> {
 ///
 /// Two sessions can share an `updated` — the timestamp is milliseconds and a
 /// scripted pair of runs can land inside one. Leaving that to the order
-/// `list()` happened to read directories in would make `ego ls` and
-/// `ego resume` disagree about "latest" on exactly the runs a script produces.
+/// `list()` happened to read directories in would make `ego ls` unstable.
 pub fn by_recency(metas: &mut [SessionMeta]) {
     metas.sort_by(|a, b| {
         b.updated
@@ -62,7 +57,9 @@ pub fn resolve(
         Some(wanted) => store
             .readable_meta(&wanted)
             .map(|meta| meta.into_iter().collect()),
-        None => readable_sessions(store, &crate::output::Stderr),
+        None => store
+            .resume_listing()
+            .map(|mut listing| listing.next_page(store, Some(root), None, 1, |_| true)),
     }
     .map_err(|err| UsageError(format!("the session store could not be listed: {err}")))?;
 
@@ -78,8 +75,9 @@ pub fn resolve(
             });
     };
 
-    // Resume asks for the named session and refuses if it does not exist.
-    // Unlike a new run, it must not create the requested id.
+    // Named explicitly, so the catalogue is asked whether it exists rather
+    // than asked to choose. A `run` would have created it; `resume` must not
+    // (ADR §3), so an id nobody has used is a refusal and not a fresh session.
     //
     // `{wanted}` and not `{wanted:?}` in both refusals below: these reach an
     // operator, and `SessionId(0192…)` names a Rust type they cannot act on.
@@ -105,7 +103,39 @@ pub fn resolve(
     Ok(meta.id)
 }
 
-/// One catalogue row for JSON or JSONL output.
+/// The one session of `root` whose title is exactly `title`.
+///
+/// Exact and case-sensitive, so a near-miss is a refusal and not a guess.
+/// Titles are not unique; when several sessions carry this one, the refusal
+/// lists them, most recent first, and resumes none: picking the newest would
+/// continue a session the caller may not have meant.
+pub fn resolve_title(
+    store: &ego_tools::store::JsonlStore,
+    root: &Path,
+    title: &str,
+) -> Result<SessionId, UsageError> {
+    let metas = readable_sessions(store, &crate::output::Stderr)
+        .map_err(|err| UsageError(format!("the session store could not be listed: {err}")))?;
+    let matches: Vec<SessionMeta> = in_workspace(metas, root)
+        .into_iter()
+        .filter(|meta| meta.title.as_deref() == Some(title))
+        .collect();
+    match matches.as_slice() {
+        [] => Err(UsageError(format!(
+            "no session titled `{title}` belongs to {}; list its sessions and titles with 'ego ls'",
+            root.display()
+        ))),
+        [meta] => Ok(meta.id),
+        _ => Err(UsageError(format!(
+            "{} sessions in {} are titled `{title}`; resume one by its id:\n{}",
+            matches.len(),
+            root.display(),
+            table(&matches, false).join("\n")
+        ))),
+    }
+}
+
+/// One row of `--output json` and one line of `--output jsonl` (`CLI.md` §4.6).
 ///
 /// A shape of its own rather than `SessionMeta` serialised directly: that type
 /// is the store port's, and publishing it would make a field added for a
@@ -136,7 +166,7 @@ impl Row {
     }
 }
 
-/// The single catalogue object emitted by `ego ls --output json`.
+/// The single object `ego ls --output json` writes (`CLI.md` §4.6).
 ///
 /// An object with a `sessions` key and not a bare array, so the listing can
 /// carry its own `v` — a top-level array has nowhere to put one, and a
@@ -197,37 +227,7 @@ pub fn table(metas: &[SessionMeta], all: bool) -> Vec<String> {
         rows.push(row);
     }
 
-    plain_table(rows)
-}
-
-/// Pad a plain-text table to its widest cells without trailing whitespace.
-pub(crate) fn plain_table(rows: Vec<Vec<String>>) -> Vec<String> {
-    let columns = rows.first().map_or(0, Vec::len);
-    let widths: Vec<usize> = (0..columns)
-        .map(|at| {
-            rows.iter()
-                .map(|row| row[at].chars().count())
-                .max()
-                .unwrap_or(0)
-        })
-        .collect();
-
-    rows.iter()
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                // The last column is not padded: trailing spaces on every line
-                // are invisible until something diffs them.
-                .map(|(at, cell)| match at + 1 == columns {
-                    true => cell.clone(),
-                    false => format!("{cell:<width$}", width = widths[at]),
-                })
-                .collect::<Vec<_>>()
-                .join("  ")
-                .trim_end()
-                .to_string()
-        })
-        .collect()
+    crate::render::table::plain_table(rows)
 }
 
 /// `updated` as a UTC calendar time an operator can read.
@@ -264,7 +264,7 @@ pub fn listing(
     })
 }
 
-/// Interactive rows use current durable prose rather than a stale manifest cache.
+/// `ego ls` keeps its complete, diagnostic catalogue and event-time ordering.
 pub(crate) fn saved_sessions(
     store: &ego_tools::store::JsonlStore,
     diagnostics: &dyn crate::output::Diagnostics,
@@ -274,13 +274,83 @@ pub(crate) fn saved_sessions(
     Ok(metas)
 }
 
+/// A modal cancellation keeps the current prompt; quit must leave it.
+pub enum SessionPick {
+    Selected(Box<SessionMeta>),
+    Cancelled,
+    Quit,
+}
+
+/// A lazy page source handed to the terminal owner. Constructing it performs no I/O.
+pub struct ResumePicker {
+    pub store: std::sync::Arc<ego_tools::store::JsonlStore>,
+    pub root: Option<std::path::PathBuf>,
+    pub exclude: Option<SessionId>,
+    pub matching: Option<std::collections::HashSet<SessionId>>,
+    listing: Option<ego_tools::store::ResumeListing>,
+}
+
+impl ResumePicker {
+    pub fn new(
+        store: std::sync::Arc<ego_tools::store::JsonlStore>,
+        root: std::path::PathBuf,
+        exclude: Option<SessionId>,
+    ) -> Self {
+        Self {
+            store,
+            root: Some(root),
+            exclude,
+            matching: None,
+            listing: None,
+        }
+    }
+
+    pub fn next_page(&mut self) -> Result<Vec<SessionMeta>, StoreError> {
+        if self.listing.is_none() {
+            self.listing = Some(self.store.resume_listing()?);
+        }
+        Ok(self
+            .listing
+            .as_mut()
+            .expect("listing initialized")
+            .next_page(
+                &self.store,
+                self.root.as_deref(),
+                self.exclude,
+                10,
+                |meta| {
+                    self.matching
+                        .as_ref()
+                        .is_none_or(|ids| ids.contains(&meta.id))
+                },
+            ))
+    }
+
+    pub fn has_more(&self) -> bool {
+        self.listing
+            .as_ref()
+            .is_none_or(|listing| listing.has_more())
+    }
+}
+
 fn readable_sessions(
     store: &dyn SessionStore,
     diagnostics: &dyn crate::output::Diagnostics,
 ) -> Result<Vec<SessionMeta>, StoreError> {
-    store.list_readable(&mut |id, error| {
-        diagnostics.note(&format!("session {id} is unreadable: {error}"));
-    })
+    let mut incompatible = 0;
+    let metas = store.list_readable(&mut |id, error| {
+        if matches!(error, StoreError::UnsupportedLog { .. }) {
+            incompatible += 1;
+        } else {
+            diagnostics.note(&format!("session {id} is unreadable: {error}"));
+        }
+    })?;
+    if incompatible > 0 {
+        diagnostics.note(&format!(
+            "{incompatible} incompatible sessions; remove them with: ego rm --incompatible --yes"
+        ));
+    }
+    Ok(metas)
 }
 
 #[cfg(test)]
@@ -418,6 +488,64 @@ mod unreadable_tests {
         log.write_all(&record).unwrap();
     }
 
+    // Catches: stale manifests or unpublished directories emit NotFound on every ls.
+    #[test]
+    fn listing_omits_or_repairs_index_entries_without_session_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+        let readable = SessionId::new();
+        let missing = SessionId::new();
+        for id in [readable, missing] {
+            store
+                .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
+                .unwrap();
+        }
+        std::fs::remove_file(dir.path().join(missing.to_string()).join("events.jsonl")).unwrap();
+        let unpublished = SessionId::new();
+        let opened = store
+            .open_writer(
+                &unpublished,
+                ego_tools::store::LeaseInputs {
+                    pid: std::process::id(),
+                    now: Timestamp::from_millis(1),
+                    stale_after: std::time::Duration::from_secs(60),
+                    is_alive: &|_| true,
+                },
+            )
+            .unwrap();
+        drop(opened);
+        assert!(
+            !dir.path()
+                .join(unpublished.to_string())
+                .join("events.jsonl")
+                .exists()
+        );
+        let notes = Notes::default();
+        for _ in 0..2 {
+            let metas = readable_sessions(&store, &notes).unwrap();
+            assert_eq!(
+                metas.iter().map(|meta| meta.id).collect::<Vec<_>>(),
+                vec![readable]
+            );
+        }
+        assert!(
+            notes.0.lock().unwrap().is_empty(),
+            "directories without authoritative data are absent, not unreadable"
+        );
+        assert!(
+            dir.path()
+                .join(readable.to_string())
+                .join("events.jsonl")
+                .exists()
+        );
+        assert!(
+            dir.path()
+                .join(missing.to_string())
+                .join("manifest.json")
+                .exists()
+        );
+    }
+
     #[test]
     fn unreadable_catalogue_entry_does_not_hide_readable_sessions() {
         let dir = tempfile::tempdir().unwrap();
@@ -435,7 +563,7 @@ mod unreadable_tests {
             json!({"kind": "future_writer_entry"}),
         );
         let notes = Notes::default();
-        let metas = saved_sessions(&store, &notes)
+        let metas = readable_sessions(&store, &notes)
             .expect("one unreadable log must not abort the catalogue");
         assert_eq!(
             metas.iter().map(|meta| meta.id).collect::<Vec<_>>(),
@@ -451,7 +579,7 @@ mod unreadable_tests {
     fn unreadable_real_record_shape_names_the_session_instead_of_an_anonymous_payload() {
         let dir = tempfile::tempdir().unwrap();
         let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
-        let id: SessionId = "00000000-0000-7000-8000-000000020001".parse().unwrap();
+        let id: SessionId = "01a070f9-69dd-7440-82ab-79f2520f2f0a".parse().unwrap();
         store
             .publish_empty_session(id, Path::new("/workspace"), Timestamp::from_millis(1))
             .unwrap();
@@ -486,14 +614,14 @@ mod unreadable_tests {
         append_payload(dir.path(), id, json!({"kind": "future_writer_entry"}));
         std::fs::remove_file(dir.path().join(id.to_string()).join("manifest.json")).unwrap();
         let notes = Notes::default();
-        assert!(saved_sessions(&store, &notes).unwrap().is_empty());
+        assert!(readable_sessions(&store, &notes).unwrap().is_empty());
         let notes = notes.0.lock().unwrap();
         assert_eq!(notes.len(), 1);
         assert!(notes[0].contains(&id.to_string()));
     }
 
     #[test]
-    fn missing_torn_and_unsupported_logs_each_get_a_diagnostic_even_when_none_are_readable() {
+    fn torn_and_unsupported_logs_get_diagnostics_but_missing_logs_are_absent() {
         use ego_core::store::codec::{Header, encode_header};
         let dir = tempfile::tempdir().unwrap();
         let store = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
@@ -518,17 +646,318 @@ mod unreadable_tests {
         )
         .unwrap();
         let notes = Notes::default();
-        assert!(saved_sessions(&store, &notes).unwrap().is_empty());
+        assert!(readable_sessions(&store, &notes).unwrap().is_empty());
         let notes = notes.0.lock().unwrap();
-        assert_eq!(notes.len(), ids.len());
-        for id in ids {
-            assert_eq!(
-                notes
-                    .iter()
-                    .filter(|note| note.contains(&id.to_string()))
-                    .count(),
-                1
-            );
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().all(|note| !note.contains(&ids[0].to_string())));
+        assert_eq!(
+            notes
+                .iter()
+                .filter(|note| note.contains(&ids[1].to_string()))
+                .count(),
+            1
+        );
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.contains("1 incompatible sessions")
+                    && note.contains("ego rm --incompatible --yes"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod resume_pages_tests {
+    use super::*;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_tools::store::{JsonlStore, OsIo, StoreIo};
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+
+    struct CountReads(Arc<Mutex<Vec<PathBuf>>>);
+
+    impl StoreIo for CountReads {
+        fn file_revision(
+            &self,
+            path: &Path,
+        ) -> std::io::Result<Option<ego_tools::store::FileRevision>> {
+            OsIo.file_revision(path)
         }
+        fn append_line(&self, path: &Path, line: &[u8]) -> std::io::Result<()> {
+            OsIo.append_line(path, line)
+        }
+        fn fsync(&self, path: &Path) -> std::io::Result<()> {
+            OsIo.fsync(path)
+        }
+        fn read(&self, path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+            self.0.lock().unwrap().push(path.to_owned());
+            OsIo.read(path)
+        }
+        fn exists(&self, path: &Path) -> std::io::Result<bool> {
+            OsIo.exists(path)
+        }
+        fn replace_atomic(&self, path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+            OsIo.replace_atomic(path, bytes)
+        }
+        fn truncate(&self, path: &Path, length: u64) -> std::io::Result<()> {
+            OsIo.truncate(path, length)
+        }
+        fn remove_file(&self, path: &Path) -> std::io::Result<()> {
+            OsIo.remove_file(path)
+        }
+        fn list_dirs(&self, path: &Path) -> std::io::Result<Vec<PathBuf>> {
+            OsIo.list_dirs(path)
+        }
+    }
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        store: Arc<JsonlStore>,
+        reads: Arc<Mutex<Vec<PathBuf>>>,
+        ids: Vec<SessionId>,
+    }
+
+    impl Fixture {
+        fn new(count: usize) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let reads = Arc::new(Mutex::new(Vec::new()));
+            let seed = JsonlStore::new(dir.path(), "/workspace", Box::new(OsIo));
+            let ids: Vec<_> = (0..count).map(|_| SessionId::new()).collect();
+            for (index, id) in ids.iter().enumerate() {
+                seed.publish_empty_session(
+                    *id,
+                    Path::new("/workspace"),
+                    Timestamp::from_millis((index as u64 + 1) * 1000),
+                )
+                .unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(dir.path().join(id.to_string()).join("events.jsonl"))
+                    .unwrap()
+                    .set_times(std::fs::FileTimes::new().set_modified(
+                        std::time::UNIX_EPOCH + std::time::Duration::from_secs(index as u64 + 1),
+                    ))
+                    .unwrap();
+            }
+            let store = JsonlStore::new(
+                dir.path(),
+                "/workspace",
+                Box::new(CountReads(Arc::clone(&reads))),
+            );
+            Self {
+                dir,
+                store: Arc::new(store),
+                reads,
+                ids,
+            }
+        }
+
+        fn page(&self) -> Result<Vec<SessionMeta>, StoreError> {
+            ResumePicker::new(Arc::clone(&self.store), "/workspace".into(), None).next_page()
+        }
+
+        fn log_reads(&self) -> usize {
+            self.reads
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|path| path.file_name().is_some_and(|name| name == "events.jsonl"))
+                .count()
+        }
+    }
+
+    // Catches: truncating the displayed rows after replaying the whole store.
+    #[test]
+    fn resume_picker_reads_only_the_newest_page_of_ten() {
+        let fixture = Fixture::new(24);
+        let rows = fixture.page().unwrap();
+        assert_eq!(rows.len(), 10, "the first page contains ten rows");
+        assert_eq!(
+            fixture.log_reads(),
+            10,
+            "older logs must not be opened for the first page"
+        );
+        assert_eq!(rows[0].id, fixture.ids[23]);
+    }
+
+    // Catches: unreadable or in-flight directories flooding the resume transcript.
+    #[test]
+    fn resume_listing_skips_unreadable_sessions() {
+        let fixture = Fixture::new(4);
+        std::fs::write(
+            fixture
+                .dir
+                .path()
+                .join(fixture.ids[0].to_string())
+                .join("events.jsonl"),
+            b"invalid header\n",
+        )
+        .unwrap();
+        std::fs::remove_file(
+            fixture
+                .dir
+                .path()
+                .join(fixture.ids[1].to_string())
+                .join("events.jsonl"),
+        )
+        .unwrap();
+        let log = fixture
+            .dir
+            .path()
+            .join(fixture.ids[2].to_string())
+            .join("events.jsonl");
+        use std::io::Write as _;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(log)
+            .unwrap()
+            .write_all(b"{\"torn\":")
+            .unwrap();
+        std::fs::create_dir(fixture.dir.path().join(SessionId::new().to_string())).unwrap();
+        let rows = fixture.page().unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![fixture.ids[3]]
+        );
+    }
+
+    fn files(root: &Path) -> Vec<(PathBuf, Vec<u8>, std::time::SystemTime)> {
+        let mut result = Vec::new();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                result.extend(files(&path));
+            } else {
+                result.push((
+                    path.clone(),
+                    std::fs::read(&path).unwrap(),
+                    std::fs::metadata(path).unwrap().modified().unwrap(),
+                ));
+            }
+        }
+        result.sort_by(|a, b| a.0.cmp(&b.0));
+        result
+    }
+
+    // Catches: catalogue reads creating events.lock or repairing a log/manifest.
+    #[test]
+    fn listing_sessions_writes_nothing_and_takes_no_lease() {
+        let fixture = Fixture::new(2);
+        for id in &fixture.ids {
+            let lock = fixture.dir.path().join(id.to_string()).join("events.lock");
+            if lock.exists() {
+                std::fs::remove_file(lock).unwrap();
+            }
+        }
+        let before = files(fixture.dir.path());
+        assert_eq!(fixture.page().unwrap().len(), 2);
+        assert_eq!(
+            files(fixture.dir.path()),
+            before,
+            "listing may not create a lock or alter bytes/mtimes"
+        );
+    }
+
+    // Catches: unnamed headless resume replaying every session to find one ID.
+    #[test]
+    fn headless_resume_without_id_picks_the_latest_without_scanning_every_session() {
+        let fixture = Fixture::new(24);
+        assert_eq!(
+            resolve(&fixture.store, Path::new("/workspace"), None).unwrap(),
+            fixture.ids[23]
+        );
+        assert_eq!(
+            fixture.log_reads(),
+            1,
+            "headless resume needs only its latest readable candidate"
+        );
+    }
+    // Catches: re-sorting each page after a live update repeats or skips IDs.
+    #[test]
+    fn next_page_continues_after_the_tenth_by_recency_with_id_tiebreak() {
+        let fixture = Fixture::new(23);
+        let stamp = std::time::UNIX_EPOCH + std::time::Duration::from_secs(100);
+        for id in &fixture.ids {
+            std::fs::File::options()
+                .write(true)
+                .open(fixture.dir.path().join(id.to_string()).join("events.jsonl"))
+                .unwrap()
+                .set_times(std::fs::FileTimes::new().set_modified(stamp))
+                .unwrap();
+        }
+        let mut expected = fixture.ids.clone();
+        expected.sort_by_key(|id| std::cmp::Reverse(id.to_string()));
+        let mut source = ResumePicker::new(Arc::clone(&fixture.store), "/workspace".into(), None);
+        assert_eq!(
+            source
+                .next_page()
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            expected[..10]
+        );
+        std::fs::File::options()
+            .write(true)
+            .open(
+                fixture
+                    .dir
+                    .path()
+                    .join(expected[22].to_string())
+                    .join("events.jsonl"),
+            )
+            .unwrap()
+            .set_times(
+                std::fs::FileTimes::new().set_modified(stamp + std::time::Duration::from_secs(100)),
+            )
+            .unwrap();
+        assert_eq!(
+            source
+                .next_page()
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            expected[10..20]
+        );
+        assert_eq!(
+            source
+                .next_page()
+                .unwrap()
+                .iter()
+                .map(|row| row.id)
+                .collect::<Vec<_>>(),
+            expected[20..]
+        );
+        assert!(!source.has_more());
+        assert_eq!(fixture.log_reads(), 23);
+    }
+
+    // Catches: counting unreadable candidates instead of readable workspace rows.
+    #[test]
+    fn unreadable_sessions_do_not_use_up_a_page_slot() {
+        let fixture = Fixture::new(14);
+        for id in &fixture.ids[10..] {
+            std::fs::write(
+                fixture
+                    .dir
+                    .path()
+                    .join(id.to_string())
+                    .join("manifest.json"),
+                b"invalid manifest",
+            )
+            .unwrap();
+        }
+        let rows = fixture.page().unwrap();
+        assert_eq!(rows.len(), 10);
+        assert_eq!(
+            rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            fixture.ids[..10].iter().rev().copied().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            fixture.log_reads(),
+            10,
+            "invalid manifests need no journal read"
+        );
     }
 }

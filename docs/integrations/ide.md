@@ -45,6 +45,12 @@ new Zed integration or broaden the architecture's editor support matrix.
 
 ## Selection, diagnostics, and edit review
 
+Ego can also ask a language server itself: turn on the `lsp` tool
+(`ego config set lsp=true`, see `CLI.md` §7.4) and the model asks for
+definitions, references and diagnostics of workspace files. That reads disk
+state, not an editor buffer, so a host that has unsaved changes still sends
+its own snapshots as below.
+
 If `promptCapabilities.embeddedContext` is true, send snapshots as standard
 `resource` prompt blocks with an embedded textual `resource`. The local
 [editor context fixture](ide-context.json) is a complete prompt array for a
@@ -109,3 +115,21 @@ is not proof that a generation or edit did not happen. Inspect recovered state
 and resolve any reported held, uncertain, or permission-required state first.
 Reconnect does not mean reusing a previous connection's permission grant or
 skipping current admission checks.
+
+## Local fixture coverage
+
+The deterministic fixtures below need no provider credentials or paid calls.
+They test the native server boundary, not a particular editor's UI:
+
+| Contract | Fixture |
+| --- | --- |
+| Documented prompt array is accepted; snapshots retain order, URI-digest provenance and untrusted labels | `ego-acp/tests/it/prompt.rs::editor_context_fixture_preserves_untrusted_ordered_snapshots` |
+| Unsaved bytes need no disk file; acquisition secrets and private metadata are omitted | `ego-acp/tests/it/prompt.rs::embedded_host_context_needs_no_disk_file_and_drops_private_metadata` |
+| Oversized or unsupported resources refuse before execution | `ego-acp/tests/it/prompt.rs::embedded_resource_bounds_refuse_without_starting_a_turn` |
+| Cancel reaches the active turn | `ego-acp/tests/it/prompt.rs::cancel_reaches_the_turn_that_is_running` |
+| Permission cancellation denies | `ego-acp/tests/it/permission.rs::a_cancelled_turn_denies_rather_than_leaving_the_seat_open` |
+| A new connection reattaches the durable session | `ego-acp/tests/it/session_lifecycle.rs::reconnecting_a_header_only_session_starts_its_first_run_under_the_same_id` |
+| Host trust metadata cannot grant arbitrary unprofiled workspace trust | `ego-cli/tests/it/acp_host_trust.rs::unprofiled_attestation_is_ignored_and_the_form_is_used` |
+
+These tests cover the protocol boundary; passing them does not establish
+compatibility with a particular editor.

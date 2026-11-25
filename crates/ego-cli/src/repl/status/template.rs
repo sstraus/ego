@@ -103,6 +103,8 @@ impl StatusTemplate {
             compact => compact_text,
             model => clean(&snapshot.model), effort => &snapshot.effort,
             fast => snapshot.fast(), mode => &snapshot.mode,
+            cache => snapshot.cache_display(),
+            rate_limits => &snapshot.rate_limits,
             ctx => minijinja::context! { used => snapshot.used_tokens, window => snapshot.window, percent => percent },
             cost => minijinja::context! { amount => cost_amount, equivalent => snapshot.cost_equivalent },
             cwd => clean(&snapshot.raw_cwd),
@@ -455,11 +457,11 @@ mod tests {
         snapshot.set_drafts(3);
         for template in [
             "{{ prompt }}",
-            "{% filter priority(0) %}steer 1 · next 2 drafts=3 interrupt=yes too long{% endfilter %}\n{{ prompt }}",
+            "{% filter priority(0) %}steer 1 · next 2 3 prompts parked interrupt=yes too long{% endfilter %}\n{{ prompt }}",
         ] {
             let (line, error) = StatusTemplate::new(template.into()).render(&snapshot, &[], 20);
             assert_eq!(error, None);
-            for value in ["steer 1 · next 2", "drafts=3", "interrupt=yes"] {
+            for value in ["steer 1 · next 2", "3 prompts parked", "interrupt=yes"] {
                 assert!(line.text().contains(value), "{}", line.text());
             }
         }

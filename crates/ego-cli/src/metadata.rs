@@ -86,6 +86,14 @@ fn execute_inner(args: &SessionMetadataArgs, out: &Stdout) -> Result<(), RunTerm
                         ceilings,
                     )
                 }
+                GoalOperation::Resume => metadata.resume_goal(&opened.writer, expected),
+                GoalOperation::Stop => metadata.transition_goal(
+                    &opened.writer,
+                    expected,
+                    GoalTransition::Cancelled {
+                        cancelled_by: GoalOwner::Operator,
+                    },
+                ),
                 GoalOperation::Achieve => metadata.transition_goal(
                     &opened.writer,
                     expected,
@@ -101,11 +109,6 @@ fn execute_inner(args: &SessionMetadataArgs, out: &Stdout) -> Result<(), RunTerm
                         reason: reason.clone(),
                     },
                 ),
-                GoalOperation::Extend(turns) => metadata.transition_goal(
-                    &opened.writer,
-                    expected,
-                    GoalTransition::AllowanceExtended { turns: *turns },
-                ),
                 GoalOperation::Show => unreachable!(),
             };
             match changed {
@@ -120,6 +123,46 @@ fn execute_inner(args: &SessionMetadataArgs, out: &Stdout) -> Result<(), RunTerm
     Ok(())
 }
 
+/// Native stop changes only goal continuation, not the current turn or worklist.
+pub(crate) fn stop_interactive_goal(
+    journal: &SharedJournal<'_>,
+    emit: &mut impl FnMut(&str),
+) -> Result<(), LifecycleError> {
+    let current = journal
+        .inspect(|state| state.goal.clone())
+        .map_err(|error| LifecycleError::Store(error.into()))?;
+    let Some(goal) = current else {
+        emit(&goal_text(None));
+        return Ok(());
+    };
+    if goal.state != GoalState::Active && goal.state != GoalState::Cancelled {
+        emit(&goal_text(Some(&goal)));
+        return Ok(());
+    }
+    let goal = journal
+        .cancel_goal(
+            ego_core::event::id::TurnId::new(),
+            goal.id,
+            GoalOwner::Operator,
+        )
+        .map_err(|error| LifecycleError::Store(error.into()))??;
+    emit(&goal_text(Some(&goal)));
+    Ok(())
+}
+
+pub(crate) fn inspection_text(
+    state: &ego_core::state::SessionState,
+    operation: &SessionMetadataOperation,
+) -> Option<String> {
+    match operation {
+        SessionMetadataOperation::Name(NameOperation::Show) => {
+            Some(name_text_from_title(state.title.as_deref()))
+        }
+        SessionMetadataOperation::Goal(GoalOperation::Show) => Some(goal_text(state.goal.as_ref())),
+        _ => None,
+    }
+}
+
 pub(crate) fn execute_interactive<S>(
     metadata: &SessionMetadata<S>,
     append: &dyn LeasedLifecycleAppend,
@@ -131,6 +174,12 @@ pub(crate) fn execute_interactive<S>(
 where
     S: SessionLifecycleStore,
 {
+    if matches!(
+        operation,
+        SessionMetadataOperation::Goal(GoalOperation::Stop)
+    ) {
+        return stop_interactive_goal(journal, emit);
+    }
     let current = journal
         .inspect(Clone::clone)
         .map_err(|error| LifecycleError::Store(error.into()))?;
@@ -164,6 +213,8 @@ where
                     GoalOwner::Operator,
                     ceilings.clone(),
                 ),
+                GoalOperation::Resume => metadata.resume_goal(append, expected),
+                GoalOperation::Stop => unreachable!("native stop uses the shared journal"),
                 GoalOperation::Achieve => metadata.transition_goal(
                     append,
                     expected,
@@ -179,16 +230,16 @@ where
                         reason: reason.clone(),
                     },
                 ),
-                GoalOperation::Extend(turns) => metadata.transition_goal(
-                    append,
-                    expected,
-                    GoalTransition::AllowanceExtended { turns: *turns },
-                ),
                 GoalOperation::Show => unreachable!(),
             };
             changed.map(|changed| {
                 emit_publication_warning(changed.publication.as_ref(), emit);
-                emit(&goal_text(Some(&changed.value)));
+                // An accepted `/goal <objective>` starts its turn at once, and the
+                // output renderer confirms the new goal on that turn's first event;
+                // a second line here would confirm the same objective twice.
+                if !matches!(operation, GoalOperation::Set(_)) {
+                    emit(&goal_text(Some(&changed.value)));
+                }
             })
         }
     };
@@ -377,6 +428,7 @@ fn goal_text(goal: Option<&GoalRecord>) -> String {
             _ => format!("goal active: {}", goal.objective),
         },
         GoalState::Achieved => format!("goal achieved: {}", goal.objective),
+        GoalState::Cancelled => format!("goal cancelled: {}", goal.objective),
         GoalState::Blocked => format!(
             "goal blocked: {} ({})",
             goal.objective,
@@ -393,7 +445,7 @@ fn render_machine(value: &impl Serialize, out: &Stdout) {
 }
 
 #[cfg(test)]
-mod interactive_metadata_tests {
+mod interactive_metadata_085_tests {
     use super::*;
     use ego_core::event::domain::EventKind;
     use ego_core::event::id::{Producer, Seq, TurnId};
@@ -410,9 +462,9 @@ mod interactive_metadata_tests {
         }
     }
 
-    /// Catches: interactive extension saves the allowance but leaves the live journal exhausted.
+    /// Catches: replacing a capped goal carries its old allowance into the new identity.
     #[test]
-    fn goal_extension_refreshes_interactive_journal_without_replacing_goal() {
+    fn goal_replacement_resets_interactive_goal_allowance() {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let store = Arc::new(JsonlStore::new(
@@ -465,18 +517,131 @@ mod interactive_metadata_tests {
             &metadata,
             &journal,
             &shared,
-            &SessionMetadataOperation::Goal(GoalOperation::Extend(2)),
+            &SessionMetadataOperation::Goal(GoalOperation::Set("new objective".into())),
             &ceilings,
             &mut |_| {},
         )
         .unwrap();
         let goal = shared.inspect(|state| state.goal.clone().unwrap()).unwrap();
-        assert_eq!(goal.id, original.id);
-        assert_eq!(goal.created_seq, original.created_seq);
-        assert_eq!(goal.continuation_budget, Some(3));
-        assert_eq!(goal.continuation_turns, 1);
+        assert_ne!(goal.id, original.id);
+        assert_eq!(goal.objective, "new objective");
+        assert_eq!(goal.continuation_budget, None);
+        assert_eq!(goal.continuation_turns, 0);
         assert_eq!(goal.check_stop, None);
         assert_eq!(metadata.goal(id).unwrap().unwrap(), goal);
+    }
+
+    // Catches: resume refills an operator/live goal, resets automatic identity or fails to persist the new allowance.
+    #[test]
+    fn automatic_goal_resume_preserves_outcome_and_only_grants_an_exhausted_goal_twenty_more_turns()
+    {
+        for (owner, turns, terminal) in [
+            (GoalOwner::Automated, 19, false),
+            (GoalOwner::Automated, 20, false),
+            (GoalOwner::Operator, 20, false),
+            (GoalOwner::Automated, 20, true),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let store = Arc::new(JsonlStore::new(
+                root.path(),
+                workspace.path(),
+                Box::new(OsIo),
+            ));
+            let id = SessionId::new();
+            store
+                .publish_empty_session(id, workspace.path(), Timestamp::from_millis(1))
+                .unwrap();
+            let opened = crate::session::open(store.as_ref(), &id, &FixedClock).unwrap();
+            let metadata = SessionMetadata::new(Arc::clone(&store), Arc::new(FixedClock));
+            let journal = LeasedSharedJournal::new(
+                &opened.writer,
+                &FixedClock,
+                &NullSink,
+                Producer::Main,
+                opened.state.clone(),
+            );
+            let shared = journal.shared();
+            let ceilings = ego_core::ceiling::Ceilings::default();
+            let changed = metadata
+                .set_goal(
+                    &journal,
+                    shared.inspect(|state| state.last_seq).unwrap(),
+                    "ship and verify".into(),
+                    owner,
+                    ceilings.clone(),
+                )
+                .unwrap();
+            let original = changed.value;
+            for _ in 0..turns {
+                shared
+                    .append(
+                        TurnId::new(),
+                        None,
+                        None,
+                        EventKind::GoalContinuation {
+                            id: original.id,
+                            text: "continue".into(),
+                        },
+                    )
+                    .unwrap();
+            }
+            if terminal {
+                metadata
+                    .transition_goal(
+                        &journal,
+                        shared.inspect(|state| state.last_seq).unwrap(),
+                        GoalTransition::Achieved {
+                            attested_by: GoalOwner::Operator,
+                            evidence: None,
+                        },
+                    )
+                    .unwrap();
+            }
+            let before = shared.inspect(Clone::clone).unwrap();
+            let result = execute_interactive(
+                &metadata,
+                &journal,
+                &shared,
+                &SessionMetadataOperation::Goal(GoalOperation::Resume),
+                &ceilings,
+                &mut |_| {},
+            );
+            let goal = shared.inspect(|state| state.goal.clone().unwrap()).unwrap();
+            if owner == GoalOwner::Automated && turns == 20 && !terminal {
+                result.unwrap();
+                assert_eq!(goal.id, original.id);
+                assert_eq!(goal.owner, GoalOwner::Automated);
+                assert_eq!(goal.objective, "ship and verify");
+                assert_eq!(goal.continuation_turns, 20);
+                assert_eq!(goal.continuation_budget, Some(40));
+                assert_eq!(goal.state, ego_core::goal::GoalState::Active);
+                assert!(
+                    execute_interactive(
+                        &metadata,
+                        &journal,
+                        &shared,
+                        &SessionMetadataOperation::Goal(GoalOperation::Resume),
+                        &ceilings,
+                        &mut |_| {}
+                    )
+                    .is_err()
+                );
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(LifecycleError::Goal(
+                        ego_core::goal::GoalRefusal::AutomaticNotPaused
+                    ))
+                ));
+                assert_eq!(
+                    shared.inspect(|state| state.last_seq).unwrap(),
+                    before.last_seq
+                );
+                assert_eq!(Some(goal.clone()), before.goal);
+            }
+            assert_eq!(metadata.goal(id).unwrap(), Some(goal));
+        }
     }
 
     /// Catches: metadata reports /3 although the durable goal blocks on observation five.
@@ -534,7 +699,7 @@ mod interactive_metadata_tests {
     }
 
     #[test]
-    fn interactive_metadata_runtime_epoch_persists_and_replays() {
+    fn interactive_metadata_085_runtime_epoch_persists_and_replays() {
         let root = tempfile::tempdir().unwrap();
         let workspace = tempfile::tempdir().unwrap();
         let store = Arc::new(JsonlStore::new(
@@ -592,7 +757,11 @@ mod interactive_metadata_tests {
             &mut |n| notices.push(n.to_owned()),
         )
         .unwrap();
-        assert_eq!(notices.last().unwrap(), "goal active: ship cleanly");
+        assert_eq!(
+            notices,
+            ["name: project alpha"],
+            "the renderer confirms an accepted goal; the host must not repeat it"
+        );
         shared
             .append(
                 TurnId::new(),

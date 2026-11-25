@@ -67,7 +67,10 @@ impl Perimeter {
                 .map(|root| PerimeterRoot {
                     path: root.path().as_path().to_path_buf(),
                     access: root.access(),
-                    source: origin(effective.roots_source),
+                    source: root.derived().map_or_else(
+                        || origin(effective.roots_source),
+                        |derived| derived.as_str().to_owned(),
+                    ),
                 })
                 .chain(
                     confinement
@@ -143,6 +146,11 @@ impl Perimeter {
             .then_some("the selected backend ran no capability probes");
         self.probe_evidence = probe_evidence.cloned();
         self
+    }
+
+    /// Whether the admitted session forbids non-loopback egress.
+    pub fn offline(&self) -> bool {
+        self.network == "offline"
     }
 
     /// Completed behavioral guarantees, including an empty measured set.

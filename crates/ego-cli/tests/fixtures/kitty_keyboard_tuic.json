@@ -1,0 +1,13 @@
+{
+  "source": "TUICommander v2.0.0 live PTY e0e1652c-183c-4f13-b72c-27da5faf40fa, 2026-11-01",
+  "query_hex": "1b5b3f751b5b63",
+  "disabled_flags": "\u001b[?0u",
+  "enabled_flags": "\u001b[?1u",
+  "device_attributes": "\u001b[?6c",
+  "raw_capture_hex": {
+    "before": "1b5b3f30751b5b3f3663",
+    "enabled": "1b5b3f31751b5b3f3663",
+    "restored": "1b5b3f31751b5b3f3663"
+  },
+  "note": "The host reported flags=1 after explicit CSI <1u pop. This is recorded, not accepted as correct stack restoration. The regression oracle requires balanced application pushes and pops."
+}

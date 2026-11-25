@@ -1,0 +1,9 @@
+: schema-derived from the OpenAI Responses reference, reasoning guide and streaming guide (read 2026-09-07)
+: provider openai, ego 0.1.0
+data: {"type":"response.reasoning_text.delta","delta":"check"}
+
+data: {"type":"response.output_text.delta","delta":"ok"}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":10,"input_tokens_details":{"cached_tokens":3,"cache_write_tokens":2},"output_tokens":3,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":13}}}
+
+data: [DONE]

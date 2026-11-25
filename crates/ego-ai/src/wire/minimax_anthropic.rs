@@ -16,6 +16,12 @@ use super::{RequestRefused, RequestTarget, WireFormat, request_has_images};
 pub struct MiniMaxAnthropic;
 
 impl WireFormat for MiniMaxAnthropic {
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        let mut policy = super::cache::policy(req, false, false);
+        policy.refresh_on_read = false;
+        policy
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,

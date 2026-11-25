@@ -2,158 +2,191 @@
 
 **Choose the model. Keep the workspace, history, and rules.**
 
-εgo is a Rust coding-agent harness for your terminal, scripts, and ACP clients.
-It gives local models, hosted APIs, and supported subscription providers the same
-file and process tools, durable sessions, and permission controls. The model
-proposes an action; the harness decides whether and where it can run.
+εgo is a coding agent for your terminal, your scripts, and ACP-capable editors and
+hosts, written in Rust. It gives local models, hosted APIs, and supported
+subscription logins the same file and process tools, durable sessions, and
+permission controls. The model proposes an action; εgo decides whether, and where,
+it may run.
 
-## Control more than the prompt
+Website: <https://ego.tuicommander.com> · User guide:
+<https://ego.tuicommander.com/docs/>
 
-### Separate permission from confinement
+## Why εgo
 
-Review a repository without permitting edits, and select read-only operating-system
-confinement independently:
+- **Every action is checked before it runs.** Permission modes decide what is
+  allowed; operating-system confinement decides what the process can reach. When
+  the host cannot provide a requested guarantee, εgo refuses instead of quietly
+  weakening it.
+- **Token economy built in.** εgo keeps the prompt prefix cacheable, shows how long
+  the cache stays warm, folds noisy build output, pages large output on demand, and
+  lets subagents start from the parent's cached context. Compacting an idle session
+  before its cache expires is available as an option.
+- **Sessions you can audit, branch, and undo.** Every session is a durable log. Fork
+  at a completed turn, rewind files and conversation together, and restore Git
+  checkpoints that refuse to overwrite edits made outside εgo.
+- **A contract for scripts and CI.** Headless runs start untrusted, return
+  schema-validated JSON, stop at token, cost, turn, or time limits, retry only when
+  that is safe, and exit with codes that say why. Agent files and goals turn a
+  prompt into a repeatable job.
+- **One binary for every host and any model.** The same session machinery serves the
+  terminal, scripts, ACP editors, and MCP clients, across local, hosted, and
+  subscription providers.
 
-```sh
-ego --mode plan --sandbox ro "Explain the parser and identify missing tests"
-```
+## Install
 
-Permission modes control which effects are allowed. Confinement controls the
-filesystem boundary. Even `yolo` does not remove a sandbox. Inspect the admitted
-boundary with `/config perimeter`, and inspect resolved settings with
-`ego config ls --effective`.
+Releases are published on
+[GitHub Releases](https://github.com/sstraus/ego/releases). `ego --version` prints
+the version you have; the [changelog](https://ego.tuicommander.com/docs/changelog.html)
+lists what each release changed.
 
-macOS uses Seatbelt; Linux uses its supported confinement backends. If the host
-cannot provide a requested guarantee, ego refuses rather than weakening it.
-Windows supports execution and host protocols, but not `workspace`, `ro`, or
-`--offline` confinement. See [permissions](docs/guides/permissions.md).
-
-### Keep work beyond one conversation
-
-Interactive and headless runs use the same durable session store. Reopen work,
-branch a conversation, or export it without copying a terminal buffer:
-
-```sh
-ego ls
-ego resume SESSION_ID
-ego fork SESSION_ID
-ego export SESSION_ID --format md
-```
-
-`ego compact` creates a compacted successor when context grows. Builtin file
-writes and edits in Git worktrees also create session-owned checkpoints;
-`ego checkpoint SESSION_ID preview` lists recovery points. Restore refuses
-conflicting external changes instead of overwriting them.
-
-### Give a task its own checkout
+### Homebrew (macOS and Linux)
 
 ```sh
-ego --worktree feat/parser-check "Review the parser and propose a focused fix"
+brew install sstraus/tap/ego
 ```
 
-The branch must be new. The checkout stays after exit, so unfinished work does
-not disappear with the process. Use `ego worktree show RECEIPT_UUID` to inspect
-it and `ego worktree cleanup RECEIPT_UUID` to request safe removal. Cleanup
-refuses dirty or unmerged work; creating a worktree does not grant extra tool
-authority. See [worktrees](docs/guides/worktrees.md).
+Homebrew installs Bash, Zsh, and Fish completions. PowerShell and Elvish scripts are
+in `$(brew --prefix ego)/share/ego/completions/`.
 
-### Change providers without changing the workflow
+### Direct download
 
-Use `ego models` to inspect the shared model catalogue, capabilities, and available
-provider profiles. Select local Ollama models, hosted APIs, or supported
-subscription logins with the same `-m provider/model` option. Unknown or
-unsupported capabilities are not silently assumed.
+Each release provides a plain executable and a `.sha256` file per platform:
 
-With a running [Ollama](https://ollama.com) daemon:
+| Platform | Asset |
+| --- | --- |
+| macOS Apple Silicon | `ego-macos-arm64` |
+| macOS Intel | `ego-macos-x64` |
+| Linux x86_64 | `ego-linux-x64` |
+| Linux ARM64 | `ego-linux-arm64` |
+| Windows x86_64 | `ego-windows-x64.exe` |
+
+Linux binaries need glibc 2.35 or newer. Each release also has target-triple
+archives (`.tar.gz`, or `.zip` on Windows) that include shell completions, and a
+combined `SHA256SUMS` file. On Apple Silicon, for example:
+
+```sh
+asset=ego-macos-arm64
+base=https://github.com/sstraus/ego/releases/latest/download
+curl -fLO "$base/$asset"
+curl -fLO "$base/$asset.sha256"
+shasum -a 256 -c "$asset.sha256"
+mkdir -p "$HOME/.local/bin"
+install -m 755 "$asset" "$HOME/.local/bin/ego"
+```
+
+On Linux, use the matching asset and `sha256sum -c`. On Windows, compare the output
+of `Get-FileHash -Algorithm SHA256` with the `.sha256` file, rename the download to
+`ego.exe`, and place it in a directory on `PATH`.
+
+### From source
+
+You need Rust 1.95 or newer and the complete checkout (patched dependencies live in
+`vendor/`):
+
+```sh
+cargo install --locked --path crates/ego-cli
+```
+
+Installing writes only the executable. εgo creates `~/.ego` (or `$EGO_HOME`) the
+first time it saves a setting, a login, or a session.
+
+## First run
+
+1. Make one provider usable: export its API key (for example `ANTHROPIC_API_KEY` or
+   `OPENAI_API_KEY`), log in to a supported subscription with
+   `ego auth login PROVIDER`, or start a local [Ollama](https://ollama.com) daemon.
+   εgo does not read `.env` files; keep keys out of project files.
+2. Run `ego setup` to see which providers are ready, or run `ego` in a repository.
+   With exactly one usable provider, εgo selects its default model; otherwise it
+   opens the model picker.
+
+With Ollama (use a model your daemon lists):
 
 ```sh
 ollama pull qwen3
 ego models --provider ollama --refresh
-ego -m ollama/qwen3 --thinking off "Explain the main entry points"
+ego -m ollama/qwen3 --thinking off "Explain the main entry points in this repository"
 ```
 
-Use a model listed by your daemon. For hosted APIs and subscription login, see
-[providers](docs/guides/providers.md); keep credentials out of project files.
+## Three ways to run it
 
-### Use the same harness from a host or a pipeline
+| Entry point | Use it for |
+| --- | --- |
+| `ego` or `ego PROMPT` | Interactive conversation with permission prompts and session controls |
+| `ego run PROMPT` | One headless run with text, JSON, or live JSONL output |
+| `ego acp` | Agent Client Protocol over stdio, for an editor or a host such as TUICommander |
 
-Configure an ACP client to launch `ego acp`. The host supplies the conversation
-and permission UI; ego supplies the session and execution machinery. Connect
-external tools through `ego mcp`, or expose scoped runs to an MCP client through
-`ego mcp-server`. See [ACP and MCP](docs/integrations/README.md).
-
-For scripts, select structured output and explicit run bounds:
+A bounded script step:
 
 ```sh
-printf '%s\n' 'Summarize what a coding harness does in one sentence.' | \
+printf '%s\n' 'Summarize what a coding agent harness does in one sentence.' | \
   ego run -m ollama/qwen3 --thinking off --no-tools \
     --max-turns 1 --timeout 30s --output json -
 ```
 
-Headless runs never ask for trust or permissions and start bare and untrusted by
-default. JSON and live JSONL output, schema-validated answers, token or money
-budgets, turn limits, and timeouts let a caller define the run contract. See
-[automation](docs/guides/automation.md) before enabling effects.
+Headless runs never prompt. They start untrusted, without project configuration or
+ambient instructions. On Windows, add `--sandbox off` (see Platforms).
+`ego mcp-server` offers scoped runs to MCP clients. Run `ego --help` for every command.
 
-## Every command
+The remaining command families are:
 
-Keep the whole workflow in one harness. See [CLI.md](CLI.md) for arguments and options.
+| Task | Commands |
+| --- | --- |
+| Continue or branch a session | `ego resume`, its alias `ego continue`, `ego fork`, `ego rewind` |
+| Inspect or maintain sessions | `ego ls`, `ego rm`, `ego compact`, `ego export`, `ego checkpoint`, `ego usage` |
+| Configure providers and tools | `ego auth`, `ego models`, `ego hooks`, `ego mcp` |
+| Configure policy and defaults | `ego config`, `ego roots`, `ego rules`, `ego setup`, `ego doctor` |
+| Manage checkouts and integrations | `ego worktree`, `ego build-recipes`, `ego a2a` |
 
-- `ego run` — Give scripts a bounded, non-interactive agent run.
-- `ego resume` — Reopen a durable session without losing its history.
-- `ego continue` — Pick up an existing session with the resume alias.
-- `ego fork` — Explore another direction without rewriting the original session.
-- `ego rm` — Remove sessions you no longer need.
-- `ego compact` — Carry the useful context into a compacted successor.
-- `ego export` — Take session history into your own reports and tools.
-- `ego ls` — Find the sessions attached to your work.
-- `ego usage` — See where tokens and costs go.
-- `ego models` — Find models and provider profiles for the next task.
-- `ego hooks` — Inspect the hooks that extend your workflow.
-- `ego doctor` — Diagnose your installation before starting work.
-- `ego checkpoint` — Inspect recovery points and restore session-owned edits.
-- `ego setup` — Configure saved settings through a staged screen.
-- `ego acp` — Put the harness behind an ACP client's conversation UI.
-- `ego a2a` — Expose local agent discovery over the A2A protocol.
-- `ego auth` — Manage supported provider logins.
-- `ego mcp` — Connect and manage external MCP tools.
-- `ego config` — Inspect and change the settings that shape your runs.
-- `ego roots` — Manage the filesystem roots available to the harness.
-- `ego rules` — Inspect and manage tool permission rules.
-- `ego mcp-server` — Expose scoped agent runs to an MCP client.
-- `ego worktree` — Inspect retained checkouts and request safe cleanup.
+## What you get
 
-## Build from source
+- **Permission modes** `plan`, `default`, `auto`, `accept-edits`, and `yolo`, chosen
+  with `--mode` or `/mode`, or cycled with Shift+Tab. Confinement is separate
+  (`--sandbox ro|workspace|adaptive|off`): even `yolo` keeps the sandbox.
+  `/config perimeter` shows the effective boundary.
+- **Sessions**: `ego ls`, `resume`, `fork`, `rewind`, `compact`, `export`, and
+  `checkpoint`. Sessions nobody opened or wrote for 30 days are deleted
+  automatically; change this with `sessions.retention_days`.
+- **Isolated checkouts**: `ego --worktree BRANCH "..."` works in a retained Git
+  worktree; `ego worktree cleanup` removes it only when it is clean and merged.
+- **Providers**: Ollama, OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Z.ai, Kimi,
+  Amazon Bedrock, Google Cloud Vertex AI, and several subscription logins, all
+  selected with `-m provider/model`. Keep several named accounts per provider and
+  pick one with `--connection`. Capabilities a model lacks fail explicitly.
+- **Tools**: read, search, edit, write, and execute; web fetch and web search; image
+  input; parallel subagents; session goals; optional workspace memory and
+  language-server lookups.
+- **Integrations**: MCP servers (including OAuth login), ACP clients, A2A discovery,
+  skills, and hooks.
+- **Inspection**: `ego doctor`, `ego usage`, `ego config`, and `ego models`.
 
-Use Rust 1.95 or newer and keep the complete checkout, including `vendor/`:
+## Platforms
 
-```sh
-git clone https://github.com/sstraus/ego.git
-cd ego
-cargo build --locked --bin ego
-./target/debug/ego --version
-./target/debug/ego --help
-```
-
-On Windows, run `target\debug\ego.exe` instead. See the
-[installation and source-build guide](docs/getting-started/README.md) for an
-optimized local installation and optional binary downloads. Binary releases are
-not guaranteed to be available; source compilation does not depend on them.
-
-This source distribution includes runtime code and user documentation, not the
-development test suite or build automation. Build the `ego` binary target;
-`cargo test` and `--all-targets` builds are not supported by this distribution.
+macOS confines with Seatbelt and defaults to the `adaptive` sandbox; Linux uses
+Landlock and namespace backends and defaults to `workspace`. Windows has no
+filesystem confinement: the `ro`, `workspace`, and `adaptive` sandboxes and
+`--offline` are refused, and non-interactive starts need `--sandbox off`. An
+interactive start asks once whether to continue unconfined. See
+[troubleshooting](https://ego.tuicommander.com/docs/guides/troubleshooting.html).
 
 ## Documentation
 
-- [User guide](docs/README.md)
-- [Getting started](docs/getting-started/README.md) and [interactive use](docs/guides/interactive.md)
-- [Sessions](docs/guides/sessions.md), [worktrees](docs/guides/worktrees.md), and [instructions and memory](docs/guides/memory.md)
-- [CLI reference](docs/reference/README.md) and [configuration](docs/reference/configuration.md)
-- [Permissions](docs/guides/permissions.md), [providers](docs/guides/providers.md), and [tools](docs/guides/tools.md)
-- [ACP, MCP, skills, and hooks](docs/integrations/README.md)
-- [Architecture overview](docs/architecture.md) and [third-party licenses](docs/THIRD_PARTY_LICENSES.md)
+- [Getting started](https://ego.tuicommander.com/docs/getting-started/) and [concepts](https://ego.tuicommander.com/docs/concepts/)
+- [Interactive use](https://ego.tuicommander.com/docs/guides/interactive.html), [sessions](https://ego.tuicommander.com/docs/guides/sessions.html), [worktrees](https://ego.tuicommander.com/docs/guides/worktrees.html), and [automation](https://ego.tuicommander.com/docs/guides/automation.html)
+- [Providers](https://ego.tuicommander.com/docs/guides/providers.html), [permissions](https://ego.tuicommander.com/docs/guides/permissions.html), and [tools](https://ego.tuicommander.com/docs/guides/tools.html)
+- [Integrations](https://ego.tuicommander.com/docs/integrations/), the [CLI reference](https://ego.tuicommander.com/docs/reference/), and [configuration](https://ego.tuicommander.com/docs/reference/configuration.html)
+
+## Building from source
+
+```sh
+cargo build --release
+cargo test --workspace
+```
+
+The binary is `target/release/ego`. The user guide in `docs/` is an mdBook project.
 
 ## License
 
-εgo is licensed under [Apache-2.0](LICENSE).
+εgo is licensed under Apache-2.0 (see `LICENSE`). Releases up to and including 0.4.1
+were MIT-licensed. Vendored and third-party components keep their own licenses; see
+`docs/THIRD_PARTY_LICENSES.md`.

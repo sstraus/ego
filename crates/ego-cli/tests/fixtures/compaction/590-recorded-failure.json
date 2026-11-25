@@ -1,0 +1,248 @@
+{
+  "session": "01a154cb-516c-754d-82e9-a690fbfba29b",
+  "peer": "parity-2021",
+  "events": [
+    {
+      "env": {
+        "seq": 1654,
+        "id": "01a154de-9e12-72fe-a2e3-3a24c5c94d99",
+        "turn": "01a154cb-5200-700e-b57f-00d0811bd18d",
+        "item": null,
+        "parent": null,
+        "ts": 1792425238034,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "ContextWindowUpdated",
+        "used_tokens": 245356,
+        "provenance": "generation_boundary",
+        "window": 272000
+      }
+    },
+    {
+      "env": {
+        "seq": 1661,
+        "id": "01a154de-a371-7083-bf64-fcb897a7cf9c",
+        "turn": "01a154cb-5200-700e-b57f-00d0811bd18d",
+        "item": null,
+        "parent": null,
+        "ts": 1792425239409,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "Error",
+        "message": "Measured context pressure requires a clean-session compaction before continuing.",
+        "error_kind": "context_overflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1662,
+        "id": "01a154de-a372-70ac-96bd-c3e24d9a91b1",
+        "turn": "01a154cb-5200-700e-b57f-00d0811bd18d",
+        "item": null,
+        "parent": null,
+        "ts": 1792425239410,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": "ContextOverflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1663,
+        "id": "01a154de-a50d-73c0-acdc-3da0a92f5f3d",
+        "turn": "01a154cb-51ee-77d9-947e-f5a73d6c4f92",
+        "item": null,
+        "parent": null,
+        "ts": 1792425239821,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "HookLifecycleReached",
+        "occurrence": {
+          "lifecycle": "PreCompact",
+          "owner": {
+            "kind": "request",
+            "request": "01a154de-a50d-73c0-acdc-3d9f0f61b9ac"
+          }
+        },
+        "subject": {
+          "scope": "session"
+        },
+        "plan": []
+      }
+    },
+    {
+      "env": {
+        "seq": 1664,
+        "id": "01a154de-a537-727d-be85-8919bdfc7530",
+        "turn": "01a154de-a521-748c-9a40-6baf5a07692b",
+        "item": null,
+        "parent": null,
+        "ts": 1792425239863,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "GenerationStarted",
+        "attempt": {
+          "generation": "01a154de-a525-72d8-83c1-ac6ebe5de09e",
+          "attempt": "01a154de-a525-72d8-83c1-ac6f9cce232a"
+        },
+        "role": "compaction"
+      }
+    },
+    {
+      "env": {
+        "seq": 1665,
+        "id": "01a154df-c98b-7379-911f-bb233ab25340",
+        "turn": "01a154de-a521-748c-9a40-6baf5a07692b",
+        "item": null,
+        "parent": null,
+        "ts": 1792425314699,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "Error",
+        "message": "the response stream failed: HTTP response body failed",
+        "error_kind": "transient"
+      }
+    },
+    {
+      "env": {
+        "seq": 1667,
+        "id": "01a154df-c992-71b5-96f2-3739e3fee377",
+        "turn": "01a154de-a521-748c-9a40-6baf5a07692b",
+        "item": null,
+        "parent": null,
+        "ts": 1792425314706,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a154de-a525-72d8-83c1-ac6ebe5de09e",
+          "attempt": "01a154de-a525-72d8-83c1-ac6f9cce232a"
+        },
+        "outcome": {
+          "stop": "error",
+          "delivery": "possibly_sent",
+          "usage": "missing"
+        }
+      }
+    },
+    {
+      "env": {
+        "seq": 1668,
+        "id": "01a154df-c995-755a-aa0a-431263a1b642",
+        "turn": "01a154de-a521-748c-9a40-6baf5a07692b",
+        "item": null,
+        "parent": null,
+        "ts": 1792425314709,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": "Provider"
+      }
+    },
+    {
+      "env": {
+        "seq": 1670,
+        "id": "01a154df-c9d3-71f2-a7f2-04bba430412d",
+        "turn": "01a154df-c9c0-71d7-8182-8817bd917538",
+        "item": "01a154df-c9d3-71f2-a7f2-04ba0c7f3fa8",
+        "parent": null,
+        "ts": 1792425314771,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "UserPrompt",
+        "text": "[TUIC] child agent 115c2f01 is now idle"
+      }
+    },
+    {
+      "env": {
+        "seq": 1672,
+        "id": "01a154df-c9e2-7382-935e-f48c0260d9b2",
+        "turn": "01a154df-c9c0-71d7-8182-8817bd917538",
+        "item": null,
+        "parent": null,
+        "ts": 1792425314786,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "Error",
+        "message": "Measured context pressure requires a clean-session compaction before continuing.",
+        "error_kind": "context_overflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1673,
+        "id": "01a154df-c9e2-7382-935e-f48d24912061",
+        "turn": "01a154df-c9c0-71d7-8182-8817bd917538",
+        "item": null,
+        "parent": null,
+        "ts": 1792425314786,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": "ContextOverflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1750,
+        "id": "01a154f9-f640-716c-98e9-2d4820b0b41a",
+        "turn": "01a154f9-f616-7406-b3bb-24ae11c6f8ee",
+        "item": "01a154f9-f640-716c-98e9-2d479d4fcfa3",
+        "parent": null,
+        "ts": 1792427030080,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "UserPrompt",
+        "text": "COORDINATOR: Boss has the CPU at 100%: your idle parity-grok PID 66436 burns 68% CPU. Close every parity-* session and the 'Marker output task' session you spawned as soon as you no longer need them, at the latest before your RESULT; close parity-grok now if its cell is recorded.\nREPLY RULE: no acknowledgement; reply only with a question, a BLOCKED or your RESULT, by agent send AND the same text in a new file ~/Gits/.tmp/results/<your-name>-$(date +%s).md. Before a RESULT for a story, run ~/Gits/personal/orchestrator/tools/agents/story-close.sh --check <repo> <story-id> and fix the criteria it refuses."
+      }
+    },
+    {
+      "env": {
+        "seq": 1752,
+        "id": "01a154f9-f651-7154-862d-e388e1615a4c",
+        "turn": "01a154f9-f616-7406-b3bb-24ae11c6f8ee",
+        "item": null,
+        "parent": null,
+        "ts": 1792427030097,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "Error",
+        "message": "Measured context pressure requires a clean-session compaction before continuing.",
+        "error_kind": "context_overflow"
+      }
+    },
+    {
+      "env": {
+        "seq": 1753,
+        "id": "01a154f9-f653-7504-8b9d-39711caccc71",
+        "turn": "01a154f9-f616-7406-b3bb-24ae11c6f8ee",
+        "item": null,
+        "parent": null,
+        "ts": 1792427030099,
+        "producer": "Main"
+      },
+      "kind": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": "ContextOverflow"
+      }
+    }
+  ]
+}

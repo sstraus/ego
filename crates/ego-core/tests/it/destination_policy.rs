@@ -1,0 +1,208 @@
+//! Contract tests for the shared destination-policy diagnostic, without network effects.
+
+use crate::support;
+use ego_core::config::{ConfigLayer, Effective, Source, Trust, resolve, resolve_selected};
+use ego_core::health::perimeter::Perimeter;
+use ego_core::permit::{CanonPath, Confinement, RunConfinement};
+
+fn view(effective: &Effective, offline: bool) -> Perimeter {
+    let workspace = std::env::current_dir().unwrap().canonicalize().unwrap();
+    let confinement =
+        RunConfinement::new(Confinement::Off, offline, CanonPath::new(workspace)).unwrap();
+    Perimeter::session(&confinement, effective, &[])
+}
+
+// Catches: filtering permission declarations loses immutable deny authority or invents a child firewall.
+#[test]
+fn destination_policy_preserves_rule_authority_and_transport_boundaries() {
+    let layers = [
+        ConfigLayer::parse(Source::System, "[permissions]\ndeny=['net(BLOCKED.test:443)']").unwrap(),
+        ConfigLayer::parse(Source::User, "[permissions]\nallow=['net(API.example.test:443)', 'read(src/**)']\ndeny=['net(blocked.test:443)']").unwrap(),
+    ];
+    let effective = resolve(&layers, Trust::Untrusted, None).unwrap();
+    let perimeter = view(&effective, false);
+    let json = serde_json::to_value(&perimeter).unwrap();
+    let policy = &json["destination_policy"];
+    assert_eq!(json["network"], "online");
+    let rules = policy["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 14);
+    assert_eq!(policy["rules"][0]["effect"], "deny");
+    assert_eq!(policy["rules"][0]["rule"], "net(blocked.test:443)");
+    assert_eq!(policy["rules"][0]["source"], "system");
+    assert_eq!(policy["rules"][0]["also"], serde_json::json!(["user"]));
+    let user_allow = rules
+        .iter()
+        .find(|rule| rule["rule"] == "net(api.example.test:443)")
+        .unwrap();
+    assert_eq!(user_allow["effect"], "allow");
+    assert_eq!(user_allow["source"], "user");
+    assert_eq!(
+        rules
+            .iter()
+            .filter(|rule| rule["source"] == "default")
+            .count(),
+        12
+    );
+    let text = perimeter.text();
+    for expected in [
+        "destination_deny\tnet(blocked.test:443)\tsystem; also user",
+        "destination_allow\tnet(api.example.test:443)\tuser",
+        "allow rules are not a default-deny firewall",
+        "net rules do not filter child sockets",
+        "one fresh DNS result",
+        "redirect destination needs fresh policy authorization",
+        "net grants do not bypass public web checks",
+        "Linux offline needs a supported namespace backend",
+    ] {
+        assert!(text.contains(expected), "missing {expected:?}: {text}");
+    }
+    assert!(!text.contains("read(src/**)"));
+}
+
+// Catches: inspection shows discarded project grants or base rules replaced by the selected profile.
+#[test]
+fn destination_policy_uses_only_admitted_selected_profile_rules() {
+    let layers = [
+        ConfigLayer::parse(Source::User, "[permissions]\nallow=['net(base.test)']\n[profile.docs.permissions]\nallow=['net(docs.test:443)']").unwrap(),
+        ConfigLayer::parse(Source::Project, "[permissions]\nallow=['net(untrusted.test)']").unwrap(),
+    ];
+    let effective =
+        resolve_selected(&layers, Trust::Untrusted, Some(("docs", Source::Flags))).unwrap();
+    let perimeter = view(&effective, false);
+    let json = serde_json::to_value(&perimeter).unwrap();
+    assert_eq!(json["destination_policy"]["profile"], "docs");
+    let rules = json["destination_policy"]["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 13);
+    assert!(
+        rules
+            .iter()
+            .any(|rule| rule["rule"] == "net(docs.test:443)" && rule["source"] == "user")
+    );
+    assert_eq!(
+        rules
+            .iter()
+            .filter(|rule| rule["source"] == "default")
+            .count(),
+        12
+    );
+    assert!(perimeter.text().contains("destination_profile\tdocs"));
+    assert!(!perimeter.text().contains("untrusted.test"));
+    assert!(!perimeter.text().contains("base.test"));
+}
+
+// Catches: an allow declaration overrides invocation offline, or an inspection claims measured isolation.
+#[test]
+fn destination_policy_does_not_turn_declarations_into_offline_capabilities() {
+    let effective = resolve(
+        &[ConfigLayer::parse(Source::User, "[permissions]\nallow=['net(*)']").unwrap()],
+        Trust::Untrusted,
+        None,
+    )
+    .unwrap();
+    let perimeter = view(&effective, true);
+    let json = serde_json::to_value(&perimeter).unwrap();
+    assert_eq!(json["network"], "offline");
+    assert_eq!(json["capabilities"], "not_checked");
+    assert_eq!(json["destination_policy"]["rules"][0]["rule"], "net(*)");
+    assert!(perimeter.measured_capabilities().is_none());
+    assert!(perimeter.text().contains("network\toffline\tinvocation"));
+    assert!(
+        perimeter
+            .text()
+            .contains("unmeasured capabilities are not a guarantee")
+    );
+}
+
+// Catches: built-in host grants are hidden or mislabeled as a default-deny allowlist.
+#[test]
+fn destination_policy_without_rules_reports_mode_dependent_coverage() {
+    let effective = resolve(&[], Trust::Untrusted, None).unwrap();
+    let perimeter = view(&effective, false);
+    let json = serde_json::to_value(&perimeter).unwrap();
+    let rules = json["destination_policy"]["rules"].as_array().unwrap();
+    assert_eq!(rules.len(), 12);
+    assert!(
+        rules
+            .iter()
+            .all(|rule| rule["effect"] == "allow" && rule["source"] == "default")
+    );
+    assert!(
+        rules
+            .iter()
+            .any(|rule| rule["rule"] == "net(crates.io:443)")
+    );
+    assert!(
+        perimeter
+            .text()
+            .contains("destination_allow\tnet(crates.io:443)\tdefault")
+    );
+    assert!(
+        perimeter
+            .text()
+            .contains("mode and approval policy decide uncovered destinations")
+    );
+}
+
+// Catches: diagnostics label a derived path writable despite an equal or
+// nested explicit read restriction, or hide its configured source.
+#[test]
+fn derived_perimeter_reports_effective_read_restrictions() {
+    use ego_core::permit::{AdaptivePerimeter, ProfileRoot, RootAccess};
+    let effective = resolve(
+        &[ConfigLayer::parse(Source::User, "roots=[]").unwrap()],
+        Trust::Untrusted,
+        None,
+    )
+    .unwrap();
+    let workspace = CanonPath::new(support::native("/work"));
+    let derived = CanonPath::new("/main/.git");
+    for (read, expected) in [("/main", "read-write"), ("/main/.git", "read")] {
+        let roots = vec![ProfileRoot::new(CanonPath::new(read), RootAccess::Read)];
+        let confinement = RunConfinement::new(Confinement::Adaptive, false, workspace.clone())
+            .unwrap()
+            .with_adaptive_perimeter(AdaptivePerimeter {
+                home: CanonPath::new("/home"),
+                writable: vec![derived.clone()],
+                credentials: vec![],
+                controls: vec![],
+            });
+        let json =
+            serde_json::to_value(Perimeter::session(&confinement, &effective, &roots)).unwrap();
+        let root = &json["roots"][1];
+        assert_eq!(root["access"], expected);
+        assert_eq!(
+            root["source"],
+            if expected == "read" {
+                "user"
+            } else {
+                "derived"
+            }
+        );
+    }
+}
+
+// Catches: a same-repository root is reported as a configured root, hiding that
+// ego derived it.
+#[test]
+fn same_repository_roots_report_their_derived_source() {
+    use ego_core::permit::{DerivedRoot, ProfileRoot, RootAccess};
+    let effective = resolve(
+        &[ConfigLayer::parse(Source::User, "roots=[]").unwrap()],
+        Trust::Untrusted,
+        None,
+    )
+    .unwrap();
+    let confinement = RunConfinement::new(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(support::native("/work")),
+    )
+    .unwrap();
+    let roots = vec![
+        ProfileRoot::new(CanonPath::new("/main"), RootAccess::ReadWrite)
+            .derived_from(DerivedRoot::SameRepository),
+    ];
+    let json = serde_json::to_value(Perimeter::session(&confinement, &effective, &roots)).unwrap();
+    assert_eq!(json["roots"][0]["source"], "same-repository");
+    assert_eq!(json["roots"][0]["access"], "read-write");
+}

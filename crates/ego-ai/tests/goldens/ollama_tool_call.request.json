@@ -1,0 +1,35 @@
+{
+  "model": "gemma4:12b-mlx",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Read the file ./src/main.rs using the read_file tool. Call the tool, do not answer from memory."
+    }
+  ],
+  "stream": true,
+  "stream_options": {
+    "include_usage": true
+  },
+  "reasoning_effort": "none",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read a file from the workspace.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      }
+    }
+  ],
+  "parallel_tool_calls": false
+}

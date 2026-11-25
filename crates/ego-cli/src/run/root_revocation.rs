@@ -1,4 +1,5 @@
-//! Terminal revocation tears down effect ownership before same-session recomposition.
+//! The terminal surface for saved session targets: listing and revocation.
+//! Revocation tears down effect ownership before same-session recomposition.
 use super::*;
 
 pub(super) fn requested(
@@ -32,7 +33,9 @@ pub(super) fn requested(
                 .iter()
                 .map(|consent| &consent.root),
         )
-        .any(|root| root.path() == &path)
+        .map(ego_core::permit::ProfileRoot::path)
+        .chain(state.owner_sandbox_grants.iter().map(|grant| &grant.path))
+        .any(|saved| saved == &path)
     {
         return Err(format!(
             "no saved root grant for {}",
@@ -40,6 +43,46 @@ pub(super) fn requested(
         ));
     }
     Ok(path)
+}
+
+/// Every explicit read, write and exec target this session holds. Roots are
+/// data reach for tools and children; only a sandbox exec grant runs programs.
+pub(super) fn listing(state: &SessionState) -> String {
+    let safe = |path: &CanonPath| ego_core::permit::terminal_safe(&path.to_string());
+    let mut table = vec![vec!["Target".into(), "Access".into(), "Scope".into()]];
+    table.extend(state.session_roots.iter().map(|root| {
+        vec![
+            safe(root.path()),
+            root.access().as_str().into(),
+            "session".into(),
+        ]
+    }));
+    table.extend(state.permanent_root_consents.iter().map(|consent| {
+        vec![
+            safe(consent.root.path()),
+            consent.root.access().as_str().into(),
+            "permanent".into(),
+        ]
+    }));
+    table.extend(state.owner_sandbox_grants.iter().map(|grant| {
+        vec![
+            safe(&grant.path),
+            grant.access.to_string(),
+            "sandbox".into(),
+        ]
+    }));
+    let mut lines = vec!["session targets:".to_owned()];
+    if table.len() == 1 {
+        lines.push("  none".into());
+    } else {
+        // This is the exact-target detail surface used to revoke a saved grant.
+        lines.extend(crate::render::table::plain_table_with_width(
+            table,
+            usize::MAX,
+        ));
+    }
+    lines.push("/config roots revoke EXACT_PATH".into());
+    lines.join("\n")
 }
 
 pub(super) fn revoke(

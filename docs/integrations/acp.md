@@ -22,7 +22,9 @@ transport authentication (`EGO_ACP_TOKEN`) at `/acp`, not a custom token preface
 on newline JSON-RPC.
 
 Launch options include `-C`, `--session-dir`, `--profile`, `--instructions`,
-`--system`, `--append-system`, `--bare`, `--tools`/`--no-tools`, and `--allow`/`--deny`. `--sandbox` is
+`--system`, `--append-system`, `--output-style`, `--bare`, `--tools`/`--no-tools`,
+`--no-hooks`, `--read-only-dir`, `--allow`/`--deny`, `--exclusive-read-only` and
+`--env-allow`. `docs/reference/cli.md` lists every option of the installed build. `--sandbox` is
 the weakest confinement a session may choose, not an unconditional host grant.
 `--allow-public-bind` alone does not establish network authentication.
 
@@ -124,6 +126,8 @@ still have returned `end_turn`. For a cancelled run, agent → host:
   silently omitted. When audio is advertised, `audio` blocks accept explicit
   `audio/wav` with valid base64 WAV bytes, at most four clips and 10 MiB total.
   Mixed audio/image prompts are refused; the selected model must support audio.
+  Existing attachment fixtures are in
+  [prompt tests](../../crates/ego-acp/tests/it/prompt.rs).
 - Keep one prompt in flight per session. Wait for its response before the next
   ordinary prompt; do not treat write completion as turn completion. Dispatch
   cancellation and permission responses independently while a prompt runs.
@@ -147,6 +151,12 @@ still have returned `end_turn`. For a cancelled run, agent → host:
   requests, drain the prompt settlement, then close stdin and reap the process.
   Do not use EOF as a substitute for a correlated cancellation response.
 
+The offline [headless stdio tests](../../crates/ego-cli/tests/it/acp_headless_stream.rs)
+launch the real `ego acp` process against the existing local provider fixture:
+multiple turns, embedded text, malformed parameters, and EOF. The existing
+[settlement tests](../../crates/ego-cli/tests/it/acp_settlement.rs) cover permission
+answers, cancellation, and another prompt after a cancelled streaming turn.
+These fixtures use no paid calls and do not prove live host compatibility.
 The CLI's stdio composition uses the SDK `Stdio` transport in
 [acp.rs](../../crates/ego-cli/src/acp.rs).
 
@@ -179,12 +189,26 @@ A held or newly paused prompt uses error code `-32011`; resume it through the
 advertised `_ego/resume` control. Context overflow reports an error with
 `_ego/compact` guidance, not a fabricated normal completion.
 
-Use live integration checks for host-specific behavior.
+Source owners: [prompt dispatch](../../crates/ego-acp/src/prompt_turn.rs),
+[durable settlement mapping](../../crates/ego-acp/src/serve.rs), and
+[ACP stop-reason projection](../../crates/ego-acp/src/project.rs).
+[Packaged stdio tests](../../crates/ego-cli/tests/it/acp_settlement.rs) cover
+cancellation during a permission wait or stream, durable holds after reconnect,
+a known HTTP 400 followed by another prompt, and restart after a killed
+generation. This documentation change reads those tests; it does not rerun them
+or replace the live host matrix.
 
 ## Host verification boundary
 
-Validate a host integration through its actual protocol connection and backend.
-Deterministic adapter tests do not establish every host's behavior or UI rendering.
+The accepted TUICommander proof boundary is the packaged production backend API
+and its named instance, not a hand-written client fixture or a screenshot. Source
+and deterministic adapter tests document behavior, but this documentation task
+does not complete the outstanding final host/product proof.
+
+Sources: [ACP composition](../../crates/ego-cli/src/acp.rs),
+[ACP adapter crate](../../crates/ego-acp/src/),
+[permission adapter](../../crates/ego-cli/src/acp_permission.rs),
+and [host proof tests](../../crates/ego-cli/tests/tuicommander_host_094.rs).
 
 ## Session profile ceiling
 

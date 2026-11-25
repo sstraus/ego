@@ -1,0 +1,165 @@
+[
+  {
+    "seq": 1,
+    "payload": {
+      "evidence": {
+        "kind": "run_context",
+        "invocation": "01a18366-962d-73be-a575-ff247be1ecb4",
+        "instructions": [
+          {
+            "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/AGENTS.md",
+            "sha256": "5a919756564b9cdb045955bb12ffa3f0253a0edaab50b93eaa129aa14f656e60",
+            "bytes": 170,
+            "scope": ".",
+            "source": "explicit"
+          },
+          {
+            "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/reference-0.md",
+            "sha256": "4ce9e18781ac1093091e008cce99c15ea718d8c5745b590908e80e19c6f8c11e",
+            "bytes": 59400,
+            "scope": ".",
+            "source": "explicit"
+          },
+          {
+            "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/reference-1.md",
+            "sha256": "005412807ca84f2b467a156e9a6b148f2cc071fb1da9ded2308025db20fc7840",
+            "bytes": 59400,
+            "scope": ".",
+            "source": "explicit"
+          },
+          {
+            "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/reference-2.md",
+            "sha256": "267b241ff0ef4d720e66a3bdd2fad52fb441e21d30b5080a40e4e90ef952e97f",
+            "bytes": 59400,
+            "scope": ".",
+            "source": "explicit"
+          },
+          {
+            "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/reference-3.md",
+            "sha256": "0c36d6739655bd758e9beec63de5f26c06f1364aaf22c2f7a29fcfe2cec0e6ae",
+            "bytes": 59400,
+            "scope": ".",
+            "source": "explicit"
+          }
+        ]
+      }
+    }
+  },
+  {
+    "seq": 10,
+    "payload": {
+      "evidence": {
+        "kind": "generation_admission",
+        "invocation": "01a18366-962d-73be-a575-ff247be1ecb4",
+        "attempt": {
+          "generation": "01a18366-9763-74a3-84c5-cd4f606095eb",
+          "attempt": "01a18366-9763-74a3-84c5-cd50cd0dce66"
+        },
+        "target": {
+          "provider": "anthropic",
+          "canonical_model": "anthropic/anthropic/claude-haiku-5.5",
+          "wire_model": "anthropic/claude-haiku-5.5"
+        }
+      }
+    }
+  },
+  {
+    "seq": 11,
+    "payload": {
+      "event": {
+        "kind": {
+          "kind": "GenerationStarted",
+          "snapshot": {
+            "system": {
+              "sources": [
+                {
+                  "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/AGENTS.md",
+                  "sha256": "5a919756564b9cdb045955bb12ffa3f0253a0edaab50b93eaa129aa14f656e60",
+                  "bytes": 170,
+                  "scope": ".",
+                  "source": "explicit"
+                },
+                {
+                  "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/reference-0.md",
+                  "sha256": "4ce9e18781ac1093091e008cce99c15ea718d8c5745b590908e80e19c6f8c11e",
+                  "bytes": 59400,
+                  "scope": ".",
+                  "source": "explicit"
+                },
+                {
+                  "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/reference-1.md",
+                  "sha256": "005412807ca84f2b467a156e9a6b148f2cc071fb1da9ded2308025db20fc7840",
+                  "bytes": 59400,
+                  "scope": ".",
+                  "source": "explicit"
+                },
+                {
+                  "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/reference-2.md",
+                  "sha256": "267b241ff0ef4d720e66a3bdd2fad52fb441e21d30b5080a40e4e90ef952e97f",
+                  "bytes": 59400,
+                  "scope": ".",
+                  "source": "explicit"
+                },
+                {
+                  "path": "/Users/stefano.straus/Gits/.tmp/ego-636-live/direct-compaction/work/20261028T164457Z-c8a152e7/001-compaction/reference-3.md",
+                  "sha256": "0c36d6739655bd758e9beec63de5f26c06f1364aaf22c2f7a29fcfe2cec0e6ae",
+                  "bytes": 59400,
+                  "scope": ".",
+                  "source": "explicit"
+                }
+              ]
+            }
+          },
+          "attempt": {
+            "generation": "01a18366-9763-74a3-84c5-cd4f606095eb",
+            "attempt": "01a18366-9763-74a3-84c5-cd50cd0dce66"
+          },
+          "role": "main"
+        }
+      }
+    }
+  },
+  {
+    "seq": 20,
+    "payload": {
+      "evidence": {
+        "kind": "run_context",
+        "invocation": "01a18366-a911-73cb-a524-78691316a415",
+        "instructions": []
+      }
+    }
+  },
+  {
+    "seq": 21,
+    "payload": {
+      "evidence": {
+        "kind": "generation_admission",
+        "invocation": "01a18366-a911-73cb-a524-78691316a415",
+        "attempt": {
+          "generation": "01a18366-aef7-777a-beef-3d0d31cc31e5",
+          "attempt": "01a18366-aef7-777a-beef-3d0e5518e043"
+        },
+        "target": {
+          "provider": "anthropic",
+          "canonical_model": "anthropic/anthropic/claude-haiku-5.5",
+          "wire_model": "anthropic/claude-haiku-5.5"
+        }
+      }
+    }
+  },
+  {
+    "seq": 22,
+    "payload": {
+      "event": {
+        "kind": {
+          "kind": "GenerationStarted",
+          "attempt": {
+            "generation": "01a18366-aef7-777a-beef-3d0d31cc31e5",
+            "attempt": "01a18366-aef7-777a-beef-3d0e5518e043"
+          },
+          "role": "compaction"
+        }
+      }
+    }
+  }
+]

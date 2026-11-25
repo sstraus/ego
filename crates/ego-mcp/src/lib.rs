@@ -66,7 +66,9 @@ pub use run_server::{
     McpRunServerFactory, McpRunServerPorts, SanitizedMcpRunResource, serialize_run_snapshot,
 };
 pub(crate) use runtime::McpRuntimeCandidateAdmission;
-pub use runtime::{MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT};
+pub use runtime::{
+    MCP_DEFAULT_ADMISSION_TIMEOUT, MCP_DEFAULT_MAX_SSE_EVENT_SIZE, MCP_DEFAULT_OPERATION_TIMEOUT,
+};
 pub use server::{
     McpServerCallOutcome, McpServerPort, McpServerResourceContents, McpServerResourceDescriptor,
     McpServerToolCall, serve_stdio,
@@ -74,7 +76,7 @@ pub use server::{
 pub use state::{
     CacheScope, McpInputMapping, McpInputRequestId, McpInputRequired, McpInputResponse,
     McpInputState, McpManualOutcome, McpMappedInput, McpRefreshRequest, McpResultMetadata,
-    McpRetryRequest, McpSubscription, McpSubscriptionEvent, McpToolResult,
+    McpRetryRequest, McpSubscription, McpSubscriptionEvent, McpTaskState, McpToolResult,
 };
 
 mod session_stdio;

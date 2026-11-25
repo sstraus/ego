@@ -1,0 +1,12 @@
+Filtering the log data using "(process == "kernel" OR process == "sandboxd" OR subsystem CONTAINS[c] "sandbox") AND composedMessage CONTAINS[c] "deny" AND (composedMessage CONTAINS[c] "pnpm" OR composedMessage CONTAINS[c] "node")"
+Timestamp               Ty Process[PID:TID]
+2026-10-25 10:26:17.365 E  kernel[0:5775631] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /Users/stefano.straus/Library/pnpm/_tmp_86149_15c15dd0
+2026-10-25 10:26:17.365 E  kernel[0:5775631] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /_tmp_86149_15cf0200
+2026-10-25 10:26:17.366 E  kernel[0:5775631] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /Users/_tmp_86149_15da0e20
+2026-10-25 10:26:17.367 E  kernel[0:5775631] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /Users/stefano.straus/_tmp_86149_15e462a8
+2026-10-25 10:26:17.368 E  kernel[0:5775631] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /Users/stefano.straus/Gits/_tmp_86149_15f1e798
+2026-10-25 10:26:17.369 E  kernel[0:5775631] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /Users/stefano.straus/Gits/personal/_tmp_86149_15fe43a8
+2026-10-25 10:26:17.369 E  kernel[0:5775631] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /Users/stefano.straus/Gits/personal/tuicommander__wt/_tmp_86149_16093858
+2026-10-25 10:26:17.372 E  kernel[0:5775631] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /Users/stefano.straus/Gits/personal/tuicommander__wt/_tmp_86149_163443e0
+2026-10-25 10:26:17.450 E  kernel[0:577564b] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-create /Users/stefano.straus/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock
+2026-10-25 10:26:17.530 E  kernel[0:5775633] (Sandbox) Sandbox: pnpm(86149) deny(1) file-write-mode /private/tmp/pnpm-store-operation-locks-501

@@ -30,7 +30,7 @@ pub(super) fn row(text: &str, width: usize) -> Option<String> {
 
 /// A completion may already exceed the screen before Enter arrives. Clip only
 /// its preview, keeping an exact prefix so Reedline's byte cursor remains valid.
-/// Ordinary input retains Reedline's default highlighting and editing behavior.
+/// Mark the interactive shell prefix without changing the editor buffer.
 pub(super) struct NoticeHighlighter(pub(super) SharedStatus);
 
 impl reedline::Highlighter for NoticeHighlighter {
@@ -43,10 +43,43 @@ impl reedline::Highlighter for NoticeHighlighter {
         } else {
             text.to_owned()
         };
-        reedline::Highlighter::highlight(
+        let mut styled = reedline::Highlighter::highlight(
             &reedline::ExampleHighlighter::default(),
             &preview,
             cursor.min(preview.len()),
-        )
+        );
+        if text.starts_with("! ") && !text.contains('\n') {
+            styled.style_range(0, 2, reedline::Color::Red.normal());
+        }
+        styled
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use reedline::Highlighter;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn shell_prefix_turns_red_after_space_only_in_a_shell_draft() {
+        let highlighter = NoticeHighlighter(Arc::new(Mutex::new(Default::default())));
+        // Catches a missing visual mode switch or a false shell cue on literal text.
+        for (draft, red_prefix) in [
+            ("!", false),
+            ("! ", true),
+            ("! printf caffè", true),
+            ("!! printf", false),
+            (" ! printf", false),
+            ("! printf\nsecond line", false),
+        ] {
+            let styled = highlighter.highlight(draft, draft.len());
+            assert_eq!(styled.raw_string(), draft);
+            assert_eq!(
+                styled.render_simple().contains("\x1b[31m! \x1b[0m"),
+                red_prefix,
+                "{draft:?}"
+            );
+        }
     }
 }

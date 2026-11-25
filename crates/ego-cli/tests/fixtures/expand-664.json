@@ -1,0 +1,133 @@
+[
+  {
+    "env": {
+      "seq": 207,
+      "id": "01a17e12-8ace-70f2-85fd-f01146bf814b",
+      "turn": "01a17e11-1772-72b8-9148-f16d9cf8b0d1",
+      "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3",
+      "parent": "01a17e12-7a37-7123-b246-ecce31ae4fbb",
+      "ts": 1793116506830,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "ToolCallStarted",
+      "name": "exec",
+      "args": "{\"argv\":[\"bash\",\"-lc\",\"/Users/stefano.straus/Gits/personal/orchestrator/tools/agents/tuic-bg.sh /Users/stefano.straus/Gits/.tmp/critic-2386-r2-validation.log -- bash /Users/stefano.straus/Gits/.tmp/critic-2386-r2-validate.sh\"],\"cwd\":\"/Users/stefano.straus/Gits/personal/tuicommander__wt/feat-2386-ego-statusbar-usage\",\"timeout_ms\":10000,\"background\":false}",
+      "call_id": "call_2d6ecf6f30dd4f7897eb214993044f2b"
+    }
+  },
+  {
+    "env": {
+      "seq": 211,
+      "id": "01a17e12-8ad2-72fc-9cac-f59f8d17d1af",
+      "turn": "01a17e11-1772-72b8-9148-f16d9cf8b0d1",
+      "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3",
+      "parent": "01a17e12-8ace-70f2-85fd-f01146bf814b",
+      "ts": 1793116506834,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "HookLifecycleReached",
+      "occurrence": {
+        "lifecycle": "PreToolUse",
+        "owner": {
+          "kind": "item",
+          "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3"
+        }
+      },
+      "subject": {
+        "scope": "item",
+        "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3"
+      },
+      "plan": []
+    }
+  },
+  {
+    "env": {
+      "seq": 213,
+      "id": "01a17e12-8b6a-7052-a5f6-8cb834987e55",
+      "turn": "01a17e11-1772-72b8-9148-f16d9cf8b0d1",
+      "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3",
+      "parent": "01a17e12-8ace-70f2-85fd-f01146bf814b",
+      "ts": 1793116506986,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "ToolCallMeasured",
+      "timing": {
+        "execution_ms": 139,
+        "approval_wait_ms": 0
+      }
+    }
+  },
+  {
+    "env": {
+      "seq": 214,
+      "id": "01a17e12-8b6a-7052-a5f6-8cb903bbece5",
+      "turn": "01a17e11-1772-72b8-9148-f16d9cf8b0d1",
+      "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3",
+      "parent": "01a17e12-8ace-70f2-85fd-f01146bf814b",
+      "ts": 1793116506986,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "ToolCallCompleted",
+      "ok": true,
+      "result": {
+        "content": [
+          {
+            "text": "tuic bg: pid=62666 log=/Users/stefano.straus/Gits/.tmp/critic-2386-r2-validation.log wake=/Users/stefano.straus/Gits/.tmp/critic-2386-r2-validation.log.wake\ntuic-bg: you will get BG DONE; end your turn now\n",
+            "provenance": {
+              "source": "process",
+              "stream": "stdout",
+              "encoding": "utf8",
+              "truncated": false,
+              "omitted_bytes": 0
+            },
+            "full_output": "f878d299012858662aa8522e8ef79b594b45cda244864d8b854fd4d642f6a5f9:206"
+          },
+          {
+            "text": "",
+            "provenance": {
+              "source": "process",
+              "stream": "stderr",
+              "encoding": "utf8",
+              "truncated": false,
+              "omitted_bytes": 0
+            },
+            "full_output": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855:0"
+          }
+        ],
+        "provenance": {
+          "kind": "builtin"
+        }
+      }
+    }
+  },
+  {
+    "env": {
+      "seq": 215,
+      "id": "01a17e12-8b6a-7052-a5f6-8cbaf44c43e6",
+      "turn": "01a17e11-1772-72b8-9148-f16d9cf8b0d1",
+      "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3",
+      "parent": "01a17e12-8ace-70f2-85fd-f01146bf814b",
+      "ts": 1793116506986,
+      "producer": "Main"
+    },
+    "kind": {
+      "kind": "HookLifecycleReached",
+      "occurrence": {
+        "lifecycle": "PostToolUse",
+        "owner": {
+          "kind": "item",
+          "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3"
+        }
+      },
+      "subject": {
+        "scope": "item",
+        "item": "01a17e12-8ace-70f2-85fd-f010ae9088b3"
+      },
+      "plan": []
+    }
+  }
+]

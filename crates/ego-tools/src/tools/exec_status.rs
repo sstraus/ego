@@ -63,7 +63,8 @@ impl TypedTool for ExecStatusTool {
                 return Err(wrong_op(self.name()));
             };
             let status = io.background_status(id).map_err(ToolError::Process)?;
-            Ok(ToolResult::builtin(status.model_text()))
+            Ok(ToolResult::builtin(status.model_text())
+                .with_session_output(status.output_observation()))
         })
     }
 }

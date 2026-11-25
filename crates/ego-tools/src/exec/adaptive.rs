@@ -212,7 +212,7 @@ pub(super) fn check_write_root(
     Ok(())
 }
 
-fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessError> {
+pub(super) fn git_roots(workspace: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ProcessError> {
     let mut roots = Vec::new();
     let mut controls = Vec::new();
     // A nested working directory uses the closest real git metadata boundary.

@@ -68,7 +68,7 @@ pub(super) fn capture(spec: &SpawnSpec) -> Result<SpawnSpec, ProcessError> {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    let shell = ego_core::permit::shell::observe(&argv);
+    let shell = ego_core::permit::shell::observe_sandboxed(&argv);
     if shell.complete && shell.read_only {
         for program in shell.programs {
             if let Some(named) = resolve(OsStr::new(&program), &cwd, &snapshot)
@@ -120,11 +120,7 @@ fn not_found(program: &OsStr) -> ProcessError {
     }
 }
 
-pub(crate) fn resolve(
-    program: &OsStr,
-    cwd: &Path,
-    env: &[(OsString, OsString)],
-) -> Option<PathBuf> {
+fn resolve(program: &OsStr, cwd: &Path, env: &[(OsString, OsString)]) -> Option<PathBuf> {
     let path = Path::new(program);
     if program.is_empty() {
         return None;
@@ -214,6 +210,8 @@ fn metadata_only(named: &Path) -> Result<ExecutableFileIdentity, IdentityFailure
 }
 
 fn hash_file(named: &Path) -> Result<ExecutableFileIdentity, IdentityFailure> {
+    #[cfg(test)]
+    cost::hashing();
     let resolved = fs::canonicalize(named).map_err(|_| IdentityFailure::Resolution)?;
     let mut file = File::open(&resolved).map_err(|_| IdentityFailure::Read)?;
     let before = file.metadata().map_err(|_| IdentityFailure::Read)?;
@@ -229,6 +227,8 @@ fn hash_file(named: &Path) -> Result<ExecutableFileIdentity, IdentityFailure> {
             break;
         }
         digest.update(&chunk[..count]);
+        #[cfg(test)]
+        cost::bytes(count);
     }
     let after = platform(&file.metadata().map_err(|_| IdentityFailure::Read)?)?;
     let current = platform(&fs::metadata(named).map_err(|_| IdentityFailure::Changed)?)?;
@@ -381,7 +381,29 @@ fn recognize(
     }
 }
 
+/// Re-observe every captured image and refuse any change since capture.
 pub(super) fn revalidate(spec: &SpawnSpec) -> Result<(), ProcessError> {
+    revalidate_with(spec, Depth::Content)
+}
+
+/// Revalidate a call whose owner approval is moments old and used once.
+///
+/// The working directory, resolved target, argv, environment and every
+/// image's resolved path and file identity (device, inode, size, mode and
+/// times) are still checked; only the content re-hash is skipped. The spawn
+/// itself re-hashes the content immediately before the launch, and a reusable
+/// approval never takes this path.
+pub(super) fn revalidate_fresh_approval(spec: &SpawnSpec) -> Result<(), ProcessError> {
+    revalidate_with(spec, Depth::FileIdentity)
+}
+
+#[derive(Clone, Copy)]
+enum Depth {
+    Content,
+    FileIdentity,
+}
+
+fn revalidate_with(spec: &SpawnSpec, depth: Depth) -> Result<(), ProcessError> {
     let Some(identity) = spec.identity() else {
         return Ok(());
     };
@@ -418,10 +440,43 @@ pub(super) fn revalidate(spec: &SpawnSpec) -> Result<(), ProcessError> {
                 .into(),
         ));
     }
+    let words: Vec<_> = spec
+        .argv()
+        .iter()
+        .map(|word| word.to_string_lossy().into_owned())
+        .collect();
+    let shell = ego_core::permit::shell::observe_sandboxed(&words);
+    if shell.complete && shell.read_only {
+        for program in shell.programs {
+            let named = resolve(OsStr::new(&program), cwd.as_path(), &environment)
+                .ok_or_else(|| not_found(OsStr::new(&program)))?;
+            if !identity
+                .files
+                .iter()
+                .any(|file| file.named.as_path() == named)
+            {
+                return Err(ProcessError::Invariant(
+                    "shell program no longer matches its captured authority; no process was launched".into(),
+                ));
+            }
+        }
+    }
     for expected in &identity.files {
-        let observed = hash_file(expected.named.as_path())
-            .or_else(|_| metadata_only(expected.named.as_path()));
-        if observed.ok().as_ref() != Some(expected) {
+        let unchanged = match depth {
+            Depth::Content => {
+                hash_file(expected.named.as_path())
+                    .or_else(|_| metadata_only(expected.named.as_path()))
+                    .ok()
+                    .as_ref()
+                    == Some(expected)
+            }
+            Depth::FileIdentity => metadata_only(expected.named.as_path()).is_ok_and(|observed| {
+                observed.named == expected.named
+                    && observed.resolved == expected.resolved
+                    && observed.platform == expected.platform
+            }),
+        };
+        if !unchanged {
             return Err(ProcessError::Invariant(
                 "execution identity changed before spawn; no process was launched".into(),
             ));
@@ -435,10 +490,69 @@ pub(super) fn revalidate(spec: &SpawnSpec) -> Result<(), ProcessError> {
     Ok(())
 }
 
+/// Per-thread count of full-content hashes, to measure what a path costs.
+#[cfg(test)]
+mod cost {
+    use std::cell::Cell;
+
+    thread_local! {
+        static HASHES: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    }
+
+    pub(super) fn hashing() {
+        HASHES.with(|cell| cell.set((cell.get().0 + 1, cell.get().1)));
+    }
+
+    pub(super) fn bytes(count: usize) {
+        HASHES.with(|cell| cell.set((cell.get().0, cell.get().1 + count as u64)));
+    }
+
+    /// `(hash calls, bytes hashed)` on this thread since the last call.
+    #[cfg(unix)]
+    pub(in crate::exec) fn take() -> (u64, u64) {
+        HASHES.with(Cell::take)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Seek, SeekFrom, Write};
+
+    // Catches: a harmless git pipeline asks because an unrelated PATH entry
+    // precedes the captured system tools, or their identities were never captured.
+    #[cfg(unix)]
+    #[test]
+    fn sandboxed_git_config_pipeline_with_extra_path_is_read_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path =
+            std::env::join_paths([dir.path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap();
+        let env = EnvPolicy::exact(vec![
+            ExplicitEnvBinding::from_native(EnvName::new("PATH").unwrap(), path).unwrap(),
+        ])
+        .unwrap();
+        let spec = SpawnSpec::new(
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "git config --global --list | wc -l".into(),
+            ],
+            Some(CanonPath::new(dir.path())),
+            None,
+            env,
+        )
+        .unwrap();
+        let captured = capture(&spec).unwrap();
+        assert!(ego_core::permit::shell::sandboxed_read_only(&captured));
+        use std::os::unix::fs::PermissionsExt;
+        let shadow = dir.path().join("git");
+        fs::write(&shadow, "shadow").unwrap();
+        fs::set_permissions(&shadow, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            revalidate(&captured).is_err(),
+            "a new PATH shadow must not run"
+        );
+    }
 
     #[cfg(unix)]
     #[test]
@@ -489,6 +603,93 @@ mod tests {
             first.authority_fingerprint(),
             second.authority_fingerprint()
         );
+    }
+
+    #[cfg(unix)]
+    fn installed_tool(directory: &Path, bytes: &[u8]) -> SpawnSpec {
+        use std::os::unix::fs::PermissionsExt;
+        let image = directory.join("tool");
+        fs::write(&image, bytes).unwrap();
+        fs::set_permissions(&image, fs::Permissions::from_mode(0o755)).unwrap();
+        SpawnSpec::new(
+            vec![image.into_os_string()],
+            Some(CanonPath::new(directory)),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap()
+    }
+
+    // Catches: a freshly owner-approved launch repeats full-image reads and hashing.
+    #[cfg(unix)]
+    #[test]
+    fn fresh_one_shot_approval_does_not_repeat_full_content_hash() {
+        let directory = tempfile::tempdir().unwrap();
+        let captured = capture(&installed_tool(directory.path(), &vec![7u8; 1 << 20])).unwrap();
+        assert_eq!(cost::take(), (1, 1 << 20), "capture hashes the image once");
+        revalidate_fresh_approval(&captured).unwrap();
+        assert_eq!(cost::take(), (0, 0), "a fresh approval reads no content");
+        revalidate(&captured).unwrap();
+        assert_eq!(
+            cost::take(),
+            (1, 1 << 20),
+            "the launch check hashes it once"
+        );
+    }
+
+    // Catches: skipping the content hash also skips the image's file identity.
+    #[cfg(unix)]
+    #[test]
+    fn fresh_one_shot_approval_still_refuses_a_replaced_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = installed_tool(directory.path(), b"version one");
+        let captured = capture(&spec).unwrap();
+        fs::write(directory.path().join("tool"), b"version two, longer").unwrap();
+        assert!(revalidate_fresh_approval(&captured).is_err());
+    }
+
+    // Catches: a compromised dependency replaces executable bytes and an old
+    // approval is reused, because the reusable path stopped comparing content.
+    #[cfg(unix)]
+    #[test]
+    fn reusable_approval_refuses_changed_executable_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let captured = capture(&installed_tool(directory.path(), b"trusted bytes")).unwrap();
+        let mut identity = captured.identity().unwrap().clone();
+        // Same file identity, other content: what metadata alone cannot see.
+        identity.files[0].content = Some([0xA5; 32]);
+        let forged = captured
+            .clone()
+            .with_execution_identity(captured.env_policy().clone(), identity);
+        assert!(revalidate(&forged).is_err());
+        assert!(revalidate_fresh_approval(&forged).is_ok());
+    }
+
+    // Measurement for story 796-c9b6: run with --ignored --nocapture.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "measurement, prints timings"]
+    fn measure_hash_cost_of_capture_and_both_revalidations() {
+        let directory = tempfile::tempdir().unwrap();
+        let spec = installed_tool(directory.path(), &vec![7u8; 64 << 20]);
+        let timed = |label: &str, run: &dyn Fn()| {
+            cost::take();
+            let start = std::time::Instant::now();
+            run();
+            let (calls, bytes) = cost::take();
+            eprintln!(
+                "{label}: hashes={calls} bytes={bytes} elapsed={:?}",
+                start.elapsed()
+            );
+        };
+        let captured = capture(&spec).unwrap();
+        timed("capture", &|| drop(capture(&spec).unwrap()));
+        timed("revalidate (reusable, full)", &|| {
+            revalidate(&captured).unwrap()
+        });
+        timed("revalidate_fresh_approval", &|| {
+            revalidate_fresh_approval(&captured).unwrap()
+        });
     }
 
     #[cfg(unix)]

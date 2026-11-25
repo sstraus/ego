@@ -38,11 +38,10 @@ impl ProtocolChild {
         let guard = CancelOnDrop(Some(self.cancel.clone()));
         Box::pin(async move {
             let mut guard = guard;
-            let result = self.request(Some(input)).await.and_then(|output| {
-                output.ok_or(SecretChildError::InvalidRequest(
-                    "protocol_filter exchange returned no frame",
-                ))
-            });
+            let result = self
+                .request(Some(input))
+                .await
+                .and_then(|output| output.ok_or(SecretChildError::ProtocolEarlyEof));
             guard.0.take();
             result
         })
@@ -117,7 +116,7 @@ pub fn start_protocol_session(
     });
     let cancel = CancelToken::new();
     let owner_cancel = cancel.clone();
-    let (commands, receiver) = mpsc::channel(1);
+    let (commands, mut receiver) = mpsc::channel(1);
     let (terminal_sender, terminal) = oneshot::channel();
     let (started, startup) = std::sync::mpsc::sync_channel(1);
     std::thread::Builder::new()
@@ -165,7 +164,7 @@ pub fn start_protocol_session(
                     return;
                 }
                 let (result, pending) =
-                    own_session(&mut child, &request, owner_cancel, receiver, max_frame).await;
+                    own_session(&mut child, &request, owner_cancel, &mut receiver, max_frame).await;
                 let clean = match child.try_wait() {
                     Ok(Some(_)) => child.cleanup_after_exit(request.termination_grace).await,
                     _ => child.terminate(request.termination_grace).await,
@@ -188,6 +187,12 @@ pub fn start_protocol_session(
                         drop(pending);
                     }
                 }
+                // A caller may have taken its send permit before own_session
+                // returned and write the command only now. Dropping the receiver
+                // would strand that command and leave its reply open forever;
+                // draining until `None` waits for every permit and closes each reply.
+                receiver.close();
+                while receiver.recv().await.is_some() {}
             });
         })
         .map_err(SecretChildError::Launch)?;
@@ -256,7 +261,7 @@ async fn own_session(
     child: &mut ManagedChild,
     request: &SecretChildRequest,
     cancel: CancelToken,
-    mut commands: mpsc::Receiver<Command>,
+    commands: &mut mpsc::Receiver<Command>,
     max_frame: usize,
 ) -> (Result<(), SecretChildError>, Option<Reply>) {
     let (Some(stdin), Some(stdout)) = (child.take_stdin(), child.take_stdout()) else {
@@ -277,14 +282,18 @@ async fn own_session(
             read = stdout.read(&mut probe[..]) => {
                 let error = match read {
                     Err(error) => SecretChildError::Io(error),
-                    _ => SecretChildError::InvalidRequest("protocol_filter unsolicited stdout or early EOF"),
+                    Ok(0) => SecretChildError::ProtocolEarlyEof,
+                    Ok(_) => SecretChildError::ProtocolFraming,
                 };
                 return (Err(error), None);
             }
             status = child.wait() => {
                 let error = match status {
-                    Ok(status) if !status.success() => SecretChildError::Exit(status.code()),
-                    Ok(_) => SecretChildError::InvalidRequest("protocol_filter exited before finish"),
+                    Ok(status) if !status.success() => SecretChildError::Exit {
+                        code: status.code(),
+                        stderr: String::new(),
+                    },
+                    Ok(_) => SecretChildError::ProtocolEarlyEof,
                     Err(error) => SecretChildError::Io(error),
                 };
                 return (Err(error), None);
@@ -309,7 +318,20 @@ async fn own_session(
                     .map_err(SecretChildError::Io)?;
                 stdin.write_all(b"\n").await.map_err(SecretChildError::Io)?;
                 stdin.flush().await.map_err(SecretChildError::Io)?;
-                read_frame(&mut stdout, max_frame).await.map(Some)
+                match read_frame(&mut stdout, max_frame).await {
+                    Err(SecretChildError::ProtocolEarlyEof) => {
+                        // Closed stdout may be a crash: a bounded wait tells exit from early EOF.
+                        // Child stderr is never read, so none reaches the error.
+                        match tokio::time::timeout(request.termination_grace, child.wait()).await {
+                            Ok(Ok(status)) if !status.success() => Err(SecretChildError::Exit {
+                                code: status.code(),
+                                stderr: String::new(),
+                            }),
+                            _ => Err(SecretChildError::ProtocolEarlyEof),
+                        }
+                    }
+                    other => other.map(Some),
+                }
             } else {
                 let mut stdin = stdin.take().expect("finish owns stdin");
                 stdin.shutdown().await.map_err(SecretChildError::Io)?;
@@ -326,12 +348,13 @@ async fn own_session(
                     .map_err(SecretChildError::Io)?
                     != 0
                 {
-                    return Err(SecretChildError::InvalidRequest(
-                        "protocol_filter additional stdout",
-                    ));
+                    return Err(SecretChildError::ProtocolFraming);
                 }
                 if !status.success() {
-                    return Err(SecretChildError::Exit(status.code()));
+                    return Err(SecretChildError::Exit {
+                        code: status.code(),
+                        stderr: String::new(),
+                    });
                 }
                 Ok(None)
             }
@@ -380,22 +403,22 @@ async fn read_frame(
     loop {
         let available = stdout.fill_buf().await.map_err(SecretChildError::Io)?;
         if available.is_empty() {
-            return Err(SecretChildError::InvalidRequest(
-                "protocol_filter truncated stdout frame",
-            ));
+            return Err(SecretChildError::ProtocolEarlyEof);
         }
         let newline = available.iter().position(|byte| *byte == b'\n');
         let count = newline.unwrap_or(available.len());
         if frame.len().saturating_add(count) > max_frame {
-            return Err(SecretChildError::InvalidRequest(
-                "protocol_filter stdout frame exceeds limits",
-            ));
+            return Err(SecretChildError::ProtocolOutputLimit);
         }
         frame.extend_from_slice(&available[..count]);
         stdout.consume(count + usize::from(newline.is_some()));
         if newline.is_some() {
-            validate_frame(&frame, max_frame)?;
+            validate_frame(&frame, max_frame).map_err(|_| SecretChildError::ProtocolFraming)?;
             return Ok(SecretMaterial::new(std::mem::take(&mut *frame)));
         }
     }
 }
+
+#[cfg(test)]
+#[path = "protocol_session_tests.rs"]
+mod tests;

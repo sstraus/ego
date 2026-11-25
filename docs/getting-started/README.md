@@ -4,41 +4,14 @@ Use εgo to work with a model in your current repository. You control the model,
 workspace trust, tool permission, and confinement. A model credential alone does
 not grant tools access to your machine.
 
-## Build and install from source
+You can also read this page in the [hosted user guide](https://ego.tuicommander.com/docs/getting-started/).
 
-The workspace requires Rust 1.95 or newer (`Cargo.toml`). Install from a complete
-checkout; the CLI uses a repository-local patched Reedline in `vendor/reedline`.
-Workspace crates are not published to crates.io. From the repository root,
-build and inspect the binary without installing it:
+## Download a binary
 
-```sh
-cargo build --locked --bin ego
-./target/debug/ego --help
-```
-
-On Windows, run `target\debug\ego.exe` instead. For an optimized local
-installation, Cargo builds the release profile by default:
-
-```sh
-cargo install --locked --path crates/ego-cli --root "$PWD/.ego-bin"
-export PATH="$PWD/.ego-bin/bin:$PATH"
-ego --help
-```
-
-`.ego-bin` is a local install prefix, not configuration or session storage. Remove
-that prefix when you no longer want the installation. Do not commit it.
-
-The development test suite is not included in this source distribution. Build
-the binary target rather than tests or `--all-targets`.
-
-## Optional binary downloads
-
-Binary packages may be unavailable. Check
-[GitHub Releases](https://github.com/sstraus/ego/releases) for an executable and
-its checksum before using a download recipe; if there is no matching published
-asset, use the source-build instructions above. A tag alone is not a download.
-Homebrew formulas and `latest/download` URLs also depend on published assets.
-Do not use those routes when the referenced release has been removed.
+Choose an executable and its checksum from
+[GitHub Releases](https://github.com/sstraus/ego/releases). Release assets are
+available only after the release workflow succeeds; a tag alone is not proof
+of a download.
 
 | Platform | Executable |
 | --- | --- |
@@ -52,7 +25,7 @@ Linux binaries require GLIBC 2.35 or newer. Target-triple `.tar.gz` archives
 (`.zip` on Windows) and `SHA256SUMS` are also published. Each archive includes
 Bash, Zsh, Fish, PowerShell, and Elvish scripts in `completions/`.
 
-If the release provides both files, on macOS Apple Silicon:
+For example, on macOS Apple Silicon:
 
 ```sh
 asset=ego-macos-arm64
@@ -67,7 +40,24 @@ install -m 755 "$asset" "$HOME/.local/bin/ego"
 On Linux, choose the matching asset and use `sha256sum -c`. On Windows, compare
 the downloaded checksum with `Get-FileHash -Algorithm SHA256`, then rename the
 executable to `ego.exe` in a directory on `PATH`. Add `~/.local/bin` to `PATH`
-on macOS or Linux if needed.
+on macOS or Linux if needed. For Homebrew installation, see the
+[installation overview](../../README.md#install).
+
+## Build and install from source
+
+The workspace requires Rust 1.95 or newer (`Cargo.toml`). Install from a complete
+checkout; the CLI uses a repository-local patched Reedline in `vendor/reedline`.
+Workspace crates are not published to crates.io. Binary downloads depend on
+the release workflow completing successfully; tagging is not proof of a download.
+
+```sh
+cargo install --locked --path crates/ego-cli --root "$PWD/.ego-bin"
+export PATH="$PWD/.ego-bin/bin:$PATH"
+ego --help
+```
+
+`.ego-bin` is a local install prefix, not configuration or session storage. Remove
+that prefix when you no longer want the installation. Do not commit it.
 
 ## Choose a model
 
@@ -96,9 +86,12 @@ what this session offers; `/config perimeter` shows its admitted boundary.
 `Ctrl+D` or `/quit` exits without erasing the durable session.
 
 Interactive startup can select and persist a first-run default when exactly one
-usable provider has a mapped default. Otherwise it opens the model picker.
-Headless startup always needs an explicit or configured model; it does not choose
-or save one on your behalf.
+usable provider has a mapped default. Otherwise it opens the model picker, which
+groups models by provider and names the sign-in remedy above each unavailable
+provider. Headless startup with exactly one usable provider uses
+that provider's default for the run, names it on stderr, and does not save it.
+With no usable provider, several, or no mapped default, headless startup refuses
+and lists the `--model` remedies. `ego setup` shows which providers are ready.
 
 ## Terminal, pipeline, or host
 

@@ -12,6 +12,7 @@ use crate::skill::{SkillCatalogueCapture, SkillCatalogueView};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionId {
     Help,
+    Context,
     Model,
     Thinking,
     Fast,
@@ -20,6 +21,7 @@ pub enum ActionId {
     Yolo,
     Permissions,
     Mcp,
+    Login,
     Sessions,
     Fork,
     Compact,
@@ -38,6 +40,7 @@ pub enum ActionId {
     Name,
     Goal,
     Tasks,
+    Side,
     Tools,
     Expand,
     Skills,
@@ -49,7 +52,9 @@ pub enum ActionId {
 
 pub(crate) const NAME_GRAMMAR: &str = "usage: /name [show|set TEXT|clear]";
 pub(crate) const GOAL_GRAMMAR: &str =
-    "usage: /goal [TEXT|show|set TEXT|extend N|achieve|block REASON]";
+    "usage: /goal [TEXT|show|stop|set TEXT|achieve|resume|block REASON]";
+pub(crate) const SIDE_GRAMMAR: &str =
+    "usage: /side QUESTION (answers from the running turn's context, with no tools)";
 pub(crate) const MCP_GRAMMAR: &str = "usage: /mcp [login NAME | toggle NAME | add NAME --http URL | add NAME --stdio -- COMMAND ...]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -126,10 +131,13 @@ pub enum Dispatch {
     Config(String),
     Fast(bool),
     Mode(ego_core::config::Mode),
+    ModelQuery(String),
     Setup(String),
     Tasks(String),
+    Side(String),
     Pins(ego_core::compact::PinCommand),
     Mcp(String),
+    Login(Option<String>),
     McpContext(McpContextCommand),
     Prompt,
     Immediate,
@@ -542,6 +550,7 @@ impl ActionRegistry {
             )
             .unavailable("the interactive permission controller"),
             enabled(Mcp, "mcp", MCP_GRAMMAR),
+            enabled(Login, "login", "Authorize a built-in OAuth provider: /login [PROVIDER]"),
             enabled(Sessions, "sessions", "Browse saved sessions")
                 .alias("history")
                 .alias("resume")
@@ -551,8 +560,13 @@ impl ActionRegistry {
                 .unavailable("the compaction service"),
             enabled(Pin, "pin", "List or add standing user constraints — /pin [TEXT]"),
             enabled(Unpin, "unpin", "Remove a standing user constraint — /unpin NUMBER"),
-            enabled(Clear, "clear", "Clear composer and menu state"),
+            enabled(Clear, "clear", "Start a fresh conversation and clear the composer"),
             enabled(Usage, "usage", "Show usage, context, cost and budget"),
+            enabled(
+                Context,
+                "context",
+                "Show the instruction files and workspace memory in the system prompt",
+            ),
             enabled(Statusline, "statusline", "Configure the native status line"),
             enabled(
                 Export,
@@ -562,7 +576,7 @@ impl ActionRegistry {
             enabled(
                 Config,
                 "config",
-                "Inspect configuration — /config [perimeter | set KEY VALUE | roots revoke EXACT_PATH]",
+                "Inspect configuration — /config [details | perimeter | roots | set KEY VALUE | roots revoke EXACT_PATH]",
             ),
             enabled(Setup, "setup", "Inspect expected work without effects"),
             enabled(Doctor, "doctor", "Show health — /doctor [details]"),
@@ -578,7 +592,12 @@ impl ActionRegistry {
             enabled(
                 Tasks,
                 "tasks",
-                "Inspect background exec — /tasks [ID | cancel ID]",
+                "List tasks, attach or cancel — /tasks [tN | ID | cancel tN]; /detach returns",
+            ).alias("detach"),
+            enabled(
+                Side,
+                "side",
+                "Ask a side question during a turn — /side QUESTION",
             ),
             enabled(Tools, "tools", "Show tools — /tools [details]"),
             enabled(
@@ -593,7 +612,7 @@ impl ActionRegistry {
                 "Show skills — /skills [details|diagnose|rescan|invoke NAME]",
             )
             .unavailable("the skill catalogue"),
-            enabled(Hooks, "hooks", "Inspect admitted hooks"),
+            enabled(Hooks, "hooks", "Inspect admitted hooks — /hooks [details]"),
             enabled(Init, "init", "Review project instruction initialization"),
             enabled(Retry, "retry", "Retry a waiting provider now").shortcut('r'),
             enabled(Version, "version", "Show packaged version information"),
@@ -779,12 +798,6 @@ impl ActionRegistry {
     pub fn help(&self, id: ActionId) -> &ActionRegistration {
         self.registration(id)
     }
-    pub fn completion(&self, id: ActionId) -> &ActionRegistration {
-        self.registration(id)
-    }
-    pub fn dispatch_projection(&self, id: ActionId) -> &ActionRegistration {
-        self.registration(id)
-    }
     pub fn availability(&self, id: ActionId) -> Availability {
         self.live_availability
             .lock()
@@ -936,6 +949,16 @@ impl ActionRegistry {
     }
 
     pub(crate) fn skill_menu(&self, filter: &str) -> Vec<(String, String)> {
+        self.skill_completion_entries(filter)
+            .into_iter()
+            .map(|(name, description, _)| (name, description))
+            .collect()
+    }
+
+    pub(crate) fn skill_completion_entries(
+        &self,
+        filter: &str,
+    ) -> Vec<(String, String, Option<crate::skill::SkillBadge>)> {
         let Ok(Some(capture)) = self.skill_capture() else {
             return Vec::new();
         };
@@ -944,7 +967,16 @@ impl ActionRegistry {
             .announce_for_user()
             .into_iter()
             .filter(|descriptor| descriptor.name.starts_with(filter))
-            .map(|descriptor| (descriptor.name.clone(), descriptor.description.clone()))
+            .map(|descriptor| {
+                let badge = capture
+                    .descriptor(&descriptor.name)
+                    .and_then(|spec| capture.badge(spec));
+                (
+                    descriptor.name.clone(),
+                    descriptor.description.clone(),
+                    badge,
+                )
+            })
             .collect()
     }
     pub fn select(&self, id: ActionId, displayed: &SurfaceSnapshot) -> Option<ActionSelection> {
@@ -1124,14 +1156,16 @@ impl ActionRegistry {
         let arguments = raw_arguments.trim();
         if arguments.is_empty() {
             Dispatch::Action(ActionId::Config)
-        } else if arguments == "perimeter"
+        } else if arguments == "details"
+            || arguments == "perimeter"
+            || arguments == "roots"
             || arguments.starts_with("set ")
             || arguments.starts_with("roots revoke ")
         {
             Dispatch::Config(arguments.to_owned())
         } else {
             Dispatch::Refused {
-                reason: "usage: /config [perimeter | set KEY TOML_VALUE | roots revoke EXACT_PATH]",
+                reason: "usage: /config [details | perimeter | roots | set KEY TOML_VALUE | roots revoke EXACT_PATH]",
             }
         }
     }
@@ -1145,6 +1179,19 @@ impl ActionRegistry {
         let id = self
             .resolve_slash(name)
             .or_else(|| self.resolve_alias(name))?;
+        if id == ActionId::Login {
+            let arguments = raw_arguments.split_whitespace().collect::<Vec<_>>();
+            return Some(match arguments.as_slice() {
+                [] => Dispatch::Login(None),
+                [provider] => Dispatch::Login(Some((*provider).to_owned())),
+                _ => Dispatch::Refused {
+                    reason: "usage: /login [PROVIDER]",
+                },
+            });
+        }
+        if id == ActionId::Model && !raw_arguments.trim().is_empty() {
+            return Some(Dispatch::ModelQuery(raw_arguments.trim().to_owned()));
+        }
         if id == ActionId::Fast {
             return Some(match raw_arguments.trim() {
                 "on" => Dispatch::Fast(true),
@@ -1176,7 +1223,9 @@ impl ActionRegistry {
                 }
             });
         }
-        if matches!(id, ActionId::Tools | ActionId::Doctor) && raw_arguments.trim() == "details" {
+        if matches!(id, ActionId::Help | ActionId::Tools | ActionId::Doctor)
+            && raw_arguments.trim() == "details"
+        {
             return Some(Dispatch::Details(id));
         }
         Some(if no_arguments {
@@ -1216,9 +1265,34 @@ impl ActionRegistry {
         if submission.origin == InputOrigin::Typed
             && let Some(command) = submission.text.strip_prefix('/')
         {
+            let command = command.trim_end();
             let boundary = command.find(char::is_whitespace).unwrap_or(command.len());
             let name = &command[..boundary];
             let raw_arguments = command[boundary..].trim_start_matches(char::is_whitespace);
+            let builtin_name = name.to_ascii_lowercase();
+            let name = if self.resolve_slash(&builtin_name).is_some()
+                || self.resolve_alias(&builtin_name).is_some()
+            {
+                if name != builtin_name {
+                    let capture = match self.skill_capture() {
+                        Ok(capture) => capture,
+                        Err(_) => {
+                            return Dispatch::Refused {
+                                reason: "the skill catalogue view is unavailable",
+                            };
+                        }
+                    };
+                    if let Some(capture) = capture
+                        && let Some(operation) =
+                            admitted_skill_operation(&capture, name, raw_arguments)
+                    {
+                        return Dispatch::Skill(operation);
+                    }
+                }
+                builtin_name.as_str()
+            } else {
+                name
+            };
             if name.starts_with("mcp__") || name.starts_with("mcp_resource__") {
                 return self.classify_mcp_context(name, raw_arguments);
             }
@@ -1252,8 +1326,27 @@ impl ActionRegistry {
                     },
                 };
             }
+            if name == "detach" && self.resolve_alias(name) == Some(ActionId::Tasks) {
+                return if raw_arguments.trim().is_empty() {
+                    Dispatch::Tasks("/detach".to_owned())
+                } else {
+                    Dispatch::Refused {
+                        reason: "usage: /detach",
+                    }
+                };
+            }
             if name == "tasks" && self.resolve_slash(name) == Some(ActionId::Tasks) {
                 return Dispatch::Tasks(raw_arguments.trim().to_owned());
+            }
+            if name == "side" && self.resolve_slash(name) == Some(ActionId::Side) {
+                let question = raw_arguments.trim();
+                return if question.is_empty() {
+                    Dispatch::Refused {
+                        reason: SIDE_GRAMMAR,
+                    }
+                } else {
+                    Dispatch::Side(question.to_owned())
+                };
             }
             if matches!(name, "resume" | "continue")
                 && self.resolve_alias(name) == Some(ActionId::Sessions)
@@ -1305,12 +1398,17 @@ impl ActionRegistry {
                 return self.classify_config(raw_arguments);
             }
             if name == "hooks" && self.resolve_slash(name) == Some(ActionId::Hooks) {
-                return if !raw_arguments.is_empty() {
+                let details = raw_arguments.trim() == "details";
+                return if !raw_arguments.is_empty() && !details {
                     Dispatch::Refused {
-                        reason: "usage: /hooks",
+                        reason: "usage: /hooks [details]",
                     }
                 } else if self.availability(ActionId::Hooks) == Availability::Enabled {
-                    Dispatch::Hooks
+                    if details {
+                        Dispatch::Details(ActionId::Hooks)
+                    } else {
+                        Dispatch::Hooks
+                    }
                 } else {
                     Dispatch::Refused {
                         reason: "the hook catalogue is unavailable",
@@ -1422,21 +1520,17 @@ fn parse_name_action(arguments: &str) -> Dispatch {
 fn parse_goal_action(arguments: &str) -> Dispatch {
     let operation = match arguments {
         "" | "show" => GoalOperation::Show,
+        "stop" => GoalOperation::Stop,
         "achieve" => GoalOperation::Achieve,
+        "resume" => GoalOperation::Resume,
         _ if arguments == "extend"
             || arguments
                 .strip_prefix("extend")
                 .is_some_and(|tail| tail.starts_with(char::is_whitespace)) =>
         {
-            let turns = arguments.strip_prefix("extend").unwrap_or_default().trim();
-            match crate::cli::parse_goal_extension(turns) {
-                Ok(turns) => GoalOperation::Extend(turns),
-                Err(_) => {
-                    return Dispatch::Refused {
-                        reason: "goal extension requires a positive integer turn count: /goal extend N",
-                    };
-                }
-            }
+            return Dispatch::Refused {
+                reason: GOAL_GRAMMAR,
+            };
         }
         _ => {
             let (text, operation) = if let Some(tail) = arguments
@@ -1456,7 +1550,7 @@ fn parse_goal_action(arguments: &str) -> Dispatch {
                     GoalOperation::Block as fn(String) -> GoalOperation,
                 )
             } else if matches!(arguments, "set" | "block")
-                || ["show", "achieve"].iter().any(|keyword| {
+                || ["show", "stop", "achieve", "resume"].iter().any(|keyword| {
                     arguments
                         .strip_prefix(keyword)
                         .is_some_and(|tail| tail.starts_with(char::is_whitespace))
@@ -1508,6 +1602,137 @@ fn admitted_skill_operation(
 #[cfg(test)]
 mod unknown_slash_tests {
     use super::*;
+
+    // Catches: a separator with no argument makes a local command fail syntax validation.
+    #[test]
+    fn trailing_whitespace_does_not_create_command_arguments() {
+        let registry = ActionRegistry::final_surface();
+        for (command, expected) in [
+            ("/help", Dispatch::Action(ActionId::Help)),
+            ("/quit", Dispatch::Action(ActionId::Quit)),
+            ("/continue", Dispatch::Resume(None)),
+            ("/model", Dispatch::Action(ActionId::Model)),
+            ("/mcp", Dispatch::Action(ActionId::Mcp)),
+            ("/fork", Dispatch::Action(ActionId::Fork)),
+            ("/hooks", Dispatch::Hooks),
+        ] {
+            for suffix in [" ", "   ", "\t", "\r\n", "\u{a0}\u{2003}"] {
+                let input = format!("{command}{suffix}");
+                assert_eq!(
+                    registry.classify(registry.submit(&input, InputOrigin::Typed)),
+                    expected,
+                    "{input:?}"
+                );
+            }
+        }
+    }
+
+    // Catches: exact-match subcommands or free-text arguments retaining trailing whitespace.
+    #[test]
+    fn trailing_whitespace_is_removed_before_parsing_command_arguments() {
+        let registry = ActionRegistry::final_surface();
+        for (input, expected) in [
+            (
+                "/name show \t",
+                Dispatch::SessionMetadata(SessionMetadataOperation::Name(NameOperation::Show)),
+            ),
+            (
+                "/goal achieve\u{2003}",
+                Dispatch::SessionMetadata(SessionMetadataOperation::Goal(GoalOperation::Achieve)),
+            ),
+            (
+                "/pin list ",
+                Dispatch::Pins(ego_core::compact::PinCommand::List),
+            ),
+            (
+                "/pin keep  internal spaces \t",
+                Dispatch::Pins(ego_core::compact::PinCommand::Pin(
+                    "keep  internal spaces".into(),
+                )),
+            ),
+            (
+                "/name set keep  internal spaces \t",
+                Dispatch::SessionMetadata(SessionMetadataOperation::Name(NameOperation::Set(
+                    "keep  internal spaces".into(),
+                ))),
+            ),
+        ] {
+            assert_eq!(
+                registry.classify(registry.submit(input, InputOrigin::Typed)),
+                expected,
+                "{input:?}"
+            );
+        }
+    }
+
+    // Catches: normalization accepting real extra arguments or turning literal prompt text into commands.
+    #[test]
+    fn trailing_whitespace_normalization_preserves_command_boundaries() {
+        let registry = ActionRegistry::final_surface();
+        for input in [
+            "/help extra ",
+            "/quit extra\t",
+            "/goal achieve extra\u{2003}",
+        ] {
+            assert!(
+                matches!(
+                    registry.classify(registry.submit(input, InputOrigin::Typed)),
+                    Dispatch::Refused { .. }
+                ),
+                "{input:?}"
+            );
+        }
+        for (input, origin) in [
+            (" /help ", InputOrigin::Typed),
+            ("/help \t", InputOrigin::BracketedPaste),
+            ("ordinary prompt \t", InputOrigin::Typed),
+        ] {
+            let submission = registry.submit(input, origin);
+            assert_eq!(submission.text(), input);
+            assert_eq!(registry.classify(submission), Dispatch::Prompt);
+        }
+    }
+
+    // Catches: /model terra is refused or forwarded to the paid model rather than routed locally.
+    #[test]
+    fn model_fragment_is_local_and_empty_model_keeps_picker() {
+        let registry = ActionRegistry::final_surface();
+        assert_eq!(
+            registry.classify(registry.submit("/model", InputOrigin::Typed)),
+            Dispatch::Action(ActionId::Model)
+        );
+        assert_eq!(
+            registry.classify(registry.submit("/model terra", InputOrigin::Typed)),
+            Dispatch::ModelQuery("terra".into())
+        );
+        assert_eq!(
+            registry.classify(registry.submit("/model terra", InputOrigin::BracketedPaste)),
+            Dispatch::Prompt
+        );
+    }
+
+    // Catches: an interactive login command is sent to a paid model turn, or
+    // bracketed-paste content unexpectedly starts authentication.
+    #[test]
+    fn login_is_a_local_typed_command_only() {
+        let registry = ActionRegistry::final_surface();
+        assert_eq!(
+            registry.classify(registry.submit("/login", InputOrigin::Typed)),
+            Dispatch::Login(None)
+        );
+        assert_eq!(
+            registry.classify(registry.submit("/login anthropic", InputOrigin::Typed)),
+            Dispatch::Login(Some("anthropic".into()))
+        );
+        assert!(matches!(
+            registry.classify(registry.submit("/login anthropic extra", InputOrigin::Typed)),
+            Dispatch::Refused { .. }
+        ));
+        assert_eq!(
+            registry.classify(registry.submit("/login anthropic", InputOrigin::BracketedPaste)),
+            Dispatch::Prompt
+        );
+    }
 
     // Catches: invalid or extra mode arguments escape into a paid model turn.
     #[test]
@@ -1824,6 +2049,25 @@ mod tests {
         );
         assert!(matches!(
             registry.classify(registry.submit("/hooks extra", InputOrigin::Typed)),
+            Dispatch::Refused { .. }
+        ));
+    }
+
+    // Catches: /detach becoming a child/parent model prompt or pasted text
+    // accidentally changing terminal input ownership.
+    #[test]
+    fn detach_is_a_typed_terminal_command_not_pasted_prompt_control() {
+        let registry = ActionRegistry::final_surface();
+        assert_eq!(
+            registry.classify(registry.submit("/detach", InputOrigin::Typed)),
+            Dispatch::Tasks("/detach".into())
+        );
+        assert_eq!(
+            registry.classify(registry.submit("/detach", InputOrigin::BracketedPaste)),
+            Dispatch::Prompt
+        );
+        assert!(matches!(
+            registry.classify(registry.submit("/detach extra", InputOrigin::Typed)),
             Dispatch::Refused { .. }
         ));
     }

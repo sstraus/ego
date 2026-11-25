@@ -1,0 +1,33 @@
+{
+  "model": "kimi-default",
+  "messages": [
+    {
+      "role": "user",
+      "content": "say ok"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "read_file",
+        "description": "Read one file.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "path": {"type": "string"}
+          },
+          "required": ["path"]
+        }
+      }
+    },
+    {
+      "type": "builtin_function",
+      "function": {"name": "$web_search"}
+    }
+  ],
+  "stream": true,
+  "stream_options": {"include_usage": true},
+  "thinking": {"type": "disabled"},
+  "max_completion_tokens": 128
+}

@@ -1,0 +1,30 @@
+{
+  "version": "ego 0.4.1",
+  "command": [
+    "/Users/stefano.straus/Gits/.mbx/targets/v1/07321ec8ca1b486087bcca910a054be62dc3fdeb9888669e40ae8b3b25dffee8/debug/ego",
+    "run",
+    "--bare",
+    "--no-tools",
+    "--thinking",
+    "off",
+    "--model",
+    "ollama/fixture",
+    "--session-dir",
+    "/Users/stefano.straus/Gits/.tmp/ego-771-capture/enriched/sessions",
+    "--retry",
+    "0",
+    "--timeout",
+    "15s",
+    "--output",
+    "text",
+    "Report readiness."
+  ],
+  "fixture_provider": "owned loopback server; no remote provider or paid turn",
+  "order": "raw PTY bytes",
+  "exit": 0,
+  "geometry": [
+    80,
+    24
+  ],
+  "tuic_socket_present": true
+}

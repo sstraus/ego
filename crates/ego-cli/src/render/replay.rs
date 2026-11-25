@@ -83,6 +83,9 @@ fn render(
             _ => None,
         })
         .collect();
+    // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
+    // Only logs written before story 842 carry chunks; a partial without a
+    // final message is printed from them.
     let mut last_delta = HashMap::new();
     for (index, event) in events.iter().enumerate() {
         if matches!(event.kind, EventKind::AssistantDelta { .. })
@@ -94,7 +97,7 @@ fn render(
     let mut partials: HashMap<ItemId, String> = HashMap::new();
     let mut calls: HashMap<ItemId, (&str, &str)> = HashMap::new();
     let mut timings = HashMap::new();
-    let mut tools = tool_row::ToolRows::default();
+    let mut tools = tool_row::ToolRows::new(workspace);
     for (index, event) in events.iter().enumerate() {
         let transcript = matches!(
             event.kind,
@@ -110,9 +113,12 @@ fn render(
             continue;
         }
         match &event.kind {
-            EventKind::UserPrompt { text, .. } => {
+            EventKind::UserPrompt { text, images, .. } => {
                 tools.separate();
                 output.line(&format!("> {text}"));
+                if let Some(label) = super::attachments::label(images.len()) {
+                    output.line(&label);
+                }
             }
             EventKind::AssistantMessage { text } => {
                 if event.env.item.and_then(|item| finals.get(&item)) == Some(&index) {
@@ -124,6 +130,7 @@ fn render(
                 tools.separate();
                 message(output, checkpoint, capabilities, workspace)
             }
+            // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
             EventKind::AssistantDelta { text } => {
                 let item = event.env.item.expect("transcript item checked above");
                 if !finals.contains_key(&item) {
@@ -153,6 +160,25 @@ fn render(
                         continue;
                     }
                     let text = result.model_text();
+                    if matches!(name.rsplit(" › ").next(), Some("write" | "edit")) {
+                        let call = tool_row::Finished {
+                            name,
+                            args,
+                            ok: *ok,
+                            result: &text,
+                            result_blocks: Some(&result.content),
+                            timing: timings.remove(&item),
+                            before_image: None,
+                        };
+                        for record in tools.record_writes(
+                            &call,
+                            result.file_writes(),
+                            capabilities.with_current_width(),
+                        ) {
+                            output.tool_row(&record.rows, record.detail);
+                        }
+                        continue;
+                    }
                     let record = tools.record(
                         &tool_row::Finished {
                             name,
@@ -161,6 +187,7 @@ fn render(
                             result: &text,
                             result_blocks: Some(&result.content),
                             timing: timings.remove(&item),
+                            before_image: result.before_image(),
                         },
                         capabilities.with_current_width(),
                     );
@@ -191,6 +218,54 @@ mod tests {
     use ego_core::store::session_store::SessionStore;
     use ego_tools::store::{JsonlStore, OsIo};
     use std::sync::Mutex;
+
+    // Catches: replay ignores its saved workspace and restores long absolute tool labels.
+    #[test]
+    fn replay_tool_paths_use_the_replayed_workspace() {
+        let workspace = std::env::temp_dir().join("ego-replay-tool-paths");
+        let path = workspace.join("lib.rs");
+        let mut events: Vec<DomainEvent> =
+            serde_json::from_str(include_str!("../../tests/fixtures/expand-664.json")).unwrap();
+        for event in &mut events {
+            if let EventKind::ToolCallStarted { name, args, .. } = &mut event.kind {
+                *name = "read".into();
+                *args = serde_json::json!({"files":[{"path":path}]}).to_string();
+            }
+        }
+        let output = Recorded::default();
+        render(&events, &output, Capabilities::plain(), Some(&workspace));
+        let text = output.0.lock().unwrap();
+        assert!(text.contains("✓ read lib.rs ·"), "{text}");
+        assert!(!text.contains(&path.display().to_string()), "{text}");
+    }
+
+    // Catches: resume reintroduces an error-like label for successful stderr.
+    #[test]
+    fn replay_keeps_successful_stderr_visible_and_neutral() {
+        let mut events: Vec<DomainEvent> =
+            serde_json::from_str(include_str!("../../tests/fixtures/expand-664.json")).unwrap();
+        for event in &mut events {
+            match &mut event.kind {
+                EventKind::ToolCallStarted { args, .. } => {
+                    *args = r#"{"argv":["x"]}"#.into();
+                }
+                EventKind::ToolCallCompleted { result, .. } => {
+                    result.content[0].text.clear();
+                    result.content[1].text = "operation completed\nwarning: check input\n".into();
+                }
+                _ => {}
+            }
+        }
+        let output = Recorded::default();
+        render(&events, &output, Capabilities::plain(), None);
+        let text = output.0.lock().unwrap();
+        assert!(text.contains("✓ $ x · exit 0"), "{text}");
+        assert!(
+            text.contains("\n  operation completed\n  warning: check input"),
+            "{text}"
+        );
+        assert!(!text.contains("stderr:"), "{text}");
+    }
 
     // Catches: wall-clock replay fabricating execution duration including approval.
     #[test]
@@ -347,7 +422,7 @@ mod tests {
                 },
                 EventKind::ToolCallStarted {
                     name: "read".into(),
-                    args: r#"{"path":"first"}"#.into(),
+                    args: r#"{"files":[{"path":"first"}]}"#.into(),
                     call_id: None,
                 },
                 EventKind::ToolCallCompleted {
@@ -467,7 +542,7 @@ mod tests {
                         producer: Producer::Main,
                     },
                     kind: EventKind::AssistantMessage {
-                        text: "DISPLAY-ONLY-KOO".to_owned(),
+                        text: "DISPLAY-ONLY-238".to_owned(),
                     },
                 },
             )
@@ -482,7 +557,7 @@ mod tests {
         let state = ego_core::state::SessionState::replay(entries.clone());
         let output = Recorded::default();
         replay(&store, id, &output, Capabilities::plain(), Some(&root)).unwrap();
-        assert_eq!(*output.0.lock().unwrap(), "DISPLAY-ONLY-KOO\n");
+        assert_eq!(*output.0.lock().unwrap(), "DISPLAY-ONLY-238\n");
         assert_eq!(std::fs::read(log).unwrap(), before);
         assert_eq!(
             ego_core::state::SessionState::replay(source_entries(&store, id)),

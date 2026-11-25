@@ -23,6 +23,9 @@ pub struct AgentIdentity {
     pub offline: bool,
     /// The client that initialized the ACP connection, when there is one.
     pub host: Option<HostClient>,
+    /// Configuration entries that were skipped or degraded at startup, so the
+    /// model can tell the user what is wrong (story 966-97ad).
+    pub config_notes: Vec<String>,
 }
 
 /// An ACP client as it named itself in `initialize`.
@@ -34,34 +37,7 @@ pub struct HostClient {
 
 impl AgentIdentity {
     pub(crate) fn stable_text(&self) -> String {
-        let confinement = if self.sandbox == Confinement::Adaptive {
-            "Adaptive sandbox: normal reads and installed executables are reachable except credential floors. \
-             Writes are confined to the workspace, captured toolchain/cache/git/temp roots and explicit grants. \
-             Workspace and derived build artifacts remain executable. Permission mode, network policy and \
-             OS privacy restrictions still apply. Report the exact refused path and why the task needs it; \
-             never bypass a refusal or claim a partially failed mutation is safe to replay."
-        } else {
-            "The workspace sandbox confines reads, writes and exec. Absent explicit \
-             roots, file access is limited to the workspace. Extra read/write roots do \
-             not grant exec; extra executable paths need exec_paths via ego config edit. \
-             Use ego roots add to grant extra paths; removing all roots leaves \
-             roots=[]; ego config unset roots restores absence."
-        };
-        format!(
-            "You are ego {}, a coding agent.\n\n\
-             Permissions and OS confinement are separate. Modes: plan prevents mutation; \
-             default uses deterministic policy and escalation; auto adds bounded analysis and \
-             an optional permissions.judge; accept-edits admits workspace file edits; yolo relaxes ordinary \
-             approvals, not confinement or hard denies. User config can select mode and sandbox \
-             silently. {confinement} Saved perimeter changes require \
-             /quit, then ego resume <session-id> without a positional prompt; they do not apply live. Ask the user \
-             to inspect /config perimeter for this session, or ego config ls --effective and \
-             ego doctor for a fresh resolution. Use ego rules ls/explain/remember to inspect \
-             approval rules; remembered shell commands stay exact. When blocked, report the \
-             exact error and required paths or authority to the user; do not bypass the block \
-             through another tool, transport or sandbox mode.",
-            self.version
-        )
+        crate::model_prompts::stable_identity(&self.version, self.sandbox == Confinement::Adaptive)
     }
 
     pub(crate) fn render(
@@ -78,6 +54,14 @@ impl AgentIdentity {
             None => "none (direct command-line invocation)".to_owned(),
         };
         let network = if self.offline { "offline" } else { "online" };
+        let notices = if self.config_notes.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n- Configuration notices (ego skipped or narrowed these entries; tell the user): {}",
+                self.config_notes.join(" | ")
+            )
+        };
         format!(
             "Current runtime facts (ego-owned; updated when facts change):\n\
              - Ego session ID: {session}\n\
@@ -86,7 +70,7 @@ impl AgentIdentity {
              - Posture: permission mode: {mode}; sandbox: {sandbox}; network: {network}\n\
              - Host: {host}\n\
              - Tools: {tools}\n\
-             - MCP servers: {servers}",
+             - MCP servers: {servers}{notices}",
             thinking = thinking.as_str(),
             workspace = policy.workspace().as_path().display(),
             mode = policy.mode(),

@@ -1,0 +1,16 @@
+error[E0616]: field `scope` of struct `ego_core::permit::Permit` is private
+  --> tests/ui/permit_fields_are_private.rs:10:21
+   |
+10 |     let _ = &permit.scope;
+   |                     ^^^^^ private field
+
+error[E0616]: field `call` of struct `Authorized` is private
+  --> tests/ui/permit_fields_are_private.rs:14:25
+   |
+14 |     let _ = &authorized.call;
+   |                         ^^^^ private field
+   |
+help: a method `call` also exists, call it with parentheses
+   |
+14 |     let _ = &authorized.call();
+   |                             ++

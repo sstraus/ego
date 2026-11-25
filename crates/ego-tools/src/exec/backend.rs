@@ -25,6 +25,12 @@ pub(crate) trait Backend: Send + Sync {
     fn maximum_demonstrable_caps(&self) -> ExecCaps;
     fn launch_prefix(&self) -> LaunchPrefix;
 
+    /// Variables that replace the child's own: fixed by the mechanism, never
+    /// by a call. Empty unless the mechanism owns the child's temporary space.
+    fn launch_env(&self) -> Vec<(OsString, OsString)> {
+        Vec::new()
+    }
+
     /// This backend with allowed paths added and exec denied under
     /// `no_exec`, or `None` when the mechanism cannot express a per-path grant
     /// after admission. The result keeps the identity and verified
@@ -92,6 +98,10 @@ impl Backend for MeasuredBackend {
 
     fn launch_prefix(&self) -> LaunchPrefix {
         self.inner.launch_prefix()
+    }
+
+    fn launch_env(&self) -> Vec<(OsString, OsString)> {
+        self.inner.launch_env()
     }
 
     fn widened(
@@ -232,6 +242,10 @@ impl Backend for super::seatbelt::SeatbeltBackend {
 
     fn launch_prefix(&self) -> LaunchPrefix {
         super::seatbelt::SeatbeltBackend::launch_prefix(self)
+    }
+
+    fn launch_env(&self) -> Vec<(OsString, OsString)> {
+        super::seatbelt::SeatbeltBackend::launch_env(self)
     }
 
     fn widened(

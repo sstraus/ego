@@ -1,5 +1,7 @@
 # Git worktrees
 
+Read this page in the [hosted user guide](https://ego.tuicommander.com/docs/guides/worktrees.html).
+
 Use a worktree when a task needs an isolated checkout and a new branch. A worktree
 shares Git history with its source repository, but has its own working files.
 Creating a worktree does not grant tools more filesystem or network authority.
@@ -37,3 +39,6 @@ Inspect a refusal rather than deleting the directory to bypass the checks.
 When `TUIC_SESSION` is nonempty and `tuic` is executable on PATH,
 TUICommander owns launch and worktree lifecycle. Otherwise ego uses system git. Use its
 controls; a hosted receipt is not adopted into ego's local worktree store.
+
+Sources: [worktree lifecycle](../../crates/ego-cli/src/worktree.rs) and
+[worktree tests](../../crates/ego-cli/tests/it/worktree.rs).

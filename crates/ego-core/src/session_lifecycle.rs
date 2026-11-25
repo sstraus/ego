@@ -107,6 +107,75 @@ pub trait SessionLifecycleStore:
     fn quarantine(&self, id: SessionId) -> Result<(), StoreError>;
 
     fn is_quarantined(&self, id: SessionId) -> Result<bool, StoreError>;
+
+    /// Hold, deletion and cached lineage anchor of one catalogue row without
+    /// replaying its log. `None` means this store keeps no such cache, and the
+    /// caller replays the log instead. A store whose cache lacks the facts
+    /// derives them once and persists them.
+    fn listed_facts(&self, _id: SessionId) -> Result<Option<ListedFacts>, StoreError> {
+        Ok(None)
+    }
+
+    /// Up to `limit` visible catalogue rows after `after`, newest first and
+    /// then by id, from an index the store keeps. `None` means this store keeps
+    /// no such index, and the caller filters and sorts [`SessionStore::list`].
+    fn catalogue_page(
+        &self,
+        _root: Option<&Path>,
+        _after: Option<(Timestamp, SessionId)>,
+        _limit: usize,
+    ) -> Result<Option<Vec<SessionMeta>>, StoreError> {
+        Ok(None)
+    }
+
+    /// Record that a client opened `id` at `at`, so retention keeps a session
+    /// that is read without new events. A store without retention ignores it.
+    fn note_opened(&self, _id: SessionId, _at: Timestamp) {}
+
+    /// Metadata for optional catalogue ancestry, not restoration authority.
+    fn listed_meta(&self, id: SessionId) -> Result<Option<SessionMeta>, StoreError> {
+        self.lifecycle_meta(id)
+    }
+
+    /// Last visible message at a source cutoff. Stores may cache only these
+    /// markers; the default keeps adapters without a projection correct.
+    fn listed_message_at(
+        &self,
+        id: SessionId,
+        cutoff: Seq,
+    ) -> Result<Option<ItemId>, LifecycleError> {
+        Ok(self
+            .entries(&id)?
+            .ok_or_else(|| LifecycleError::UnknownSession {
+                session: id,
+                store_root: self.storage_root(),
+            })?
+            .into_iter()
+            .filter_map(|entry| match entry {
+                SessionEntry::Event(event)
+                    if event.env.seq <= cutoff
+                        && matches!(
+                            event.kind,
+                            EventKind::UserPrompt { .. }
+                                | EventKind::AssistantDelta { .. }
+                                | EventKind::AssistantMessage { .. }
+                        ) =>
+                {
+                    event.env.item
+                }
+                _ => None,
+            })
+            .next_back())
+    }
+
+    /// Keep the derived anchor of `id`'s lineage so a later listing replays nothing.
+    fn cache_lineage_anchor(
+        &self,
+        _id: SessionId,
+        _anchor: LineageAnchor,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 /// Session-bound authority to append a lifecycle event while its writer lease is held.
@@ -206,9 +275,18 @@ impl From<StoreError> for LifecycleAppendError {
     }
 }
 
-/// Host-visible hold state distinguishes a pending request from a reached pause boundary. Only
-/// the latter promises no further effects. Keep hold separate from activity: a finished session
-/// and a held inactive session respond differently to new work.
+/// What a session's hold is, as a host can observe it.
+///
+/// Three values and not a boolean, because the middle one is the whole
+/// reason `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-
+/// session.md` distinguishes a request from a boundary: a host told `Paused`
+/// may assume no further effect will happen, and a host told `Pending` may
+/// not. Collapsing them would let a client act on a hold that has not landed.
+///
+/// Beside [`SessionActivity`] and not folded into it. Activity is about the
+/// run — is a turn in flight — and this is about the session: a session can
+/// be inactive because it finished and inactive because it is being held,
+/// and only one of the two will start work when asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HoldState {
@@ -287,6 +365,22 @@ pub struct SessionLineageInfo {
     pub root: SessionId,
     pub at_message: Option<ItemId>,
     pub source_deleted: bool,
+}
+
+/// The immutable part of [`SessionLineageInfo`]: a lineage edge never changes,
+/// so a store may keep its root and cutoff message beside the catalogue row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LineageAnchor {
+    pub root: SessionId,
+    pub at_message: Option<ItemId>,
+}
+
+/// What a catalogue row needs beyond [`SessionMeta`], read without a log replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ListedFacts {
+    pub pause: PauseState,
+    pub deleted: bool,
+    pub lineage_anchor: Option<LineageAnchor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -566,8 +660,12 @@ where
 
     /// The hold this session is under right now.
     pub fn hold(&self, id: SessionId) -> Result<HoldState, LifecycleError> {
-        self.meta(id)?;
-        Ok(hold_state(self.state(id)?.pause))
+        self.raw_meta(id)?;
+        let state = self.state(id)?;
+        if state.deleted {
+            return Err(LifecycleError::Deleted);
+        }
+        Ok(hold_state(state.pause))
     }
 
     /// What this session has already answered each hold request with.
@@ -695,10 +793,11 @@ where
         let objective = validate_operator_text(objective)?;
         self.meta(session)?;
         let state = self.state(session)?;
-        if state
-            .goal
-            .as_ref()
-            .is_some_and(|goal| goal.state == GoalState::Active)
+        if owner != GoalOwner::Operator
+            && state
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.state == GoalState::Active)
         {
             return Err(GoalRefusal::ActiveGoalExists.into());
         }
@@ -726,6 +825,33 @@ where
         })
     }
 
+    /// Explicit operator resume: preserve the automatic goal and grant one more batch.
+    pub fn resume_goal(
+        &self,
+        append: &dyn LeasedLifecycleAppend,
+        expected: Seq,
+    ) -> Result<LifecycleMutation<GoalRecord>, LifecycleError> {
+        let goal = self
+            .goal(append.session_id())?
+            .ok_or(GoalRefusal::NoActiveGoal)?;
+        if goal.owner != GoalOwner::Automated
+            || goal.state != GoalState::Active
+            || goal.continuation_turns
+                < goal
+                    .continuation_budget
+                    .unwrap_or(crate::goal::AUTOMATIC_CONTINUATION_LIMIT)
+        {
+            return Err(GoalRefusal::AutomaticNotPaused.into());
+        }
+        self.transition_goal(
+            append,
+            expected,
+            GoalTransition::AllowanceExtended {
+                turns: crate::goal::AUTOMATIC_CONTINUATION_LIMIT,
+            },
+        )
+    }
+
     pub fn transition_goal(
         &self,
         append: &dyn LeasedLifecycleAppend,
@@ -741,6 +867,7 @@ where
                 reason: validate_operator_text(reason)?,
             },
             unchanged @ (GoalTransition::Achieved { .. }
+            | GoalTransition::Cancelled { .. }
             | GoalTransition::AllowanceExtended { .. }) => unchanged,
         };
         self.meta(session)?;
@@ -1011,6 +1138,7 @@ where
                             && matches!(
                                 event.kind,
                                 EventKind::UserPrompt { .. }
+                                    // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
                                     | EventKind::AssistantDelta { .. }
                                     | EventKind::AssistantMessage { .. }
                             ) =>
@@ -1082,14 +1210,41 @@ where
         {
             return Err(LifecycleError::InvalidCursor);
         }
+        let keyset = after.as_ref().map(|after| (after.created, after.id));
+        let mut items =
+            match self
+                .metadata
+                .store
+                .catalogue_page(root, keyset, limit.saturating_add(1))?
+            {
+                Some(items) => items,
+                None => self.scan_catalogue(root, keyset)?,
+            };
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        let next_cursor = has_more.then(|| {
+            SessionCursor::new(
+                root,
+                items.last().expect("a non-zero full page has a last row"),
+            )
+        });
+        Ok(SessionPage { items, next_cursor })
+    }
+
+    /// The catalogue of a store without an index: every manifest, filtered
+    /// and sorted here.
+    fn scan_catalogue(
+        &self,
+        root: Option<&Path>,
+        after: Option<(Timestamp, SessionId)>,
+    ) -> Result<Vec<SessionMeta>, LifecycleError> {
         let mut items = self.metadata.store.list()?;
         items.retain(|meta| root.is_none_or(|root| meta.workspace_root == root));
+        // The catalogue omits deleted sessions (`SessionStore::list`), so no
+        // event log is read here: the cost follows the manifest count.
         let mut visible = Vec::with_capacity(items.len());
         for meta in items {
-            if self.metadata.store.is_quarantined(meta.id)? {
-                continue;
-            }
-            if !self.metadata.state(meta.id)?.deleted {
+            if !self.metadata.store.is_quarantined(meta.id)? {
                 visible.push(meta);
             }
         }
@@ -1100,21 +1255,89 @@ where
                 .cmp(&left.created)
                 .then_with(|| left.id.cmp(&right.id))
         });
-        if let Some(after) = after {
-            items.retain(|meta| {
-                meta.created < after.created
-                    || (meta.created == after.created && meta.id > after.id)
-            });
+        if let Some((created, id)) = after {
+            items
+                .retain(|meta| meta.created < created || (meta.created == created && meta.id > id));
         }
-        let has_more = items.len() > limit;
-        items.truncate(limit);
-        let next_cursor = has_more.then(|| {
-            SessionCursor::new(
-                root,
-                items.last().expect("a non-zero full page has a last row"),
-            )
-        });
-        Ok(SessionPage { items, next_cursor })
+        Ok(items)
+    }
+
+    /// Hold and lineage of one listed row. Reads no event log when the store
+    /// keeps these facts beside the catalogue row.
+    pub fn listed_row(
+        &self,
+        meta: &SessionMeta,
+    ) -> Result<(HoldState, Option<SessionLineageInfo>), LifecycleError> {
+        let id = meta.id;
+        let store = &self.metadata.store;
+        let facts = store.listed_facts(id)?;
+        let hold = match facts {
+            Some(facts) if facts.deleted => return Err(LifecycleError::Deleted),
+            Some(facts) => hold_state(facts.pause),
+            None => self.hold(id)?,
+        };
+        match self.listed_lineage(meta, facts.and_then(|facts| facts.lineage_anchor)) {
+            // Lineage is optional display data. An absent ancestor must not
+            // hide a locally readable row or imply that its source was deleted.
+            Err(LifecycleError::UnknownSession { session, .. }) if session != id => {
+                tracing::warn!(session = %id, ancestor = %session, "session/list omitted unavailable lineage for a readable session");
+                Ok((hold, None))
+            }
+            result => result.map(|lineage| (hold, lineage)),
+        }
+    }
+
+    fn listed_lineage(
+        &self,
+        meta: &SessionMeta,
+        anchor: Option<LineageAnchor>,
+    ) -> Result<Option<SessionLineageInfo>, LifecycleError> {
+        let id = meta.id;
+        let store = &self.metadata.store;
+        let Some(lineage) = meta.lineage else {
+            return Ok(None);
+        };
+        let Some(anchor) = anchor else {
+            let mut visited = std::collections::HashSet::from([id]);
+            let mut edge = lineage;
+            let root = loop {
+                let (SessionLineage::Fork { source, .. }
+                | SessionLineage::Compaction { source, .. }) = edge;
+                if !visited.insert(source) {
+                    return Err(ReplayError::Cycle { session: source }.into());
+                }
+                let parent = store
+                    .listed_meta(source)?
+                    .ok_or_else(|| self.metadata.unknown_session(source))?;
+                match parent.lineage {
+                    Some(next) => edge = next,
+                    None => break source,
+                }
+            };
+            let at_message = match lineage {
+                SessionLineage::Fork { source, at_seq, .. } => {
+                    store.listed_message_at(source, at_seq)?
+                }
+                SessionLineage::Compaction { .. } => None,
+            };
+            let anchor = LineageAnchor { root, at_message };
+            if let Err(error) = store.cache_lineage_anchor(id, anchor) {
+                tracing::warn!(session = %id, %error, "lineage anchor could not be cached");
+            }
+            return self.listed_lineage(meta, Some(anchor));
+        };
+        let (SessionLineage::Fork { source, .. } | SessionLineage::Compaction { source, .. }) =
+            lineage;
+        let source_deleted = match store.listed_facts(source)? {
+            Some(source_facts) => source_facts.deleted,
+            None => self.metadata.state(source)?.deleted,
+        };
+        Ok(Some(SessionLineageInfo {
+            lineage,
+            root: anchor.root,
+            at_message: anchor.at_message,
+            source_deleted,
+        }))
     }
 
     pub async fn load(
@@ -1158,6 +1381,9 @@ where
         if state.deleted {
             return Err(LifecycleError::Deleted);
         }
+        self.metadata
+            .store
+            .note_opened(id, self.metadata.clock.now());
         if self.runs.activity(id).await? == SessionActivity::Uncertain {
             return Err(LifecycleError::EffectUncertain);
         }
@@ -1234,6 +1460,56 @@ where
         })
     }
 
+    /// Fork a settled tip, or an immutable completed prefix while the source is busy.
+    pub async fn fork_for_prompt(
+        &self,
+        source: SessionId,
+    ) -> Result<CreatedSession, LifecycleError> {
+        let _lease = match self.require_inactive(source).await {
+            Ok(lease) => Some(lease),
+            Err(LifecycleError::LeaseHeld | LifecycleError::Active) => None,
+            Err(error) => return Err(error),
+        };
+        self.metadata.meta(source)?;
+        let at = self.metadata.clock.now();
+        let prepared = if _lease.is_some() {
+            let state = self.metadata.state(source)?;
+            PreparedFork::for_prompt(source, &state, at).ok()
+        } else {
+            None
+        };
+        let prepared = match prepared {
+            Some(prepared) => prepared,
+            None => {
+                let entries = self
+                    .metadata
+                    .store
+                    .entries(&source)?
+                    .ok_or_else(|| self.metadata.unknown_session(source))?;
+                let cutoff = entries
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match entry {
+                        SessionEntry::Event(event)
+                            if matches!(event.kind, EventKind::TurnCompleted { ok: true, .. }) =>
+                        {
+                            Some(event.env.seq)
+                        }
+                        _ => None,
+                    })
+                    .ok_or(ForkError::UnsettledTurn)?;
+                let (state, _) = self.metadata.replay_prefix(source, Some(cutoff))?;
+                PreparedFork::for_prompt(source, &state, at)?
+            }
+        };
+        let id = SessionId::new();
+        let publication = self.publish_prepared_fork(id, &prepared)?;
+        Ok(CreatedSession {
+            id,
+            publication: publication.into(),
+        })
+    }
+
     /// Fork at a visible user or assistant message without taking the source writer lease.
     pub async fn fork_at(
         &self,
@@ -1302,6 +1578,7 @@ where
                         Some(crate::session::SessionLineage::Fork {
                             source: ancestor,
                             at_seq,
+                            neutral: false,
                         }) => {
                             source = ancestor;
                             cutoff = Some(at_seq);
@@ -1426,9 +1703,16 @@ where
     }
 
     /// Release a hold that is durably in place.
-    /// `release` lets a paused session run again; `resume` already means client
-    /// reattachment here. The wire operation remains `_ego/resume`. Only durable
-    /// paused sessions are eligible, so this path has no live turn lease.
+    ///
+    /// `release` and not `resume`, which this type already uses for
+    /// `session/resume` — reattaching a client to a session. The two are
+    /// unrelated: one gives a connection a view, the other lets a stopped
+    /// session run again. The wire name stays `_ego/resume` because the ADR
+    /// ratified it; the collision is only in Rust.
+    ///
+    /// Only ever the idle path: [`SessionMetadata::release`] refuses anything
+    /// but a session that is durably paused, and a durably paused session by
+    /// definition has no turn left to hold the lease.
     pub async fn release(
         &self,
         id: SessionId,

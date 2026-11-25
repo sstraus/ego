@@ -56,16 +56,89 @@ pub struct PermanentRootConsent {
 }
 
 /// One admitted root: canonical, and checked against the ceilings.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProfileRoot {
     path: CanonPath,
     access: RootAccess,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source: Option<crate::config::Source>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ceiling_source: Option<String>,
+    /// Set when ego derived the root itself instead of reading it from a config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    derived: Option<DerivedRoot>,
+    /// An exact write root approved at the terminal, not an ordinary profile root.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    terminal_write: bool,
+}
+
+/// Why ego admitted a root nobody configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DerivedRoot {
+    /// A checkout or git directory of the workspace's own repository.
+    SameRepository,
+}
+
+impl DerivedRoot {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SameRepository => "same-repository",
+        }
+    }
+}
+
+// Provenance is diagnostic; authority identity remains path and access.
+impl PartialEq for ProfileRoot {
+    fn eq(&self, other: &Self) -> bool {
+        self.path == other.path && self.access == other.access
+    }
+}
+impl Eq for ProfileRoot {}
+impl std::hash::Hash for ProfileRoot {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.path, state);
+        std::hash::Hash::hash(&self.access, state);
+    }
 }
 
 impl ProfileRoot {
     pub fn new(path: CanonPath, access: RootAccess) -> Self {
-        Self { path, access }
+        Self {
+            path,
+            access,
+            source: None,
+            ceiling_source: None,
+            derived: None,
+            terminal_write: false,
+        }
+    }
+
+    pub fn derived_from(mut self, derived: DerivedRoot) -> Self {
+        self.derived = Some(derived);
+        self
+    }
+
+    pub fn derived(&self) -> Option<DerivedRoot> {
+        self.derived
+    }
+
+    pub fn with_provenance(
+        mut self,
+        source: Option<crate::config::Source>,
+        ceiling_source: Option<String>,
+    ) -> Self {
+        self.source = source;
+        self.ceiling_source = ceiling_source;
+        self
+    }
+
+    pub fn source(&self) -> Option<crate::config::Source> {
+        self.source
+    }
+    pub fn ceiling_source(&self) -> Option<&str> {
+        self.ceiling_source.as_deref()
     }
 
     pub fn path(&self) -> &CanonPath {
@@ -76,10 +149,23 @@ impl ProfileRoot {
         self.access
     }
 
-    /// A read root inside writable authority subtracts that subtree. A broad
-    /// read root may still contain a more specific writable root or workspace.
+    /// Mark a root whose exact scope was approved by the terminal.
+    pub fn with_terminal_write(mut self) -> Self {
+        self.terminal_write = self.access == RootAccess::ReadWrite;
+        self
+    }
+
+    pub fn terminal_write(&self) -> bool {
+        self.terminal_write
+    }
+
+    /// A read root inside writable authority subtracts that subtree. The
+    /// workspace itself retains its built-in write authority, including when
+    /// an equal read root also lies inside a broader writable profile root.
+    /// A broad read root may contain a more specific writable root or workspace.
     pub fn restricts_writes(&self, workspace: &CanonPath, roots: &[ProfileRoot]) -> bool {
         self.access == RootAccess::Read
+            && self.path != *workspace
             && (self.path.is_or_under(workspace)
                 || roots.iter().any(|root| {
                     root.access == RootAccess::ReadWrite && self.path.is_or_under(&root.path)
@@ -150,14 +236,13 @@ pub fn admit_roots(
     let admitted = roots
         .iter()
         .map(|root| {
-            let expanded = expand(&root.path, home)?;
-            let path =
-                resolver
-                    .canonicalize(&expanded)
-                    .map_err(|error| RootsError::Unresolvable {
-                        path: root.path.clone(),
-                        reason: error.to_string(),
-                    })?;
+            let expanded = expand_root_path(&root.path, home)?;
+            let path = resolve_root(&expanded, root.access, resolver).map_err(|error| {
+                RootsError::Unresolvable {
+                    path: root.path.clone(),
+                    reason: error.to_string(),
+                }
+            })?;
             for (protected, contains) in [
                 (home.as_path(), "the home directory"),
                 (
@@ -175,9 +260,41 @@ pub fn admit_roots(
     Ok(admitted)
 }
 
+/// The canonical target of a root.
+///
+/// A read-write root may name a file that does not exist yet (story 954-4d0a):
+/// it is then the canonical parent plus the exact file name, and only when the
+/// parent exists and is spelled canonically. A missing parent, or one that
+/// resolves through a symlink alias, stays unresolvable, and so does every
+/// read root: the grant never widens to the parent directory.
+pub fn resolve_root(
+    path: &Path,
+    access: RootAccess,
+    resolver: &dyn PathResolver,
+) -> Result<CanonPath, crate::permit::FsError> {
+    match resolver.canonicalize(path) {
+        Err(crate::permit::FsError::NotFound { .. }) if access == RootAccess::ReadWrite => {
+            let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+                return Err(crate::permit::FsError::NotAFile {
+                    path: CanonPath::new(path),
+                });
+            };
+            let canonical = resolver.canonicalize(parent)?;
+            if canonical.as_path() != parent {
+                return Err(crate::permit::FsError::NotFound {
+                    path: CanonPath::new(path),
+                });
+            }
+            Ok(CanonPath::new(canonical.as_path().join(name)))
+        }
+        other => other,
+    }
+}
+
 const ADMIN_DIR: &str = "/etc/ego";
 
-fn expand(path: &Path, home: &CanonPath) -> Result<PathBuf, RootsError> {
+/// Expand a home-relative root and reject paths without an absolute authority.
+pub fn expand_root_path(path: &Path, home: &CanonPath) -> Result<PathBuf, RootsError> {
     if let Ok(rest) = path.strip_prefix("~") {
         return Ok(home.as_path().join(rest));
     }
@@ -188,6 +305,63 @@ fn expand(path: &Path, home: &CanonPath) -> Result<PathBuf, RootsError> {
             path: path.to_path_buf(),
         })
     }
+}
+
+/// Canonical administrator bounds carried with native write policy. Each
+/// independently declared layer must allow an external write; an empty layer
+/// refuses all external writes. The workspace keeps its admitted authority.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RootCeilings(Vec<Vec<ProfileRoot>>);
+
+impl RootCeilings {
+    pub fn new(layers: Vec<Vec<ProfileRoot>>) -> Self {
+        Self(layers)
+    }
+
+    pub fn is_unbounded(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Combine restrictions without replacing any previously captured layer.
+    pub fn intersect(mut self, other: Self) -> Self {
+        for layer in other.0 {
+            if !self.0.contains(&layer) {
+                self.0.push(layer);
+            }
+        }
+        self
+    }
+
+    pub(crate) fn allows_write(&self, path: &CanonPath, workspace: &CanonPath) -> bool {
+        self.0
+            .iter()
+            .all(|bounds| root_within_ceiling(path, RootAccess::ReadWrite, bounds, workspace))
+    }
+}
+
+fn root_within_ceiling(
+    path: &CanonPath,
+    access: RootAccess,
+    bounds: &[ProfileRoot],
+    workspace: &CanonPath,
+) -> bool {
+    if path.is_or_under(workspace) {
+        return true;
+    }
+    let containing = bounds
+        .iter()
+        .filter(|bound| path.is_or_under(bound.path()))
+        .max_by_key(|bound| bound.path().as_path().components().count());
+    let access_allowed = containing
+        .is_some_and(|bound| access == RootAccess::Read || bound.access() == RootAccess::ReadWrite);
+    let covers_read_only = access == RootAccess::ReadWrite
+        && bounds.iter().any(|bound| {
+            bound.access() == RootAccess::Read
+                && bound.path().is_or_under(path)
+                && !bound.path().is_or_under(workspace)
+        });
+    access_allowed && !covers_read_only
 }
 
 /// Refuse extra canonical roots outside any independently declared system bound.
@@ -201,23 +375,7 @@ pub fn check_root_ceilings(
     for ceiling in ceilings {
         let allowed = admit_roots(ceiling, home, resolver)?;
         for root in roots {
-            if root.path().is_or_under(workspace) {
-                continue;
-            }
-            let containing = allowed
-                .iter()
-                .filter(|bound| root.path().is_or_under(bound.path()))
-                .max_by_key(|bound| bound.path().as_path().components().count());
-            let access_allowed = containing.is_some_and(|bound| {
-                root.access() == RootAccess::Read || bound.access() == RootAccess::ReadWrite
-            });
-            let covers_read_only = root.access() == RootAccess::ReadWrite
-                && allowed.iter().any(|bound| {
-                    bound.access() == RootAccess::Read
-                        && bound.path().is_or_under(root.path())
-                        && !bound.path().is_or_under(workspace)
-                });
-            if !access_allowed || covers_read_only {
+            if !root_within_ceiling(root.path(), root.access(), &allowed, workspace) {
                 return Err(RootsError::OutsideCeiling {
                     path: root.path().clone(),
                 });

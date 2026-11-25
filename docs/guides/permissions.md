@@ -1,5 +1,7 @@
 # Permissions and confinement
 
+Read this page in the [hosted user guide](https://ego.tuicommander.com/docs/guides/permissions.html).
+
 Permissions decide which prepared effects may run. Confinement limits what the
 operating system allows an executor to do. Workspace trust decides whether project
 configuration and instructions are admitted. These are separate authorities.
@@ -22,6 +24,12 @@ does not turn the sandbox off. To request approvals and workspace confinement
 explicitly, use `ego --mode auto --sandbox workspace`.
 
 Headless work does not ask a human; unavailable required approval becomes exit 3.
+After the denied action, the message lists three exact remedies: allow for this
+run (`--allow 'RULE'` added to the same command), allow always
+(`ego rules allow 'RULE'`) and keep blocked (`ego rules deny 'RULE'`). For a path
+outside the workspace, the run remedy is `--allow-dir 'PATH:ro'` (or `:rw` for a
+write). The list is omitted when the exact rule would disclose credential values
+or no rule can name the request.
 `--plan` and `--yolo` are mode shortcuts. REPL `/mode`, `/plan`, and `/yolo`
 use live session authorities; a system `max_mode` can refuse a selection.
 
@@ -31,13 +39,66 @@ or clearing the draft. Modals ignore it. During a turn, selections wait until
 the turn ends and then stage the next generation. Unavailable modes report why
 and leave the previous mode unchanged. The fixed sandbox cannot be relaxed.
 
+### Unattended interactive sessions
+
+An interactive session that nobody watches (for example an agent that another
+program started in a terminal) waits on a permission prompt until somebody
+answers. To deny such a call instead, set `deny_prompts = true` in
+`~/.ego/config.toml`, or start the session with `ego -c deny_prompts=true`.
+The call does not run. The model receives this tool result:
+`TOOL was not run: the user declined it and said: nobody is available to approve
+it, ...`. The turn continues, so the model can try another way or report the
+authority that it needs.
+
+The setting replaces only the human answer. Rules, the mode and the `auto`
+judge decide first, as before, and a call that they allow runs. The sandbox
+path question and the terminal root approval are not asked: a refused path
+stays the result of the call. A question to re-admit a changed execution
+policy is denied too. The setting is off by default; without it, interactive
+prompting does not change. Only the user file and the command line can set it;
+a project or local layer that sets it is a configuration error. Headless runs
+(exit 3) and ACP host prompts do not change.
+
 `edits` is an input alias for `accept-edits`; configuration emits the canonical
 name. Repeated mode changes during a turn are applied in queue order. Rules,
 ACP permission answers, denies, and confinement still apply after a mode change.
 
-A prepared call can contain several operations: `edit` needs read and write,
-external tools need connection and opaque-call authority. Every required operation
-must be covered; approving one does not approve the rest. Deny takes precedence.
+A prepared call can contain several operations: `edit` needs read and write
+for each file, and external tools need connection and opaque-call authority.
+Every required operation must be covered before execution; approving one does
+not approve the rest. Deny takes precedence.
+
+### Commands that change ego itself
+
+A model that runs `ego roots add`, `ego config set`, `ego rules allow` or another
+administrative `ego` command through `exec` would change its own perimeter. Outside
+`yolo`, such a call is never approved by the mode, by a wildcard rule such as
+`exec(*)` or `exec(ego *)`, or by the `auto` judge: it is high risk, so the judge is
+not asked, and the owner is asked with the reason "changes ego's own permissions or
+configuration". A deny rule still refuses it. An allow rule that names the exact
+command allows that command only, and only when it comes from your user file or a launch
+option: a project, local or agent file can be written by the model and never pre-approves
+it. A nested `ego` started with `--yolo`, `--sandbox off`, `--allow-dir`, `--allow`,
+`--set` or `--trust-workspace` is treated the same way, because it would run with more
+authority than the session that started it. Read-only commands (`ego roots ls`, `ego config get`,
+`ego rules ls`, `ego mcp ls`, `ego auth status`) follow the ordinary rules. `yolo` keeps
+no control, as everywhere else, and a command you type yourself with `!` is yours.
+
+The check recognises `ego` named in the command or in a shell command line, including
+wrappers such as `env`, `nice` and `bash -c`. It does not recognise an interpreter that
+builds the command at run time or a script that calls `ego`; see
+[design limits](../design-limits.md).
+
+### Runaway tool-call guard
+
+Independently of mode and rules, ego bounds how many tool calls a model can
+issue. One response can carry at most 128 tool calls, and at most 8 identical
+calls (same tool, same normalized arguments). One turn can carry at most 4,096
+calls. When the model repeats the same call across responses without a changed
+result, the third repetition gives the model a loop warning, and the eighth
+stops the turn. Calls whose arguments contain a raw model control token
+are refused too. Above a limit, no call of that response runs; a headless run
+exits 7 with reason `guard`. `yolo` does not lift these limits.
 
 ## Rules and remembered decisions
 
@@ -47,16 +108,28 @@ Use `ego rules ls --json` to inspect effective origins; `allow`/`deny` persist a
 user predicate; `revoke ID` removes it from the selected user target only.
 Copies in other authorities can survive revocation.
 
+When a stored-rule transaction creates a profile's first permissions block, it
+copies the inherited user permissions before adding the rule. The copied rules
+then belong to that profile; later base-rule changes do not update that copy.
+An existing explicit profile permissions block still replaces the user base
+block. Administrator denies remain binding.
+
 ```sh
 ego rules ls --json
-ego rules explain read '{"path":"README.md"}'
+ego rules explain read '{"files":[{"path":"README.md"}]}'
 ```
 
 `rules explain` prepares and matches without executing. `rules remember` previews
 the narrowest expressible predicates and the omitted dimensions; it writes only
 with `--yes`. Interactive remembered permissions use the same transaction. In the approval
 prompt, `[d]` shows the parameters and proposed rules; `[a]` persists the displayed
-allow rules. For a shell wrapper such as `bash -c 'git status'`, this is the exact
+allow rules. `[k] keep blocked`, offered when a rule can name the request, stores
+a deny rule instead: the exact path for a sandbox widening, the call's own rules
+otherwise. The prompt shows the stored rule, and the same request is not asked
+again; remove it with `ego rules revoke ID`. For an MCP tool, `[y]` also approves
+every later call of that tool in the session, whatever its arguments; for
+`web_fetch`, every later fetch from that host in the session. The prompt says so.
+For a shell wrapper such as `bash -c 'git status'`, `[a]` stores the exact
 rendered argv string inside `exec(...)`, including the script. A different script
 will not match. It is not a general grant for `bash` or for commands in the script.
 Current code can suggest `exec(git status *)` for a bare recognized program and
@@ -69,9 +142,9 @@ mean the command is known to be harmful. An exec can report `runs a program`,
 `program not fully identified`, or `runs code from its arguments`, even for a
 read-only shell script. `default` mode can ask for each such call. In `auto`,
 deterministic analysis runs first, then a configured `permissions.judge`, then
-ordinary escalation. Without an explicit judge selection, auto mode derives a
-judge from the current provider/model, preferring a supplied review or small-model
-default for supported providers. It does not mean that no judge runs.
+ordinary escalation. Without an explicit judge selection, auto mode uses the
+active main model as the judge, at low reasoning effort. It does not mean that no
+judge runs.
 `permissions.judge="none"` disables that role.
 The judge receives bounded task context and action evidence (see
 [Judge action evidence](#judge-action-evidence)); it cannot classify a shell
@@ -98,20 +171,84 @@ An ACP session grant is transient; a persistent grant is a user rule with the
 same origin, preview, and limitations. “Allow all for this session” does not
 persist a global allow or raise system ceilings.
 
-Credential-like reads have built-in default denies, including `.env*`, `.ssh/**`,
-`.aws/**`, `.netrc`, and keychain patterns. Only an effective explicit user allow
-can lift the default for its matching read under `ro` or `workspace`. Project or flag allows do not. Under `off` and `adaptive`, built-in read, list, and search tools retain an immutable credential-path floor. This
-is a read policy, not a subprocess secret filter or an assertion that all allowed
-search output is redacted. Exec arguments are data, not file accesses: a command
-may print or edit test text that names a credential path. The native sandbox
+Credential-like native reads have built-in default denies, including `.env*`,
+`.ssh/**`, `.aws/**`, `.netrc`, and keychain patterns. An exact user-layer rule,
+for example `read(/absolute/project/.env)`, lifts the default for that canonical
+file. Under Adaptive it also lifts the native read perimeter for that file.
+Wildcard, project and flag rules do not grant this exception. A read grant does
+not approve a sibling file or credential children beneath an approved directory;
+recursive list/search operations still check each canonical entry. Exact user
+`list(...)` and `search(...)` rules likewise approve only their named protected
+root. Explicit denies and the admitted workspace/root boundary still win.
+
+On Windows, a path pattern that starts with `/` applies on every drive and UNC
+share: `read(/**/.ssh/**)` covers `C:\Users\u\.ssh` and `D:\home\.ssh`, and
+`read(/Users/u/.env)` covers `\Users\u\.env` on every volume. A pattern cannot
+name one drive. Matching on Windows ignores case, as NTFS does, so `.SSH` is
+covered by a `.ssh` rule. On macOS and Linux, matching is case-sensitive.
+
+Use `ego rules allow 'read(/absolute/project/.env)'` to save the owner's narrow
+approval. Inspect its ID with `ego rules ls --json` and remove it with
+`ego rules revoke ID` to revoke future rule authority.
+
+The same exact user-layer rule is the value-disclosure approval. For the named
+canonical file, `read` returns the file bytes unchanged, including formats that
+have no key-name projection (SSH keys, `.netrc`, JSON tokens), and `grep` over
+that file matches and shows its real lines when the rule is `search(...)`.
+Without an exact user rule for the operation, native reads and searches of
+credential files return key names only and unsupported formats refuse. Project
+rules, flags, wildcards, permission modes (including `yolo`), sandbox `off`,
+session approvals and approval of a parent directory never disclose values. A
+disclosed value enters the model context and the session transcript; the usual
+masking of known secrets still applies to command output. To stop disclosure,
+revoke the rule; the next read returns key names or is refused again.
+
+Every way to store such an exact user `read(...)` or `search(...)` rule for a
+credential file grants disclosure:
+
+- `ego rules allow 'read(/absolute/project/.env)'`;
+- `ego rules remember allow read '{"files":[{"path":"/absolute/project/.env"}]}' --yes`;
+- `[a]` (remember) in the interactive approval prompt, which is offered for a
+  credential read when sandbox `off` removes the credential floor;
+- `Allow always` in an ACP host prompt for the same read;
+- a `read(...)` or `search(...)` entry that you write in your user
+  configuration by hand.
+
+Each remember surface (the `[d]` details and the `rules remember` preview, the
+`[a]` prompt and the ACP prompt) states that remembering will show the values
+of the named credential file.
+
+Sandbox `off` removes built-in credential admission floors for native read, list
+and search, as well as subprocess confinement. Operation scope, explicit denies,
+permission-mode decisions and the key-name projection (without an exact user rule) still apply. Under
+Adaptive, ungranted credential reads remain blocked even with `yolo` or a broad
+allow. Exec arguments are data, not file accesses: the native process sandbox
 checks files when the child opens them, including paths built inside a script.
-With `--sandbox off`, exec has no credential protection: off = no confinement,
-credentials included. Permission checks on the command still apply, but read
-tool rules do not constrain files opened by an unconfined child.
+Native-tool user rules do not widen a child process's OS credential exclusions.
 
 Default allows do not authorize control paths such as instruction/config/skill
 material. Those require their dedicated authority. Explicit file-layer denies
 and immutable system denies continue to win.
+
+### Trust for development programs
+
+Workspace trust is bound to the exact executable surface of the project: the
+declared MCP servers, hooks and other programs, and the bytes of each program
+file they name. Editing such a program changes the surface, so the next launch
+asks again, and a headless run treats the workspace as untrusted.
+
+`--trust-development-programs` trusts the workspace and also approves future
+edits to the programs it names now, and remembers that grant. A later launch
+stays trusted when only the content or executable bit of those existing programs
+changed, and it prints a notice listing the changed programs. A new program, a
+changed declaration (command, arguments, environment keys), a changed custom
+command Markdown file or a new external instruction disclosure still asks again.
+The flag cannot be combined with `--bare` or `--trust-workspace`.
+
+To return to trust bound to the current bytes, launch once with
+`--trust-workspace`; it replaces the stored grant. To revoke trust completely,
+remove the workspace entry from the trust ledger (`trust.json` under
+`$EGO_HOME`); the next launch asks again.
 
 ## Filesystem and network boundaries
 
@@ -125,8 +262,13 @@ and immutable system denies continue to win.
 Built-in read, list, and search tools follow the admitted sandbox read reach.
 Under `off` and `adaptive`, they can access non-credential paths outside the
 workspace without an extra root. Each permit still covers only the named file
-or traversal subtree; writes do not gain this reach. Adaptive also retains its
-captured credential exclusions. Under `ro` and `workspace`, these tools retain
+or traversal subtree. With `yolo` and sandbox `off`, ordinary native writes and
+edits outside the workspace also run without a root approval question. This
+approves only the prepared effect: it does not add a session or permanent root.
+Explicit denies, read-only roots and protected-file floors remain binding.
+Other mode/sandbox combinations keep their existing write admission.
+Adaptive retains its captured credential exclusions except for exact user
+native-tool grants described above. Under `ro` and `workspace`, these tools retain
 the workspace and admitted extra-root boundary.
 
 Under strict levels, no extra home-tree root is granted by default. Use the user
@@ -196,9 +338,11 @@ Adaptive's OS credential floors cannot be lifted by permission rules or human
 sandbox grants: SSH/AWS/GnuPG, netrc, keychain/browser stores, provider/ego/Cargo
 credentials and `.env*` outside the workspace. Git config/hooks and worktree
 selectors stay protected against writes.
-`AGENTS.md` and `CLAUDE.md` at any depth, and Markdown files beneath the admitted
-home's `.codex`, `.claude` and `.claude-private` directories also stay read-only,
-including beneath workspace, derived, human and judge write grants.
+`AGENTS.md` and `CLAUDE.md` beyond the workspace, and Markdown files beneath the
+admitted home's `.codex`, `.claude` and `.claude-private` directories also stay
+read-only, including beneath derived, human and judge write grants. Inside the
+workspace `AGENTS.md` and `CLAUDE.md` are ordinary files: the edit tool and exec
+children write them alike.
 Metadata roots, module directories,
 worktree entries, hooks and info directories cannot be relocated. Git can still
 remove transient operation state and empty object/ref directories. Ordinary OS
@@ -246,15 +390,22 @@ A judge grant is never persistent. A recommended `always` scope is recorded but
 applies only to this session; only a human can store a permanent grant. A
 judge-granted path stays non-executable: programs placed there cannot run.
 One command can raise at most 3 judge decisions and one session at most 32.
-A judge that does not answer in time (the command waits at most 10 seconds), an
+A judge that does not answer in time (the command waits at most 5 seconds), an
 invalid verdict and a refusal from a background command get no grant; the human
-question follows.
+question follows. The user or system configuration can change these three bounds
+in the `[residual_limits]` table (`decisions_per_call`, `decisions_per_session`,
+`deadline_ms`); see the [configuration reference](../reference/configuration.md).
+A project layer cannot change them.
 `/config perimeter` lists judge-granted paths as `read-write` roots with source
 `judge`. A sanitized export keeps the outcome and scope of each decision but
 not the path or the reason.
 
-Agent instruction files have an executor write floor and do not depend on the
-judge prompt.
+The judge evaluation checks how the model responds to ambiguous write requests
+and attempts to inject instructions into its input. It does not run commands
+or apply grants, so it does not test executor enforcement. Separate native
+tests force an approval for protected paths and check that the executor still
+refuses the write. For example, the executor protects agent instruction files
+outside the workspace even if the judge approves the write.
 
 **Root-list traps:** `ego roots add PATH --access read` edits the stored list,
 not the running session perimeter. Removing the final stored root with `ego roots rm PATH` leaves
@@ -277,6 +428,78 @@ Exit and resume without a positional prompt to admit the new configuration.
 `/config perimeter` shows the current session; the commands below inspect a new
 resolution, not that session.
 
+**Terminal root approval:** when a built-in read, list, search or write is
+refused outside the workspace, the human terminal that owns the session asks
+for that exact canonical path and access: `Keep blocked`, `Session` or `Permanent`.
+The path section names the requested change. For an unfinished native turn,
+the question also shows the complete current execution observation and the
+choice-specific Session/Permanent proposals: backend identity/revision, measured
+capabilities, policy digest and semantic policy. The proposals use the same
+configured/durable-root assembly as real admission; saving a permanent root can
+change root order. These observations can include unchanged roots. Missing or insufficient
+measurement refuses the grant instead of falling back to an undisclosed
+backend change. Press `1`, `2`, or `3` to answer immediately, without Enter. Arrow keys move the
+selection; Enter confirms it. Invalid digits do not answer. `Keep blocked`
+remembers the refusal for this root. Escape cancels without saving a choice.
+Ordinary external writes in `yolo` with sandbox `off` do not need this question;
+explicit restrictions still apply.
+An approval adds a data root, not a native exec permission. Native executable
+admission stays separate (`exec_paths` or an owner sandbox grant). Child-process
+OS reach is backend-specific: on Linux a read-write data root is also executable
+by child processes. The question discloses that consequence; it does not promise
+that every backend makes the new root non-executable.
+
+Neither choice changes a live policy or OS guard. At a quiet effect boundary,
+ego re-admits the same session in the same process through normal admission:
+it captures the new execution observation, rebuilds the policy engine and the
+OS confinement for new child processes, and keeps every earlier root. The
+unfinished turn then continues without another user message. The refused call
+and its unstarted siblings receive explicit not-run results; the model can
+issue fresh calls under the new authority. Completed effects are not replayed.
+A configuration edit or a restart is not necessary. On Linux, an exact root
+change can select a different confinement backend. One answer covers that
+transition only when the root question disclosed the complete current measurement
+and the proposal for the selected grant lifetime. The approval is process-local,
+bound to that session, pending call and unfinished
+turn, and consumed once. Admission measures again and requires the exact
+approved root and observations; drift, cancellation, denied/protected paths and
+insufficient guarantees refuse continuation. Saving a permanent root does not
+save reusable trust in a backend or policy. Unrelated or later policy changes
+retain their independent approval boundary. If a background command or a
+background agent is still running, re-admission waits until that work ends; the
+terminal reports this. A running OS guard is never changed in place.
+
+`Session` keeps the root for this session only; `ego resume` of the same session
+restores it, and other sessions do not get it. If a session root is removed from disk, ego drops it
+with a note on the next re-admission or resume; the other roots stay. `Permanent` also saves the root
+with its journal receipt in the selected user-profile configuration.
+
+The approval cannot widen itself. A root is the exact canonical path, not its
+parent directory. A write inside a read root is first refused as a read-only
+root. The terminal can offer an exact write approval for a mutable user root,
+but not for a flag-defined read-only root, a read-only sandbox, an explicit deny,
+or an administrator ceiling. A system root ceiling refuses a path or access
+outside it before the terminal asks. Administrator write ceilings also bind native writes in `yolo` with sandbox
+`off`, including headless runs and captured continuations. Independent ceiling
+layers intersect; an explicit empty layer permits no external native write.
+These ceilings also restrict native writes through configured or same-repository
+roots outside the workspace. With sandbox `off`, they do not confine child
+process filesystem effects; OS permissions still apply to those processes.
+A missing write-granting bound is skipped; a missing read-only bound keeps
+restricting through its nearest existing canonical ancestor. Each affected entry
+produces a configuration note. If a restriction cannot be located safely, its
+layer blocks external native writes rather than stopping the run or widening access.
+Model or tool text cannot answer the question.
+
+`/config roots` lists the session targets: session and permanent roots with
+their access, owner sandbox grants (`read`, `write` or `exec`), and the revoke
+command. `/config roots revoke EXACT_PATH` removes one of them.
+
+Exec through a data root differs per backend: macOS gives a data root no exec
+access. On Linux, a read root gives no exec access, but a read-write root is
+also executable for child processes under both Landlock and the namespace
+backend.
+
 System sandbox configuration is a floor. Extra roots specify canonical paths
 and access; system roots cap them and configured executable paths. A read-only
 root nested beneath a broader writable grant restricts built-in tools. macOS
@@ -297,6 +520,21 @@ with guarded transport or demonstrated no-IP process confinement. It does not
 control an independent local model daemon's upstream behavior. A requested
 unsupported guarantee fails; no automatic fallback weakens it.
 
+Network rules such as `net(example.com:443)` govern ego's own connections
+(`web_fetch` and other native tools). They do not apply to shell commands: a
+command run through `exec` gets the whole network when `network` is on and none
+when it is off. On macOS the Seatbelt profile either allows or denies all
+network access for the child; it cannot filter by host.
+
+A built-in set of documentation and package hosts is allowed for ego's own
+connections, such as `web_fetch`, without a question, on port 443 only; other hosts follow the ordinary permission
+flow: `docs.rs`, `crates.io`, `static.crates.io`, `index.crates.io`,
+`doc.rust-lang.org`, `registry.npmjs.org`, `www.npmjs.com`, `pypi.org`,
+`files.pythonhosted.org`, `docs.python.org`, `developer.mozilla.org` and
+`nodejs.org`. Hosts that fetch an origin named in the request path, such as a
+Go module proxy, are deliberately left out. A user `deny` rule for one of these
+hosts still wins, and redirects and DNS checks still apply.
+
 macOS uses Seatbelt. Linux uses admitted/proven Linux backends. Windows confinement
 is not supported; transport/private-state support does not establish the
 same filesystem/network boundary. See [troubleshooting](troubleshooting.md).
@@ -305,14 +543,20 @@ Mode names, input aliases, and cycle order come from
 [the shared mode definition](../../crates/ego-core/src/config/layer.rs).
 [REPL actions](../../crates/ego-cli/src/repl/actions.rs) and
 [key handling](../../crates/ego-cli/src/repl/seat/edit_mode.rs) route direct and
-Shift+Tab selections through the same policy owner. All input routes select the same supported modes.
+Shift+Tab selections through the same policy owner.
+
+Sources: [policy engine](../../crates/ego-core/src/permit/grant.rs),
+[rule grammar](../../crates/ego-core/src/permit/rule/),
+[confinement adapters](../../crates/ego-tools/src/exec/), and
+[effective-perimeter tests](../../crates/ego-cli/tests/it/effective_perimeter.rs).
 
 ## Judge action evidence
 
-In `auto`, an unset `permissions.judge` prefers the same provider's review model
-when it is in the catalogue: OpenAI Luna, Anthropic Haiku, or a dedicated Codex
-reviewer. Otherwise it uses the active main model. It uses low reasoning effort
-when supported, otherwise off.
+In `auto`, an unset `permissions.judge` uses the active main model: the judge
+decides on development work and does not drop to a smaller model. It uses low
+reasoning effort when the model offers it (or the lowest effort above off),
+otherwise off. Only the goal completion check prefers a smaller model of the same
+provider, such as OpenAI Luna or Anthropic Haiku, when it is in the catalogue.
 Set `permissions.judge = "none"` to disable advisory generation and keep human
 escalation. An explicit provider/model selects a separate judge. The judge sees
 bounded task context, agent reasoning, recent call outcomes and action evidence.
@@ -344,20 +588,77 @@ not run again and that programs placed there cannot run. It must not ask the
 judge itself, edit roots or claim that a partially failed command is safe to
 replay.
 
+Sources: [model identity](../../crates/ego-core/src/turn/identity.rs),
+[system-context assembly](../../crates/ego-core/src/turn/mod.rs), and
+[generator-boundary coverage](../../crates/ego-core/tests/it/tool_catalogue.rs).
+
 ### User configuration write floor
 
 Sandboxed child processes cannot write the operator user-configuration directory
 (`EGO_HOME`, or `HOME/.ego` when unset). Explicit writable roots and runtime grants
 do not lift this floor. The canonical `config.toml` target is protected too
 when the file is a symlink outside that directory. Reads retain their existing reach. Sandbox `off` has no
-such native confinement. Sandboxed admission refuses a config file with multiple
-hardlinks; replace it with a copy or symlink so its authority has one captured
-file identity.
+such native confinement. A config file with multiple hardlinks does not refuse
+admission: ego finds every other name of the file inside the writable roots and
+protects each one like the file itself. A name that lies outside every writable
+root cannot be written by the sandbox. A scan that would visit more than
+1,000,000 entries refuses admission, because ego cannot then prove that no alias
+is writable.
 
-On macOS, Seatbelt denies writes under the captured directory and prevents
-unlinking its ancestor boundaries. Linux Landlock grants cannot subtract a
-protected descendant from a writable root. Ego therefore refuses Workspace
-admission if the workspace, scratch directory, or writable root overlaps the
-user-configuration directory. The error names both paths; select a separate
-workspace rather than widening authority. Operator config commands run outside
+Unrelated work is admitted when a writable root overlaps the configuration; only
+writes to the configuration are denied. On macOS, Seatbelt denies writes under the
+captured directory and prevents unlinking its ancestor boundaries. Linux Landlock
+grants are additive and cannot subtract a protected descendant, so ego grants the
+overlapping root entry by entry around the protected path. Writes below every
+sibling are allowed. Inside a directory that holds the configuration, existing
+files stay writable, but ego cannot create, delete or rename entries directly in
+that directory or in the directories between it and the root; symlinks there are not
+granted. A root inside the configuration directory gets no write access. Where the
+bwrap backend would be selected, it refuses the overlap and ego uses Landlock. No
+command, rule or grant lifts this floor: the model cannot give itself authority
+over the configuration. Recovery: change the configuration with `ego config` or
+your editor outside the sandbox, or select a workspace that does not contain
+`EGO_HOME`.
+Operator config commands run outside
 the model's process sandbox and retain their existing atomic transaction.
+
+## Executable content checks
+
+Before ego runs a program it records the identity of every executable image the
+call names: the resolved path, the file identity (device, inode, size, mode and
+times) and a SHA-256 of the content. It checks that record again twice before
+the launch.
+
+- **You approve the call, or ego reuses your approval.** This covers an answer
+  you give for one call, a session approval that ego reuses for an identical
+  call, and a command that you type in the terminal shell. The check made right
+  after the approval compares the resolved path and the file identity but does
+  not read the content again. A one-shot answer covers that one call only.
+- **A stored rule or cached judge decision allows the call.** Both checks
+  compare the content hash. A replaced executable no longer matches, whatever
+  its timestamps say.
+
+The check at the launch reads and hashes the content for every authority, so a
+changed image is refused in all cases.
+
+The working directory, the resolved target, the arguments and the exact
+environment are checked in both cases. If an image changed while a prompt was
+open, ego asks again once with the new identity. Recovery from a refusal: run
+the command again so that ego records the current image.
+
+Hashing costs time on large executables: one content hash of a 64 MiB image took
+about 185 ms in a debug build. An approved one-shot call hashes twice (at capture
+and at the launch).
+
+## Environment secret masking
+
+Ego masks the values of environment variables that look like secrets (`[REDACTED]`)
+in tool output, evidence, exports and status. A variable qualifies when one of its
+`_`-separated name segments, compared case-insensitively, ends with `TOKEN`, `KEY`,
+`SECRET` or `PASSWORD` (`API_KEY`, `github_token`, `PGPASSWORD`, `NGROK_AUTHTOKEN`),
+or when it is `AWS_ACCESS_KEY_ID` or
+`GOOGLE_APPLICATION_CREDENTIALS`. `MY_KEYBOARD` and `TOKENIZER` do not qualify.
+A qualifying value shorter than 8 bytes is not masked (7 bytes stays visible, 8 is
+masked), so a short value such as `it` cannot corrupt ordinary output. Qualifying
+values are still masked across output chunk boundaries. Child environment
+inheritance is unchanged. To mask a short value, use a value of 8 or more bytes.

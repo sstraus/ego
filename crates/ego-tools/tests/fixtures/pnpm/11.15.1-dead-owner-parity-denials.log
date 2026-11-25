@@ -1,0 +1,18 @@
+Filtering the log data using "composedMessage CONTAINS[c] "Sandbox:" AND composedMessage CONTAINS[c] "pnpm""
+Timestamp               Ty Process[PID:TID]
+2026-10-25 13:13:39.487 E  kernel[0:58f9260] (Sandbox) Sandbox: touch(10090) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-cNqnZV/home/Library/Caches/pnpm/dlx/probe
+2026-10-25 13:13:41.594 E  kernel[0:58f78d5] (Sandbox) Sandbox: pnpm(10241) deny(1) mach-lookup com.apple.securityd.xpc
+2026-10-25 13:13:41.596 E  kernel[0:58f9524] (Sandbox) Sandbox: pnpm(10241) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains
+2026-10-25 13:13:41.596 E  kernel[0:58f9524] (Sandbox) 1 duplicate report for Sandbox: pnpm(10241) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains
+2026-10-25 13:13:41.596 E  kernel[0:58f9524] (Sandbox) Sandbox: pnpm(10241) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains/login.keychain-db
+2026-10-25 13:13:41.596 E  kernel[0:58f9524] (Sandbox) Sandbox: pnpm(10241) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains
+2026-10-25 13:13:41.596 E  kernel[0:58f9524] (Sandbox) 1 duplicate report for Sandbox: pnpm(10241) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains
+2026-10-25 13:13:41.596 E  kernel[0:58f9524] (Sandbox) Sandbox: pnpm(10241) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains/login.keychain-db
+2026-10-25 13:13:41.596 E  kernel[0:58f78d5] (Sandbox) Sandbox: pnpm(10241) deny(1) mach-lookup com.apple.SecurityServer
+2026-10-25 13:13:41.664 E  kernel[0:58f78d5] (Sandbox) Sandbox: pnpm(10241) deny(1) mach-lookup com.apple.SystemConfiguration.DNSConfiguration
+2026-10-25 13:13:41.845 E  kernel[0:58f956e] (Sandbox) Sandbox: touch(10484) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-cNqnZV/xdg-cache/pnpm/dlx/probe
+2026-10-25 13:13:42.317 E  kernel[0:58f9617] (Sandbox) Sandbox: touch(10559) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-cNqnZV/home/Library/pnpm/store/probe
+2026-10-25 13:13:43.425 E  kernel[0:58f97a0] (Sandbox) Sandbox: touch(10755) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-cNqnZV/home/Library/Caches/pnpm/dlx/probe
+2026-10-25 13:13:46.613 E  kernel[0:58f9972] (Sandbox) Sandbox: pnpm(11052) deny(1) system-socket domain:32 type:2 protocol:2
+2026-10-25 13:13:47.090 E  kernel[0:58f78d6] (Sandbox) 11 duplicate reports for Sandbox: pnpm(11052) deny(1) system-socket domain:32 type:2 protocol:2
+

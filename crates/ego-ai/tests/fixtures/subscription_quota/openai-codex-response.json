@@ -1,0 +1,83 @@
+{
+  "recorded_at": "2026-11-12T04:38:22.251554+00:00",
+  "request": {
+    "method": "POST",
+    "url": "https://chatgpt.com/backend-api/codex/responses",
+    "header_names": [
+      "Authorization",
+      "ChatGPT-Account-Id",
+      "Content-Type",
+      "User-Agent",
+      "openai-beta"
+    ],
+    "body": {
+      "model": "gpt-6.1-sol",
+      "stream": true,
+      "store": false,
+      "instructions": "Reply OK only.",
+      "input": [
+        {
+          "role": "user",
+          "content": "Reply OK only."
+        }
+      ],
+      "reasoning": {
+        "effort": "low"
+      }
+    }
+  },
+  "status": 200,
+  "response_header_names": [
+    "cf-cache-status",
+    "cf-ray",
+    "cross-origin-opener-policy",
+    "date",
+    "nel",
+    "referrer-policy",
+    "report-to",
+    "server",
+    "set-cookie",
+    "strict-transport-security",
+    "x-codex-active-limit",
+    "x-codex-credits-balance",
+    "x-codex-credits-has-credits",
+    "x-codex-credits-unlimited",
+    "x-codex-plan-type",
+    "x-codex-primary-over-secondary-limit-percent",
+    "x-codex-primary-reset-after-seconds",
+    "x-codex-primary-reset-at",
+    "x-codex-primary-used-percent",
+    "x-codex-primary-window-minutes",
+    "x-codex-safety-buffering-enabled",
+    "x-codex-safety-buffering-faster-model",
+    "x-codex-secondary-reset-after-seconds",
+    "x-codex-secondary-reset-at",
+    "x-codex-secondary-used-percent",
+    "x-codex-secondary-window-minutes",
+    "x-codex-turn-state",
+    "x-content-type-options",
+    "x-models-etag",
+    "x-oai-request-id",
+    "x-openai-proxy-wasm"
+  ],
+  "quota_headers": {
+    "x-codex-active-limit": "premium",
+    "x-codex-plan-type": "pro",
+    "x-codex-primary-used-percent": "14",
+    "x-codex-secondary-used-percent": "0",
+    "x-codex-primary-window-minutes": "10080",
+    "x-codex-primary-over-secondary-limit-percent": "0",
+    "x-codex-secondary-window-minutes": "0",
+    "x-codex-primary-reset-after-seconds": "534204",
+    "x-codex-secondary-reset-after-seconds": "0",
+    "x-codex-primary-reset-at": "1794992503",
+    "x-codex-secondary-reset-at": "",
+    "x-codex-credits-has-credits": "True",
+    "x-codex-credits-balance": "8418.4673090000",
+    "x-codex-credits-unlimited": "False",
+    "x-codex-turn-state": "[REDACTED]",
+    "x-codex-safety-buffering-enabled": "true",
+    "x-codex-safety-buffering-faster-model": "gpt-6-luna"
+  },
+  "body_recorded": false
+}

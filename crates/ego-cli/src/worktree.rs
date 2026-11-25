@@ -44,6 +44,7 @@ pub trait Repository {
 
 /// Owns an active checkout until drop, independently of inherited descriptors.
 /// The lock file stays in place so later launches lock the same inode.
+#[derive(Debug)]
 pub struct WorktreeLease {
     file: File,
 }
@@ -54,6 +55,28 @@ impl Drop for WorktreeLease {
         // cannot prevent a concurrent child from retaining it before exec.
         // Unlock before closing so that child cannot extend our lease.
         let _ = self.file.unlock();
+    }
+}
+
+/// Only a held checkout lock is retryable during queued session admission.
+#[derive(Debug)]
+pub enum LaunchError {
+    Busy,
+    Failed(String),
+}
+
+impl From<String> for LaunchError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl std::fmt::Display for LaunchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("worktree is in use by another ego process"),
+            Self::Failed(message) => formatter.write_str(message),
+        }
     }
 }
 
@@ -86,6 +109,10 @@ impl LocalRepository {
     }
 
     fn lease(&self, id: Uuid) -> Result<WorktreeLease, String> {
+        self.try_lease(id).map_err(|error| error.to_string())
+    }
+
+    fn try_lease(&self, id: Uuid) -> Result<WorktreeLease, LaunchError> {
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -96,12 +123,14 @@ impl LocalRepository {
         let file = options
             .open(self.directory().join(format!("{id}.active")))
             .map_err(error)?;
-        file.try_lock()
-            .map_err(|_| "worktree is in use by another ego process".to_owned())?;
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => LaunchError::Busy,
+            std::fs::TryLockError::Error(error) => LaunchError::Failed(error.to_string()),
+        })?;
         Ok(WorktreeLease { file })
     }
 
-    fn existing_lease(&self, directory: &Path) -> Result<Option<WorktreeLease>, String> {
+    fn existing_lease(&self, directory: &Path) -> Result<Option<WorktreeLease>, LaunchError> {
         let directory = fs::canonicalize(directory).map_err(error)?;
         let checkouts = self.directory().join("checkouts");
         let Ok(relative) = directory.strip_prefix(checkouts) else {
@@ -119,9 +148,11 @@ impl LocalRepository {
         let _guard = lock.try_write().map_err(error)?;
         let receipt = self.read(id)?;
         if receipt.state == ReceiptState::Removed {
-            return Err("owned worktree receipt has been removed".into());
+            return Err(LaunchError::Failed(
+                "owned worktree receipt has been removed".into(),
+            ));
         }
-        self.lease(id).map(Some)
+        self.try_lease(id).map(Some)
     }
 
     fn publish(&self, receipt: &Receipt) -> Result<(), String> {
@@ -132,7 +163,7 @@ impl LocalRepository {
         file.as_file().sync_all().map_err(error)?;
         file.persist(dir.join(format!("{}.json", receipt.id)))
             .map_err(error)?;
-        File::open(dir).and_then(|f| f.sync_all()).map_err(error)
+        ego_tools::fs::sync_directory(&dir).map_err(error)
     }
 
     pub fn read(&self, id: Uuid) -> Result<Receipt, String> {
@@ -159,10 +190,12 @@ impl LocalRepository {
         if !receipt.worktree.try_exists().map_err(error)? {
             // Removal may have completed before the final receipt was durable.
             // Do not remove/prune anything during this recovery observation.
-            let registered = git(&receipt.source, &["worktree", "list", "--porcelain"])?;
+            let registered = git(&receipt.source, &["worktree", "list", "--porcelain", "-z"])?;
+            let checkout = git_path(&receipt.worktree)?;
             if registered
-                .lines()
-                .any(|line| line.strip_prefix("worktree ") == receipt.worktree.to_str())
+                .split('\0')
+                .filter_map(|field| field.strip_prefix("worktree "))
+                .any(|path| Path::new(path) == checkout)
             {
                 return Err(
                     "checkout is missing but Git still registers it; recovery needs inspection"
@@ -229,12 +262,15 @@ impl LocalRepository {
         }
         // Ignore no files and never pass --force. Git rechecks dirty state and
         // refuses worktrees containing submodules rather than discarding them.
+        // Run Git from the source: Windows cannot delete a process's working
+        // directory, so removal started inside the checkout always fails there.
+        let checkout = git_path(&receipt.worktree)?;
         git(
-            &receipt.worktree,
+            &receipt.source,
             &[
                 "worktree",
                 "remove",
-                receipt.worktree.to_str().ok_or("non-UTF-8 checkout")?,
+                checkout.to_str().ok_or("non-UTF-8 checkout")?,
             ],
         )?;
         receipt.state = ReceiptState::Removed;
@@ -259,7 +295,9 @@ impl Repository for LocalRepository {
             git(&source, &["symbolic-ref", "--quiet", "HEAD"]).unwrap_or_else(|_| head.clone());
         let id = Uuid::new_v4();
         let worktree = self.directory().join("checkouts").join(id.to_string());
-        fs::create_dir_all(worktree.parent().ok_or("missing checkout parent")?).map_err(error)?;
+        let parent = worktree.parent().ok_or("missing checkout parent")?;
+        fs::create_dir_all(parent).map_err(error)?;
+        let checkout = git_directory(parent)?.join(id.to_string());
         let mut receipt = Receipt {
             version: 1,
             id,
@@ -281,7 +319,7 @@ impl Repository for LocalRepository {
                 "add",
                 "-b",
                 branch,
-                receipt.worktree.to_str().ok_or("non-UTF-8 checkout")?,
+                checkout.to_str().ok_or("non-UTF-8 checkout")?,
                 &receipt.initial_head,
             ],
         )
@@ -355,11 +393,41 @@ fn common_dir(source: &Path) -> Result<PathBuf, String> {
     fs::canonicalize(path).map_err(error)
 }
 
-fn git_command(source: &Path) -> Command {
+// Keep the canonical spelling for filesystem identity and receipt checks.
+// Git for Windows does not accept Rust's verbatim spelling for worktree paths.
+fn git_path(path: &Path) -> Result<PathBuf, String> {
+    #[cfg(windows)]
+    {
+        let text = path.to_str().ok_or("non-UTF-8 Git path")?;
+        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+            return Ok(PathBuf::from(format!(r"\\{unc}")));
+        }
+        if let Some(disk) = text.strip_prefix(r"\\?\") {
+            if matches!(
+                disk.as_bytes(),
+                [b'A'..=b'Z' | b'a'..=b'z', b':', b'\\', ..]
+            ) {
+                return Ok(PathBuf::from(disk));
+            }
+            return Err("Git does not support this verbatim Windows path".into());
+        }
+    }
+    Ok(path.to_path_buf())
+}
+
+fn git_directory(path: &Path) -> Result<PathBuf, String> {
+    let ordinary = git_path(path)?;
+    if ordinary != path && fs::canonicalize(&ordinary).map_err(error)? != path {
+        return Err("ordinary Git path does not identify the canonical directory".into());
+    }
+    Ok(ordinary)
+}
+
+fn git_command(source: &Path) -> Result<Command, String> {
     let mut command = Command::new("git");
     command
         .arg("-C")
-        .arg(source)
+        .arg(git_directory(source)?)
         .args([
             "-c",
             "core.hooksPath=/dev/null",
@@ -374,11 +442,11 @@ fn git_command(source: &Path) -> Command {
         .env_remove("GIT_INDEX_FILE")
         .env("GIT_NO_LAZY_FETCH", "1")
         .stdin(Stdio::null());
-    command
+    Ok(command)
 }
 
 fn git(source: &Path, args: &[&str]) -> Result<String, String> {
-    let mut command = git_command(source);
+    let mut command = git_command(source)?;
     let output = command.args(args).output().map_err(error)?;
     if !output.status.success() {
         return Err(format!(
@@ -428,7 +496,7 @@ fn hosted() -> bool {
 
 /// Run before trust/config/provider admission: all subsequent consumers use
 /// the actual checkout directory, not the source repository's directory.
-pub fn launch(args: &mut Args) -> Result<Option<WorktreeLease>, String> {
+pub fn launch(args: &mut Args) -> Result<Option<WorktreeLease>, LaunchError> {
     let source = args
         .directory
         .clone()
@@ -443,7 +511,9 @@ pub fn launch(args: &mut Args) -> Result<Option<WorktreeLease>, String> {
         };
     };
     if !matches!(args.session, SessionChoice::New) {
-        return Err("--worktree requires a new unnamed session".into());
+        return Err(LaunchError::Failed(
+            "--worktree requires a new unnamed session".into(),
+        ));
     }
     let adapter: Box<dyn Repository> = if hosted() {
         Box::new(TuicRepository)

@@ -116,19 +116,26 @@ fn load(source: SkillSourceAuthority, path: &Path, name: &str) -> Result<SkillSp
     } else {
         (BTreeMap::new(), text)
     };
-    let description = fields
-        .remove("description")
-        .map(|node| crate::yaml_envelope::scalar(node).ok_or("description must be a string"))
-        .transpose()?
+    // A command is read by the same field parsers as a skill, so a file written for
+    // either loads the same way: unknown fields are ignored, and the tool and model
+    // fields only narrow or select, as they do for a skill. The command stays
+    // user-invocable and is never offered to the model.
+    crate::skill::validate_field_names(&fields)?;
+    let description = crate::skill::take_optional_string(&mut fields, "description")?
         .unwrap_or_else(|| format!("Run {name}"));
-    let argument_hint = fields
-        .remove("argument-hint")
-        .map(|node| crate::yaml_envelope::scalar(node).ok_or("argument-hint must be a string"))
-        .transpose()?;
-    if let Some(field) = fields.keys().next() {
-        return Err(format!(
-            "command field `{field}` is not supported; refusing rather than ignoring its behavior"
-        ));
+    let argument_hint = crate::skill::take_argument_hint(&mut fields)?;
+    let allowed_tools = crate::skill::take_tools(&mut fields, "allowed-tools")?;
+    let disallowed_tools =
+        crate::skill::take_tools(&mut fields, "disallowed-tools")?.unwrap_or_default();
+    let model = crate::skill::take_optional_string(&mut fields, "model")?
+        .filter(|model| !model.eq_ignore_ascii_case("inherit"))
+        .map(ego_core::config::ModelRef);
+    let effort = crate::skill::take_optional_string(&mut fields, "effort")?
+        .map(|value| value.to_lowercase());
+    if let Some(value) = effort.as_deref()
+        && ego_core::skill::parse_skill_effort(value).is_none()
+    {
+        return Err(format!("field `effort` has unsupported value `{value}`"));
     }
     let location = SkillSourceLocation::parse(&format!(
         "commands/{}/{}.md",
@@ -150,9 +157,17 @@ fn load(source: SkillSourceAuthority, path: &Path, name: &str) -> Result<SkillSp
         user_invocable: true,
         model_invocable: false,
     };
-    SkillSpec::new(descriptor, body.as_bytes().to_vec())
-        .map(|spec| spec.with_metadata(BTreeMap::from([("ego-command".into(), "true".into())])))
-        .map_err(|e| e.to_string())
+    let mut spec = SkillSpec::new(descriptor, body.as_bytes().to_vec())
+        .map(|spec| {
+            spec.with_metadata(BTreeMap::from([("ego-command".into(), "true".into())]))
+                .with_model_selection(model, effort)
+                .with_disallowed_tools(disallowed_tools)
+        })
+        .map_err(|e| e.to_string())?;
+    if let Some(tools) = allowed_tools {
+        spec = spec.with_tool_ceiling(tools);
+    }
+    Ok(spec)
 }
 
 #[cfg(test)]
@@ -217,18 +232,74 @@ mod tests {
         ));
     }
 
+    // Catches: builtin case folding shadows exact custom names or folds other custom names.
     #[test]
-    fn unsupported_model_and_tool_authority_are_rejected_not_ignored() {
-        let root = tempfile::tempdir().unwrap();
-        for field in ["model: vendor/model", "allowed-tools: Bash", "agent: build"] {
-            let path = root.path().join("review.md");
-            fs::write(&path, format!("---\n{field}\n---\nReview")).unwrap();
+    fn mixed_case_builtins_preserve_exact_custom_command_names() {
+        use crate::repl::actions::{ActionId, ActionRegistry, Dispatch, InputOrigin};
+
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        let commands = workspace.join(".claude/commands");
+        fs::create_dir_all(&commands).unwrap();
+        fs::write(commands.join("Model.md"), "Custom model $1").unwrap();
+        fs::write(commands.join("Review.md"), "Custom review $1").unwrap();
+        let discovery = crate::skill::SkillDiscovery::for_workspace(&workspace, true).unwrap();
+        let actions = ActionRegistry::final_surface();
+        let names = actions
+            .names()
+            .into_iter()
+            .chain(actions.aliases())
+            .collect::<Vec<_>>();
+        let catalogue = crate::skill::SkillCatalogue::discover(discovery, &names).unwrap();
+        actions.bind_skill_view(catalogue.view()).unwrap();
+
+        for input in ["/Model MixedCase", "/Review MixedCase"] {
             assert!(
-                load(SkillSourceAuthority::User, &path, "review")
-                    .unwrap_err()
-                    .contains("not supported")
+                matches!(
+                    actions.classify(actions.submit(input, InputOrigin::Typed)),
+                    Dispatch::Skill(_)
+                ),
+                "{input:?}"
             );
         }
+        for input in ["/model", "/MODEL"] {
+            assert_eq!(
+                actions.classify(actions.submit(input, InputOrigin::Typed)),
+                Dispatch::Action(ActionId::Model),
+                "{input:?}"
+            );
+        }
+        assert!(matches!(
+            actions.classify(actions.submit("/review MixedCase", InputOrigin::Typed)),
+            Dispatch::UnknownSlash(_)
+        ));
+    }
+
+    // Catches: a command file written for the reference format is refused for a field
+    // ego reads in a skill, or its tool ceiling and model selection are dropped.
+    #[test]
+    fn a_command_reads_the_skill_fields_and_stays_user_only() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("review.md");
+        fs::write(
+            &path,
+            "---\nmodel: vendor/model\neffort: High\nallowed-tools: read grep\ndisallowed-tools: Bash\nargument-hint: [file]\nagent: build\nfuture-field: 1\n---\nReview $1",
+        )
+        .unwrap();
+        let spec = load(SkillSourceAuthority::User, &path, "review").unwrap();
+        assert_eq!(spec.model(), Some("vendor/model"));
+        assert_eq!(spec.effort(), Some("high"));
+        assert_eq!(
+            spec.allowed_tools().unwrap().iter().collect::<Vec<_>>(),
+            ["grep", "read"]
+        );
+        assert!(spec.disallowed_tools().contains("exec"));
+        assert_eq!(spec.descriptor().argument_hint.as_deref(), Some("[file]"));
+        assert!(spec.descriptor().user_invocable);
+        assert!(!spec.descriptor().model_invocable);
+        // A foreign tool name still narrows nothing by accident: it is refused.
+        fs::write(&path, "---\nallowed-tools: Bash\n---\nReview").unwrap();
+        assert!(load(SkillSourceAuthority::User, &path, "review").is_err());
     }
 
     #[test]

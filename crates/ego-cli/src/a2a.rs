@@ -67,9 +67,21 @@ pub async fn serve(args: &A2aArgs) -> RunTermination {
         );
     });
 
+    let bound = match ego_listen::bind(&admitted).await {
+        Ok(bound) => bound,
+        Err(error) => return refused(format!("the A2A listener could not serve: {error}")),
+    };
+    // A local socket in an ordinary directory lives in a private child, so
+    // the endpoint a caller must use can differ from the requested one.
+    match bound.advertised() {
+        Ok(advertised) => eprintln!("ego a2a: listening on {advertised}"),
+        Err(error) => return refused(format!("the A2A listener could not serve: {error}")),
+    }
+    let gate = ego_listen::ConnectionGate::new(ego_listen::ConnectionLimits::default());
     // Never resolves: the listener runs until the process is signalled, which
     // is the same lifetime `ego acp` has when its host keeps the pipe open.
-    match ego_a2a::serve::serve(&admitted, credential, std::future::pending()).await {
+    match ego_a2a::serve::serve_on(bound, &admitted, credential, gate, std::future::pending()).await
+    {
         Ok(()) => RunTermination::Done,
         Err(error) => refused(format!("the A2A listener could not serve: {error}")),
     }
@@ -101,7 +113,6 @@ mod tests {
 
     fn args(listen: &str, allow_public_bind: bool) -> A2aArgs {
         A2aArgs {
-            session_dir: None,
             directory: None,
             listen: listen.to_string(),
             allow_public_bind,

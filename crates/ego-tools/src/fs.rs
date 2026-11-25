@@ -1,8 +1,10 @@
 //! `OsFs`: the [`Fs`] a model's tools actually run against.
 //!
-//! Model-controlled filesystem access crosses this adapter, wrapped in
-//! `GuardedFs` before tools use it. Session-store filesystem I/O is separate
-//! and unreachable by model tools.
+//! The only *model-controlled* filesystem adapter in the workspace — the
+//! session store touches `std::fs` too, but behind a seam no tool can reach
+//! (`docs/internals/decisions/2026-08-21-reading-without-reading-everything.md` §7).
+//! Nothing here consults a `Permit`: this is the raw seam, held by the turn
+//! loop and wrapped in `GuardedFs` before a tool ever sees it.
 
 use std::ffi::OsString;
 use std::fs;
@@ -14,7 +16,9 @@ use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tempfile::NamedTempFile;
 
-pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
+/// Flush a directory entry to disk. Windows opens a directory only with
+/// backup semantics, so a plain `File::open` is refused there.
+pub fn sync_directory(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt as _;
@@ -142,6 +146,14 @@ impl PreparedReplacement {
     }
 
     pub(crate) fn commit(self) -> io::Result<()> {
+        self.publish(false)
+    }
+
+    pub(crate) fn commit_new(self) -> io::Result<()> {
+        self.publish(true)
+    }
+
+    fn publish(self, create_only: bool) -> io::Result<()> {
         let Self {
             target,
             parent,
@@ -151,7 +163,12 @@ impl PreparedReplacement {
         // `persist` is one atomic replacement. On error it returns ownership
         // of the NamedTempFile; converting the PersistError to io::Error drops
         // that file and therefore removes the scratch path.
-        let persisted = temp.persist(&target).map_err(io::Error::from)?;
+        let persisted = if create_only {
+            temp.persist_noclobber(&target)
+        } else {
+            temp.persist(&target)
+        }
+        .map_err(io::Error::from)?;
         drop(persisted);
 
         // The file data is already stable. This barrier makes the directory
@@ -161,6 +178,15 @@ impl PreparedReplacement {
 }
 
 impl Fs for OsFs {
+    fn create_attempt(&self, path: &CanonPath, bytes: &[u8]) -> ego_core::permit::FsWriteAttempt {
+        ego_core::permit::FsWriteAttempt {
+            result: PreparedReplacement::new(path.as_path(), bytes)
+                .and_then(PreparedReplacement::commit_new)
+                .map_err(|err| Self::error(path.as_path(), &err)),
+            checkpoint: None,
+        }
+    }
+
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError> {
         fs::read(path.as_path()).map_err(|err| Self::error(path.as_path(), &err))
     }
@@ -236,6 +262,82 @@ impl Fs for OsFs {
         walk.descend(req.root.as_path(), Path::new(""), 0)?;
         Ok(Scan::new(walk.entries, walk.truncated))
     }
+}
+
+/// List workspace files without reading their contents. Ignore files are read
+/// only when `allowed` admits them; denied directories are never entered.
+/// Symlinks are omitted so a workspace entry cannot escape its root.
+pub fn workspace_files(
+    root: &Path,
+    allowed: &dyn Fn(&Path) -> bool,
+    matches: &dyn Fn(&Path) -> bool,
+) -> Vec<PathBuf> {
+    fn visit(
+        root: &Path,
+        dir: &Path,
+        allowed: &dyn Fn(&Path) -> bool,
+        matches: &dyn Fn(&Path) -> bool,
+        ignores: &mut Vec<Gitignore>,
+        files: &mut Vec<PathBuf>,
+    ) {
+        if files.len() >= 10_000 || !allowed(dir) {
+            return;
+        }
+        let ignore = dir.join(".gitignore");
+        let rules =
+            if allowed(&ignore) && fs::symlink_metadata(&ignore).is_ok_and(|meta| meta.is_file()) {
+                gitignore_in(dir)
+            } else {
+                None
+            };
+        let scoped = rules.is_some();
+        ignores.extend(rules);
+        if let Ok(entries) = fs::read_dir(dir) {
+            let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                if files.len() >= 10_000 {
+                    break;
+                }
+                let path = entry.path();
+                if !allowed(&path) {
+                    continue;
+                }
+                let Ok(kind) = entry.file_type() else {
+                    continue;
+                };
+                if kind.is_symlink() || entry.file_name() == ".git" {
+                    continue;
+                }
+                let ignored = ignores
+                    .iter()
+                    .rev()
+                    .find_map(|rules| match rules.matched(&path, kind.is_dir()) {
+                        Match::None => None,
+                        Match::Ignore(_) => Some(true),
+                        Match::Whitelist(_) => Some(false),
+                    })
+                    .unwrap_or(false);
+                if ignored {
+                    continue;
+                }
+                if kind.is_dir() {
+                    visit(root, &path, allowed, matches, ignores, files);
+                } else if kind.is_file()
+                    && let Ok(relative) = path.strip_prefix(root)
+                    && matches(relative)
+                {
+                    files.push(relative.to_path_buf());
+                }
+            }
+        }
+        if scoped {
+            ignores.pop();
+        }
+    }
+    let mut files = Vec::new();
+    visit(root, root, allowed, matches, &mut Vec::new(), &mut files);
+    files
 }
 
 /// One traversal in progress.
@@ -390,9 +492,13 @@ impl Walk<'_> {
     /// A symlink: resolved, reported if it lands on a file, and never
     /// descended into.
     ///
-    /// Do not follow directory symlinks during walks: they can escape roots
-    /// or form cycles. Report file symlinks under canonical targets so ordinary
-    /// permit checks can reject out-of-scope results.
+    /// This is the no-follow rule (`docs/internals/decisions/2026-08-21-reading-without-reading-everything.md`
+    /// §4). A walk resolves many paths where a read resolves one, so a
+    /// symlinked directory inside an in-scope root is an escape the root check
+    /// cannot see; refusing to enter one closes it and makes cycles impossible
+    /// rather than merely detectable. A symlinked *file* is still reported —
+    /// under its canonical target, so an escape is something the permit check
+    /// can see and refuse.
     fn link(&mut self, relative: std::path::PathBuf, at: &Path) {
         let Ok(target) = fs::canonicalize(at) else {
             return; // dangling, or a loop
@@ -452,6 +558,38 @@ impl Walk<'_> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    // Catches: the picker descends into a denied directory or lists an ignored file.
+    #[test]
+    fn file_picker_workspace_walk_obeys_read_boundary_and_ignore() {
+        let tree = TempDir::new().unwrap();
+        let root = tree.path();
+        fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+        fs::write(root.join("ignored.txt"), "hidden").unwrap();
+        fs::write(root.join("visible.txt"), "body").unwrap();
+        fs::create_dir(root.join("denied")).unwrap();
+        fs::write(root.join("denied/private.txt"), "secret").unwrap();
+        let entries = workspace_files(
+            root,
+            &|path| !path.starts_with(root.join("denied")),
+            &|_| true,
+        );
+        assert!(entries.contains(&PathBuf::from("visible.txt")));
+        assert!(!entries.contains(&PathBuf::from("ignored.txt")));
+        assert!(!entries.contains(&PathBuf::from("denied/private.txt")));
+    }
+
+    // Catches: unrelated early entries consume the result cap before filtering.
+    #[test]
+    fn file_picker_match_after_result_cap_is_found() {
+        let tree = TempDir::new().unwrap();
+        for index in 0..10_001 {
+            fs::write(tree.path().join(format!("a{index:05}")), "").unwrap();
+        }
+        fs::write(tree.path().join("z-match"), "").unwrap();
+        let entries = workspace_files(tree.path(), &|_| true, &|path| path == Path::new("z-match"));
+        assert_eq!(entries, vec![PathBuf::from("z-match")]);
+    }
 
     /// Preparing a replacement is allowed to create and fill a private
     /// scratch file, but the named target must remain untouched until commit.

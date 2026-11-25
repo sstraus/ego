@@ -30,10 +30,17 @@ pub fn materialize_admissions(
         .or_else(|| {
             std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".ego"))
         });
+    let credentials_root = home.as_deref().map(|home| home.join("secrets"));
+    let backend = crate::credentials::SelectedCredentialBackend::from_environment(
+        credentials_root
+            .as_deref()
+            .unwrap_or_else(|| std::path::Path::new("secrets")),
+    )
+    .unwrap_or(crate::credentials::SelectedCredentialBackend::InvalidSelection);
     materialize_admissions_with_credentials(
         selected,
         home.as_deref().map(|home| home.join("mcp")).as_deref(),
-        Arc::new(crate::credentials::OsCredentialStore::default()),
+        Arc::new(crate::credentials::OsCredentialStore::new(backend)),
     )
 }
 

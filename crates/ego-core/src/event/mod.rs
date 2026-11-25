@@ -1,6 +1,6 @@
 //! The event model: identity, ordering and the domain event set.
 //!
-//! Event payloads and durable envelopes.
+//! See `ARCHITECTURE.md` §1.
 
 pub mod domain;
 pub mod hook;

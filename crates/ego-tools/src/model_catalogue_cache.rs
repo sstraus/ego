@@ -1,7 +1,8 @@
 //! Opaque durable storage for the machine-local model discovery snapshot.
 //!
-//! `ego-ai` owns document decoding and merge policy. This adapter owns
-//! paths, refresh leases, byte reads and atomic publication.
+//! `ego-ai` owns the document codec and merge policy. This adapter owns only
+//! the paths, refresh lease, byte reads, and atomic publication described by
+//! `docs/internals/decisions/2026-08-25-the-catalogue-is-a-snapshot-not-generation-authority.md`.
 
 use std::io;
 use std::path::{Path, PathBuf};

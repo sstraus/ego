@@ -1,6 +1,6 @@
 //! Generation attempts: what a retry keeps, and whether it may retry at all.
 //!
-
+//! See `docs/internals/decisions/2026-08-20-generation-attempt-contract.md`.
 //!
 //! A *generation* is one logical request plan. An *attempt* is one journey to
 //! the wire, with its own admission and settlement.
@@ -8,9 +8,11 @@
 //! reaching the provider again, while usage, cost, evidence and settlement
 //! remain attributable to each distinct wire journey.
 //!
-//! It has to: it is carried by a `DomainEvent`, and `ego-core` cannot depend on `ego-ai`
-//! without inverting the crate DAG. The same split already applies to `Usage` — core owns
-//! the type, the provider layer produces the values.
+//! `DeliveryCertainty` lives here rather than in `ego-ai`, even though
+//! `ego-ai` is what observes it (`ARCHITECTURE.md` §3.1). It has to: it is
+//! carried by a `DomainEvent`, and `ego-core` cannot depend on `ego-ai`
+//! without inverting the crate DAG. The same split already applies to
+//! `Usage` — core owns the type, the provider layer produces the values.
 //!
 //! ## Who owns the authorisation, and why it is not the provider
 //!
@@ -19,9 +21,13 @@
 //! consuming it at `generate` left nobody to reconcile, and borrowing it
 //! left the token reusable for a second generation.
 //!
-//! Budget reconciliation needs the admitting gate's mutable access. Generators and
-//! destructors cannot settle a reservation independently; the attempt owner must return
-//! it explicitly.
+//! `plans/m0b-vertical-slice.md` originally sketched
+//! `generate(req, attempt) -> BoxStream<AiEvent>`, with the attempt moved in
+//! and never returned. That does not work, and the reason is worth stating
+//! so it is not re-proposed: [`BudgetGate::reconcile`] needs
+//! `&mut BudgetGate`, a `Generator` has none and cannot obtain one, and
+//! `Drop` cannot acquire one either. An attempt that goes in and never comes
+//! out can never be settled by anybody — the same ownership hole, relocated.
 //!
 //! So the attempt rides *inside* the stream. [`AttemptStream`] owns both the
 //! attempt and the provider's stream and is itself a `Stream<Item =
@@ -98,7 +104,8 @@ impl AttemptRef {
     }
 }
 
-/// Whether a request may have reached the provider.
+/// Whether a request may have reached the provider (`docs/internals/01-fx.md` §2.4,
+/// `ARCHITECTURE.md` §3.1).
 ///
 /// Ordered deliberately: `DefinitelyUnsent` is the *more* certain state, and
 /// certainty is only ever lost. The derived `Ord` puts `DefinitelyUnsent`
@@ -168,13 +175,19 @@ pub enum UsageReport {
 /// and may still have reported usage — and a parallel enum would duplicate
 /// `StopReason`'s variants only to answer a different question.
 ///
-/// Every [`StopReason`] is terminal. A decoded outcome therefore cannot
-/// contain a non-terminal stop value and needs no separate validation guard.
+/// Durable, and safe to decode without a guard: every [`StopReason`] is
+/// terminal since `Pending` was removed
+/// (`docs/internals/decisions/2026-08-21-attempt-accounting-ledger.md`), so there is no
+/// non-terminal value for a decoded outcome to hold. This type used to reject
+/// one in its constructor and refuse to derive `Deserialize` because of it;
+/// deleting the variant deleted both guards rather than adding a third.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outcome {
     stop: StopReason,
     delivery: DeliveryCertainty,
     usage: UsageReport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cache_transport: Option<crate::usage::CacheTransport>,
 }
 
 impl Outcome {
@@ -184,7 +197,18 @@ impl Outcome {
             stop,
             delivery,
             usage,
+            cache_transport: None,
         }
+    }
+
+    /// Attach adapter-observed dispatch evidence; absence never implies HTTP.
+    pub fn with_cache_transport(mut self, transport: crate::usage::CacheTransport) -> Self {
+        self.cache_transport = Some(transport);
+        self
+    }
+
+    pub fn cache_transport(&self) -> Option<crate::usage::CacheTransport> {
+        self.cache_transport
     }
 
     /// Why the attempt stopped.
@@ -221,8 +245,10 @@ impl Outcome {
 pub struct GenerationAttempt {
     attempt: AttemptRef,
     metering: Metering,
-    /// Captured rates for actual settlement, if resolved. They stay beside
-    /// metering because the billing arrangement and knowledge of prices differ.
+    /// The rates captured for actual settlement, when any were resolved. Carried
+    /// beside the metering rather than inside it for the reason
+    /// `2026-08-21-a-run-with-no-ceiling.md` §3 gives: the arrangement and
+    /// our knowledge of its prices are different facts.
     rates: Option<PricingQuote>,
     /// Taken by [`AttemptStream::settle`]. While it is `Some`, this attempt
     /// still needs settlement, which is exactly what [`Drop`] reports on.
@@ -320,7 +346,8 @@ impl Drop for GenerationAttempt {
 /// the same figure, and two spellings of it are two places for it to
 /// disagree.
 ///
-/// The three distinct cases:
+/// The three cases, and why each is not the other
+/// (`docs/internals/decisions/2026-08-21-how-a-model-is-metered.md` §5):
 ///
 /// - **Quote settlement** prices the observed usage. No usage frame means no
 ///   quantity to price, so the cost is unknown and the gate charges its
@@ -452,6 +479,8 @@ pub struct AttemptStream {
     /// restatements. Same reasoning the wire decoder applies to its own
     /// cumulative usage chunk.
     provider_cost: Option<Money>,
+    cache_transport: Option<crate::usage::CacheTransport>,
+    cache_transport_seen: bool,
     /// The *first* terminal stop reason seen. Exactly one outcome per
     /// attempt: a provider that emits two is not believed twice.
     terminal: Option<StopReason>,
@@ -470,6 +499,8 @@ impl AttemptStream {
             delivery: DeliveryCertainty::default(),
             usage: UsageReport::Missing,
             provider_cost: None,
+            cache_transport: None,
+            cache_transport_seen: false,
             terminal: None,
         }
     }
@@ -506,6 +537,11 @@ impl AttemptStream {
         match event {
             // The transport's own reading, folded monotonically.
             AiEvent::DeliveryObserved(certainty) => self.delivery.observe(*certainty),
+            AiEvent::CacheTransportObserved(transport) => {
+                // Exactly one actual dispatch proof; duplicates cannot restore a rejected proof.
+                self.cache_transport = (!self.cache_transport_seen).then_some(*transport);
+                self.cache_transport_seen = true;
+            }
 
             // Usage arrives as increments, so it accumulates.
             AiEvent::Usage(delta) => {
@@ -533,13 +569,17 @@ impl AttemptStream {
             | AiEvent::TextDelta { .. }
             | AiEvent::ReasoningDelta { .. }
             | AiEvent::ReasoningState(_)
-            | AiEvent::ToolCall { .. } => {}
+            | AiEvent::ToolCall { .. }
+            | AiEvent::ToolCallRejected { .. } => {}
 
             // Deliberately not treated as proof of arrival: an `Error` can
             // be the provider answering *or* the transport failing locally,
             // and the two are opposite readings of retry safety. The
             // transport says which, with `DeliveryObserved`.
-            AiEvent::Error { .. } | AiEvent::LocalFailure { .. } | AiEvent::FilterState(_) => {}
+            AiEvent::Error { .. }
+            | AiEvent::LocalFailure { .. }
+            | AiEvent::FilterState(_)
+            | AiEvent::FilterNotice { .. } => {}
             // Only a provider that answered emits one, so it is content below.
             AiEvent::ProviderFailure { .. } => {}
         }
@@ -591,6 +631,7 @@ impl AttemptStream {
             stop: self.terminal.unwrap_or(StopReason::Aborted),
             delivery: self.delivery,
             usage: self.usage,
+            cache_transport: self.cache_transport,
         }
     }
 

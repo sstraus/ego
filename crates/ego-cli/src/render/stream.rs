@@ -5,13 +5,22 @@
 //! not code until it closes. So a renderer has exactly three choices, and two
 //! of them are wrong:
 //!
-//! Render complete Markdown blocks while retaining the unfinished suffix. Rendering each
-//! delta misclassifies partial syntax; buffering an entire message hides progress. A
-//! blank line outside a fence establishes a safe block boundary.
+//! - **Render each delta.** Cheap and incoherent: `| a | b |` is a paragraph
+//!   until the delimiter row arrives, and by then it has been printed.
+//! - **Buffer the whole message.** Correct and dead: `CLI.md` §4 makes text
+//!   mode *live*, and a run that shows nothing for ninety seconds and then
+//!   everything is a progress bar that only draws at 100%.
+//! - **Flush at block boundaries.** A markdown block ends at a blank line
+//!   outside a fence — a rule the source states, not one a renderer guesses.
+//!   Everything before the last such boundary is final and can be rendered;
+//!   everything after it is still arriving.
 //!
-//! Redirected output is a different rendering: preserve the model's markdown
-//! byte for byte so `ego run … > answer.md` produces a Markdown file, not
-//! a terminal redraw transcript.
+//! The third is what this does. It is also why the non-TTY path does none of
+//! it: `docs/internals/decisions/2026-08-22-two-axes-and-a-terminal-that-answers.md` §2
+//! rules that a redirected run is a *different* rendering, and for a pipe the
+//! right rendering of the model's markdown is the model's markdown — byte for
+//! byte, so `ego run … > answer.md` is a markdown file and not a transcript of
+//! one being drawn.
 
 use pulldown_cmark::{Event, Parser};
 
@@ -100,10 +109,36 @@ impl Answer {
         format!("{separator}{}", block_with(&lines, self.capabilities))
     }
 
-    /// Return the last completed top-level block boundary. Parser depth prevents blank lines
-    /// inside lists or blockquotes from splitting one construct. Require source evidence of
-    /// completion because parsers close incomplete constructs at end of input. Shared markdown
-    /// options keep boundary detection and rendering aligned.
+    /// The offset just past the last block boundary that is safe to render.
+    ///
+    /// Two conditions, and the first is the one a lexical scan gets wrong.
+    ///
+    /// **The block must be at the top level.** A blank line inside a list
+    /// separates two items of one list; inside a blockquote it separates two
+    /// of its paragraphs. Flushing there does not split the output early, it
+    /// renders it *differently* — the first half becomes a finished list and
+    /// the continuation becomes an indented paragraph that has lost its
+    /// bullet. So the boundary is not "a blank line" but "a blank line that
+    /// nothing is inside", and the only thing that knows what we are inside is
+    /// the parser. Depth is counted over its own events, which is also why
+    /// [`markdown::options`] is shared: two parsers configured differently
+    /// would disagree about where a block ends.
+    ///
+    /// **The block must be finished.** The parser closes every open construct
+    /// at end of input, so the last block always *looks* complete — a
+    /// paragraph still arriving one word at a time ends, on paper, after every
+    /// word. So a boundary counts only when the source proves the block is
+    /// over: a blank line after it, or content that has already started the
+    /// next block.
+    ///
+    /// ## What this still cannot see
+    ///
+    /// A link reference definition (`[x]: https://…`) changes how an earlier
+    /// `[x]` renders, and it can arrive after that paragraph was frozen. No
+    /// checkpoint rule fixes that — the fix is to not freeze at all, which is
+    /// the dead-renderer option §1 of this module rejects. It is rare enough,
+    /// and wrong in a small enough way (a link renders as literal text), to be
+    /// worth the trade rather than worth blocking a live stream over.
     fn split(&self) -> Option<usize> {
         let mut depth = 0usize;
         let mut last_safe = None;
@@ -182,6 +217,31 @@ mod tests {
         }
         out.push_str(&answer.finish());
         out
+    }
+
+    // Catches: split citation controls leak, code literals change, or source URLs are discarded.
+    #[test]
+    fn citation_controls_survive_stream_boundaries_without_changing_pipes_or_links() {
+        let marker = "\u{e200}cite\u{e202}turn368169search1\u{e201}";
+        let source = format!(
+            "appena creato. {marker}\n\n`{marker}`\n\n```\n{marker}\n```\n\n[Source](https://example.com/source)"
+        );
+        let chunks: Vec<String> = source.chars().map(|ch| ch.to_string()).collect();
+        let deltas: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let whole = drain(screen(), &[&source]);
+        assert_eq!(drain(screen(), &deltas), whole);
+        assert!(whole.starts_with("appena creato. [source]\n"), "{whole:?}");
+        assert_eq!(
+            whole.matches(marker).count(),
+            2,
+            "code stays literal: {whole:?}"
+        );
+        assert!(whole.contains("\x1b]8;;https://example.com/source\x07"));
+        assert_eq!(drain(Capabilities::plain(), &deltas), source);
+        let truncated = "before \u{e200}cite\u{e202}turn368169search1";
+        let chunks: Vec<String> = truncated.chars().map(|ch| ch.to_string()).collect();
+        let deltas: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        assert_eq!(bare(&drain(screen(), &deltas)), "before [source]\n");
     }
 
     // Catches: TUIC marker rules split ordinary Markdown on non-TUIC terminals.
@@ -326,7 +386,7 @@ mod tests {
         let mut errors = Vec::new();
         for prefix in ["", "💬 "] {
             let source = format!(
-                "{prefix}{}END-AAW",
+                "{prefix}{}END-582",
                 "L’eseguibile è stato rimosso perché il collegamento è rimasto sul percorso precedente. ".repeat(8)
             );
             let chars: Vec<String> = source.chars().map(|ch| ch.to_string()).collect();
@@ -341,7 +401,7 @@ mod tests {
                 );
                 let bytes = pty_bytes(&rendered, 221);
                 eprintln!(
-                    "PTY-AAW prefix={prefix:?} bytes={:?}",
+                    "PTY-582 prefix={prefix:?} bytes={:?}",
                     String::from_utf8_lossy(&bytes)
                 );
                 let actual = bare(&String::from_utf8(bytes).unwrap());
@@ -353,7 +413,8 @@ mod tests {
         assert!(errors.is_empty(), "{}", errors.join("\n"));
     }
 
-    /// Redirected text output remains plain Markdown rather than terminal rendering.
+    /// §2's promise about redirection, and the one that must not regress:
+    /// `ego run … > answer.md` is unchanged from before any of this existed.
     #[test]
     fn a_pipe_receives_the_models_markdown_byte_for_byte() {
         let source = "# Title\n\nSome **bold** text.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n";

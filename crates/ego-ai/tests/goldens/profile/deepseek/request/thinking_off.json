@@ -1,0 +1,10 @@
+{
+  "model": "deepseek-flash",
+  "messages": [
+    { "role": "user", "content": "9.11 and 9.8, which is greater?" }
+  ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "thinking": { "type": "disabled" },
+  "max_tokens": 64
+}

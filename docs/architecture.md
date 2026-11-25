@@ -3,8 +3,10 @@
 The architecture explains where policy lives, where real effects occur, and why
 a host integration cannot bypass the same admission used by the CLI.
 
-[CLI.md](../CLI.md) describes command conventions. The table below summarizes
-the source structure and authority boundaries.
+[ARCHITECTURE.md](../ARCHITECTURE.md) remains the canonical design and roadmap;
+it stays at the repository root so existing project authorities remain stable.
+[SPEC.md](../SPEC.md) records product scope and [CLI.md](../CLI.md) records the
+command language. Implementation evidence comes from source and tests.
 
 | Crate | Responsibility |
 | --- | --- |
@@ -20,3 +22,11 @@ the source structure and authority boundaries.
 Follow [concepts](concepts/README.md) for the work lifecycle,
 [permissions](guides/permissions.md) for authority, and
 [integrations](integrations/README.md) for host boundaries.
+
+## Terminal editor dependency
+
+Ego pins a local copy of Reedline to preserve correct prompt placement when
+external output interrupts editing, including when the prompt contains wide
+or combining characters. The local changes belong to the editor; Ego keeps
+its input policy and rendering decisions outside the dependency. Replace the
+local copy when an upstream release passes the same terminal regression tests.

@@ -32,7 +32,7 @@ async fn invoke(
     {
         return Err(authority("selected stdio fingerprint changed"));
     }
-    let request = operation_request(&envelope)?;
+    let request = operation_request(&envelope, io.tool_call_correlation_id())?;
     let claim = io.claim_mcp_stdio(call).map_err(McpError::from)?;
     if claim.envelope() != &envelope {
         return Err(authority("guarded stdio claim changed its envelope"));
@@ -66,7 +66,7 @@ async fn invoke(
     let client = lease.client.as_mut().expect("authorized client");
     client.set_identity_retry(Arc::clone(&factory.identity_retry));
     let cancellation = client.cancellation();
-    let mut request = Box::pin(request.invoke(client));
+    let mut request = Box::pin(request.invoke(client, None));
     let outcome = loop {
         if io.is_cancelled()
             || session.is_closed()

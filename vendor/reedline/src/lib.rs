@@ -266,7 +266,7 @@ mod painting;
 pub use painting::{Painter, StyledText};
 
 mod engine;
-pub use engine::{MouseClickMode, Reedline, RepaintSignal};
+pub use engine::{BreakSignal, MouseClickMode, Reedline, RepaintSignal};
 
 mod result;
 pub use result::{ReedlineError, ReedlineErrorVariants, Result};
@@ -339,5 +339,5 @@ pub use utils::{
 // Reexport the key types to be independent from an explicit crossterm dependency.
 pub use crossterm::event::{KeyCode, KeyModifiers};
 #[cfg(feature = "external_printer")]
-pub use external_printer::ExternalPrinter;
+pub use external_printer::{ExternalPrinter, ExternalPrinterSender};
 pub use nu_ansi_term::Color;

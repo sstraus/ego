@@ -1,0 +1,257 @@
+[
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 1,
+      "run_id": {
+        "session_id": "972a33b8-dbf8-503e-ad67-e32065c0efc3",
+        "nonce": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_admitted",
+        "request_id": "5f829607-e9e6-42ec-a3e3-235ee6fd7956",
+        "digest": "02d80767544c65263d880ca2a339a745b26fc57f4700e7b5301fd5d5b0d8d6cc",
+        "expected_revision": null,
+        "lease": "f17cfa13-c1a6-4ca1-b546-653a6006e883",
+        "executor_id": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983",
+        "prompt": "ciao",
+        "model": "openai-codex/gpt-6-sol",
+        "start": true
+      },
+      "status": "running",
+      "observed_at": 1791567936569
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 2,
+      "run_id": {
+        "session_id": "972a33b8-dbf8-503e-ad67-e32065c0efc3",
+        "nonce": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_settled",
+        "lease": "f17cfa13-c1a6-4ca1-b546-653a6006e883",
+        "settlement": {
+          "outcome": "interrupted",
+          "diagnostic": "confinement changed before execution: admitted backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b; observed backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 532b1663b0bb3a52e7673014c8480210a8f9213ea9a1aff6c209325c7f91b285; the session must be reinitialized"
+        }
+      },
+      "status": "interrupted",
+      "observed_at": 1791567936655
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 3,
+      "run_id": {
+        "session_id": "972a33b8-dbf8-503e-ad67-e32065c0efc3",
+        "nonce": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_admitted",
+        "request_id": "c1dd6bf4-0955-4714-bf94-78a358325547",
+        "digest": "02d80767544c65263d880ca2a339a745b26fc57f4700e7b5301fd5d5b0d8d6cc",
+        "expected_revision": 2,
+        "lease": "66a7322d-68d1-4692-a0da-e5876e63797b",
+        "executor_id": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983",
+        "prompt": "ciao",
+        "model": "openai-codex/gpt-6-sol",
+        "start": false
+      },
+      "status": "running",
+      "observed_at": 1791569168480
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 4,
+      "run_id": {
+        "session_id": "972a33b8-dbf8-503e-ad67-e32065c0efc3",
+        "nonce": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_settled",
+        "lease": "66a7322d-68d1-4692-a0da-e5876e63797b",
+        "settlement": {
+          "outcome": "interrupted",
+          "diagnostic": "confinement changed before execution: admitted backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b; observed backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 532b1663b0bb3a52e7673014c8480210a8f9213ea9a1aff6c209325c7f91b285; the session must be reinitialized"
+        }
+      },
+      "status": "interrupted",
+      "observed_at": 1791569168556
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 5,
+      "run_id": {
+        "session_id": "972a33b8-dbf8-503e-ad67-e32065c0efc3",
+        "nonce": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_admitted",
+        "request_id": "2e9c245e-3080-421b-aabf-2fb294948d45",
+        "digest": "02d80767544c65263d880ca2a339a745b26fc57f4700e7b5301fd5d5b0d8d6cc",
+        "expected_revision": 4,
+        "lease": "387ddea7-d37d-448a-8db2-e2243ee057e4",
+        "executor_id": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983",
+        "prompt": "ciao",
+        "model": "openai-codex/gpt-6-sol",
+        "start": false
+      },
+      "status": "running",
+      "observed_at": 1791569214949
+    }
+  },
+  {
+    "kind": "run_transaction",
+    "run_transaction": {
+      "revision": 6,
+      "run_id": {
+        "session_id": "972a33b8-dbf8-503e-ad67-e32065c0efc3",
+        "nonce": "e6641b08-13d4-4c84-ba9f-a1a8c2c56983"
+      },
+      "origin": {
+        "kind": "top_level"
+      },
+      "root": "/workspace",
+      "selections": {
+        "model": null,
+        "thinking": null,
+        "mode": null,
+        "budget": null,
+        "profile": null,
+        "sandbox": "off",
+        "sandbox_observation": {
+          "backend": {
+            "name": "null",
+            "revision": "0.1.0"
+          },
+          "capabilities": [],
+          "policy_digest": "53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b"
+        },
+        "trust": "trusted"
+      },
+      "command": {
+        "kind": "command_settled",
+        "lease": "387ddea7-d37d-448a-8db2-e2243ee057e4",
+        "settlement": {
+          "outcome": "interrupted",
+          "diagnostic": "confinement changed before execution: admitted backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 53289a1a90479827946e29a369966f7759ad73b595aa3e40a8dccd46cb8c9b8b; observed backend `null` (revision 0.1.0) with capabilities [no confinement guarantee] and policy 532b1663b0bb3a52e7673014c8480210a8f9213ea9a1aff6c209325c7f91b285; the session must be reinitialized"
+        }
+      },
+      "status": "interrupted",
+      "observed_at": 1791569215025
+    }
+  }
+]

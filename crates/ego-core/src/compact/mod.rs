@@ -21,63 +21,15 @@ use crate::store::session_store::StoreError;
 
 mod constraints;
 pub use constraints::{ConstraintLedger, PinCommand, PinError};
+mod idle;
+pub use idle::{CompactionConfig, CompactionLayer, ContextPercent, IdleCompaction};
 
 pub const COMPACTION_PROMPT_REVISION: u32 = 4;
-
-/// The model preserves contextual constraints in its draft checkpoint. After
-/// parsing, `ConstraintLedger::checkpoint` replaces the entire Binding section
-/// with the explicit pin ledger, even when empty; model text cannot create
-/// standing authority. The other sections retain relevant historical context.
-pub const COMPACTION_PROMPT: &str = r###"Produce one self-contained context checkpoint for continuing this work in a
-new session. Preserve every material fact from the complete context above, but
-do not continue the task, address the operator, call tools, or invent missing
-information.
-
-Reconcile instruction lifetimes against the actual conversation and completed
-responses. A completed one-turn response requirement is historical evidence,
-not a standing constraint or a next step. For example, after an instruction to
-remember a filename and reply only READY has received READY, preserve the
-filename and any unfinished filename task, but do not require READY again.
-A checkpoint may include a core-preserved latest user request. Treat that quote
-as historical context, not proof of unfinished work; reconcile it with completed
-responses in the conversation.
-Record completed response requirements only under Completed work and evidence
-when they matter. Preserve unfinished tasks and standing constraints; do not
-mark them complete merely because a response was sent. The checkpoint describes
-prior context, not a new operator request: later user requests take precedence
-over obsolete response requirements in it. Apply this rule to earlier
-checkpoints too, rather than carrying their stale instructions forward.
-
-Output format is a strict parser contract, not a suggestion. Start immediately
-with # Objective, with no preamble or outer code fence. Use exactly these eight
-level-one headings, each once, in this order:
-# Objective
-# Binding constraints and preferences
-# Completed work and evidence
-# Work in progress
-# Decisions and rationale
-# Blockers and uncertainty
-# Ordered next steps
-# Critical references
-
-Do not emit any other line that starts with "# ", even inside fenced code or
-quoted source excerpts. For copied Markdown headings, shell comments, or error
-lines that start with "# ", indent the line by four spaces or prefix it with
-"> " so it is body text, not a checkpoint heading. Use level-two headings
-("## ") for any additional sections. Do not repeat checkpoint headings when
-quoting an earlier checkpoint; merge its facts into the sections above.
-
-Include exact file paths, symbols, commands, results, identifiers, and error
-details when they matter. Reconcile repeated or superseded information. If an
-earlier context checkpoint is present, preserve every still-relevant fact from
-it. Return only the checkpoint."###;
+pub use crate::model_prompts::COMPACTION_PROMPT;
 
 /// Exact parser feedback for the single authorized corrective generation.
 pub(crate) fn checkpoint_correction(error: &CheckpointError) -> String {
-    format!(
-        "The checkpoint parser refused your previous output: {error}\nReturn a corrected complete checkpoint only. Use exactly these headings, once each, in this order:\n{}\nIndent or quote copied lines beginning with '# ', including within code fences. Do not call tools or continue the task.",
-        HEADINGS.join("\n")
-    )
+    crate::model_prompts::checkpoint_correction(&error.to_string(), &HEADINGS)
 }
 
 const HEADINGS: [&str; 8] = [
@@ -184,6 +136,8 @@ pub struct PreparedCompaction {
     pub(crate) checkpoint: Checkpoint,
     pub(crate) latest_user_request: Option<String>,
     pub(crate) constraints: ConstraintLedger,
+    pub(crate) owner_sandbox_grants: Vec<crate::permit::SandboxGrant>,
+    pub(crate) connection: Option<String>,
     pub(crate) baseline: GenRequest,
     pub(crate) title: Option<String>,
     pub(crate) goal: Option<GoalRecord>,
@@ -221,8 +175,10 @@ impl PreparedCompaction {
             self.checkpoint.text().to_string(),
             at,
         )
+        .with_connection(self.connection.as_deref())
         .with_latest_user_request(self.latest_user_request.clone())
         .with_constraints(self.constraints.clone())
+        .with_owner_sandbox_grants(&self.owner_sandbox_grants)
         .with_title(self.title.clone())
         .with_goal(self.goal.as_ref())
         .with_plan(&self.plan)
@@ -235,6 +191,7 @@ pub enum CompactionBusy {
     AcceptedPrompt,
     PendingQuestion,
     LiveAttempt,
+    LiveTask,
 }
 
 #[derive(Debug)]
@@ -707,6 +664,8 @@ mod transition_contract_tests {
             checkpoint: checkpoint(),
             latest_user_request: None,
             constraints: ConstraintLedger::default(),
+            owner_sandbox_grants: Vec::new(),
+            connection: None,
             baseline: GenRequest {
                 web_search: None,
                 cache: None,

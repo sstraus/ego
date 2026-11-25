@@ -1,13 +1,13 @@
 # CLI help from a verified binary
 
-Captured from `ego 0.4.3` on 2026-11-01. Binary SHA-256: `13c4ea47c1bfdeee8530ac304f01bd518c15f97d647c69b72b0d9a2e68b02c0e`.
+Captured from `ego 0.4.14` on 2026-11-19. Binary SHA-256: `e144c6c1ebe03f1bf47ad7786f5ecafe973cf4ecabb86da8d5207b813de3f1bf`.
 
-This is a dated help-only snapshot, not a separate command specification. The [generated reference](cli.md) follows the source parser. For your installed binary, use `ego COMMAND SUBCOMMAND --help`.
+This is a dated help-only snapshot, not a separate command specification. The [generated reference](cli.md) follows the source parser. For your installed binary, use `ego COMMAND SUBCOMMAND --help`. The historical `ego auth migrate` shown below has since been removed; see [multiple accounts](../guides/providers.md#multiple-accounts) for current login and recovery.
 
 ## `ego --help`
 
 ```text
-ego 0.4.3 — an agent you run from a terminal.
+ego 0.4.14 — an agent you run from a terminal.
 
 Usage:
   ego [OPTIONS] [PROMPT]
@@ -17,32 +17,32 @@ Interactive:
   ego -m ollama/qwen3
 
 Commands:
-  run         Run an agent from a prompt, headless
-  resume      Continue a session; terminal picker, otherwise latest in this workspace
-  continue    Continue a session; terminal picker, otherwise latest in this workspace
-  fork        Fork a session at its tip or after a completed turn
-  rm          Delete a stored session
-  compact     Compact a session into its deterministic successor
-  export      Export a session or sanitized bundle
-  ls          List sessions (this workspace; --all for every one)
-  usage       Report usage, context and cost for this workspace
-  models      List the shared model catalogue
-  hooks       Inspect the admitted hook catalogue
-  doctor      Print a read-only redacted health snapshot
-  checkpoint  Preview and selectively restore session-owned file edits
-  setup       Inspect expected work without running effects
-  acp         Serve the Agent Client Protocol on stdio
-  a2a         Serve Agent2Agent discovery information
-  auth        Manage subscription credentials
-  mcp         Manage configured MCP servers
-  config      Manage stored user configuration
-  roots       Manage perimeter roots
-  rules       Inspect and manage permission rules
-  mcp-server  Serve scoped ego runs over MCP on stdio
-  worktree    Inspect or safely remove a retained local worktree
+  run            Run an agent from a prompt, headless
+  resume         Continue a session; terminal picker, otherwise latest in this workspace
+  continue       Continue a session; terminal picker, otherwise latest in this workspace
+  fork           Fork a session at its tip or after a completed turn
+  rewind         Restore a session's files and fork it after a completed turn
+  rm             Delete a stored session
+  compact        Compact a session into its deterministic successor
+  export         Export a session or sanitized bundle
+  ls             List sessions (this workspace; --all for every one)
+  usage          Report usage, context and cost for this workspace
+  models         List the shared model catalogue
+  hooks          Inspect the admitted hook catalogue
+  doctor         Print a read-only redacted health snapshot
+  checkpoint     Preview and selectively restore session-owned file edits
+  setup          Review provider readiness and configure saved user settings
+  acp            Serve the Agent Client Protocol on stdio or an endpoint
+  a2a            Serve Agent2Agent discovery information
+  auth           Manage subscription credentials
+  mcp            Manage configured MCP servers
+  config         Manage stored user configuration
+  roots          Manage perimeter roots
+  rules          Inspect and manage permission rules
+  mcp-server     Serve scoped ego runs over MCP on stdio
+  worktree       Inspect or safely remove a retained local worktree
+  build-recipes  Inspect or delete learned build-output recipes
 
-      --continua
-          Resume the latest saved session in this workspace without the terminal picker
       --worktree <BRANCH>
           Create a retained managed worktree on this explicitly approved new branch
   -f, --file <FILE>
@@ -53,6 +53,8 @@ Commands:
           Add exact image bytes as ordered context before the prompt text
   -m, --model <MODEL>
           provider/model slug, e.g. ollama/qwen3
+      --account <N>
+          Select an account by its stable number within the provider
       --offline
           No non-loopback egress from ego's own HTTP transport
       --proxy <http://HOST[:PORT]>
@@ -78,7 +80,9 @@ Commands:
       --tools <TOOLS>
           Restrict the builtin tools to this comma-separated list
       --no-tools
-          Offer no tools at all
+          Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools
+      --no-hooks
+          Run with every hook off for this invocation; configuration is unchanged
       --allow <RULE>
           Allow rule, e.g. 'read(src/**)'. Repeatable
       --deny <RULE>
@@ -87,6 +91,8 @@ Commands:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session <SESSION>
           Named session: created or attached
       --session-id <SESSION_ID>
@@ -120,7 +126,7 @@ Commands:
       --context-interval <CONTEXT_INTERVAL>
           Minimum completed turns between model-requested transitions [default: 10]
       --goal-turns <GOAL_TURNS>
-          Maximum automatic goal continuation turns [default: 20]
+          Optional maximum automatic goal continuation turns
       --goal-check-command <GOAL_CHECK_COMMAND>
           Evaluator argv as a JSON string array; reads evidence JSON on stdin
       --max-turns <MAX_TURNS>
@@ -129,6 +135,10 @@ Commands:
           Wall clock, e.g. '90s' or '10m'
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
+      --mcp-only
+          Attach only the servers that --mcp selects; enabled configured servers stay detached
+      --allow-dir <PATH[:ro|rw]>
+          Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root
       --mode <MODE>
           Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
@@ -145,6 +155,12 @@ Commands:
           Append plain output without terminal styling or live retry updates
       --vim
           Use Vim normal/insert editing in the interactive composer
+      --memory
+          Keep a memory file for this workspace that the model can add to
+      --no-session-compression
+          Do not compress old sessions in the background during this run
+      --no-checkpoints
+          Do not save file checkpoints before writes during this run
   -h, --help
           Print help
 
@@ -173,6 +189,8 @@ Options:
           Add exact image bytes as ordered context before the prompt text
   -m, --model <MODEL>
           provider/model slug, e.g. ollama/qwen3
+      --account <N>
+          Select an account by its stable number within the provider
       --offline
           No non-loopback egress from ego's own HTTP transport
       --proxy <http://HOST[:PORT]>
@@ -198,7 +216,9 @@ Options:
       --tools <TOOLS>
           Restrict the builtin tools to this comma-separated list
       --no-tools
-          Offer no tools at all
+          Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools
+      --no-hooks
+          Run with every hook off for this invocation; configuration is unchanged
       --allow <RULE>
           Allow rule, e.g. 'read(src/**)'. Repeatable
       --deny <RULE>
@@ -207,6 +227,8 @@ Options:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session <SESSION>
           Named session: created or attached
       --session-id <SESSION_ID>
@@ -240,7 +262,7 @@ Options:
       --context-interval <CONTEXT_INTERVAL>
           Minimum completed turns between model-requested transitions [default: 10]
       --goal-turns <GOAL_TURNS>
-          Maximum automatic goal continuation turns [default: 20]
+          Optional maximum automatic goal continuation turns
       --goal-check-command <GOAL_CHECK_COMMAND>
           Evaluator argv as a JSON string array; reads evidence JSON on stdin
       --max-turns <MAX_TURNS>
@@ -249,6 +271,10 @@ Options:
           Wall clock, e.g. '90s' or '10m'
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
+      --mcp-only
+          Attach only the servers that --mcp selects; enabled configured servers stay detached
+      --allow-dir <PATH[:ro|rw]>
+          Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root
       --mode <MODE>
           Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
@@ -263,6 +289,12 @@ Options:
           Never emit ANSI colour, whatever the terminal claims to support
       --plain
           Append plain output without terminal styling or live retry updates
+      --memory
+          Keep a memory file for this workspace that the model can add to
+      --no-session-compression
+          Do not compress old sessions in the background during this run
+      --no-checkpoints
+          Do not save file checkpoints before writes during this run
   -h, --help
           Print help
 ```
@@ -281,10 +313,16 @@ Arguments:
 Options:
       --answer <QUESTION_ID=JSON>
           Settle a pending question. Repeat for multiple sibling questions
+      --accept-authority-delta
+          Accept the authority change shown for this resume, without a question. Applies to this resume only
+      --title <TITLE>
+          Resume the session of this workspace whose title is exactly TITLE
+      --queue
+          Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
-          Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON
+          Read or change goal metadata without starting a turn: show, stop, set=TEXT, achieve, resume, block=REASON
   -f, --file <FILE>
           Read the instruction and its invocation configuration from an agent file
       --var <KEY=VALUE>
@@ -293,6 +331,8 @@ Options:
           Add exact image bytes as ordered context before the prompt text
   -m, --model <MODEL>
           provider/model slug, e.g. ollama/qwen3
+      --account <N>
+          Select an account by its stable number within the provider
       --offline
           No non-loopback egress from ego's own HTTP transport
       --proxy <http://HOST[:PORT]>
@@ -318,7 +358,9 @@ Options:
       --tools <TOOLS>
           Restrict the builtin tools to this comma-separated list
       --no-tools
-          Offer no tools at all
+          Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools
+      --no-hooks
+          Run with every hook off for this invocation; configuration is unchanged
       --allow <RULE>
           Allow rule, e.g. 'read(src/**)'. Repeatable
       --deny <RULE>
@@ -327,6 +369,8 @@ Options:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session-dir <SESSION_DIR>
           Override the store location
   -C <DIR>
@@ -356,7 +400,7 @@ Options:
       --context-interval <CONTEXT_INTERVAL>
           Minimum completed turns between model-requested transitions [default: 10]
       --goal-turns <GOAL_TURNS>
-          Maximum automatic goal continuation turns [default: 20]
+          Optional maximum automatic goal continuation turns
       --goal-check-command <GOAL_CHECK_COMMAND>
           Evaluator argv as a JSON string array; reads evidence JSON on stdin
       --max-turns <MAX_TURNS>
@@ -365,6 +409,10 @@ Options:
           Wall clock, e.g. '90s' or '10m'
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
+      --mcp-only
+          Attach only the servers that --mcp selects; enabled configured servers stay detached
+      --allow-dir <PATH[:ro|rw]>
+          Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root
       --mode <MODE>
           Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
@@ -381,6 +429,12 @@ Options:
           Append plain output without terminal styling or live retry updates
       --vim
           Use Vim normal/insert editing in the interactive composer
+      --memory
+          Keep a memory file for this workspace that the model can add to
+      --no-session-compression
+          Do not compress old sessions in the background during this run
+      --no-checkpoints
+          Do not save file checkpoints before writes during this run
   -h, --help
           Print help
 
@@ -403,10 +457,16 @@ Arguments:
 Options:
       --answer <QUESTION_ID=JSON>
           Settle a pending question. Repeat for multiple sibling questions
+      --accept-authority-delta
+          Accept the authority change shown for this resume, without a question. Applies to this resume only
+      --title <TITLE>
+          Resume the session of this workspace whose title is exactly TITLE
+      --queue
+          Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
-          Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON
+          Read or change goal metadata without starting a turn: show, stop, set=TEXT, achieve, resume, block=REASON
   -f, --file <FILE>
           Read the instruction and its invocation configuration from an agent file
       --var <KEY=VALUE>
@@ -415,6 +475,8 @@ Options:
           Add exact image bytes as ordered context before the prompt text
   -m, --model <MODEL>
           provider/model slug, e.g. ollama/qwen3
+      --account <N>
+          Select an account by its stable number within the provider
       --offline
           No non-loopback egress from ego's own HTTP transport
       --proxy <http://HOST[:PORT]>
@@ -440,7 +502,9 @@ Options:
       --tools <TOOLS>
           Restrict the builtin tools to this comma-separated list
       --no-tools
-          Offer no tools at all
+          Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools
+      --no-hooks
+          Run with every hook off for this invocation; configuration is unchanged
       --allow <RULE>
           Allow rule, e.g. 'read(src/**)'. Repeatable
       --deny <RULE>
@@ -449,6 +513,8 @@ Options:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session-dir <SESSION_DIR>
           Override the store location
   -C <DIR>
@@ -478,7 +544,7 @@ Options:
       --context-interval <CONTEXT_INTERVAL>
           Minimum completed turns between model-requested transitions [default: 10]
       --goal-turns <GOAL_TURNS>
-          Maximum automatic goal continuation turns [default: 20]
+          Optional maximum automatic goal continuation turns
       --goal-check-command <GOAL_CHECK_COMMAND>
           Evaluator argv as a JSON string array; reads evidence JSON on stdin
       --max-turns <MAX_TURNS>
@@ -487,6 +553,10 @@ Options:
           Wall clock, e.g. '90s' or '10m'
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
+      --mcp-only
+          Attach only the servers that --mcp selects; enabled configured servers stay detached
+      --allow-dir <PATH[:ro|rw]>
+          Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root
       --mode <MODE>
           Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
@@ -503,6 +573,12 @@ Options:
           Append plain output without terminal styling or live retry updates
       --vim
           Use Vim normal/insert editing in the interactive composer
+      --memory
+          Keep a memory file for this workspace that the model can add to
+      --no-session-compression
+          Do not compress old sessions in the background during this run
+      --no-checkpoints
+          Do not save file checkpoints before writes during this run
   -h, --help
           Print help
 
@@ -519,10 +595,28 @@ Fork a session at its tip or after the completed turn containing a message.
 Usage: ego fork [OPTIONS] <SOURCE>
 
 Arguments:
-  <SOURCE>
+  <SOURCE>  Stored session ID to fork
 
 Options:
-      --at <ITEM_ID>
+      --at <ITEM_ID>               Fork after the completed turn containing this message
+      --session-dir <SESSION_DIR>  Override the store location
+  -C <DIR>                         Run as if started in DIR
+      --output <OUTPUT>            text|json|jsonl [possible values: text, json, jsonl]
+  -h, --help                       Print help
+```
+
+## `ego rewind --help`
+
+```text
+Restore the files a session changed after a completed turn, then fork the conversation there.
+
+Usage: ego rewind [OPTIONS] --at <ITEM_ID> <SOURCE>
+
+Arguments:
+  <SOURCE>  Stored session ID to rewind
+
+Options:
+      --at <ITEM_ID>               A user or assistant message of the turn to return to
       --session-dir <SESSION_DIR>  Override the store location
   -C <DIR>                         Run as if started in DIR
       --output <OUTPUT>            text|json|jsonl [possible values: text, json, jsonl]
@@ -534,12 +628,14 @@ Options:
 ```text
 Delete a stored session (history is retained for descendants).
 
-Usage: ego rm [OPTIONS] <SOURCE>
+Usage: ego rm [OPTIONS] [SOURCE]
 
 Arguments:
-  <SOURCE>  Stored session ID to delete; history needed by descendants is retained
+  [SOURCE]  Stored session ID to delete; history needed by descendants is retained
 
 Options:
+      --incompatible               Permanently remove sessions with an unsupported stored format. Requires --yes
+      --expired                    Permanently remove sessions not opened within `sessions.retention_days` (30 by default). Open and held sessions stay. Requires --yes
       --yes                        Supply deletion confirmation without prompting; required without terminal stdin
       --force                      Acknowledge an uncertain prior run; does not replace deletion confirmation and is not a general override
       --session-dir <SESSION_DIR>  Override the store location
@@ -555,12 +651,12 @@ Compact a session into its deterministic successor.
 Usage: ego compact [OPTIONS] <SOURCE>
 
 Arguments:
-  <SOURCE>
+  <SOURCE>  Stored session ID to compact
 
 Options:
       --budget <BUDGET>                        Hard spend ceiling, as for run
       --max-output-tokens <MAX_OUTPUT_TOKENS>  Maximum generated tokens per request
-      --request-id <REQUEST_ID>
+      --request-id <REQUEST_ID>                Reuse this request UUID for a deterministic retry
       --session-dir <SESSION_DIR>              Override the store location
   -C <DIR>                                     Run as if started in DIR
       --output <OUTPUT>                        text|json|jsonl [possible values: text, json, jsonl]
@@ -612,6 +708,7 @@ Usage: ego usage [OPTIONS]
 
 Options:
       --period <PERIOD>            all|Ns|Nm|Nh [default: all]
+      --session <ID>               Report only this stored session
       --json                       Emit the exact versioned usage-report object
       --all-roles                  Keep role rows that recorded no activity in the text table
       --session-dir <SESSION_DIR>  Override the store location
@@ -627,6 +724,7 @@ List the shared model catalogue.
 Usage: ego models [OPTIONS]
 
 Options:
+      --account <N>          Select an account by its stable number within the provider
       --provider <PROVIDER>  Restrict enumeration and output to one admitted provider
       --refresh              Refresh the selected discoverable provider slices
       --json                 Emit the exact versioned snapshot object
@@ -667,8 +765,10 @@ Report a read-only redacted health snapshot of this installation.
 Usage: ego doctor [OPTIONS]
 
 Options:
-      --json  Emit the exact versioned health snapshot
-  -h, --help  Print help
+      --json           Emit the exact versioned health snapshot
+      --offline        Skip every provider network probe
+      --probe-network  Probe the network reachability of each configured provider, like `doctor_network = true`
+  -h, --help           Print help
 ```
 
 ## `ego checkpoint --help`
@@ -685,10 +785,10 @@ Commands:
   help     Print this message or the help of the given subcommand(s)
 
 Arguments:
-  <SESSION>
+  <SESSION>  Session that owns the checkpoints
 
 Options:
-  -C, --directory <DIRECTORY>  [default: .]
+  -C, --directory <DIRECTORY>  Workspace that owns the session [default: .]
   -h, --help                   Print help
 ```
 
@@ -711,7 +811,7 @@ Restore one selected checkpoint; external changes are never forced
 Usage: ego checkpoint <SESSION> restore <CHECKPOINT>
 
 Arguments:
-  <CHECKPOINT>
+  <CHECKPOINT>  Checkpoint ID to restore
 
 Options:
   -h, --help  Print help
@@ -731,7 +831,7 @@ Options:
 ## `ego setup --help`
 
 ```text
-Configure saved user settings in an interactive terminal.
+Review provider readiness and configure saved user settings in an interactive terminal.
 
 Usage: ego setup [OPTIONS]
 
@@ -770,13 +870,19 @@ Options:
       --tools <TOOLS>
           Restrict the builtin tools to this comma-separated list
       --no-tools
-          Offer no tools at all
+          Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools
+      --no-hooks
+          Run with every hook off for this invocation; configuration is unchanged
       --allow <RULE>
           Allow rule, e.g. 'read(src/**)'. Repeatable
       --deny <RULE>
           Deny rule, e.g. 'write(**)'. Repeatable
       --profile <PROFILE>
           Layer [profile.NAME] from config
+      --exclusive-read-only
+          Serve an unattended read-only session that no configuration layer or host request can widen: no tools, hooks, skills, commands or MCP servers, and an environment cleared to an allow-list
+      --env-allow <NAME>
+          Keep this environment variable under --exclusive-read-only. Repeatable
       --listen <LISTEN>
           Serve on a socket path or address instead of stdio
       --allow-public-bind
@@ -801,11 +907,8 @@ Options:
 Usage: ego a2a [OPTIONS] --listen <LISTEN>
 
 Options:
-      --session-dir <SESSION_DIR>
-          Override the store location
-
   -C <DIR>
-          Run as if started in DIR
+          Run as if started in DIR. `ego a2a` keeps no sessions, so it takes no `--session-dir`
 
       --sandbox <SANDBOX>
           The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included
@@ -825,18 +928,53 @@ Options:
 ## `ego auth --help`
 
 ```text
-Manage subscription credentials.
+Manage provider credentials.
 
-Usage: ego auth <COMMAND>
+Usage: ego auth [OPTIONS] <COMMAND>
 
 Commands:
-  login   Authenticate and store a provider credential
-  logout  Remove a stored provider credential
-  status  Show credential type and expiry, never token values
-  help    Print this message or the help of the given subcommand(s)
+  migrate  Explicitly move one legacy credential to an existing named connection
+  usage    Read subscription quota without generating a model response
+  login    Authenticate and store a provider credential
+  logout   Remove a stored provider credential
+  remove   Delete a saved account and its local credential without reusing its number
+  status   Show credential type and expiry, never token values
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
-  -h, --help  Print help
+      --account <N>  Select an account by its stable number within the provider
+  -h, --help         Print help
+```
+
+## `ego auth migrate --help`
+
+```text
+Explicitly move one legacy credential to an existing named connection
+
+Usage: ego auth migrate [OPTIONS] <PROVIDER>
+
+Arguments:
+  <PROVIDER>  Legacy provider route whose stored credential is moved
+
+Options:
+      --account <N>  Select an account by its stable number within the provider
+  -h, --help         Print help
+```
+
+## `ego auth usage --help`
+
+```text
+Read subscription quota without generating a model response
+
+Usage: ego auth usage [OPTIONS] [PROVIDER]
+
+Arguments:
+  [PROVIDER]  Limit the read to one stored provider
+
+Options:
+      --json         Print quota and provider issues as JSON
+      --account <N>  Select an account by its stable number within the provider
+  -h, --help         Print help
 ```
 
 ## `ego auth login --help`
@@ -847,11 +985,14 @@ Authenticate and store a provider credential
 Usage: ego auth login [OPTIONS] [PROVIDER]
 
 Arguments:
-  [PROVIDER]
+  [PROVIDER]  Provider to authenticate
 
 Options:
-      --device  Prefer device-code login when the provider offers it
-  -h, --help    Print help
+      --renew            Renew a saved account instead of creating a new account
+      --account <N>      Select an account by its stable number within the provider
+      --device           Prefer device-code OAuth login when the provider offers it
+      --method <METHOD>  Choose API-key registration or OAuth for a provider offering both [possible values: api-key, oauth]
+  -h, --help             Print help
 ```
 
 ## `ego auth logout --help`
@@ -859,13 +1000,29 @@ Options:
 ```text
 Remove a stored provider credential
 
-Usage: ego auth logout [PROVIDER]
+Usage: ego auth logout [OPTIONS] [PROVIDER]
 
 Arguments:
-  [PROVIDER]
+  [PROVIDER]  Provider whose credential to remove
 
 Options:
-  -h, --help  Print help
+      --account <N>  Select an account by its stable number within the provider
+  -h, --help         Print help
+```
+
+## `ego auth remove --help`
+
+```text
+Delete a saved account and its local credential without reusing its number
+
+Usage: ego auth remove [OPTIONS] <PROVIDER>
+
+Arguments:
+  <PROVIDER>  Provider whose saved account to delete
+
+Options:
+      --account <N>  Select an account by its stable number within the provider
+  -h, --help         Print help
 ```
 
 ## `ego auth status --help`
@@ -873,13 +1030,15 @@ Options:
 ```text
 Show credential type and expiry, never token values
 
-Usage: ego auth status [PROVIDER]
+Usage: ego auth status [OPTIONS] [PROVIDER]
 
 Arguments:
-  [PROVIDER]
+  [PROVIDER]  Provider whose credential status to show
 
 Options:
-  -h, --help  Print help
+      --json         Print versioned local credential presence without secret metadata
+      --account <N>  Select an account by its stable number within the provider
+  -h, --help         Print help
 ```
 
 ## `ego mcp --help`
@@ -906,10 +1065,10 @@ Options:
 Add or replace one complete server entry
 
 Usage: ego mcp add <NAME> --stdio [--cwd <DIR>] [--inherit-env <NAME>]... -- <COMMAND> [ARG]...
-       ego mcp add <NAME> --http <URL> [--auth <none|oauth>] [--allow-insecure-loopback]
+       ego mcp add <NAME> --http <URL> [--profile <current|legacy-sse>] [--auth <none|oauth>] [--allow-insecure-loopback] [--oauth-host <URL>]...
 
 Arguments:
-  <NAME>
+  <NAME>  Name of the server to configure
 
 Options:
       --stdio                    Configure a subprocess transport. Its command follows literal `--`
@@ -918,7 +1077,8 @@ Options:
       --inherit-env <NAME>       Environment variable inherited by the stdio child. Repeatable
       --profile <PROFILE>        Explicit HTTP wire profile; never selected by fallback [possible values: current, legacy-sse]
       --auth <AUTH>              HTTP authentication mode [possible values: none, oauth]
-      --allow-insecure-loopback  Consent to plaintext HTTP for an exact loopback host
+      --allow-insecure-loopback  Consent to plaintext HTTP for this server on loopback or the owner network
+      --oauth-host <URL>         Extra OAuth origin that may host this server's authorization, token or registration endpoint when it differs from the issuer's. Repeatable
   -h, --help                     Print help
 ```
 
@@ -930,7 +1090,7 @@ Remove, mask, or reveal one configured server entry
 Usage: ego mcp rm <NAME>
 
 Arguments:
-  <NAME>
+  <NAME>  Name of the configured server
 
 Options:
   -h, --help  Print help
@@ -944,8 +1104,9 @@ List configured and admitted MCP state
 Usage: ego mcp ls [OPTIONS]
 
 Options:
-      --json  Emit the typed machine-readable projection
-  -h, --help  Print help
+      --json              Emit the typed machine-readable projection
+      --mcp <NAME|@FILE>  Also list this invocation's `--mcp` selection (NAME or @FILE); it is not probed
+  -h, --help              Print help
 ```
 
 ## `ego mcp login --help`
@@ -956,7 +1117,7 @@ Authorize a public OAuth client with an explicit registration strategy
 Usage: ego mcp login [OPTIONS] <NAME>
 
 Arguments:
-  <NAME>
+  <NAME>  Name of the configured server
 
 Options:
       --client-id <CLIENT_ID>          Operator-issued public client ID
@@ -964,8 +1125,8 @@ Options:
       --dcr                            Explicitly use issuer-advertised dynamic registration
       --callback-port <CALLBACK_PORT>  Loopback port registered with the authorization server (0 selects a free port) [default: 0]
       --refresh                        Refresh an existing issuer/resource/account-bound credential without interaction
-      --issuer <ISSUER>
-      --account <ACCOUNT>
+      --issuer <ISSUER>                Issuer bound to the credential to refresh
+      --account <ACCOUNT>              Account bound to the credential to refresh
   -h, --help                           Print help
 ```
 
@@ -977,7 +1138,7 @@ Reconcile every configured server, or one named server
 Usage: ego mcp reload [NAME]
 
 Arguments:
-  [NAME]
+  [NAME]  Server to reconcile; omit to reconcile all servers
 
 Options:
   -h, --help  Print help
@@ -1023,7 +1184,7 @@ Read stored values and their opaque owner revision as JSON
 Usage: ego config snapshot [OPTIONS]
 
 Options:
-      --profile <NAME>
+      --profile <NAME>  Select the named user profile
   -h, --help            Print help
 ```
 
@@ -1035,10 +1196,10 @@ Atomically publish a bounded set of typed managed edits
 Usage: ego config batch [OPTIONS]
 
 Options:
-      --profile <NAME>
-      --set <KEY=TOML_VALUE>
-      --if-revision <REVISION>
-      --unset <KEY>
+      --profile <NAME>          Select the named user profile
+      --set <KEY=TOML_VALUE>    Set a key to a TOML value
+      --if-revision <REVISION>  Apply only if the owner revision matches
+      --unset <KEY>             Remove a stored key
   -h, --help                    Print help
 ```
 
@@ -1050,11 +1211,11 @@ Read one exact stored value
 Usage: ego config get [OPTIONS] <KEY>
 
 Arguments:
-  <KEY>
+  <KEY>  Managed configuration key
 
 Options:
-      --profile <NAME>
-      --json
+      --profile <NAME>  Select the named user profile
+      --json            Emit JSON output
   -h, --help            Print help
 ```
 
@@ -1066,10 +1227,10 @@ Store one strictly typed TOML value
 Usage: ego config set [OPTIONS] <KEY=TOML_VALUE>
 
 Arguments:
-  <KEY=TOML_VALUE>
+  <KEY=TOML_VALUE>  Managed key and its TOML value
 
 Options:
-      --profile <NAME>
+      --profile <NAME>  Select the named user profile
   -h, --help            Print help
 ```
 
@@ -1081,10 +1242,10 @@ Remove one exact stored value
 Usage: ego config unset [OPTIONS] <KEY>
 
 Arguments:
-  <KEY>
+  <KEY>  Managed configuration key
 
 Options:
-      --profile <NAME>
+      --profile <NAME>  Select the named user profile
   -h, --help            Print help
 ```
 
@@ -1096,8 +1257,8 @@ List the exact stored managed projection
 Usage: ego config ls [OPTIONS]
 
 Options:
-      --profile <NAME>
-      --json
+      --profile <NAME>  Select the named user profile
+      --json            Emit JSON output
       --effective       Show the effective run perimeter instead of stored values
   -h, --help            Print help
 ```
@@ -1136,11 +1297,11 @@ Add or update one user perimeter root
 Usage: ego roots add [OPTIONS] <PATH>
 
 Arguments:
-  <PATH>
+  <PATH>  Path of the perimeter root
 
 Options:
-      --profile <PROFILE>
-      --access <ACCESS>    [default: read] [possible values: read, read-write]
+      --profile <PROFILE>  Select the named user profile
+      --access <ACCESS>    Access granted to this root [default: read] [possible values: read, read-write]
   -h, --help               Print help
 ```
 
@@ -1152,10 +1313,10 @@ Remove a root by its stored spelling
 Usage: ego roots rm [OPTIONS] <PATH>
 
 Arguments:
-  <PATH>
+  <PATH>  Path of the perimeter root
 
 Options:
-      --profile <PROFILE>
+      --profile <PROFILE>  Select the named user profile
   -h, --help               Print help
 ```
 
@@ -1167,8 +1328,8 @@ List roots stored in the selected user target
 Usage: ego roots ls [OPTIONS]
 
 Options:
-      --profile <PROFILE>
-      --json
+      --profile <PROFILE>  Select the named user profile
+      --json               Emit JSON output
   -h, --help               Print help
 ```
 
@@ -1199,8 +1360,8 @@ List the effective system and selected user rules
 Usage: ego rules ls [OPTIONS]
 
 Options:
-      --profile <NAME>
-      --json
+      --profile <NAME>  Select the named user profile
+      --json            Emit JSON output
   -h, --help            Print help
 ```
 
@@ -1212,10 +1373,10 @@ Persist one allow predicate
 Usage: ego rules allow [OPTIONS] <RULE>
 
 Arguments:
-  <RULE>
+  <RULE>  Permission rule to store
 
 Options:
-      --profile <NAME>
+      --profile <NAME>  Select the named user profile
   -h, --help            Print help
 ```
 
@@ -1227,10 +1388,10 @@ Persist one deny predicate
 Usage: ego rules deny [OPTIONS] <RULE>
 
 Arguments:
-  <RULE>
+  <RULE>  Permission rule to store
 
 Options:
-      --profile <NAME>
+      --profile <NAME>  Select the named user profile
   -h, --help            Print help
 ```
 
@@ -1242,10 +1403,10 @@ Remove one predicate ID from both selected user lists
 Usage: ego rules revoke [OPTIONS] <ID>
 
 Arguments:
-  <ID>
+  <ID>  Identifier of the rule to revoke
 
 Options:
-      --profile <NAME>
+      --profile <NAME>  Select the named user profile
   -h, --help            Print help
 ```
 
@@ -1257,14 +1418,14 @@ Derive persistent rules from one prepared builtin call
 Usage: ego rules remember [OPTIONS] <EFFECT> <TOOL> <ARGS_JSON>
 
 Arguments:
-  <EFFECT>
-  <TOOL>
-  <ARGS_JSON>
+  <EFFECT>     Rule effect to remember
+  <TOOL>       Builtin tool name
+  <ARGS_JSON>  Tool arguments as a JSON object
 
 Options:
-      --profile <NAME>
-  -C <DIR>
-      --yes
+      --profile <NAME>  Select the named user profile
+  -C <DIR>              Resolve the call in this workspace
+      --yes             Confirm the proposed rules without a prompt
   -h, --help            Print help
 ```
 
@@ -1276,13 +1437,13 @@ Explain one prepared builtin call without running it
 Usage: ego rules explain [OPTIONS] <TOOL> <ARGS_JSON>
 
 Arguments:
-  <TOOL>
-  <ARGS_JSON>
+  <TOOL>       Builtin tool name
+  <ARGS_JSON>  Tool arguments as a JSON object
 
 Options:
-      --profile <NAME>
-  -C <DIR>
-      --json
+      --profile <NAME>  Select the named user profile
+  -C <DIR>              Resolve the call in this workspace
+      --json            Emit JSON output
   -h, --help            Print help
 ```
 
@@ -1291,15 +1452,27 @@ Options:
 ```text
 Serve scoped ego runs over MCP on stdio.
 
-Usage: ego mcp-server [OPTIONS] --max-concurrent-runs <MAX_CONCURRENT_RUNS> --retained-requests <RETAINED_REQUESTS> --max-resource-bytes <MAX_RESOURCE_BYTES>
+Usage: ego mcp-server [OPTIONS]
 
 Options:
-      --session-dir <SESSION_DIR>                  Override the store location
-  -C <DIR>                                         Run as if started in DIR
+      --session-dir <SESSION_DIR>
+          Override the store location
+  -C <DIR>
+          Run as if started in DIR
       --max-concurrent-runs <MAX_CONCURRENT_RUNS>
+          Runs that may execute at once [default: 1]
       --retained-requests <RETAINED_REQUESTS>
+          Finished requests kept for status and resource reads [default: 16]
       --max-resource-bytes <MAX_RESOURCE_BYTES>
-  -h, --help                                       Print help
+          Largest resource body returned to a client, in bytes [default: 65536]
+      --allow-root <DIR>
+          Also let clients run in DIR. The directory given with -C (or the current one) is always allowed
+      --allow-model <P/M>
+          Also let clients select this model. The configured model is always allowed
+      --allow-mode <ALLOW_MODE>
+          Also let clients select this mode. The configured mode is always allowed
+  -h, --help
+          Print help
 ```
 
 ## `ego worktree --help`
@@ -1326,7 +1499,7 @@ Inspect a durable local worktree receipt without starting a model
 Usage: ego worktree show <RECEIPT>
 
 Arguments:
-  <RECEIPT>
+  <RECEIPT>  ID of the retained worktree receipt
 
 Options:
   -h, --help  Print help
@@ -1340,7 +1513,93 @@ Remove only a clean worktree whose commits are integrated; retain its branch
 Usage: ego worktree cleanup <RECEIPT>
 
 Arguments:
-  <RECEIPT>
+  <RECEIPT>  ID of the retained worktree receipt
+
+Options:
+  -h, --help  Print help
+```
+
+## `ego build-recipes --help`
+
+```text
+Inspect, disable, enable or delete the learned build-output recipes of this workspace.
+
+Usage: ego build-recipes <COMMAND>
+
+Commands:
+  ls       List the recipes of this workspace
+  show     Print one recipe as JSON
+  disable  Stop using one recipe; it stays stored
+  enable   Use one disabled recipe again
+  rm       Delete one recipe
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+  -h, --help  Print help
+```
+
+## `ego build-recipes ls --help`
+
+```text
+List the recipes of this workspace
+
+Usage: ego build-recipes ls
+
+Options:
+  -h, --help  Print help
+```
+
+## `ego build-recipes show --help`
+
+```text
+Print one recipe as JSON
+
+Usage: ego build-recipes show <ID>
+
+Arguments:
+  <ID>  Recipe ID, as `ego build-recipes ls` prints it
+
+Options:
+  -h, --help  Print help
+```
+
+## `ego build-recipes disable --help`
+
+```text
+Stop using one recipe; it stays stored
+
+Usage: ego build-recipes disable <ID>
+
+Arguments:
+  <ID>  Recipe ID, as `ego build-recipes ls` prints it
+
+Options:
+  -h, --help  Print help
+```
+
+## `ego build-recipes enable --help`
+
+```text
+Use one disabled recipe again
+
+Usage: ego build-recipes enable <ID>
+
+Arguments:
+  <ID>  Recipe ID, as `ego build-recipes ls` prints it
+
+Options:
+  -h, --help  Print help
+```
+
+## `ego build-recipes rm --help`
+
+```text
+Delete one recipe
+
+Usage: ego build-recipes rm <ID>
+
+Arguments:
+  <ID>  Recipe ID, as `ego build-recipes ls` prints it
 
 Options:
   -h, --help  Print help
@@ -1360,10 +1619,16 @@ Arguments:
 Options:
       --answer <QUESTION_ID=JSON>
           Settle a pending question. Repeat for multiple sibling questions
+      --accept-authority-delta
+          Accept the authority change shown for this resume, without a question. Applies to this resume only
+      --title <TITLE>
+          Resume the session of this workspace whose title is exactly TITLE
+      --queue
+          Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout
       --name <NAME>
           Read or change the session title without starting a turn: show, set=TEXT, clear
       --goal-operation <GOAL_OPERATION>
-          Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON
+          Read or change goal metadata without starting a turn: show, stop, set=TEXT, achieve, resume, block=REASON
   -f, --file <FILE>
           Read the instruction and its invocation configuration from an agent file
       --var <KEY=VALUE>
@@ -1372,6 +1637,8 @@ Options:
           Add exact image bytes as ordered context before the prompt text
   -m, --model <MODEL>
           provider/model slug, e.g. ollama/qwen3
+      --account <N>
+          Select an account by its stable number within the provider
       --offline
           No non-loopback egress from ego's own HTTP transport
       --proxy <http://HOST[:PORT]>
@@ -1397,7 +1664,9 @@ Options:
       --tools <TOOLS>
           Restrict the builtin tools to this comma-separated list
       --no-tools
-          Offer no tools at all
+          Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools
+      --no-hooks
+          Run with every hook off for this invocation; configuration is unchanged
       --allow <RULE>
           Allow rule, e.g. 'read(src/**)'. Repeatable
       --deny <RULE>
@@ -1406,6 +1675,8 @@ Options:
           Layer [profile.NAME] from config
       --trust-workspace
           Trust this launch's workspace without asking; remember the answer
+      --trust-development-programs
+          Trust this workspace and future edits to its current named programs; remember the grant
       --session-dir <SESSION_DIR>
           Override the store location
   -C <DIR>
@@ -1435,7 +1706,7 @@ Options:
       --context-interval <CONTEXT_INTERVAL>
           Minimum completed turns between model-requested transitions [default: 10]
       --goal-turns <GOAL_TURNS>
-          Maximum automatic goal continuation turns [default: 20]
+          Optional maximum automatic goal continuation turns
       --goal-check-command <GOAL_CHECK_COMMAND>
           Evaluator argv as a JSON string array; reads evidence JSON on stdin
       --max-turns <MAX_TURNS>
@@ -1444,6 +1715,10 @@ Options:
           Wall clock, e.g. '90s' or '10m'
       --mcp <NAME|@FILE>
           Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server
+      --mcp-only
+          Attach only the servers that --mcp selects; enabled configured servers stay detached
+      --allow-dir <PATH[:ro|rw]>
+          Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root
       --mode <MODE>
           Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)
       --plan
@@ -1460,6 +1735,12 @@ Options:
           Append plain output without terminal styling or live retry updates
       --vim
           Use Vim normal/insert editing in the interactive composer
+      --memory
+          Keep a memory file for this workspace that the model can add to
+      --no-session-compression
+          Do not compress old sessions in the background during this run
+      --no-checkpoints
+          Do not save file checkpoints before writes during this run
   -h, --help
           Print help
 

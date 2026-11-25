@@ -1,0 +1,11 @@
+{"sessionUpdate":"user_message","messageId":"00000000-0000-0000-0000-000000000004","content":[{"type":"text","text":"list the files"}]}
+{"sessionUpdate":"agent_message_chunk","messageId":"00000000-0000-0000-0000-000000000005","content":{"type":"text","text":"Sure"}}
+{"sessionUpdate":"agent_message_chunk","messageId":"00000000-0000-0000-0000-000000000005","content":{"type":"text","text":", one sec"}}
+{"sessionUpdate":"agent_message","messageId":"00000000-0000-0000-0000-000000000005","content":[{"type":"text","text":"Sure, one sec"}]}
+{"sessionUpdate":"tool_call_update","toolCallId":"00000000-0000-0000-0000-000000000006","title":"bash","status":"pending","rawInput":"ls"}
+{"sessionUpdate":"tool_call_content_chunk","toolCallId":"00000000-0000-0000-0000-000000000006","content":{"type":"content","content":{"type":"text","text":"file1\n"}}}
+{"sessionUpdate":"tool_call_update","toolCallId":"00000000-0000-0000-0000-000000000006","status":"completed","content":[{"type":"content","content":{"type":"text","text":"file1\nfile2\n"}}]}
+{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}
+{"sessionUpdate":"user_message","messageId":"00000000-0000-0000-0000-000000000009","content":[{"type":"text","text":"thanks"}]}
+{"sessionUpdate":"agent_message","messageId":"00000000-0000-0000-0000-00000000000a","content":[{"type":"text","text":"You're welcome"}]}
+{"sessionUpdate":"state_update","state":"idle","stopReason":"end_turn"}

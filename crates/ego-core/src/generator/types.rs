@@ -2,8 +2,9 @@
 //! `Message`, `ContentBlock`, `ToolDescriptor`, `StopReason`, `ErrorKind`,
 //! `ThinkingLevel`, `ReasoningState`.
 //!
-//! Messages contain typed content blocks; the conversation model does not
-//! encode a message as plain text with a second optional identity path.
+//! See `ARCHITECTURE.md` §3.1 and `docs/internals/02-pi.md` §2 (the pi taxonomy this
+//! borrows from), and `docs/internals/decisions/2026-08-21-tool-use-history.md` for why
+//! a message is a list of blocks rather than a string plus an optional id.
 
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -51,6 +52,9 @@ pub struct Image {
     /// UTF-8 byte position in the accompanying prompt text; absent means leading.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     text_offset: Option<usize>,
+    /// Derived while rebuilding tool results; never durable or provider data.
+    #[serde(skip)]
+    tool_result: bool,
 }
 
 impl Image {
@@ -64,7 +68,17 @@ impl Image {
             width,
             height,
             text_offset: None,
+            tool_result: false,
         })
+    }
+
+    pub(crate) fn with_tool_result_origin(mut self) -> Self {
+        self.tool_result = true;
+        self
+    }
+
+    pub(crate) const fn is_tool_result(&self) -> bool {
+        self.tool_result
     }
 
     pub fn with_text_offset(mut self, offset: usize) -> Self {
@@ -487,9 +501,15 @@ fn webp_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
     }
 }
 
-/// Reasoning effort, including explicit `Off`. A `GenRequest` can request
-/// no thinking or a supported effort level. Variants are ordered from least
-/// to most effort so the derived ordering has the same meaning.
+/// Reasoning effort, pi's scale (`docs/internals/02-pi.md` §2) plus `Off`: pi actually
+/// carries two related types (`ThinkingLevel` without `off`, and
+/// `ModelThinkingLevel` adding it for per-model defaults). A `GenRequest`
+/// needs to be able to say "no thinking" as well as an effort level, and the
+/// plan asks for one `ThinkingLevel` type, so this merges the two rather than
+/// introducing a second type the acceptance criteria doesn't ask for.
+/// The ordering is the effort ordering, not an accident of declaration: it is
+/// derived, and the variants are written from least to most so that deriving
+/// it says something true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ThinkingLevel {
@@ -517,11 +537,15 @@ impl ThinkingLevel {
     }
 }
 
-/// The terminal reason a generation stopped.
+/// Why a generation stopped, pi's scale (`docs/internals/02-pi.md` §2) minus `Pending`.
 ///
-/// Every variant is terminal. An [`Outcome`](super::attempt::Outcome) cannot
-/// contain a value meaning nothing has ended, so durable decoding needs no
-/// non-terminal-state guard.
+/// The one deliberate deviation from pi, decided in
+/// `docs/internals/decisions/2026-08-21-attempt-accounting-ledger.md`: pi's `Pending`
+/// means "no terminal state yet", which is the *absence* of the answer this
+/// type exists to give. Every variant here is terminal, so an
+/// [`Outcome`](super::attempt::Outcome) cannot be built around a value that
+/// says nothing ended — and it can be durable without a guard, because a
+/// decoded `StopReason` has no non-terminal spelling to decode into.
 ///
 /// "Not finished yet" is expressed by not having a `StopReason`: the stream
 /// is still running, or `AttemptStream::terminal` is `None`.
@@ -540,7 +564,8 @@ pub enum StopReason {
     Error,
     /// The generation was cancelled.
     Aborted,
-    /// The provider deferred delivery; the result is fetched later, not streamed.
+    /// The provider deferred delivery of the result (fetched later, not
+    /// streamed) — `docs/internals/02-pi.md` §2's `DeferredHandle`.
     Deferred,
 }
 
@@ -552,14 +577,20 @@ pub enum StopReason {
 /// repository does not do. The adapter maps its provider's spelling onto
 /// these; the mapping is data, and the branch stays in core.
 ///
-/// Provider codes are normalized at the wire boundary. Matching provider
-/// spellings inside `turn/` would violate the provider-neutral core boundary.
+/// Carrying the provider's own code as a string beside the message was
+/// rejected for the reason that a string only helps if something matches on
+/// it, and the only thing that would is `turn/` — matching on a provider's
+/// spelling in `turn/` being exactly what
+/// `docs/internals/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §5's
+/// name-absence test exists to forbid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorKind {
     /// Momentarily unable: overload, rate limit, timeout, upstream
     /// unavailability. A retry may succeed.
     Transient,
+    /// A response stopped sending bytes or frames.
+    IdleTimeout,
     /// The provider explicitly reported that the model context window was
     /// exhausted. The current request cannot succeed unchanged, and hosts
     /// may offer an explicit compaction transition.
@@ -567,6 +598,10 @@ pub enum ErrorKind {
     /// The request is wrong and will be wrong again: schema or an unsupported
     /// parameter. No retry changes it.
     Invalid,
+    /// A local policy forbids this attempt. Never retry or advance a fallback.
+    PolicyRejected,
+    /// A local limit stopped the response. Never retry or advance a fallback.
+    LocalLimit,
     /// The account or the credential is refused: unauthenticated, forbidden,
     /// out of credit. No retry changes it, and the request was not the
     /// problem.
@@ -609,7 +644,13 @@ pub enum Role {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     /// Opaque provider-owned output, replayed only to its originating dialect.
-    ProviderContent { state: ReasoningState },
+    ProviderContent {
+        state: ReasoningState,
+        /// The assistant text this item showed, when it showed any. A model
+        /// that does not accept `state` is sent this text instead.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+    },
     /// Visible text.
     Text { text: String },
     /// Exact image bytes. Only a user-authored message may carry this block.
@@ -899,8 +940,9 @@ impl From<Conversation> for Vec<Message> {
     }
 }
 
-/// Tool name, description, and parameter schema, directly usable from registry descriptors in a
-/// generation request.
+/// A tool the model may call: name, description and JSON Schema for its
+/// parameters — the same shape `Tool::descriptor` returns (ARCH §3.2), so a
+/// `GenRequest` can be built directly from a tool registry.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolDescriptor {
     pub name: String,
@@ -914,6 +956,10 @@ pub struct ToolDescriptor {
 /// (`capabilities::ReasoningCarryover`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningState {
+    /// Stable local connection that received these private bytes. An absent
+    /// origin is legacy/unbound state, not permission to adopt another account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
     /// Opaque, provider-private. Never parsed, never modified, never
     /// reordered — three separate documented `400`s.
     pub blob: String,
@@ -932,6 +978,9 @@ pub struct ReasoningState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostedSearch {
     pub max_requests: std::num::NonZeroU32,
+    /// Permit live external access on routes that support cached search.
+    /// Other routes retain their own native search contract.
+    pub allow_live_access: bool,
 }
 
 /// A request to generate the next assistant turn.
@@ -943,8 +992,9 @@ pub struct GenRequest {
     /// Transient provider-cache policy and prefix boundary; never journaled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache: Option<PromptCache>,
-    /// Provider-catalogue model ID, opaque to core. `ego-ai` owns provider and catalogue
-    /// interpretation.
+    /// The model to generate with, as a provider-catalogue id (e.g.
+    /// `"claude-opus-5"`). `ego-core` treats this as an opaque string; the
+    /// catalogue and provider table live in `ego-ai` (ARCH §3.1).
     pub model: String,
     /// The history, already checked. A `Conversation` and not a
     /// `Vec<Message>` so that an unvalidated history cannot reach a
@@ -964,9 +1014,35 @@ pub struct GenRequest {
 /// Stable messages precede the volatile context/current user request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PromptCache {
+    /// Isolates verifier routing from the conversation and from other verifier roles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verifier: Option<VerifierCache>,
     /// Active session identity; unlike the cache root this changes on a fork.
     pub session_id: crate::event::id::SessionId,
     pub lineage_root: crate::event::id::SessionId,
     pub retention: super::capabilities::CacheRetention,
     pub stable_messages: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifierCache {
+    GoalCheck,
+    PermissionJudge,
+}
+
+impl PromptCache {
+    pub(crate) fn for_verifier(
+        session_id: crate::event::id::SessionId,
+        retention: super::capabilities::CacheRetention,
+        verifier: VerifierCache,
+    ) -> Option<Self> {
+        (retention != super::capabilities::CacheRetention::None).then_some(Self {
+            verifier: Some(verifier),
+            session_id,
+            lineage_root: session_id,
+            retention,
+            stable_messages: 1,
+        })
+    }
 }

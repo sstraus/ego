@@ -239,6 +239,7 @@ pub enum ExportEvent {
     GoalAllowanceInherited,
     GoalUpdated,
     PlanUpdated,
+    WorklistContinuation,
     GoalCheckStopped,
     PromptQueued {
         id: QueuedPromptId,
@@ -252,13 +253,16 @@ pub enum ExportEvent {
     PromptRetracted {
         id: QueuedPromptId,
     },
+    CheckpointContinued,
     UserPrompt {
         images: Vec<ImageRef>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         audio: Vec<crate::generator::audio::AudioRef>,
         queued_prompt: Option<QueuedPromptId>,
     },
+    // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
     AssistantDelta,
+    AssistantMessageStarted,
     AssistantMessage,
     HostContextAppended,
     ReasoningDelta,
@@ -273,6 +277,11 @@ pub enum ExportEvent {
     },
     DetachedExecStarted {
         id: crate::event::id::DetachedExecId,
+    },
+    DetachedExecOutput {
+        id: crate::event::id::DetachedExecId,
+        lines: usize,
+        omitted: u64,
     },
     DetachedExecSettled {
         id: crate::event::id::DetachedExecId,
@@ -296,6 +305,9 @@ pub enum ExportEvent {
     PermissionDecided {
         allowed: Option<bool>,
     },
+    TaskProfileSelected {
+        profile: crate::model_catalogue::ExecutionProfile,
+    },
     GenerationStarted {
         attempt: AttemptRef,
         role: GenerationRole,
@@ -306,6 +318,9 @@ pub enum ExportEvent {
     },
     SessionSelectionsSelected {
         selections: crate::run::RunSelections,
+    },
+    SandboxOwnerGranted {
+        access: crate::permit::SandboxAccess,
     },
     SessionRootGranted {
         access: crate::permit::RootAccess,
@@ -887,6 +902,13 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::PinsChanged
         }
+        EventKind::WorklistContinuation {
+            completed: _,
+            text: _,
+        } => {
+            redactions.opaque_prose += 1;
+            ExportEvent::WorklistContinuation
+        }
         EventKind::PlanUpdated { update: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::PlanUpdated
@@ -939,10 +961,12 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 queued_prompt: *queued_prompt,
             }
         }
+        // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
         EventKind::AssistantDelta { text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::AssistantDelta
         }
+        EventKind::AssistantMessageStarted => ExportEvent::AssistantMessageStarted,
         EventKind::AssistantMessage { text: _ } => {
             redactions.opaque_prose += 1;
             ExportEvent::AssistantMessage
@@ -960,6 +984,15 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             ExportEvent::ReasoningState
         }
         EventKind::ContextCommandStarted { name: _, args: _ } => {
+            redactions.tool_material += 2;
+            ExportEvent::ToolCallStarted
+        }
+        EventKind::BatchMemberStarted {
+            batch: _,
+            index: _,
+            name: _,
+            args: _,
+        } => {
             redactions.tool_material += 2;
             ExportEvent::ToolCallStarted
         }
@@ -984,7 +1017,21 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.opaque_prose += 1;
             ExportEvent::HostContextAppended
         }
+        EventKind::McpTaskResultDelivered { text: _, result } => {
+            redactions.opaque_prose += 1;
+            redactions.tool_material += u64::from(result.is_some());
+            ExportEvent::HostContextAppended
+        }
+        EventKind::CheckpointContinued => ExportEvent::CheckpointContinued,
         EventKind::DetachedExecStarted { id } => ExportEvent::DetachedExecStarted { id: *id },
+        EventKind::DetachedExecOutput { output } => {
+            redactions.tool_material += 1;
+            ExportEvent::DetachedExecOutput {
+                id: output.id,
+                lines: output.lines.len(),
+                omitted: output.omitted,
+            }
+        }
         EventKind::DetachedExecSettled { snapshot } => project_detached_exec(snapshot, redactions),
         EventKind::QuestionRequested { request, target } => {
             redactions.opaque_prose += 1 + (request.options.len() as u64 * 2);
@@ -1045,12 +1092,18 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             redactions.permission_material += 1 + by.is_some() as u64 + reason.is_some() as u64;
             ExportEvent::PermissionDecided { allowed: *allowed }
         }
+        EventKind::TaskProfileSelected { profile } => ExportEvent::TaskProfileSelected {
+            profile: profile.clone(),
+        },
         EventKind::GenerationStarted {
             attempt,
             role,
             snapshot,
+            cache,
+            profile: _,
         } => {
-            redactions.opaque_prose += u64::from(snapshot.is_some());
+            // Request cache policy contains the operator's exact model spelling.
+            redactions.opaque_prose += u64::from(snapshot.is_some()) + u64::from(cache.is_some());
             if let Some(system) = snapshot.as_ref().and_then(|value| value.system.as_ref()) {
                 redactions.path += system.sources.len() as u64;
             }
@@ -1093,6 +1146,12 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
                 selections: selections.clone(),
             }
         }
+        EventKind::SandboxOwnerGranted { grant } => {
+            redactions.path += 1;
+            ExportEvent::SandboxOwnerGranted {
+                access: grant.access,
+            }
+        }
         EventKind::SessionRootGranted { root } => {
             redactions.path += 1;
             ExportEvent::SessionRootGranted {
@@ -1133,6 +1192,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             attempt,
             text,
             truncated,
+            input: _,
         } => {
             redactions.opaque_prose += 1;
             ExportEvent::JudgeResponse {
@@ -1232,6 +1292,7 @@ fn project_event(kind: &EventKind, redactions: &mut Redactions) -> ExportEvent {
             source,
             at_seq,
             snapshot,
+            neutral: _,
         } => {
             redactions.opaque_prose += u64::from(snapshot.is_some());
             if let Some(system) = snapshot.as_ref().and_then(|value| value.system.as_ref()) {

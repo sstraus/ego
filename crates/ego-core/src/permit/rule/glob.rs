@@ -1,5 +1,32 @@
-//! One wildcard matcher for path segments and exec tokens. Callers parse their different escape
-//! syntax into pieces; this module defines shared matching semantics.
+//! `Glob`: the one wildcard matcher in the grammar.
+//!
+//! A path segment and an `exec` token are the same shape — a run of literal
+//! characters with `*` standing for "any run, including none" — and they are
+//! matched by the same code, because two implementations of one wildcard is
+//! how `src/*.rs` and `cargo-*` start disagreeing about what `*` means.
+//!
+//! What differs between them is only how the *text* becomes pieces: a path
+//! segment has no escapes (§5 lists two constructs and no third), while an
+//! `exec` token honours `\` (§6). So the callers build the pieces and this
+//! module owns what they mean.
+
+/// How a literal character of a pattern compares with a character of the
+/// text it is matched against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Case {
+    /// Character for character: an `exec` token, or a path on a platform
+    /// whose file names are case-sensitive.
+    Exact,
+    /// Equal when their lowercase forms are equal: a path on a platform whose
+    /// file system ignores case, where `.SSH` and `.ssh` name one directory.
+    Folded,
+}
+
+impl Case {
+    fn same(self, pattern: char, text: char) -> bool {
+        pattern == text || (self == Case::Folded && pattern.to_lowercase().eq(text.to_lowercase()))
+    }
+}
 
 /// One run of a wildcard pattern. Canonical form alternates: no two `Lit`s
 /// and no two `Star`s are ever adjacent, so `a**b` and `a*b` are one value
@@ -68,10 +95,15 @@ impl Glob {
         matches!(self.pieces.as_slice(), [Piece::Star])
     }
 
-    /// Match the whole canonical text without case folding or Unicode normalization. Backtrack
-    /// only to the latest wildcard, giving O(pattern × text) rather than exponential recursive
-    /// branching.
-    pub fn matches(&self, text: &str) -> bool {
+    /// Match the whole of `text`, with no Unicode normalisation, comparing
+    /// characters as `case` says.
+    ///
+    /// The two-pointer form and not a recursion over pieces: a recursion
+    /// branches at every wildcard and costs exponentially on operator-
+    /// supplied input, which is the same objection §4 raises to regular
+    /// expressions. This backtracks to the most recent wildcard only, which
+    /// is `O(pattern × text)`.
+    pub fn matches(&self, text: &str, case: Case) -> bool {
         let pattern = self.flattened();
         let text: Vec<char> = text.chars().collect();
 
@@ -88,7 +120,7 @@ impl Glob {
                     resume = t;
                     p += 1;
                 }
-                Some(Some(ch)) if *ch == text[t] => {
+                Some(Some(ch)) if case.same(*ch, text[t]) => {
                     p += 1;
                     t += 1;
                 }
@@ -169,9 +201,15 @@ pub enum Elem<'a> {
     Rest,
 }
 
-/// Match sequence patterns with a table. A recursive branch at each rest wildcard can grow
-/// exponentially on operator input; this implementation is O(pattern × target).
-pub fn matches_sequence(pattern: &[Elem<'_>], target: &[&str]) -> bool {
+/// Match a sequence pattern against a sequence.
+///
+/// A table rather than the obvious recursion. A `Rest` can begin at any
+/// offset, so recursing branches at every one of them and a pattern with
+/// several costs exponentially — inside a security decision, on operator-
+/// supplied input. §4 refuses regular expressions partly for unbounded
+/// matching cost, and accepting it here through the back door would be the
+/// same mistake with a smaller vocabulary. This is `O(pattern × target)`.
+pub fn matches_sequence(pattern: &[Elem<'_>], target: &[&str], case: Case) -> bool {
     // `reach[j]`: the pattern consumed so far accounts for exactly the first
     // `j` items of `target`.
     let mut reach = vec![false; target.len() + 1];
@@ -193,7 +231,7 @@ pub fn matches_sequence(pattern: &[Elem<'_>], target: &[&str]) -> bool {
             Elem::AnyOne => next[1..].copy_from_slice(&reach[..target.len()]),
             Elem::One(glob) => {
                 for j in 0..target.len() {
-                    if reach[j] && glob.matches(target[j]) {
+                    if reach[j] && glob.matches(target[j], case) {
                         next[j + 1] = true;
                     }
                 }
@@ -216,5 +254,31 @@ impl std::fmt::Display for Glob {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Case, GlobBuilder};
+
+    fn glob(text: &str) -> super::Glob {
+        let mut glob = GlobBuilder::default();
+        for ch in text.chars() {
+            if ch == '*' {
+                glob.star();
+            } else {
+                glob.literal(ch);
+            }
+        }
+        glob.build()
+    }
+
+    #[test]
+    fn folded_case_matches_another_spelling_and_exact_case_does_not() {
+        assert!(glob(".ssh").matches(".SSH", Case::Folded));
+        assert!(glob("*.PEM").matches("id.pem", Case::Folded));
+        assert!(glob("\u{c9}t\u{e9}").matches("\u{e9}T\u{c9}", Case::Folded));
+        assert!(!glob(".ssh").matches(".sshx", Case::Folded));
+        assert!(!glob(".ssh").matches(".SSH", Case::Exact));
     }
 }

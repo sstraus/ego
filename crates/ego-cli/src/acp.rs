@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use agent_client_protocol::{ByteStreams, Client, ConnectTo, ConnectionTo};
 use agent_client_protocol_schema::v1;
@@ -37,7 +37,9 @@ use ego_mcp::{
     McpServerAdmission, McpTransportMaterial, RegistryScope, RegistryTrigger,
 };
 use ego_tools::clock::SystemClock;
-use ego_tools::credentials::{OsGenerationPolicyCaptureStore, SessionResumeKey};
+use ego_tools::credentials::{
+    OsGenerationPolicyCaptureStore, SelectedCredentialBackend, SessionResumeKey,
+};
 use ego_tools::exec::{ExecLimits, RunEffectPorts};
 use ego_tools::mcp::{RunMcpDuplexEffectsFactory, RunMcpHttpEffects};
 use ego_tools::mcp_continuation::JsonlContinuationJournal;
@@ -47,6 +49,7 @@ use futures::future::BoxFuture;
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncBufReadExt;
 use tokio::sync::watch;
+use tokio::time::Instant;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::acp_confinement::CliSessionConfinementAdmission;
@@ -225,6 +228,8 @@ struct AcpMcpSessionAdmitter {
     timeout: Duration,
     failed_admissions: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
     connections: Arc<Mutex<HashMap<String, Weak<CliAcpMcpEffects>>>>,
+    /// The exclusive read-only policy: a host that supplies any MCP server is refused.
+    refuse_all: bool,
 }
 
 struct CliAcpMcpEffects {
@@ -473,6 +478,9 @@ impl McpAcpEffects for CliAcpMcpEffects {
     }
 }
 
+#[cfg(test)]
+mod tests;
+
 const MAX_FAILED_ADMISSIONS: usize = 64;
 const INITIAL_ADMISSION_BACKOFF: Duration = Duration::from_secs(60);
 const MAX_ADMISSION_BACKOFF: Duration = Duration::from_secs(15 * 60);
@@ -500,6 +508,7 @@ impl AdmissionAttempt {
     async fn begin(
         state: Arc<Mutex<HashMap<[u8; 32], AdmissionRetry>>>,
         key: [u8; 32],
+        explicit_retry: bool,
     ) -> Result<Self, McpSessionAdmissionError> {
         loop {
             let reservation = {
@@ -528,7 +537,7 @@ impl AdmissionAttempt {
                 });
                 if let Some(active) = retry.active.clone() {
                     AdmissionReservation::Wait(active)
-                } else if now < retry.retry_after {
+                } else if !explicit_retry && now < retry.retry_after {
                     return Err(safe_mcp_error(format!(
                         "{}; retry later",
                         retry
@@ -622,7 +631,13 @@ impl AcpMcpSessionAdmitter {
             timeout,
             failed_admissions: Arc::new(Mutex::new(HashMap::new())),
             connections: Arc::new(Mutex::new(HashMap::new())),
+            refuse_all: false,
         }
+    }
+
+    fn refusing_all(mut self) -> Self {
+        self.refuse_all = true;
+        self
     }
 }
 
@@ -667,6 +682,13 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
         if servers.is_empty() {
             return Box::pin(async { Ok(None) });
         }
+        if self.refuse_all {
+            return Box::pin(async {
+                Err(safe_mcp_error(
+                    "this session is exclusive read-only: it accepts no MCP server",
+                ))
+            });
+        }
         let private_diagnostic_root = self.private_diagnostic_root.clone();
         let http_management = Arc::clone(&self.http_management);
         let max_sse_event_size = self.max_sse_event_size;
@@ -696,7 +718,8 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
             let acp_management = acp_effects
                 .as_ref()
                 .map(|effects| Arc::clone(effects) as Arc<dyn McpAcpEffects>);
-            let attempt = AdmissionAttempt::begin(failed_admissions, key).await?;
+            let attempt =
+                AdmissionAttempt::begin(failed_admissions, key, context.explicit_retry).await?;
             let cleanup_effects = acp_effects.clone();
             let result = async {
                 let refresh = McpRegistryRefresh::new(
@@ -709,6 +732,11 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                     .map_err(|_| safe_mcp_error("ACP MCP session storage could not be created"))?;
                 let registry_root = storage.path().join("registry");
                 let continuation_root = storage.path().join("continuations");
+                let backend =
+                    SelectedCredentialBackend::from_environment(storage.path().join("secrets"))
+                        .map_err(|_| {
+                            safe_mcp_error("MCP credential backend selection is invalid")
+                        })?;
                 let registry_journal =
                     Arc::new(JsonlMcpRegistryJournal::with_private_diagnostic_root(
                         registry_root,
@@ -747,7 +775,7 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                     McpRegistryRuntime::new_with_acp(
                         registry_journal,
                         continuation_journal,
-                        Arc::new(OsGenerationPolicyCaptureStore::default()),
+                        Arc::new(OsGenerationPolicyCaptureStore::new(backend)),
                         http_management,
                         stdio_management,
                         Arc::new(SessionResumeKey::generate().map_err(|_| {
@@ -757,6 +785,8 @@ impl McpSessionAdmitter for AcpMcpSessionAdmitter {
                         max_sse_event_size,
                         timeout,
                         acp_management,
+                        // DEFERRED (2026-11-05) — MCP Tasks in ACP sessions; v1 serves `ego run` only.
+                        false,
                     )
                     .map_err(|_| safe_mcp_error("ACP MCP runtime could not be created"))?,
                 );
@@ -941,6 +971,12 @@ async fn prepare_listener(args: &AcpArgs) -> Result<Option<AcpListener>, RunTerm
     let bound = ego_listen::bind(&admitted)
         .await
         .map_err(|error| failed(format!("the ACP endpoint could not be opened: {error}")))?;
+    // A local socket in an ordinary directory lives in a private child, so
+    // the endpoint a host must use can differ from the requested one.
+    let advertised = bound
+        .advertised()
+        .map_err(|error| failed(format!("the ACP endpoint has no address: {error}")))?;
+    eprintln!("ego acp: listening on {advertised}");
     Ok(Some(AcpListener {
         admitted,
         bound,
@@ -953,25 +989,24 @@ fn failed(message: String) -> RunTermination {
     RunTermination::Failed { message }
 }
 
-fn confinement_ceiling(
-    args: &AcpArgs,
-    configured: Option<Confinement>,
-    endpoint: Option<&Admitted>,
-) -> Confinement {
-    let selected = args.sandbox.or(configured).unwrap_or_default();
-    endpoint.map_or(selected, |endpoint| endpoint.cap_confinement(selected))
+fn confinement_ceiling(args: &AcpArgs, configured: Option<Confinement>) -> Confinement {
+    args.sandbox.or(configured).unwrap_or_default()
 }
 
 async fn session_catalogue(
     http: &Arc<dyn ego_ai::http::Http>,
+    effective: &ego_core::config::Effective,
 ) -> Option<ego_ai::catalogue::ModelCatalogueSnapshot> {
-    match crate::models::build_catalogue_snapshot(
+    match crate::models::build_captured_catalogue_snapshot(
         &crate::cli::ModelsArgs {
-            provider: None,
+            account: None,
+            connection: effective.connection.clone(),
+            provider: crate::models::selected_instance_provider(effective).map(str::to_owned),
             refresh: false,
             json: false,
         },
         http,
+        effective,
     )
     .await
     {
@@ -1044,7 +1079,6 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         Ok(listener) => listener,
         Err(termination) => return termination,
     };
-    let admitted = listener.as_ref().map(|listener| &listener.admitted);
     let root = match run::workspace(args.directory.as_ref()) {
         Ok(root) => root,
         Err(error) => {
@@ -1063,12 +1097,96 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     };
     let private_diagnostic_root = store_root.join("mcp-private-diagnostics");
     let store = Arc::new(session::jsonl(store_root, root.clone()));
-    let executor = Arc::new(run::CliRunExecutor::for_acp(
-        args.session_dir.clone(),
-        args.shape.clone(),
-        Arc::clone(&store),
-        Arc::clone(&evidence),
-    ));
+    let mcp_cancel = CancelToken::new();
+    let mcp_effects = match CommandHttpScope::online(mcp_cancel.clone()).await {
+        Ok(effects) => effects,
+        Err(error) => {
+            return RunTermination::Failed {
+                message: format!("the ACP MCP effect scope could not be created: {error}"),
+            };
+        }
+    };
+    let http_management: Arc<dyn McpHttpEffects> =
+        Arc::new(RunMcpHttpEffects::new(Arc::clone(mcp_effects.ports())));
+    let admitter = AcpMcpSessionAdmitter::new(
+        private_diagnostic_root,
+        http_management,
+        MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
+        MCP_DEFAULT_OPERATION_TIMEOUT,
+    );
+    let mcp_admitter: Arc<dyn McpSessionAdmitter> = Arc::new(if args.shape.exclusive_read_only {
+        admitter.refusing_all()
+    } else {
+        admitter
+    });
+
+    // The connected host is this connection's operator seat, so it gets the
+    // picker a terminal seat gets. `run.rs` builds the catalogue only where
+    // there is a human, and the ACP client is one. Discovery reuses the HTTP
+    // scope this server already opened rather than a second egress: an `ego
+    // acp` invocation is online by construction, so this adds no reach it did
+    // not already have.
+    let (controls, ceiling, rule_target, agent_catalogue) =
+        match run::protocol_effective(root.as_path(), args.session_dir.clone(), args.shape.clone())
+        {
+            Ok(effective) => {
+                if let Err(message) = crate::models::configured_catalogue_rows(
+                    &effective.auth,
+                    &effective.providers,
+                    &effective.connections,
+                ) {
+                    return RunTermination::UsageError { message };
+                }
+                crate::config::report_discarded(root.as_path(), &effective, &crate::output::Stderr);
+                let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(mcp_effects.ports())))
+                    as Arc<dyn ego_ai::http::Http>;
+                let catalogue = session_catalogue(&http, &effective).await;
+                let agent_catalogue = catalogue
+                    .as_ref()
+                    .filter(|_| effective.connections.is_empty())
+                    .and_then(|snapshot| {
+                        crate::models::catalogue_snapshot_view(snapshot, &effective.auth).ok()
+                    })
+                    .map(Arc::new);
+                // The flag wins over the configuration, and the configuration
+                // over the default. A host that was started at `--sandbox ro`
+                // is capped there whatever any layer says, which is the whole
+                // reason the flag exists: the layer an operator would have
+                // reached for is the one an untrusted headless resolution
+                // discards.
+                let ceiling = confinement_ceiling(args, effective.sandbox);
+                let rule_target = match permission_rule_target(&effective) {
+                    Ok(target) => target,
+                    Err(termination) => return termination,
+                };
+                (
+                    Arc::new(
+                        AcpSessionControls::new(&effective, ceiling, catalogue)
+                            .with_store(Arc::clone(&store)),
+                    ),
+                    ceiling,
+                    rule_target,
+                    agent_catalogue,
+                )
+            }
+            Err(error) => {
+                return RunTermination::UsageError {
+                    message: format!(
+                        "the ACP confinement configuration could not be resolved: {error}"
+                    ),
+                };
+            }
+        };
+
+    let executor = Arc::new(
+        run::CliRunExecutor::for_acp(
+            args.session_dir.clone(),
+            args.shape.clone(),
+            Arc::clone(&store),
+            Arc::clone(&evidence),
+        )
+        .with_acp_controls(Arc::clone(&controls)),
+    );
     let compaction: Arc<dyn ego_core::compact::CompactionCommand> =
         Arc::new(run::CliCompactionCommand::for_protocol(
             root.clone(),
@@ -1092,67 +1210,6 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
         run_lifecycle,
         clock,
     ));
-
-    let mcp_cancel = CancelToken::new();
-    let mcp_effects = match CommandHttpScope::online(mcp_cancel.clone()).await {
-        Ok(effects) => effects,
-        Err(error) => {
-            return RunTermination::Failed {
-                message: format!("the ACP MCP effect scope could not be created: {error}"),
-            };
-        }
-    };
-    let http_management: Arc<dyn McpHttpEffects> =
-        Arc::new(RunMcpHttpEffects::new(Arc::clone(mcp_effects.ports())));
-    let mcp_admitter: Arc<dyn McpSessionAdmitter> = Arc::new(AcpMcpSessionAdmitter::new(
-        private_diagnostic_root,
-        http_management,
-        MCP_DEFAULT_MAX_SSE_EVENT_SIZE,
-        MCP_DEFAULT_OPERATION_TIMEOUT,
-    ));
-
-    // The connected host is this connection's operator seat, so it gets the
-    // picker a terminal seat gets. `run.rs` builds the catalogue only where
-    // there is a human, and the ACP client is one. Discovery reuses the HTTP
-    // scope this server already opened rather than a second egress: an `ego
-    // acp` invocation is online by construction, so this adds no reach it did
-    // not already have.
-    let (controls, ceiling, rule_target) =
-        match run::protocol_effective(root.as_path(), args.session_dir.clone(), args.shape.clone())
-        {
-            Ok(effective) => {
-                crate::config::report_discarded(root.as_path(), &effective, &crate::output::Stderr);
-                let http = Arc::new(ProviderHttpAdapter::new(Arc::clone(mcp_effects.ports())))
-                    as Arc<dyn ego_ai::http::Http>;
-                let catalogue = session_catalogue(&http).await;
-                // The flag wins over the configuration, and the configuration
-                // over the default. A host that was started at `--sandbox ro`
-                // is capped there whatever any layer says, which is the whole
-                // reason the flag exists: the layer an operator would have
-                // reached for is the one an untrusted headless resolution
-                // discards.
-                let ceiling = confinement_ceiling(args, effective.sandbox, admitted);
-                let rule_target = match permission_rule_target(&effective) {
-                    Ok(target) => target,
-                    Err(termination) => return termination,
-                };
-                (
-                    Arc::new(
-                        AcpSessionControls::new(&effective, ceiling, catalogue)
-                            .with_store(Arc::clone(&store)),
-                    ),
-                    ceiling,
-                    rule_target,
-                )
-            }
-            Err(error) => {
-                return RunTermination::UsageError {
-                    message: format!(
-                        "the ACP confinement configuration could not be resolved: {error}"
-                    ),
-                };
-            }
-        };
 
     let reporter = Arc::new(Reporter::new(Arc::new(crate::output::Stderr)));
     if listener.is_some() {
@@ -1221,6 +1278,11 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
     // the answer it helps ask is carried by the run selection rather than by
     // anything this adapter remembers.
     let trust = CliSessionTrustAdmission::new(crate::config::ego_home());
+    let trust = if args.shape.exclusive_read_only {
+        trust.without_commands()
+    } else {
+        trust
+    };
     let trust = if args.shape.profile.is_some()
         && args.shape.profile_source == Some(ego_core::config::Source::Flags)
     {
@@ -1251,6 +1313,11 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
             ids.clone(),
             Arc::new(ShutdownBindings {
                 inner: AcpRunBindingsBuilder::with_controls(Some(Arc::clone(&control_port)))
+                    .with_model_catalogue(agent_catalogue.clone())
+                    .with_rate_limits(crate::config::ego_home().map(|home| {
+                        Arc::new(crate::quota::CurrentQuotaReader(home))
+                            as Arc<dyn ego_core::quota::RateLimitsReader>
+                    }))
                     .with_permission_rules(permission_rules.clone())
                     .with_sandbox_store(sandbox_grants.clone()),
                 turns: Arc::clone(&turns),
@@ -1344,7 +1411,6 @@ pub async fn serve(args: &AcpArgs, evidence: Arc<EvidenceAdmissionService>) -> R
 mod confinement_ceiling_tests {
     use super::{confinement_ceiling, map_mcp_servers};
     use crate::cli::{self, AcpArgs, Invocation};
-    use ego_core::endpoint::Admitted;
     use ego_core::permit::Confinement;
 
     fn args(sandbox: Option<Confinement>) -> AcpArgs {
@@ -1359,51 +1425,32 @@ mod confinement_ceiling_tests {
     }
 
     #[test]
-    fn resolves_flag_then_config_then_default_and_caps_only_admitted_public() {
-        let local = Admitted::Local {
-            name: "listener-test.sock".to_owned(),
-        };
-        let loopback = Admitted::Loopback("127.0.0.1:8080".parse().unwrap());
-        let public = Admitted::Public("0.0.0.0:8080".parse().unwrap());
-
+    fn resolves_flag_then_config_then_default_without_an_endpoint_cap() {
         assert_eq!(
-            confinement_ceiling(&args(Some(Confinement::Ro)), Some(Confinement::Off), None),
+            confinement_ceiling(&args(Some(Confinement::Ro)), Some(Confinement::Off)),
             Confinement::Ro,
             "the CLI flag wins over configuration"
         );
+        for configured in Confinement::ALL {
+            assert_eq!(
+                confinement_ceiling(&args(None), Some(configured)),
+                configured,
+                "configuration applies when the CLI does not name a ceiling"
+            );
+            assert_eq!(
+                confinement_ceiling(&args(Some(configured)), Some(Confinement::Off)),
+                configured,
+                "the CLI selects the ceiling"
+            );
+        }
         assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Ro), None),
-            Confinement::Ro,
-            "configuration wins when the CLI does not name a ceiling"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), None, None),
+            confinement_ceiling(&args(None), None),
             if cfg!(target_os = "macos") {
                 Confinement::Adaptive
             } else {
                 Confinement::Workspace
             },
             "the default applies when neither flag nor configuration names a ceiling"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&public)),
-            Confinement::Workspace,
-            "an admitted public endpoint caps unconfined ACP at workspace"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Off), None),
-            Confinement::Off,
-            "stdio has no endpoint cap"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&local)),
-            Confinement::Off,
-            "a local endpoint adds no confinement cap"
-        );
-        assert_eq!(
-            confinement_ceiling(&args(None), Some(Confinement::Off), Some(&loopback)),
-            Confinement::Off,
-            "a loopback endpoint adds no confinement cap"
         );
     }
 
@@ -1474,7 +1521,7 @@ mod poisoned_active_connections_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod admission_concurrency_tests {
     use std::sync::Arc;
 
@@ -1526,6 +1573,7 @@ for line in sys.stdin:
             MCP_DEFAULT_OPERATION_TIMEOUT,
         );
         let context = || McpAdmissionContext {
+            explicit_retry: false,
             session: SessionId::new(),
             root: RunRoot::new(std::env::current_dir().expect("workspace")).expect("root"),
             confinement: None,

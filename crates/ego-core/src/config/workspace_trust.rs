@@ -1,12 +1,18 @@
 //! What a workspace offers to be trusted with, and which executable changes
 //! require another answer.
 //!
-//! Core owns pure trust decisions: inventory identity and stored-answer
-//! validity. The binary owns probing, file reads and locked `$EGO_HOME` state.
+//! See `docs/internals/decisions/2026-09-28-one-workspace-trust-answer-across-seats.md`.
+//! Split the way everything else in this crate is split: the *decisions* —
+//! what an inventory is, when two of them are the same, and whether a stored
+//! answer still applies — are pure and live here. Which paths get probed,
+//! reading them, and the locked document under `$EGO_HOME` are effects and
+//! live in the binary.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
+
+mod development;
 
 use super::source::Trust;
 use crate::digest::sha256_hex;
@@ -91,6 +97,9 @@ pub struct ProgramEvidence {
     pub executable: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link_target: Option<String>,
+    /// Canonical workspace-relative destination, including symlinked ancestors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved_target: Option<String>,
 }
 
 impl ExecutableSurface {
@@ -156,14 +165,14 @@ impl ExecutableSurface {
             lines.push(format!("program {key:?}: changed"));
             if let Some(before) = old.programs.get(key) {
                 lines.push(format!(
-                    "  before: size={} executable={} target={:?}",
-                    before.bytes, before.executable, before.link_target
+                    "  before: size={} executable={} target={:?} resolved={:?}",
+                    before.bytes, before.executable, before.link_target, before.resolved_target
                 ));
             }
             if let Some(after) = self.programs.get(key) {
                 lines.push(format!(
-                    "  after: size={} executable={} target={:?}",
-                    after.bytes, after.executable, after.link_target
+                    "  after: size={} executable={} target={:?} resolved={:?}",
+                    after.bytes, after.executable, after.link_target, after.resolved_target
                 ));
             }
         }
@@ -197,6 +206,12 @@ impl ExecutableDeclaration {
     }
 
     fn describe(&self) -> String {
+        if self.kind.starts_with("grant ") {
+            return format!(
+                "{} {} in {} details={:?}",
+                self.kind, self.name, self.config, self.details
+            );
+        }
         let command_line = std::iter::once(&self.command)
             .chain(self.args.iter())
             .map(|part| format!("{part:?}"))
@@ -243,6 +258,9 @@ impl TrustInventory {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrustRecord {
     pub decision: Trust,
+    /// Owner approval for edits to this workspace's existing named programs.
+    #[serde(default)]
+    pub development_programs: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,7 +295,12 @@ impl TrustLedger {
         self.workspaces
             .get(root)
             .filter(|record| match &record.executable_surface {
-                Some(stored) => stored == surface,
+                Some(stored) => {
+                    stored == surface
+                        || (record.decision == Trust::Trusted
+                            && record.development_programs
+                            && surface.development_edit_of(stored))
+                }
                 None => record.digest.is_some() && surface.external_instructions.is_empty(),
             })
             .map(|record| record.decision)
@@ -305,6 +328,7 @@ impl TrustLedger {
             root.into(),
             TrustRecord {
                 decision,
+                development_programs: false,
                 digest: None,
                 executable_surface: Some(surface),
             },

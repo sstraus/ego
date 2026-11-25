@@ -1,0 +1,44 @@
+{
+  "model": "deepseek/deepseek-v4.1-flash-1017",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Call get_weather for Rome first. After you get the result, call get_weather for Paris. Then compare in one sentence."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "chatcmpl-tool-a3d3ce87eb7e55d0",
+          "type": "function",
+          "function": { "name": "get_weather", "arguments": "{\"city\": \"Rome\"}" }
+        }
+      ],
+      "reasoning_content": "The user wants me to call get_weather for Rome first, then after getting result, call for Paris, then compare in one sentence. These are dependent (sequential), so I must call Rome first."
+    },
+    {
+      "role": "tool",
+      "tool_call_id": "chatcmpl-tool-a3d3ce87eb7e55d0",
+      "content": "{\"temp_c\": 21}"
+    }
+  ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "reasoning_effort": "high",
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Weather for a city",
+        "parameters": {
+          "type": "object",
+          "properties": { "city": { "type": "string" } },
+          "required": ["city"]
+        }
+      }
+    }
+  ],
+  "parallel_tool_calls": false,
+  "max_completion_tokens": 1500
+}

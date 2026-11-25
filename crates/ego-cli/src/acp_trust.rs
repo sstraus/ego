@@ -1,6 +1,10 @@
 //! What one ACP session's workspace offers to be trusted with.
-//! `ego-acp` owns the protocol human seat. This adapter owns inventory reads
-//! and uses the same per-root trust ledger as the terminal seat.
+//!
+//! The seat that asks lives in `ego-acp`, because asking is a protocol act.
+//! Which files the answer is *about* lives here, because the trust ADR gives
+//! `ego-cli` "which paths are probed, the reads that build the inventory".
+//!
+//! The adapter uses the same per-root ledger as the terminal seat.
 
 use std::path::PathBuf;
 
@@ -13,6 +17,7 @@ use ego_core::run::RunRoot;
 pub struct CliSessionTrustAdmission {
     home: Option<PathBuf>,
     host_profile: bool,
+    no_commands: bool,
 }
 
 impl CliSessionTrustAdmission {
@@ -20,7 +25,13 @@ impl CliSessionTrustAdmission {
         Self {
             home,
             host_profile: false,
+            no_commands: false,
         }
+    }
+    /// Offer the host no skill or custom command (the exclusive read-only policy).
+    pub fn without_commands(mut self) -> Self {
+        self.no_commands = true;
+        self
     }
     /// Enable attestations only after the launch profile has been resolved.
     pub fn with_host_profile(mut self) -> Self {
@@ -34,6 +45,9 @@ impl SessionTrustAdmission for CliSessionTrustAdmission {
         &self,
         root: &RunRoot,
     ) -> Vec<ego_core::event::skill::SkillDescriptorEvidence> {
+        if self.no_commands {
+            return Vec::new();
+        }
         let trusted = matches!(
             self.status(root),
             SessionTrustStatus::Remembered(Trust::Trusted)

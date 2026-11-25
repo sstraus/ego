@@ -7,12 +7,48 @@
 //! ```
 #[cfg(feature = "external_printer")]
 use {
-    crossbeam::channel::{bounded, Receiver, SendError, Sender},
+    crossbeam::channel::{bounded, Receiver, SendError, Sender, TrySendError},
     std::fmt::Display,
 };
 
 #[cfg(feature = "external_printer")]
 pub const EXTERNAL_PRINTER_DEFAULT_CAPACITY: usize = 20;
+
+/// A printer sender that wakes the editor after a buffered line is published.
+#[cfg(feature = "external_printer")]
+#[derive(Debug, Clone)]
+pub struct ExternalPrinterSender<T> {
+    sender: Sender<T>,
+}
+
+#[cfg(feature = "external_printer")]
+impl<T> From<Sender<T>> for ExternalPrinterSender<T> {
+    fn from(sender: Sender<T>) -> Self {
+        Self { sender }
+    }
+}
+
+#[cfg(feature = "external_printer")]
+impl<T> ExternalPrinterSender<T> {
+    /// Send a line, then wake its terminal consumer.
+    pub fn send(&self, line: T) -> Result<(), SendError<T>> {
+        self.sender.send(line)?;
+        let _ = crossterm::event::wake();
+        Ok(())
+    }
+
+    /// The bounded queue capacity, or `None` for an unbounded channel.
+    pub fn capacity(&self) -> Option<usize> {
+        self.sender.capacity()
+    }
+
+    /// Publish a line without waiting for queue capacity.
+    pub fn try_send(&self, line: T) -> Result<(), TrySendError<T>> {
+        self.sender.try_send(line)?;
+        let _ = crossterm::event::wake();
+        Ok(())
+    }
+}
 
 /// An ExternalPrinter allows to print messages of text while editing a line.
 /// The message is printed as a new line, the line-edit will continue below the
@@ -26,7 +62,7 @@ pub struct ExternalPrinter<T>
 where
     T: Display,
 {
-    sender: Sender<T>,
+    sender: ExternalPrinterSender<T>,
     receiver: Receiver<T>,
 }
 
@@ -38,11 +74,16 @@ where
     /// Creates an ExternalPrinter to store lines with a max_cap
     pub fn new(max_cap: usize) -> Self {
         let (sender, receiver) = bounded::<T>(max_cap);
-        Self { sender, receiver }
+        Self {
+            sender: sender.into(),
+            receiver,
+        }
     }
     /// Gets a Sender to use the printer externally by sending lines to it
-    pub fn sender(&self) -> Sender<T> {
-        self.sender.clone()
+    pub fn sender(&self) -> ExternalPrinterSender<T> {
+        ExternalPrinterSender {
+            sender: self.sender.sender.clone(),
+        }
     }
     /// Receiver to get messages if any
     pub fn receiver(&self) -> &Receiver<T> {

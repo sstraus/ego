@@ -109,6 +109,18 @@ impl ManagedChild {
         self.wait().await.is_ok() && wait_for_tree_absence(self.tree_id, grace).await
     }
 
+    /// Whether a process that the exited child started (a `nohup` or `&`
+    /// child) still runs in its group, so cleanup is about to stop it.
+    #[cfg(unix)]
+    pub(super) async fn group_outlived_child(&self) -> bool {
+        self.tree_id.is_some() && !tree_is_absent(self.tree_id).await
+    }
+
+    #[cfg(not(unix))]
+    pub(super) async fn group_outlived_child(&self) -> bool {
+        false
+    }
+
     #[cfg(windows)]
     pub(super) async fn cleanup_after_exit(&mut self, _grace: Duration) -> bool {
         self.wait().await.is_ok()

@@ -1,0 +1,36 @@
+{
+  "model": "deepseek-flash",
+  "messages": [
+    { "role": "user", "content": "How's the weather in Hangzhou Tomorrow" }
+  ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "thinking": { "type": "enabled" },
+  "reasoning_effort": "high",
+  "max_tokens": 4096,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_date",
+        "description": "Get the current date",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather of a location, the user should supply the location and date.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string", "description": "The city name" },
+            "date": { "type": "string", "description": "The date in format YYYY-mm-dd" }
+          },
+          "required": ["location", "date"]
+        }
+      }
+    }
+  ]
+}

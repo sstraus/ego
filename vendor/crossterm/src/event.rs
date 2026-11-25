@@ -205,6 +205,38 @@ pub fn poll(timeout: Duration) -> std::io::Result<bool> {
     poll_internal(Some(timeout), &EventFilter)
 }
 
+/// Wake an interruptible input wait after publishing external work.
+/// Requests coalesce and remain pending even when no input wait is active.
+#[cfg(feature = "event-stream")]
+pub fn wake() -> std::io::Result<()> {
+    INPUT_WAKE_PENDING.store(true, std::sync::atomic::Ordering::Release);
+    if let Some(waker) = INPUT_WAKER.lock().as_ref() {
+        waker.wake()?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "event-stream")]
+static INPUT_WAKE_PENDING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+#[cfg(feature = "event-stream")]
+static INPUT_WAKER: Mutex<Option<sys::Waker>> = parking_lot::const_mutex(None);
+
+/// Wait for terminal input, an external wake, or an optional work deadline.
+/// A false result is a wake or timeout, not a terminal event. Unlike `read`,
+/// this returns control to the caller when external work is published.
+#[cfg(feature = "event-stream")]
+pub fn poll_interruptible(timeout: Option<Duration>) -> std::io::Result<bool> {
+    let mut reader = lock_internal_event_reader();
+    // Register before checking the latch: a producer racing registration either
+    // leaves the latch set or wakes this source. It never takes the reader lock.
+    *INPUT_WAKER.lock() = Some(reader.try_waker()?);
+    if INPUT_WAKE_PENDING.swap(false, std::sync::atomic::Ordering::AcqRel) {
+        return Ok(false);
+    }
+    reader.poll(timeout, &EventFilter)
+}
+
 /// Reads a single [`Event`](enum.Event.html).
 ///
 /// This function blocks until an [`Event`](enum.Event.html) is available. Combine it with the

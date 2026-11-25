@@ -1,0 +1,27 @@
+{
+  "choices": [
+    {
+      "delta": {
+        "content": ""
+      },
+      "finish_reason": "stop",
+      "index": 0,
+      "logprobs": null
+    }
+  ],
+  "created": 1793084907,
+  "id": "golden-deepseek",
+  "model": "deepseek-flash",
+  "object": "chat.completion.chunk",
+  "system_fingerprint": "golden",
+  "usage": {
+    "completion_tokens": 1,
+    "prompt_tokens": 11,
+    "prompt_tokens_details": {
+      "cached_tokens": 0,
+      "prompt_cache_hit_tokens": 0,
+      "prompt_cache_miss_tokens": 11
+    },
+    "total_tokens": 12
+  }
+}

@@ -246,24 +246,43 @@ async fn compose_and_serve(
         .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
     let store = Arc::new(session::jsonl(store_root, root.clone()));
     let artifact_publisher: Arc<dyn RunArtifactStore> = store.clone();
-    let effective = run::protocol_effective(
-        root.as_path(),
+    let protocol_args = run::protocol_args(
         args.session_dir.clone(),
         crate::cli::SessionShape::default(),
+    );
+    let frozen = Arc::new(
+        crate::config::FrozenRunConfig::capture(
+            root.as_path(),
+            &protocol_args,
+            ego_core::config::Trust::Untrusted,
+        )
+        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?,
+    );
+    let effective = frozen
+        .resolve(&protocol_args)
+        .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+    // Definitions must be valid even when explicit thinking needs no catalogue facts.
+    models::configured_catalogue_rows(
+        &effective.auth,
+        &effective.providers,
+        &effective.connections,
     )
-    .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+    .map_err(|message| McpError::new(McpFailure::InvalidValue, message))?;
     let catalogue = if effective.thinking.is_none() {
         let scope = crate::provider_http::CommandHttpScope::online(CancelToken::new())
             .await
             .map_err(|message| McpError::new(McpFailure::Transport, message))?;
         Some(
-            models::build_catalogue_snapshot(
+            models::build_captured_catalogue_snapshot(
                 &ModelsArgs {
-                    provider: None,
+                    account: None,
+                    connection: effective.connection.clone(),
+                    provider: models::selected_instance_provider(&effective).map(str::to_owned),
                     refresh: false,
                     json: false,
                 },
                 scope.http(),
+                &effective,
             )
             .await
             .map_err(catalogue_error)?,
@@ -271,7 +290,7 @@ async fn compose_and_serve(
     } else {
         None
     };
-    let (executor, deployment) = run::CliRunExecutor::for_mcp(
+    let (executor, deployment) = run::CliRunExecutor::for_mcp_captured(
         run_root,
         args.session_dir.clone(),
         Arc::clone(&store),
@@ -279,14 +298,28 @@ async fn compose_and_serve(
         args.max_concurrent_runs,
         Arc::clone(&evidence),
         catalogue.as_ref(),
+        frozen,
     )
     .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
 
+    let mut roots = BTreeSet::from([deployment.root]);
+    for allowed in &args.allow_roots {
+        let allowed = run::workspace(Some(&run::rooted_path(&root, allowed.clone())))
+            .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?;
+        roots.insert(
+            RunRoot::new(allowed)
+                .map_err(|error| McpError::new(McpFailure::InvalidValue, error.to_string()))?,
+        );
+    }
+    let mut models = BTreeSet::from([deployment.model]);
+    models.extend(args.allow_models.iter().cloned());
+    let mut modes = BTreeSet::from([deployment.mode]);
+    modes.extend(args.allow_modes.iter().copied());
     let policy = McpRunSelectionPolicy::new(
-        BTreeSet::from([deployment.root]),
-        BTreeSet::from([deployment.model]),
+        roots,
+        models,
         deployment.thinking,
-        BTreeSet::from([deployment.mode]),
+        modes,
         deployment.ceilings,
         deployment.profile.into_iter().collect(),
     )?;

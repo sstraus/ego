@@ -2,10 +2,116 @@
 
 use super::*;
 
+pub(super) enum ResumeConnection {
+    Retain,
+    Unbound,
+    ProviderChange { previous: String, selected: String },
+}
+
+fn recorded_resume_model(args: &Args, chosen: &Chosen) -> Result<Option<ModelRef>, UsageError> {
+    if !matches!(args.session, SessionChoice::Resume(_)) {
+        return Ok(None);
+    }
+    chosen
+        .store
+        .readable_meta(&chosen.id)
+        .map(|meta| meta.and_then(|session| session.model).map(ModelRef))
+        .map_err(|error| UsageError(format!("could not read the resumed session model: {error}")))
+}
+
+/// Resume binding is shared by ordinary startup and direct preflight, before generation.
+pub(super) fn restore_resume_connection(
+    args: &mut Args,
+    chosen: &Chosen,
+) -> Result<ResumeConnection, UsageError> {
+    if args.connection.is_some() || !matches!(args.session, SessionChoice::Resume(_)) {
+        return Ok(ResumeConnection::Retain);
+    }
+    let saved = chosen
+        .store
+        .selected_connection(&chosen.id)
+        .map_err(|error| UsageError(error.to_string()))?;
+    let Some(saved) = saved else {
+        return Ok(ResumeConnection::Unbound);
+    };
+    if let Some((selected, _)) = args.model.as_ref().and_then(|model| model.split_once('/')) {
+        // The journal may have committed selections before their first generation.
+        let previous_model = chosen
+            .store
+            .selected_model(&chosen.id)
+            .map_err(|error| UsageError(error.to_string()))?;
+        let previous_model = match previous_model {
+            Some(model) => Some(model),
+            None => recorded_resume_model(args, chosen)?,
+        };
+        if let Some((previous, _)) = previous_model
+            .as_ref()
+            .and_then(|model| model.0.split_once('/'))
+            && crate::auth::connection_vendor(previous) != crate::auth::connection_vendor(selected)
+        {
+            // An explicit cross-provider model uses fresh startup account selection.
+            return Ok(ResumeConnection::ProviderChange {
+                previous: previous.to_owned(),
+                selected: selected.to_owned(),
+            });
+        }
+    }
+    args.connection = Some(saved);
+    Ok(ResumeConnection::Retain)
+}
+
+pub(super) fn admit_resume_connection(
+    connection: &ResumeConnection,
+    effective: &Effective,
+    session: &SessionId,
+) -> Result<(), UsageError> {
+    match connection {
+        ResumeConnection::Retain => return Ok(()),
+        ResumeConnection::ProviderChange { previous, selected } => {
+            return models::instance_discovery_connection(
+                &effective.providers,
+                &effective.connections,
+                effective.connection.as_deref(),
+                Some(selected),
+            )
+            .map(|_| ())
+            .map_err(|cause| {
+                let model = effective.model.as_ref().expect("resume has an explicit model");
+                UsageError(format!(
+                    "cannot resume from provider {previous} with provider {selected}: {cause}. Rerunning the same command cannot succeed with this account configuration. Retry 'ego resume {session} --model {model} --account N' with a compatible account number."
+                ))
+            });
+        }
+        ResumeConnection::Unbound => {}
+    }
+    let vendor = effective.model.as_ref().map(|model| {
+        crate::auth::connection_vendor(
+            model
+                .0
+                .split_once('/')
+                .map_or(model.0.as_str(), |(route, _)| route),
+        )
+    });
+    if effective.connection.is_some()
+        || effective
+            .connections
+            .values()
+            .any(|connection| vendor.is_none_or(|vendor| connection.vendor == vendor))
+    {
+        return Err(UsageError(
+            "this session has no committed connection; start a new session to use a saved account"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 struct ResolvedInvocation {
+    args: Args,
     settings: Option<Settings>,
     ci: Option<CiInvocation>,
     refresh: Option<ego_mcp::McpRegistryRefresh>,
+    mcp_refusals: Vec<ego_core::config::McpServerName>,
     ready: Option<ExecutionReady>,
     auto_preflight: Option<Arc<CliAutoPreflight>>,
     chosen_session: Option<Chosen>,
@@ -26,13 +132,11 @@ async fn resolve_invocation_phase(
             settings,
             ci,
             refresh,
+            mcp_refusals,
             ready,
             chosen,
         }) => {
-            if matches!(
-                args.session,
-                crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
-            ) {
+            if matches!(args.session, crate::cli::SessionChoice::Resume(_)) {
                 use ego_core::store::session_store::{SessionEntry, SessionStore};
                 use futures::TryStreamExt as _;
                 let entries = SessionStore::read(chosen.store.as_ref(), &chosen.id)
@@ -55,9 +159,11 @@ async fn resolve_invocation_phase(
                 }
             }
             Ok(ResolvedInvocation {
+                args: args.clone(),
                 settings: Some(settings),
                 ci,
                 refresh: Some(refresh),
+                mcp_refusals,
                 ready,
                 auto_preflight: None,
                 chosen_session: Some(chosen),
@@ -69,10 +175,9 @@ async fn resolve_invocation_phase(
             let chosen_session = chosen(args, &cwd, None).map_err(usage)?;
             let mut resumed = args.clone();
             let mut session_roots = Vec::new();
-            if matches!(
-                args.session,
-                crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
-            ) {
+            let resume_connection =
+                restore_resume_connection(&mut resumed, &chosen_session).map_err(usage)?;
+            if matches!(args.session, crate::cli::SessionChoice::Resume(_)) {
                 use ego_core::store::session_store::SessionEntry;
                 use futures::TryStreamExt as _;
                 let entries = ego_core::store::session_store::SessionStore::read(
@@ -114,6 +219,9 @@ async fn resolve_invocation_phase(
                         if resumed.sandbox.is_none() {
                             resumed.sandbox = selections.sandbox();
                         }
+                        if resumed.tools.is_none() {
+                            resumed.tools = selections.tools().cloned();
+                        }
                         break;
                     }
                 }
@@ -125,7 +233,14 @@ async fn resolve_invocation_phase(
                 diagnostics,
             )
             .map_err(usage)?;
-            restore_session_roots(&mut settings, &session_roots).map_err(usage)?;
+            // Direct materialization consumes the original argv and these settings,
+            // not the restored argv retained for child preparation below.
+            if let Some(tools) = &resumed.tools {
+                settings.effective.tools = Some(tools.clone());
+            }
+            admit_resume_connection(&resume_connection, &settings.effective, &chosen_session.id)
+                .map_err(usage)?;
+            restore_session_roots(&mut settings, &session_roots, diagnostics).map_err(usage)?;
             admit_windows_unconfined_start(
                 args,
                 &mut settings,
@@ -145,21 +260,7 @@ async fn resolve_invocation_phase(
                     message: "direct CI execution is missing its preflight token".to_owned(),
                 });
             }
-            let recorded_model = if matches!(
-                args.session,
-                crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
-            ) {
-                chosen_session
-                    .store
-                    .readable_meta(&chosen_session.id)
-                    .map_err(|error| RunTermination::Failed {
-                        message: format!("could not read the resumed session model: {error}"),
-                    })?
-                    .and_then(|session| session.model)
-                    .map(ModelRef)
-            } else {
-                None
-            };
+            let recorded_model = recorded_resume_model(args, &chosen_session).map_err(usage)?;
             if resumed.model.is_none() && recorded_model.is_some() {
                 settings.effective.model = recorded_model.clone();
             }
@@ -181,8 +282,17 @@ async fn resolve_invocation_phase(
             )
             .map_err(usage)?;
             if !args.quiet {
-                note_refused_mcp(diagnostics, &attachment.refused);
+                note_mcp_attachment(diagnostics, &attachment);
             }
+            settings.confinement = super::composition_root::with_selected_mcp_executables(
+                settings.confinement.clone(),
+                &attachment.attached,
+            );
+            let mcp_refusals = attachment
+                .refused
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
             let selected_mcp = attachment.attached;
             let selected_mcp = ego_tools::mcp::materialize_admissions(selected_mcp);
             let refresh = ego_mcp::McpRegistryRefresh::new(
@@ -197,9 +307,11 @@ async fn resolve_invocation_phase(
                 auto_preflight.validate_startup()?;
             }
             Ok(ResolvedInvocation {
+                args: resumed,
                 settings: Some(settings),
                 ci,
                 refresh: Some(refresh),
+                mcp_refusals,
                 ready: None,
                 auto_preflight: Some(auto_preflight),
                 chosen_session: Some(chosen_session),
@@ -209,39 +321,71 @@ async fn resolve_invocation_phase(
 }
 
 /// Re-admit saved authority before either the generation policy or OS guard
-/// is constructed for a fresh process. A changed symlink fails closed.
+/// is constructed for a fresh process. A changed symlink fails closed. A root
+/// removed from disk is dropped: that only narrows the session's reach.
 fn restore_session_roots(
     settings: &mut Settings,
     grants: &[ego_core::permit::ProfileRoot],
+    diagnostics: &dyn Diagnostics,
 ) -> Result<(), UsageError> {
     if grants.is_empty() {
         return Ok(());
     }
+    let admitted = assemble_session_roots(
+        &mut settings.effective,
+        grants,
+        settings.confinement.workspace(),
+        |message| diagnostics.note(message),
+    )?;
+    settings.confinement = settings.confinement.clone().with_roots(admitted);
+    Ok(())
+}
+
+/// Final root assembly shared by real re-admission and pre-answer proposals.
+/// Session receipts are restored after configured roots in durable grant order.
+pub(super) fn assemble_session_roots(
+    effective: &mut Effective,
+    grants: &[ego_core::permit::ProfileRoot],
+    workspace: &CanonPath,
+    notice: impl Fn(&str),
+) -> Result<Vec<ego_core::permit::ProfileRoot>, UsageError> {
+    let mut restored = Vec::with_capacity(grants.len());
     for grant in grants {
-        let actual = std::fs::canonicalize(grant.path().as_path())
-            .map(CanonPath::new)
-            .map_err(|error| {
-                UsageError(format!(
-                    "saved session root {} is unavailable: {error}",
-                    grant.path()
-                ))
-            })?;
+        let actual = match ego_core::permit::resolve_root(
+            grant.path().as_path(),
+            grant.access(),
+            &ego_tools::fs::OsFs,
+        ) {
+            Ok(actual) => actual,
+            Err(error) => {
+                notice(&format!(
+                    "saved session root {} is unavailable ({error}); this session continues without it",
+                    ego_core::permit::terminal_safe(&grant.path().to_string())
+                ));
+                continue;
+            }
+        };
         if actual != *grant.path() {
             return Err(UsageError(format!(
                 "saved session root {} changed since approval",
                 grant.path()
             )));
         }
-        settings.effective.roots.push(ego_core::permit::RootCfg {
+        effective.roots.retain(|root| root.path != actual.as_path());
+        effective.roots.push(ego_core::permit::RootCfg {
             consent: None,
             path: actual.as_path().to_path_buf(),
             access: grant.access(),
         });
+        restored.push(grant);
     }
-    let admitted =
-        super::profile_roots::admit(&settings.effective, settings.confinement.workspace())
-            .map_err(UsageError)?;
-    for grant in grants {
+    let mut admitted = super::profile_roots::admit(effective, workspace).map_err(UsageError)?;
+    for root in &mut admitted {
+        if restored.iter().any(|grant| *grant == root) {
+            *root = root.clone().with_terminal_write();
+        }
+    }
+    for grant in restored {
         if !admitted.contains(grant) {
             return Err(UsageError(format!(
                 "saved session root {} was not admitted",
@@ -249,8 +393,7 @@ fn restore_session_roots(
             )));
         }
     }
-    settings.confinement = settings.confinement.clone().with_roots(admitted);
-    Ok(())
+    Ok(admitted)
 }
 
 /// The terminal's normal trusted-workspace flow is automatic analysis. An
@@ -273,6 +416,7 @@ fn enable_trusted_interactive_auto(settings: &mut Settings, driver: &Driver<'_>)
 
 pub(super) struct ScopedInvocation {
     pub(super) mcp_scope: crate::provider_http::McpProcessScope,
+    pub(super) mcp_task_port: Option<Arc<dyn ego_core::mcp::McpTaskPort>>,
     pub(super) mcp_runtime: Arc<ego_mcp::McpRegistryRuntime>,
     pub(super) mcp_registry: Arc<McpRegistryController>,
     pub(super) artifact_store: Option<JsonlStore>,
@@ -303,19 +447,41 @@ async fn open_scope_phase(
         })
     {
         let effective = &settings.effective;
-        host.diagnostics.note(&format!(
-            "model {model}\nmode {} ({}) · sandbox {} ({})\n{}",
-            effective.mode.unwrap_or(Mode::Default),
-            effective.mode_provenance,
-            settings.confinement.level(),
-            effective.sandbox_provenance,
-            seat.key_hints()
-        ));
+        if !args.plain {
+            let provider = model
+                .split_once('/')
+                .map_or(model, |(provider, _)| provider);
+            let auth = crate::auth::startup::summary(provider, effective);
+            host.diagnostics.startup_block(&format!(
+                "{}\n{}",
+                super::startup_layout::render(
+                    model,
+                    &auth,
+                    effective,
+                    &settings.confinement,
+                    args.read_only_dir.as_deref(),
+                    seat.width(),
+                ),
+                seat.startup_key_hints(),
+            ));
+        } else {
+            host.diagnostics.note(&format!(
+                "model {model}\nmode {} ({}) · sandbox {} ({})\n{}",
+                effective.mode.unwrap_or(Mode::Default),
+                effective.mode_provenance,
+                settings.confinement.level(),
+                effective.sandbox_provenance,
+                seat.key_hints()
+            ));
+        }
     }
     let mcp_scope = crate::provider_http::McpProcessScope::for_run(
         settings.confinement.clone(),
         cancel.clone(),
         settings.run_deadline,
+        // MCP Tasks need a session that outlives the turn: a human terminal.
+        settings.effective.mcp_tasks
+            && matches!(&host.driver, Driver::Interactive { seat, .. } if seat.has_human()),
     )
     .await
     .map_err(|error| match error {
@@ -326,6 +492,7 @@ async fn open_scope_phase(
             RunTermination::Failed { message }
         }
     })?;
+    let mcp_task_port = mcp_scope.task_port();
     let mcp_runtime = Arc::clone(mcp_scope.runtime());
     let mcp_registry = Arc::clone(mcp_runtime.controller());
     if let Some(ci) = &resolved.ci {
@@ -344,6 +511,7 @@ async fn open_scope_phase(
         .expect("the effect scope consumes the chosen session once");
     Ok(ScopedInvocation {
         mcp_scope,
+        mcp_task_port,
         mcp_runtime,
         mcp_registry,
         artifact_store,
@@ -359,6 +527,7 @@ struct ResumePreparation<'store> {
     policy_selection: GenerationPolicySelection,
     policy_source: Arc<dyn GenerationPolicySource>,
     perimeter: crate::perimeter::Perimeter,
+    config_notes: Vec<String>,
     invocation: RunInvocationId,
     run_id: RunId,
     resume_plan: Option<ResumePlan>,
@@ -370,6 +539,7 @@ fn prepare_resume_phase<'store>(
     host: &RunHost<'_>,
     scoped: &'store ScopedInvocation,
     resolved: &ResolvedInvocation,
+    startup: &startup_failure::StartupFailure<'_>,
 ) -> Result<ResumePreparation<'store>, RunTermination> {
     let settings = resolved
         .settings
@@ -377,10 +547,7 @@ fn prepare_resume_phase<'store>(
         .expect("resume preparation observes resolved settings before materialization");
     let direct_ci_ready = resolved.ready.is_some();
     let terminal_resume = matches!(host.driver, Driver::Interactive { .. })
-        && matches!(
-            args.session,
-            crate::cli::SessionChoice::Resume(_) | crate::cli::SessionChoice::ResumeLatest
-        );
+        && matches!(args.session, crate::cli::SessionChoice::Resume(_));
     let early_opened = if direct_ci_ready || !args.answers.is_empty() || terminal_resume {
         Some(Opened::Durable(Box::new(
             session::open(
@@ -395,17 +562,18 @@ fn prepare_resume_phase<'store>(
     } else {
         None
     };
+    if early_opened.is_some() {
+        startup.opened();
+    }
     let mode = settings.effective.mode.unwrap_or(Mode::Default);
     let human: Option<Arc<dyn HumanApprover>> = match &host.driver {
-        Driver::Interactive { seat, .. } if seat.has_human() => Some(Arc::new(SeatApprover {
-            seat: Arc::clone(seat),
-        })),
-        Driver::Once | Driver::Interactive { .. } => None,
+        Driver::Interactive { seat, .. } => seat_human(seat, settings.effective.deny_prompts),
+        Driver::Once => None,
     };
     let policy_selection =
         GenerationPolicySelection::new(mode, settings.effective.permissions.clone());
-    let profile_roots =
-        super::profile_roots::admit(&settings.effective, settings.confinement.workspace())
+    let (profile_roots, config_notes) =
+        super::profile_roots::admit_noted(&settings.effective, settings.confinement.workspace())
             .map_err(|message| RunTermination::Failed { message })?;
     let perimeter = crate::perimeter::Perimeter::session(
         &settings.confinement,
@@ -419,7 +587,8 @@ fn prepare_resume_phase<'store>(
             human,
         )
         .with_profile_roots(profile_roots)
-        .with_read_perimeter(&settings.confinement),
+        .with_read_perimeter(&settings.confinement)
+        .with_root_ceilings(super::profile_roots::write_ceilings(&settings.effective).0),
     );
     let invocation = RunInvocationId::new();
     let run_id = RunId::new(scoped.session_id, invocation.uuid());
@@ -468,6 +637,7 @@ fn prepare_resume_phase<'store>(
         policy_selection,
         policy_source,
         perimeter,
+        config_notes,
         invocation,
         run_id,
         resume_plan,
@@ -486,6 +656,7 @@ pub(super) struct MaterializedRun<'store> {
     pub(super) generation: Option<GenerationReady>,
     pub(super) skill_trust: Trust,
     pub(super) skill_profile_layers: Option<Vec<Sourced<ConfigLayer>>>,
+    pub(super) no_hooks: bool,
     pub(super) run_deadline: Option<Instant>,
     pub(super) root: PathBuf,
     pub(super) cwd: PathBuf,
@@ -500,6 +671,7 @@ pub(super) struct MaterializedRun<'store> {
     pub(super) policy_selection: GenerationPolicySelection,
     pub(super) policy_source: Arc<dyn GenerationPolicySource>,
     pub(super) perimeter: crate::perimeter::Perimeter,
+    pub(super) config_notes: Vec<String>,
     pub(super) invocation: RunInvocationId,
     pub(super) run_id: RunId,
     pub(super) resume_plan: Option<ResumePlan>,
@@ -512,6 +684,8 @@ fn materialize_run_phase<'store>(
     scoped: &'store ScopedInvocation,
     resolved: &mut ResolvedInvocation,
     resume: ResumePreparation<'store>,
+    startup: &startup_failure::StartupFailure<'_>,
+    defer_open: bool,
 ) -> Result<MaterializedRun<'store>, RunTermination> {
     let settings = resolved
         .settings
@@ -524,6 +698,7 @@ fn materialize_run_phase<'store>(
         policy_selection,
         policy_source,
         perimeter,
+        config_notes,
         invocation,
         run_id,
         resume_plan,
@@ -560,11 +735,13 @@ fn materialize_run_phase<'store>(
             } = materials(
                 &settings,
                 args,
-                matches!(&host.driver, Driver::Interactive { .. }),
+                &host.driver,
                 Arc::new(scoped.jsonl_store.history()),
                 host.diagnostics,
             )
-            .map_err(usage)?;
+            .map_err(|err| {
+                super::composition::expired(settings.run_deadline).unwrap_or_else(|| usage(err))
+            })?;
             (system, registry, skills, compiled, text, Some(slug), None)
         }
     };
@@ -580,32 +757,36 @@ fn materialize_run_phase<'store>(
     } = settings;
     let skill_resource_roots = crate::config::ego_home().map(|user| {
         ego_core::skill::SkillResourceRoots::new(PathBuf::from("/etc/ego"), user, root.join(".ego"))
+            .with_project_dir(root.clone())
     });
     let currency = CurrencyCode::new(SETTLEMENT).expect("a constant this file controls");
-    let opened = match early_opened {
-        Some(opened) => opened,
-        None => Opened::Durable(Box::new(
-            session::open(
-                scoped.jsonl_store.as_ref(),
-                &scoped.session_id,
-                &scoped.clock,
-            )
-            .map_err(|err| RunTermination::Failed {
-                message: err.to_string(),
-            })?,
-        )),
+    let opened = if defer_open {
+        None
+    } else {
+        let opened = match early_opened {
+            Some(opened) => opened,
+            None => open_materialized_session(scoped)?,
+        };
+        startup.opened();
+        Some(opened)
     };
     let child_root = RunRoot::new(root.clone()).map_err(|error| RunTermination::Failed {
         message: error.to_string(),
     })?;
     let child_artifacts: Arc<dyn RunArtifactStore> = scoped.jsonl_store.clone();
+    let mut child_args = resolved.args.clone();
+    child_args.session_dir = args.session_dir.clone();
+    child_args.connection = effective.connection.clone();
+    // Children inherit the admitted identity, not the user-facing selector.
+    child_args.account = None;
     let child_executor = Arc::new(CliRunExecutor {
-        args: args.clone(),
+        args: child_args.clone(),
         store: Arc::clone(&scoped.jsonl_store),
         concurrency: None,
         frozen: Some(Arc::new(
-            config::FrozenRunConfig::capture(&root, args, skill_trust).map_err(usage)?,
+            config::FrozenRunConfig::capture(&root, &child_args, skill_trust).map_err(usage)?,
         )),
+        acp_controls: None,
         artifacts: Some(child_artifacts),
         admission: Arc::clone(&host.evidence),
         child_authority: Some(Arc::new(ChildAuthorityCeiling::from_parent(
@@ -630,7 +811,7 @@ fn materialize_run_phase<'store>(
     )
     .map_err(usage)?;
     Ok(MaterializedRun {
-        opened: Some(opened),
+        opened,
         system,
         registry,
         skills,
@@ -640,6 +821,7 @@ fn materialize_run_phase<'store>(
         generation,
         skill_trust,
         skill_profile_layers,
+        no_hooks: args.no_hooks,
         run_deadline,
         root,
         cwd,
@@ -654,10 +836,23 @@ fn materialize_run_phase<'store>(
         policy_selection,
         policy_source,
         perimeter,
+        config_notes,
         invocation,
         run_id,
         resume_plan,
         recovered_capture,
+    })
+}
+
+fn open_materialized_session(scoped: &ScopedInvocation) -> Result<Opened<'_>, RunTermination> {
+    session::open(
+        scoped.jsonl_store.as_ref(),
+        &scoped.session_id,
+        &scoped.clock,
+    )
+    .map(|opened| Opened::Durable(Box::new(opened)))
+    .map_err(|error| RunTermination::Failed {
+        message: error.to_string(),
     })
 }
 
@@ -714,7 +909,7 @@ async fn admit_run_phase<'store>(
                     .as_mut()
                     .expect("the materialized run owns its opened session"),
                 answer,
-                continuation,
+                *continuation,
                 request_event,
             )
             .map_err(finalize)?;
@@ -816,6 +1011,16 @@ async fn admit_run_phase<'store>(
     }
     debug_assert!(materialized.context.is_some());
     let mcp_status = scoped.mcp_registry.status();
+    let admitted_tools = scoped.mcp_registry.admitted_tools();
+    let refused = std::mem::take(&mut resolved.mcp_refusals);
+    let admitted_tools = if refused.is_empty() {
+        admitted_tools
+    } else {
+        Arc::new(McpTransportRefusalNotes {
+            admitted_tools,
+            refused,
+        })
+    };
     Ok(AdmittedRun {
         opened: materialized
             .opened
@@ -823,8 +1028,30 @@ async fn admit_run_phase<'store>(
             .expect("the admitted run takes its opened session once"),
         resume,
         mcp_errors: mcp_status.mcp_errors(),
-        admitted_tools: Some(scoped.mcp_registry.admitted_tools()),
+        admitted_tools: Some(admitted_tools),
     })
+}
+
+struct McpTransportRefusalNotes {
+    admitted_tools: Arc<dyn AdmittedToolSource>,
+    refused: Vec<ego_core::config::McpServerName>,
+}
+
+impl AdmittedToolSource for McpTransportRefusalNotes {
+    fn capture(
+        &self,
+    ) -> Result<ego_core::turn::CapturedToolCatalogue, ego_core::turn::ToolCatalogueError> {
+        self.admitted_tools.capture()
+    }
+
+    fn context_notes(&self) -> Vec<String> {
+        let mut notes = self.admitted_tools.context_notes();
+        // Configured transport refusals here only arise under offline confinement.
+        notes.extend(self.refused.iter().map(|name| format!(
+            "MCP server '{name}' is unavailable under offline confinement. No tool call was attempted. Do not retry under the current confinement."
+        )));
+        notes
+    }
 }
 
 async fn prepare_generation_phase(
@@ -856,6 +1083,7 @@ async fn prepare_generation_phase(
                     session_id: scoped.session_id,
                     confinement: &materialized.confinement,
                     effective: &materialized.effective,
+                    connection_binding: None,
                     slug: materialized
                         .slug
                         .clone()
@@ -958,6 +1186,12 @@ fn activate_session_phase<'store, S: EventSink>(
         )
     })?;
     let sink = destination(&generation.main_capabilities);
+    if let Some(status) = host.status.as_ref() {
+        status.seat.set_file_picker(
+            materialized.confinement.workspace().as_path().to_path_buf(),
+            ego_core::permit::ReadPerimeter::from_confinement(&materialized.confinement),
+        );
+    }
     if let Some(status) = host.status.as_ref()
         && status.human
     {
@@ -991,6 +1225,7 @@ fn activate_session_phase<'store, S: EventSink>(
                 &materialized.registry,
                 materialized.system.is_some(),
                 materialized.compiled.is_some(),
+                materialized.no_hooks,
             ),
             mcp_errors: mcp_errors.clone(),
             hook_errors: Vec::new(),
@@ -1012,30 +1247,111 @@ fn activate_session_phase<'store, S: EventSink>(
     })
 }
 pub(super) async fn execute<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+    preflight: Option<ExecutionPreflight>,
+    host: RunHost<'_>,
+) -> Result<Ended, RunTermination> {
+    execute_with_admission(args, destination, cancel, preflight, host, None).await
+}
+
+pub(super) async fn execute_with_admission<S: EventSink>(
     mut args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
     preflight: Option<ExecutionPreflight>,
     mut host: RunHost<'_>,
+    provider_switch: Option<(&ProviderSwitch, &mut bool)>,
 ) -> Result<Ended, RunTermination> {
     // Phase order: resolve invocation, open effect scope, restore resumptions,
     // materialize inputs, admit context, prepare generation, activate, drive.
     let mut resolved =
         resolve_invocation_phase(&args, &host.driver, host.diagnostics, &cancel, preflight).await?;
     let scoped = open_scope_phase(&mut args, &host, &cancel, &mut resolved).await?;
+    let mut startup = startup_failure::StartupFailure::new(
+        scoped.jsonl_store.root(),
+        scoped.session_id,
+        host.diagnostics,
+    );
     let outcome = async {
-        let resume = prepare_resume_phase(&args, &host, &scoped, &resolved)?;
-        let mut materialized = materialize_run_phase(&args, &host, &scoped, &mut resolved, resume)?;
-        let admitted = admit_run_phase(&host, &scoped, &mut resolved, &mut materialized).await?;
-        let (generation, policy_application) = prepare_generation_phase(
-            args.proxy.clone(),
-            &mut host,
-            &cancel,
+        let resume = prepare_resume_phase(&args, &host, &scoped, &resolved, &startup)?;
+        startup.phase("materialize inputs");
+        let pending_fork = provider_switch
+            .as_ref()
+            .and_then(|(change, _)| change.fork.as_ref());
+        let mut materialized = materialize_run_phase(
+            &args,
+            &host,
             &scoped,
-            &resolved,
-            &materialized,
-        )
-        .await?;
+            &mut resolved,
+            resume,
+            &startup,
+            pending_fork.is_some(),
+        )?;
+        let switch_generation = if let Some((change, _)) = provider_switch.as_ref() {
+            change
+                .destination
+                .verify(&materialized.effective, &change.request.target())?;
+            startup.phase("admit provider switch");
+            let generation = prepare_generation_phase(
+                args.proxy.clone(),
+                &mut host,
+                &cancel,
+                &scoped,
+                &resolved,
+                &materialized,
+            )
+            .await?;
+            if !change
+                .destination
+                .matches_admitted_account(&generation.0.selection)
+            {
+                return Err(RunTermination::UsageError {
+                    message:
+                        "the admitted account differs from the selected destination; reopen /model"
+                            .into(),
+                });
+            }
+            if let Some(fork) = pending_fork {
+                let lifecycle = ego_core::session_lifecycle::SessionLifecycle::new(
+                    Arc::clone(&scoped.jsonl_store),
+                    Arc::new(super::session_commands::NoLiveRuns),
+                    Arc::new(scoped.clock),
+                );
+                let publication = lifecycle
+                    .publish_prepared_fork(scoped.session_id, fork)
+                    .map_err(|error| RunTermination::Failed {
+                        message: error.to_string(),
+                    })?;
+                if let Some(diagnostic) = publication.diagnostic() {
+                    host.diagnostics.note(diagnostic);
+                }
+                materialized.opened = Some(open_materialized_session(&scoped)?);
+                startup.opened();
+            }
+            Some(generation)
+        } else {
+            None
+        };
+        startup.phase("admit context");
+        let admitted = admit_run_phase(&host, &scoped, &mut resolved, &mut materialized).await?;
+        startup.phase("prepare generation");
+        let (generation, policy_application) = match switch_generation {
+            Some(generation) => generation,
+            None => {
+                prepare_generation_phase(
+                    args.proxy.clone(),
+                    &mut host,
+                    &cancel,
+                    &scoped,
+                    &resolved,
+                    &materialized,
+                )
+                .await?
+            }
+        };
+        startup.phase("activate session");
         let activated = activate_session_phase(
             admitted,
             destination,
@@ -1045,6 +1361,7 @@ pub(super) async fn execute<S: EventSink>(
             &scoped,
         )?;
         drive_execution(DriverExecution {
+            provider_switch,
             args,
             cancel,
             host,
@@ -1057,6 +1374,154 @@ pub(super) async fn execute<S: EventSink>(
         .await
     }
     .await;
+    startup.finish(outcome.as_ref().err());
     scoped.mcp_scope.close().await;
     outcome
+}
+
+#[cfg(all(test, unix))]
+mod missing_file_grant_tests {
+    use super::*;
+    use ego_core::permit::{ProfileRoot, RootAccess};
+
+    struct Silent;
+    impl Diagnostics for Silent {
+        fn note(&self, _: &str) {}
+    }
+
+    struct Owner;
+    impl ego_core::question::Elicitor for Owner {
+        fn elicit<'a>(
+            &'a self,
+            _: ego_core::event::id::ItemId,
+            _: ego_core::question::QuestionRequest,
+        ) -> futures::future::BoxFuture<
+            'a,
+            Result<ego_core::question::QuestionOutcome, ego_core::question::ElicitorError>,
+        > {
+            Box::pin(async {
+                Ok(ego_core::question::QuestionOutcome::Answered(
+                    ego_core::question::QuestionAnswer::Single("session".into()),
+                ))
+            })
+        }
+    }
+
+    // Catches: replay drops a grant for a new file before the first write.
+    #[tokio::test]
+    async fn missing_file_session_grant_survives_readmission_and_write() {
+        use ego_core::turn::RootGrantPort;
+        let tree = tempfile::tempdir().unwrap();
+        let workspace = tree.path().join("workspace");
+        let sibling = tree.path().join("sibling");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let workspace = std::fs::canonicalize(workspace).unwrap();
+        let target = std::fs::canonicalize(sibling).unwrap().join("NOTES.md");
+        let root = CanonPath::new(&workspace);
+        let mut settings = Settings {
+            run_deadline: None,
+            root: workspace.clone(),
+            cwd: workspace,
+            confinement: RunConfinement::new(ego_core::permit::Confinement::Workspace, false, root)
+                .unwrap(),
+            trust: Trust::Untrusted,
+            profile_layers: None,
+            effective: ego_core::config::resolve(&[], Trust::Untrusted, None).unwrap(),
+        };
+        let seat = super::super::turns::SeatRootGrants {
+            resume_turn: false,
+            transition: None,
+            elicitor: Arc::new(Owner),
+            effective: settings.effective.clone(),
+            workspace: CanonPath::new(&settings.root),
+            target: ego_core::config::UserConfigTarget::Base,
+            rule_writer: None,
+            store_root: tree.path().join("store"),
+        };
+        let answer = seat
+            .ask(
+                ego_core::event::id::SessionId::new(),
+                ego_core::event::id::ItemId::new(),
+                ego_core::turn::RootGrantRequest {
+                    continuation: None,
+                    tool: "write".into(),
+                    operation: ego_core::permit::OpName::Write,
+                    path: CanonPath::new(&target),
+                    access: RootAccess::ReadWrite,
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer, ego_core::turn::RootGrantChoice::Session);
+        let grant = ProfileRoot::new(CanonPath::new(&target), RootAccess::ReadWrite);
+        restore_session_roots(&mut settings, std::slice::from_ref(&grant), &Silent).unwrap();
+        assert!(settings.confinement.roots().contains(&grant));
+        use ego_core::permit::{
+            Classification, PrepareCtx, ReadPerimeter, Resolution, Tool, Typed,
+        };
+        let fs = ego_tools::fs::OsFs;
+        let tool = Typed(ego_tools::tools::WriteTool);
+        let prepared = tool
+            .prepare(
+                serde_json::json!({"files": [{"path": target, "contents": "approved"}]}),
+                &PrepareCtx {
+                    cwd: CanonPath::new(&settings.root),
+                    resolver: &fs,
+                },
+            )
+            .unwrap();
+        let policy = ego_core::permit::PolicyEngine::new(
+            CanonPath::new(&settings.root),
+            ego_core::config::Mode::Yolo,
+            ego_core::config::Ruleset::default(),
+        )
+        .with_profile_roots(settings.confinement.roots().to_vec())
+        .with_read_perimeter(ReadPerimeter::from_confinement(&settings.confinement));
+        let authorized = match policy.classify(prepared) {
+            Classification::Settled(result) => result.unwrap(),
+            Classification::Ask(pending) => match policy.settle(pending).await {
+                Resolution::Settled(result) => result.unwrap(),
+                _ => panic!("the restored exact root must authorize the write"),
+            },
+        };
+        let evidence =
+            SessionEvidenceStore::open(tree.path(), SessionId::new(), 1024 * 1024).unwrap();
+        let (ports, _, _) = run_effect_ports(
+            settings.confinement.clone(),
+            evidence.clone(),
+            CancelToken::new(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        // Landlock must not replace the missing exact-file grant with its parent.
+        let unapproved = target.with_file_name("unapproved");
+        let spec = ego_core::permit::SpawnSpec::new(
+            vec!["/usr/bin/touch".into(), unapproved.as_os_str().to_owned()],
+            Some(CanonPath::new(&settings.root)),
+            None,
+            ego_core::permit::EnvPolicy::Inherited,
+        )
+        .unwrap();
+        assert!(ports.process().execute(&spec).await.is_err());
+        assert!(!unapproved.exists());
+        let (call, permit) = authorized.into_parts();
+        let guarded = ego_core::permit::GuardedEffects::new(
+            permit,
+            &fs,
+            ports.process(),
+            &evidence,
+            ports.resolver_handle(),
+            ports.one_hop_handle(),
+            ports.duplex_handle(),
+        );
+        let result = tool.execute(call, &guarded).await.unwrap();
+        assert!(matches!(result, ego_core::mcp::ToolExecution::Complete(_)));
+
+        assert_eq!(std::fs::read_to_string(target).unwrap(), "approved");
+    }
 }

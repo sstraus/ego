@@ -233,11 +233,30 @@ pub trait McpCandidateAdmission: Send + Sync {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum McpCandidateError {
+    TimedOut,
     CredentialRequired,
     ExecutableDenied {
         denial: ego_core::permit::ExecutableDenial,
     },
     Invalid {
+        cause: String,
+    },
+    /// The server does not implement the required `server/discover` protocol version.
+    ProtocolVersion {
+        cause: String,
+    },
+    /// The server failed the MCP exchange, for example with a JSON-RPC error on
+    /// `server/discover`. Its configuration can be correct.
+    Protocol {
+        cause: String,
+    },
+    /// The server answered with a message that is not a valid MCP answer.
+    InvalidResponse {
+        cause: String,
+    },
+    /// The connection to the server could not be made or closed early, for example
+    /// a stdio server that exits at once.
+    Transport {
         cause: String,
     },
     AuthorizationRequired {
@@ -250,8 +269,13 @@ pub enum McpCandidateError {
 impl McpCandidateError {
     pub fn failure(&self) -> McpFailure {
         match self {
+            Self::TimedOut => McpFailure::Timeout,
             Self::CredentialRequired => McpFailure::Credential,
             Self::Invalid { .. } => McpFailure::InvalidValue,
+            Self::ProtocolVersion { .. } => McpFailure::ProtocolVersion,
+            Self::Protocol { .. } => McpFailure::Protocol,
+            Self::InvalidResponse { .. } => McpFailure::InvalidResponse,
+            Self::Transport { .. } => McpFailure::Transport,
             Self::ExecutableDenied { .. } => McpFailure::Authority,
             Self::AuthorizationRequired { .. } => McpFailure::Authorization,
         }
@@ -281,30 +305,34 @@ impl CandidateFailure {
         }
     }
 
+    /// The registry class is `McpCandidateError::failure`; this adds only the typed payload.
     fn admission(error: McpCandidateError) -> Self {
+        let failure = Self::materialization(error.failure());
         match error {
-            McpCandidateError::CredentialRequired => Self::materialization(McpFailure::Credential),
+            McpCandidateError::TimedOut | McpCandidateError::CredentialRequired => failure,
             McpCandidateError::ExecutableDenied { denial } => Self {
                 denied_executable: Some(denial),
-                ..Self::materialization(McpFailure::Authority)
+                ..failure
             },
-            McpCandidateError::Invalid { cause } => Self {
+            McpCandidateError::Invalid { cause }
+            | McpCandidateError::ProtocolVersion { cause }
+            | McpCandidateError::Protocol { cause }
+            | McpCandidateError::InvalidResponse { cause }
+            | McpCandidateError::Transport { cause } => Self {
                 detail: Some(cause),
-                ..Self::materialization(McpFailure::InvalidValue)
+                ..failure
             },
             McpCandidateError::AuthorizationRequired {
                 issuer,
                 protected_resource,
                 scopes,
             } => Self {
-                failure: McpFailure::Authorization,
                 authorization: Some(CandidateAuthorizationFailure {
                     issuer,
                     protected_resource,
                     scopes,
                 }),
-                detail: None,
-                denied_executable: None,
+                ..failure
             },
         }
     }
@@ -666,7 +694,6 @@ pub struct McpCapturedServer {
     identity: McpCandidateIdentity,
     provenance: McpConfigProvenance,
     capabilities: McpCapabilities,
-    instructions: Option<String>,
     cache: McpCacheMetadata,
     collapsed_bootstrap: Option<McpCollapsedBootstrap>,
     factory: Arc<dyn McpOperationFactory>,
@@ -712,8 +739,7 @@ pub(crate) struct McpToolSchemaCommand {
     server_admission: Arc<McpServerAdmission>,
     generation: String,
     admission_fingerprint: McpAdmissionFingerprint,
-    requested_name: String,
-    structured_content: serde_json::Value,
+    definitions: Vec<(String, serde_json::Value)>,
 }
 
 impl McpToolSchemaCommand {
@@ -728,8 +754,21 @@ impl McpToolSchemaCommand {
             server_admission: server.into(),
             generation,
             admission_fingerprint,
-            requested_name,
-            structured_content,
+            definitions: vec![(requested_name, structured_content)],
+        }
+    }
+
+    pub(crate) fn from_definitions(
+        server: impl Into<Arc<McpServerAdmission>>,
+        generation: String,
+        admission_fingerprint: McpAdmissionFingerprint,
+        definitions: Vec<(String, serde_json::Value)>,
+    ) -> Self {
+        Self {
+            server_admission: server.into(),
+            generation,
+            admission_fingerprint,
+            definitions,
         }
     }
 }
@@ -1106,16 +1145,35 @@ impl McpCapturePin for McpRegistryCapture {
 /// Bound and order what the captured servers said about themselves.
 ///
 /// The order is the servers' own names ascending, which is what
-/// `captured_servers` already carries because it is built from a `BTreeMap`
+/// `servers` already carries because it is a `BTreeMap`
 /// keyed by name. Restated here rather than assumed, because the composition
 /// order is a documented contract and an incidental one is not a contract.
-fn captured_instructions(servers: &[McpCapturedServer]) -> Vec<McpServerInstructions> {
+fn captured_instructions(
+    servers: &BTreeMap<McpServerName, Arc<AdmittedServerSlice>>,
+) -> Vec<McpServerInstructions> {
     let mut instructions: Vec<_> = servers
-        .iter()
+        .values()
         .filter_map(|server| {
-            let text = server.instructions.as_deref()?;
-            let text = text.trim();
-            (!text.is_empty()).then(|| McpServerInstructions::new(server.identity.as_str(), text))
+            let text = server.instructions.as_deref().unwrap_or_default().trim();
+            // Run-context refresh replaces the live bootstrap, but model history can
+            // still contain schemas from the previous capture. State rediscovery
+            // before the next call, rather than silently relying on that history.
+            let text = if server.collapsed_bootstrap.is_some()
+                && !server.tools.iter().any(|tool| {
+                    tool.collapsed_catalogue().is_some_and(|catalogue| {
+                        catalogue.tool_names().any(|name| name != "call_tool")
+                    })
+                })
+            {
+                format!(
+                    "Ego schema admission state: No inner tool schemas are currently admitted. \
+                     Schemas in earlier conversation history do not grant current admission. \
+                     Use search_tools with a complete schema or get_tool_schema before the next call_tool.\n\n{text}"
+                )
+            } else {
+                text.to_owned()
+            };
+            (!text.is_empty()).then(|| McpServerInstructions::new(server.identity.as_str(), &text))
         })
         .collect();
     instructions.sort_by(|left, right| left.server().cmp(right.server()));
@@ -1486,6 +1544,7 @@ fn failed_publication_status(
 
 fn failure_message(failure: McpFailure) -> &'static str {
     match failure {
+        McpFailure::Timeout => "server is not responding: connection deadline elapsed",
         McpFailure::Absent => "server is unavailable; inspect with 'ego mcp ls'",
         McpFailure::InvalidValue => "server configuration is invalid; inspect with 'ego mcp ls'",
         McpFailure::InvalidResponse => {
@@ -1496,6 +1555,9 @@ fn failure_message(failure: McpFailure) -> &'static str {
         }
         McpFailure::Transport => "could not connect to the server; inspect with 'ego mcp ls'",
         McpFailure::Protocol => "communication with the server failed; inspect with 'ego mcp ls'",
+        McpFailure::ProtocolVersion => {
+            "protocol-version mismatch: the server does not answer 'server/discover' (MCP 2026-07-28 required); update the server"
+        }
         McpFailure::Authorization => "authorization is required; run '/mcp login NAME'",
         McpFailure::Credential => "server credential is unavailable; run '/mcp login NAME'",
         McpFailure::Cancelled => {
@@ -1605,6 +1667,29 @@ impl AdmittedToolSource for RegistryToolSource {
             snapshot.capture.clone(),
         )
     }
+
+    fn context_notes(&self) -> Vec<String> {
+        let Ok(state) = self.state.read() else {
+            return Vec::new();
+        };
+        state
+            .status
+            .servers()
+            .iter()
+            .filter(|server| server.generation().is_none())
+            .filter_map(|server| {
+                let failure = server.diagnostic()?.failure();
+                let name = server.name();
+                // Project the typed cause, not remote response bytes or private host details.
+                let cause = failure_message(failure).replace("NAME", name.as_str());
+                Some(format!(
+                    "MCP server '{name}' could not complete connection and discovery: {cause}. \
+                     No tool call was attempted by this check. Do not use tools from this server \
+                     until it connects successfully."
+                ))
+            })
+            .collect()
+    }
 }
 
 #[derive(Clone)]
@@ -1626,6 +1711,7 @@ impl McpRegistryRuntime {
         clock: Arc<dyn Clock>,
         max_sse_event_size: usize,
         timeout: Duration,
+        tasks: bool,
     ) -> Result<Self, McpRegistryError> {
         Self::new_with_acp(
             registry_journal,
@@ -1638,6 +1724,7 @@ impl McpRegistryRuntime {
             max_sse_event_size,
             timeout,
             None,
+            tasks,
         )
     }
 
@@ -1653,6 +1740,7 @@ impl McpRegistryRuntime {
         max_sse_event_size: usize,
         timeout: Duration,
         acp_management: Option<Arc<dyn crate::McpAcpEffects>>,
+        tasks: bool,
     ) -> Result<Self, McpRegistryError> {
         if max_sse_event_size == 0 || timeout.is_zero() {
             return Err(McpRegistryError::InvalidCandidate(
@@ -1684,8 +1772,8 @@ impl McpRegistryRuntime {
                 Arc::new(ControllerToolSchemaAdmission {
                     controller: controller.clone(),
                 });
-            let admission: Arc<dyn McpCandidateAdmission> =
-                Arc::new(McpRuntimeCandidateAdmission::new(
+            let admission: Arc<dyn McpCandidateAdmission> = Arc::new(
+                McpRuntimeCandidateAdmission::new(
                     Arc::clone(&http_management),
                     Arc::clone(&stdio_management),
                     Arc::clone(&owner),
@@ -1693,7 +1781,9 @@ impl McpRegistryRuntime {
                     max_sse_event_size,
                     timeout,
                     acp_management,
-                ));
+                )
+                .with_tasks(tasks),
+            );
             McpRegistryController {
                 journal: registry_journal,
                 admission,
@@ -1959,12 +2049,22 @@ impl McpRegistryController {
             .tools
             .iter()
             .find_map(McpToolDefinition::collapsed_catalogue);
-        let catalogue = McpCollapsedCatalogue::reconcile_structured_content(
-            previous,
-            &command.requested_name,
-            command.structured_content,
-        )
-        .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?;
+        let mut catalogue = previous.cloned();
+        for (requested_name, structured_content) in command.definitions {
+            catalogue = Some(
+                McpCollapsedCatalogue::reconcile_structured_content(
+                    catalogue.as_ref(),
+                    &requested_name,
+                    structured_content,
+                )
+                .map_err(|error| McpRegistryError::InvalidCandidate(error.to_string()))?,
+            );
+        }
+        let catalogue = catalogue.ok_or_else(|| {
+            McpRegistryError::InvalidCandidate(
+                "collapsed schema command contains no definitions".to_owned(),
+            )
+        })?;
         let successor_server = Arc::new(server.with_collapsed_catalogue(catalogue)?);
         let request_id = format!(
             "request-{}",
@@ -2165,13 +2265,12 @@ impl McpRegistryController {
                 identity: server.identity.clone(),
                 provenance: server.provenance.clone(),
                 capabilities: server.capabilities.clone(),
-                instructions: server.instructions.clone(),
                 cache: server.cache.clone(),
                 collapsed_bootstrap: server.collapsed_bootstrap,
                 factory: Arc::clone(&server.factory),
             })
             .collect::<Vec<_>>();
-        let instructions = captured_instructions(&captured_servers);
+        let instructions = captured_instructions(&servers);
         let capture = McpRegistryCapture {
             inner: Arc::new(McpRegistryCaptureInner {
                 generation: Arc::clone(&generation),
@@ -2457,6 +2556,9 @@ impl StableCaptureHasher {
                     "allow-insecure-loopback",
                     &[u8::from(config.allow_insecure_loopback)],
                 );
+                for host in &config.oauth_hosts {
+                    self.field("oauth-host", host.to_string().as_bytes());
+                }
                 if let Some(session) = admission.oauth_session() {
                     // OAuth authority is the issuer/resource/account binding,
                     // not a rotating Bearer header or a second static-header path.
@@ -3010,6 +3112,168 @@ mod collapsed_mcp_red {
         })
     }
 
+    // Feed the production search parser into the real registry publication boundary.
+    async fn publish_search(content: Value) -> (McpRegistryPublication, McpRegistryPublication) {
+        let (controller, _, first) = bootstrap().await;
+        let search = management()
+            .into_iter()
+            .find(|tool| tool.name == "search_tools")
+            .unwrap();
+        let source = McpAdmissionFingerprint::new(
+            first.capture().stable_fingerprint(),
+            format!("{SERVER}/search_tools"),
+            crate::dynamic::schema_fingerprint(&search.parameters).unwrap(),
+        )
+        .unwrap();
+        let mut result = rmcp::model::CallToolResult::success(vec![]);
+        result.structured_content = Some(content);
+        let definitions = crate::operation::search_inline_definitions(&result)
+            .expect("invalid inline schemas must not fail search");
+        assert_ne!(result.is_error, Some(true));
+        let next = controller
+            .reconcile_tool_schema(McpToolSchemaCommand::from_definitions(
+                first.capture().servers()[0].clone(),
+                first.generation().to_owned(),
+                source,
+                definitions,
+            ))
+            .await
+            .expect("one search publication");
+        (first, next)
+    }
+
+    fn search_dispatches(capture: &McpRegistryCapture, name: &str, arguments: Value) -> bool {
+        let tool = capture
+            .tools()
+            .iter()
+            .find(|tool| tool.descriptor().name == "call_tool")
+            .unwrap();
+        let fs = ego_core::permit::fake::FakeFs::default();
+        let ctx = ego_core::permit::PrepareCtx {
+            cwd: CanonPath::new("/fixture"),
+            resolver: &fs,
+        };
+        tool.prepare(json!({"tool_name":name,"arguments":arguments}), &ctx)
+            .is_ok()
+    }
+
+    // Catches: extra search definitions need another lookup or a stale second publication.
+    #[tokio::test(flavor = "current_thread")]
+    async fn collapsed_search_extra_schemas_are_callable_in_one_publication() {
+        let content = json!({"results":[{"name":"weather"}],
+            "top_schema":schema_definition("weather", weather_schema()),
+            "schemas":[schema_definition("register", json!({"type":"object","properties":{"id":{"type":"integer"}},"required":["id"],"additionalProperties":false})),
+                schema_definition("calendar", json!({"type":"object","properties":{},"additionalProperties":false}))]});
+        let (first, next) = publish_search(content).await;
+        assert_eq!(next.generation(), "generation-2");
+        for (name, args) in [
+            ("weather", json!({"city":"Rome"})),
+            ("register", json!({"id":7})),
+            ("calendar", json!({})),
+        ] {
+            assert!(
+                search_dispatches(next.capture(), name, args.clone()),
+                "{name}"
+            );
+            assert!(
+                !search_dispatches(first.capture(), name, args),
+                "old capture: {name}"
+            );
+        }
+        assert!(!search_dispatches(
+            next.capture(),
+            "register",
+            json!({"id":"7"})
+        ));
+        assert!(!search_dispatches(next.capture(), "unknown", json!({})));
+    }
+
+    // Catches: one malformed top/extra schema fails the search or hides valid siblings.
+    #[tokio::test(flavor = "current_thread")]
+    async fn collapsed_search_bad_inline_entry_preserves_good_schemas() {
+        let good = schema_definition("weather", weather_schema());
+        let mut unknown = schema_definition("bad", weather_schema());
+        unknown["unexpected"] = json!(true);
+        let oversized = schema_definition(
+            "bad",
+            json!({"type":"object","description":"x".repeat(16384)}),
+        );
+        for bad in [
+            unknown,
+            oversized,
+            json!({"name":"bad"}),
+            schema_definition("bad", json!({"type":"invalid"})),
+        ] {
+            for bad_top in [false, true] {
+                let content = if bad_top {
+                    json!({"results":[{"name":"bad"}],"top_schema":bad,"schemas":[good.clone()]})
+                } else {
+                    json!({"results":[{"name":"weather"}],"top_schema":good,"schemas":[bad]})
+                };
+                let (_, next) = publish_search(content).await;
+                assert!(search_dispatches(
+                    next.capture(),
+                    "weather",
+                    json!({"city":"Rome"})
+                ));
+                assert!(!search_dispatches(
+                    next.capture(),
+                    "bad",
+                    json!({"city":"Rome"})
+                ));
+            }
+        }
+    }
+
+    // Catches: valid individual schemas bypass the aggregate 32 KiB admission cap.
+    #[tokio::test(flavor = "current_thread")]
+    async fn collapsed_search_total_schema_cap_is_enforced() {
+        let padded = |name: &str| {
+            let mut definition = schema_definition(name, weather_schema());
+            definition["description"] = json!("");
+            let padding = 16384 - serde_json::to_vec(&definition).unwrap().len();
+            definition["description"] = json!("x".repeat(padding));
+            definition
+        };
+        let (_, next) = publish_search(json!({"results":[{"name":"first"}],
+            "top_schema":padded("first"),"schemas":[padded("second"),schema_definition("third", weather_schema())]})).await;
+        for name in ["first", "second"] {
+            assert!(search_dispatches(
+                next.capture(),
+                name,
+                json!({"city":"Rome"})
+            ));
+        }
+        assert!(!search_dispatches(
+            next.capture(),
+            "third",
+            json!({"city":"Rome"})
+        ));
+    }
+
+    // Catches: duplicate entries replace the top schema, or management names gain inner authority.
+    #[tokio::test(flavor = "current_thread")]
+    async fn collapsed_search_duplicate_and_management_schemas_are_not_admitted() {
+        let (_, next) = publish_search(json!({"results":[{"name":"weather"}],
+            "top_schema":schema_definition("weather", weather_schema()),
+            "schemas":[schema_definition("weather", json!({"type":"object"})),
+                schema_definition("call_tool", weather_schema()), schema_definition("get_tool_schema", weather_schema()),
+                schema_definition("search_tools", weather_schema())]})).await;
+        assert!(search_dispatches(
+            next.capture(),
+            "weather",
+            json!({"city":"Rome"})
+        ));
+        assert!(!search_dispatches(next.capture(), "weather", json!({})));
+        for name in ["call_tool", "get_tool_schema", "search_tools"] {
+            assert!(!search_dispatches(
+                next.capture(),
+                name,
+                json!({"city":"Rome"})
+            ));
+        }
+    }
+
     // Catches: schema admission inserts call_tool before existing wire tools and drops continuation.
     #[tokio::test(flavor = "current_thread")]
     async fn collapsed_schema_admission_preserves_generator_catalogue_bytes() {
@@ -3039,6 +3303,121 @@ mod collapsed_mcp_red {
             descriptors(second.capture()),
             "schema admission must not mutate the wire catalogue"
         );
+    }
+
+    // Catches: a fresh run-context bootstrap silently forgets a schema still in model history.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unchanged_catalogue_admission_stays_coherent() {
+        let server_admission = admission(SERVER);
+        let candidates = Arc::new(Admission::default());
+        candidates.push(Outcome::Candidate(candidate(
+            Arc::clone(&server_admission),
+            None,
+        )));
+        let controller =
+            McpRegistryController::new(Arc::new(Journal::default()), candidates.clone())
+                .expect("controller");
+        let first = controller
+            .reconcile(refresh(&server_admission))
+            .await
+            .expect("bootstrap");
+        let fixture: Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/tuic-search-top-schema.json"
+        ))
+        .expect("recorded schema fixture");
+        let known = controller
+            .reconcile_tool_schema(command(
+                first.capture(),
+                first.generation(),
+                "needle",
+                fixture["top_schema"].clone(),
+            ))
+            .await
+            .expect("recorded schema admission");
+        let fs = ego_core::permit::fake::FakeFs::default();
+        let ctx = ego_core::permit::PrepareCtx {
+            cwd: CanonPath::new("/fixture"),
+            resolver: &fs,
+        };
+        let invoke = |capture: &McpRegistryCapture, name: &str| {
+            capture
+                .tools()
+                .iter()
+                .find(|tool| tool.descriptor().name == "call_tool")
+                .expect("dispatcher")
+                .prepare(json!({"tool_name":name,"arguments":{}}), &ctx)
+        };
+        for _ in 0..2 {
+            invoke(known.capture(), "needle").expect("ordinary repeated admitted call");
+        }
+        assert!(invoke(known.capture(), "unknown").is_err());
+        for trigger in [
+            RegistryTrigger::ConfigChanged,
+            RegistryTrigger::ToolsListChanged,
+            RegistryTrigger::Reload,
+        ] {
+            candidates.push(Outcome::Candidate(candidate(
+                Arc::clone(&server_admission),
+                None,
+            )));
+            let refreshed = controller
+                .reconcile(
+                    McpRegistryRefresh::new(
+                        vec![McpRegistryCandidate::ready(
+                            Arc::clone(&server_admission),
+                            McpConfigProvenance::Layer {
+                                source: Source::User,
+                            },
+                        )],
+                        trigger,
+                        RegistryScope::All,
+                    )
+                    .expect("refresh"),
+                )
+                .await
+                .expect("refreshed context");
+            // The next model request consumes these instructions before requesting a call.
+            assert!(
+                refreshed
+                    .capture()
+                    .instructions()
+                    .iter()
+                    .any(|instruction| {
+                        instruction
+                            .text()
+                            .contains("No inner tool schemas are currently admitted")
+                            && instruction.text().contains("before the next call_tool")
+                    }),
+                "{trigger:?}: admission reset must be model-visible before dispatch"
+            );
+            assert!(
+                invoke(refreshed.capture(), "needle").is_err(),
+                "{trigger:?}: old schema must not authorize dispatch"
+            );
+            assert!(invoke(refreshed.capture(), "unknown").is_err());
+            let rediscovered = controller
+                .reconcile_tool_schema(command(
+                    refreshed.capture(),
+                    refreshed.generation(),
+                    "needle",
+                    fixture["top_schema"].clone(),
+                ))
+                .await
+                .expect("rediscovery restores admission");
+            invoke(rediscovered.capture(), "needle").expect("rediscovered call");
+            assert!(
+                !rediscovered
+                    .capture()
+                    .instructions()
+                    .iter()
+                    .any(|instruction| {
+                        instruction
+                            .text()
+                            .contains("No inner tool schemas are currently admitted")
+                    }),
+                "admitted capture must not carry a stale reset notice"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

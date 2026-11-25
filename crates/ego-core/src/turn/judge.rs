@@ -10,6 +10,7 @@ pub struct JudgeGeneration<'a, 'session, 'control> {
     pub control: &'a mut Option<&'control mut InteractiveControl>,
     pub gate: &'a SharedBudgetGate,
     pub session_id: SessionId,
+    pub cache: Option<crate::generator::types::PromptCache>,
     pub invocation: RunInvocationId,
     pub admission: &'a EvidenceAdmissionService,
     pub evidence: &'a dyn EvidenceStore,
@@ -40,6 +41,7 @@ impl JudgeGeneration<'_, '_, '_> {
         };
         let mut request = input.request_with_context(&config, context, main);
         request.thinking = profile.thinking;
+        request.cache.clone_from(&self.cache);
 
         if !self.admit_request(turn, profile, &request)? {
             return Ok(JudgeGenerationResult::Unavailable);
@@ -104,8 +106,10 @@ impl JudgeGeneration<'_, '_, '_> {
             None,
             None,
             EventKind::GenerationStarted {
+                profile: None,
                 attempt: reference,
                 role: GenerationRole::Judge,
+                cache: Some(profile.prompt_cache_request(&request)),
                 snapshot: None,
             },
         )?;
@@ -173,6 +177,16 @@ impl JudgeGeneration<'_, '_, '_> {
         )?;
 
         let (raw, truncated) = decoder.response_evidence();
+        let record = JudgeInputRecord {
+            facts: input.facts(&config, context, main).to_string(),
+            instructions: Some(input.instructions().to_owned()),
+            instructions_sha256: crate::digest::sha256_hex(input.instructions().as_bytes()),
+            model: profile.identity.0.clone(),
+            task_bytes: context.task.len(),
+            agent_reason_bytes: context.agent_reason.len(),
+            recent_calls: context.recent_calls.len(),
+            roots: context.roots.len(),
+        };
         self.journal.append(
             turn,
             None,
@@ -181,6 +195,7 @@ impl JudgeGeneration<'_, '_, '_> {
                 attempt: reference,
                 text: raw.to_owned(),
                 truncated,
+                input: Some(record),
             },
         )?;
 
@@ -229,8 +244,22 @@ impl JudgeGeneration<'_, '_, '_> {
                 }
             };
             if let AiEvent::FilterState(exchange) = event {
-                if let Err(error) = self.journal.filter_state(turn, exchange) {
+                if let Err(error) = self.journal.filter_state(
+                    turn,
+                    crate::event::domain::GenerationRole::Judge,
+                    exchange,
+                ) {
                     failure = Some(error);
+                    break;
+                }
+                continue;
+            }
+            if let AiEvent::FilterNotice { text } = event {
+                if let Err(error) = self
+                    .journal
+                    .publish(&crate::public::PublicEvent::FilterNotice { turn, text })
+                {
+                    failure = Some(error.into());
                     break;
                 }
                 continue;

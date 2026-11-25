@@ -1,9 +1,10 @@
 //! Projection of `ego-core`'s public event stream onto ACP `SessionUpdate`
 //! values.
 //!
-//! Projection functions only — no transport, no server, no state of our own. The types
-//! come from the real `agent-client-protocol-schema` crate rather than hand-rolled
-//! mirrors, so a schema bump is a compile error instead of a silently stale golden.
+//! See `ARCHITECTURE.md` §7. Projection functions only — no transport, no
+//! server, no state of our own. The types come from the real
+//! `agent-client-protocol-schema` crate rather than hand-rolled mirrors, so a
+//! schema bump is a compile error instead of a silently stale golden.
 //!
 //! ## The input is [`PublicEvent`], not `DomainEvent`
 //!
@@ -95,9 +96,11 @@
 //! - **emit nothing** (what this does) — a message that never streamed is lost
 //!   from the v1 transcript entirely.
 //!
-//! This is a real, accepted limitation, pinned by a test named for it rather than left as
-//! an unremarked absence in the golden. It is not fixable inside this module: correctness
-//! depends on what a given *client view* received, and only the connection knows that.
+//! This is a real, accepted limitation, pinned by a test named for it rather
+//! than left as an unremarked absence in the golden. It is not fixable inside
+//! this module: correctness depends on what a given *client view* received,
+//! and only the connection knows that. `ARCHITECTURE.md` §7 already classes
+//! ACP adapters as lossy projections.
 //!
 //! `ItemDelta { kind: Tool }`'s v1 `None` is the same shape of limitation: v1
 //! has no append primitive for tool-call content, and `ToolCallUpdate.content`
@@ -176,7 +179,17 @@
 //! - **`Error`** — a mid-turn error surfaces as the JSON-RPC error response to
 //!   the `session/prompt` call, a different message shape (a response's error
 //!   field, not a notification). Rendering it as an `AgentMessageChunk` would
-//!   misrepresent an RPC-level fact as conversational content.
+//!   misrepresent an RPC-level fact as conversational content. A hook notice
+//!   does not end the turn, so no RPC carries it: [`project_acp_updates_v1`]
+//!   sends it live as a notice, as replay does.
+//!
+//! ## Notices are never message chunks
+//!
+//! Every ego notice — cost anomaly, hook error, replayed failure, execution
+//! policy notice and out-of-turn card — goes through `notice_v1`, a
+//! `session_info_update` carrying `_meta.ego.notice`. A notice in
+//! `agent_message_chunk` is joined to the model's answer by any client that
+//! reads the answer from those chunks (story 1202-c67e).
 //! - **`ProviderRetry`** — a live status, not transcript, and stateful: it
 //!   must be cleared when the next attempt shows output or the turn ends.
 //!   [`AcpSink`](crate::sink::AcpSink) owns that state and sends
@@ -214,17 +227,45 @@ pub enum NoticeAction {
 }
 
 pub fn project_notice_v1(notice: &AcpNotice) -> v1::SessionUpdate {
-    v1::SessionUpdate::AgentMessageChunk(
-        v1::ContentChunk::new(notice.text.clone().into())
-            .message_id(Some(v1::MessageId::new(notice.id.clone())))
-            .meta(serde_json::Map::from_iter([(
-                "ego".to_owned(),
-                serde_json::json!({
-                    "salience": "card",
-                    "action": &notice.action,
-                }),
-            )])),
+    notice_v1(Some(&notice.id), &notice.text, Some(&notice.action))
+}
+
+/// The one ACP shape of an ego notice: `_meta.ego.notice` on a
+/// `session_info_update`.
+///
+/// Never a message chunk. A notice is not model output, and a client that
+/// reads the answer from `agent_message_chunk` would join it to the model's
+/// words (story 1202-c67e). See
+/// `docs/internals/decisions/2026-11-23-acp-notices-are-not-agent-messages.md`.
+pub(crate) fn notice_v1(
+    id: Option<&str>,
+    text: &str,
+    action: Option<&NoticeAction>,
+) -> v1::SessionUpdate {
+    v1::SessionUpdate::SessionInfoUpdate(
+        v1::SessionInfoUpdate::new().meta(notice_meta(id, text, action)),
     )
+}
+
+fn notice_v2(id: Option<&str>, text: &str) -> v2::SessionUpdate {
+    v2::SessionUpdate::SessionInfoUpdate(
+        v2::SessionInfoUpdate::new().meta(notice_meta(id, text, None)),
+    )
+}
+
+fn notice_meta(
+    id: Option<&str>,
+    text: &str,
+    action: Option<&NoticeAction>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut notice = serde_json::json!({"text": text, "salience": "card"});
+    if let Some(id) = id {
+        notice["id"] = serde_json::json!(id);
+    }
+    if let Some(action) = action {
+        notice["action"] = serde_json::json!(action);
+    }
+    serde_json::Map::from_iter([("ego".to_owned(), serde_json::json!({ "notice": notice }))])
 }
 
 /// The live retry status, as a `session_info_update` patch.
@@ -241,6 +282,7 @@ pub fn provider_retry_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
         limit,
         delay_ms,
         kind,
+        capacity,
         cause,
         recovery_remaining_ms,
         ..
@@ -267,9 +309,11 @@ pub fn provider_retry_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
         "limit": limit,
         "delayMs": delay_ms,
         "kind": kind,
+        "capacity": capacity,
         "cause": cause,
         "text": format!(
-            "{cause} — connection problem, retrying in {seconds}s ({counter})"
+            "{cause} — {}, retrying in {seconds}s ({counter})",
+            if *capacity { "provider at capacity" } else { "connection problem" }
         ),
     })))
 }
@@ -302,7 +346,7 @@ fn activity_meta() -> v1::Meta {
 /// is what serde calls a newtype, which every serializer — `serde_json`
 /// included — renders exactly as the inner value, here a plain JSON string.
 /// That is already relied on elsewhere in this workspace
-/// (`ego-core/tests/public_golden.rs`'s `id()` helper deserialises a bare UUID
+/// (`ego-core/tests/it/public_golden.rs`'s `id()` helper deserialises a bare UUID
 /// literal straight into these newtypes), so encoding through it rather than
 /// formatting the `Uuid` by hand keeps this file decoupled from `event::id`'s
 /// internal representation.
@@ -334,6 +378,23 @@ fn tool_presentation(
         "glob" | "grep" => v1::ToolKind::Search,
         _ => v1::ToolKind::Other,
     };
+    let paths: Vec<&str> = if matches!(name, "read" | "write" | "edit") {
+        input
+            .get("files")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|file| file.get("path").and_then(serde_json::Value::as_str))
+            .filter(|path| !path.is_empty())
+            .collect()
+    } else {
+        input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .filter(|path| !path.is_empty())
+            .into_iter()
+            .collect()
+    };
     let title = if name == "exec" {
         input
             .get("argv")
@@ -347,27 +408,25 @@ fn tool_presentation(
             .map(|argv| argv.join(" "))
             .unwrap_or_else(|| name.to_owned())
     } else {
-        input
-            .get("path")
-            .and_then(serde_json::Value::as_str)
-            .filter(|path| !path.is_empty())
-            .map(|path| format!("{name} {path}"))
-            .unwrap_or_else(|| name.to_owned())
+        if paths.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{name} {}", paths.join(", "))
+        }
     };
     let locations = if matches!(name, "read" | "edit" | "write") {
-        input
-            .get("path")
-            .and_then(serde_json::Value::as_str)
+        paths
+            .into_iter()
             .map(std::path::Path::new)
-            .and_then(|path| {
+            .filter_map(|path| {
                 if path.is_absolute() {
                     Some(path.to_path_buf())
                 } else {
                     root.map(|root| root.join(path))
                 }
             })
-            .map(|path| vec![v1::ToolCallLocation::new(path)])
-            .unwrap_or_default()
+            .map(v1::ToolCallLocation::new)
+            .collect()
     } else {
         Vec::new()
     };
@@ -393,9 +452,13 @@ fn stop_reason_v2(exit_reason: ExitReason) -> v2::StopReason {
         // durable log and in the CLI's exit code; flattening it here is a
         // projection, which is what this module is.
         ExitReason::Cancelled(_) => v2::StopReason::Cancelled,
-        // A cancelled turn is over; a paused turn is waiting. Keeping them distinct
-        // lets a host offer resume only when resumption is possible.
+        // Deliberately *not* folded into `Cancelled` with the causes above: a
+        // cancelled turn is over and a paused one is waiting, and a host that
+        // read them as the same word would either offer no way to resume or
+        // offer one that cannot work. See
+        // `docs/internals/decisions/2026-09-03-acp-host-control-is-negotiated-per-session.md`.
         ExitReason::Paused => v2::StopReason::Other("_paused".to_string()),
+        ExitReason::Guard => v2::StopReason::Other("_guard".to_string()),
         ExitReason::Provider => v2::StopReason::Other("_provider".to_string()),
         ExitReason::ContextOverflow => v2::StopReason::Other("_context_overflow".to_string()),
         ExitReason::Internal => v2::StopReason::Other("_internal".to_string()),
@@ -468,6 +531,7 @@ pub fn stop_reason_v1(termination: &RunTermination) -> Result<v1::StopReason, St
         )),
         RunTermination::TaskFailed => Err("the turn ran and the task did not succeed".to_string()),
         RunTermination::UsageError { message }
+        | RunTermination::Guard { message }
         | RunTermination::Provider { message }
         | RunTermination::ProviderUncertain { message }
         | RunTermination::ContextOverflow { message }
@@ -565,16 +629,50 @@ pub fn project_acp_v1(
 /// to at most one final update because only the final durable state and the
 /// latest admitted model's durable context window describe the session being
 /// attached now.
+///
+/// `session/load` opens an empty client view, so replay knows what that view
+/// received. Story 842 stopped persisting message chunks, so a message with no
+/// replayed chunk is sent as one chunk at its last completion.
 pub fn project_replay_v1(
     frames: &[ReplayFrame],
     context_window: Option<u64>,
     root: &std::path::Path,
+    session: &str,
 ) -> Vec<v1::SessionUpdate> {
-    let mut updates = frames
+    let frames: Vec<&ReplayFrame> = frames
         .iter()
         // Child-only frames were not part of standard replay before the extension.
         // Keep the existing error-card positions stable for ordinary clients.
         .filter(|frame| !matches!(frame.event, PublicEvent::ChildLifecycle { .. }))
+        .collect();
+    // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
+    // A log written before story 842 replays its chunks; its final message
+    // must not repeat them.
+    let streamed: std::collections::HashSet<ItemId> = frames
+        .iter()
+        .filter_map(|frame| match frame.event {
+            PublicEvent::ItemDelta {
+                item,
+                kind: ItemKind::AgentMessage,
+                ..
+            } => Some(item),
+            _ => None,
+        })
+        .collect();
+    let last_completion: std::collections::HashMap<ItemId, usize> = frames
+        .iter()
+        .enumerate()
+        .filter_map(|(position, frame)| match frame.event {
+            PublicEvent::ItemCompleted {
+                item,
+                kind: ItemKind::AgentMessage,
+                ..
+            } => Some((item, position)),
+            _ => None,
+        })
+        .collect();
+    let mut updates = frames
+        .iter()
         .enumerate()
         .flat_map(|(position, frame)| {
             // The original prompt RPC carried this failure live. On load
@@ -587,23 +685,42 @@ pub fn project_replay_v1(
                 ..
             } = &frame.event
             {
-                vec![v1::SessionUpdate::AgentMessageChunk(
-                    v1::ContentChunk::new(message.clone().into())
-                        .message_id(Some(v1::MessageId::new(format!(
-                            "replay-error-{turn:?}-{item:?}-{position}"
-                        ))))
-                        .meta(serde_json::Map::from_iter([(
-                            "ego".to_owned(),
-                            serde_json::json!({"salience": "card"}),
-                        )])),
+                vec![notice_v1(
+                    Some(&format!("replay-error-{turn:?}-{item:?}-{position}")),
+                    message,
+                    None,
                 )]
             } else if matches!(frame.event, PublicEvent::PlanUpdated { .. }) {
                 vec![project_plan_v1(&frame.state.plan)]
+            } else if let PublicEvent::ItemCompleted {
+                item,
+                kind: ItemKind::AgentMessage,
+                text: Some(text),
+                ..
+            } = &frame.event
+                && !streamed.contains(item)
+                && last_completion.get(item) == Some(&position)
+            {
+                vec![v1::SessionUpdate::AgentMessageChunk(
+                    v1::ContentChunk::new(text.clone().into())
+                        .message_id(Some(v1::MessageId::new(item_id_string(*item)))),
+                )]
             } else {
                 project_updates_v1(&frame.event, root)
             };
+            correlate_tool_updates(&mut updates, session, &frame.state);
             if frame.inherited {
                 for update in &mut updates {
+                    if let v1::SessionUpdate::SessionInfoUpdate(info) = update
+                        && let Some(notice) = info
+                            .meta
+                            .as_mut()
+                            .and_then(|meta| meta.get_mut("ego"))
+                            .and_then(|ego| ego.get_mut("notice"))
+                    {
+                        notice["inherited"] = serde_json::Value::Bool(true);
+                        continue;
+                    }
                     let meta = match update {
                         v1::SessionUpdate::UserMessageChunk(chunk)
                         | v1::SessionUpdate::AgentMessageChunk(chunk)
@@ -684,18 +801,10 @@ fn project_v1_with_root(
             model,
             estimated_upper_bound,
             cause,
-        } => Some(v1::SessionUpdate::AgentMessageChunk(
-            v1::ContentChunk::new(
-                ego_core::public::cost_anomaly_message(
-                    model,
-                    estimated_upper_bound.as_ref(),
-                    *cause,
-                )
-                .into(),
-            )
-            .message_id(Some(v1::MessageId::new(format!(
-                "cost-anomaly-{turn:?}-{model}"
-            )))),
+        } => Some(notice_v1(
+            Some(&format!("cost-anomaly-{turn:?}-{model}")),
+            &ego_core::public::cost_anomaly_message(model, estimated_upper_bound.as_ref(), *cause),
+            None,
         )),
 
         PublicEvent::ItemStarted {
@@ -802,9 +911,11 @@ fn project_v1_with_root(
         // See the module doc comment's "no counterpart in either version"
         // list, plus v1's own note for `TurnCompleted`. The two usage-shaped
         // events need reduced state and are handled by `project_acp_v1`.
-        PublicEvent::ChildProgress { .. }
+        PublicEvent::GenerationProfileSelected { .. }
+        | PublicEvent::ChildProgress { .. }
         | PublicEvent::ChildLifecycle { .. }
         | PublicEvent::SessionStarted { .. }
+        | PublicEvent::SessionCompacted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
@@ -814,7 +925,9 @@ fn project_v1_with_root(
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
         | PublicEvent::Error { .. }
-        | PublicEvent::PlanUpdated { .. } => None,
+        | PublicEvent::PlanUpdated { .. }
+        | PublicEvent::FilterNotice { .. }
+        | PublicEvent::SkillSafety { .. } => None,
     }
 }
 
@@ -851,6 +964,8 @@ pub fn project_acp_updates_v1(
 ) -> Vec<v1::SessionUpdate> {
     let mut updates = if matches!(event, PublicEvent::PlanUpdated { .. }) {
         vec![project_plan_v1(&state_after.plan)]
+    } else if let Some(notice) = hook_notice_v1(event, state_after) {
+        vec![notice]
     } else if needs_state(event) {
         project_acp_v1(event, state_after, caps)
             .into_iter()
@@ -866,6 +981,32 @@ pub fn project_acp_updates_v1(
         updates.push(plan);
     }
     updates
+}
+
+/// A hook-produced error does not end the turn, so no prompt RPC carries it.
+/// The reducer records it in `errors` only, never in `non_hook_errors`; a
+/// turn failure is the latest non-hook error and stays with the RPC.
+fn hook_notice_v1(event: &PublicEvent, state_after: &SessionState) -> Option<v1::SessionUpdate> {
+    let PublicEvent::Error {
+        turn,
+        item,
+        message,
+        ..
+    } = event
+    else {
+        return None;
+    };
+    if state_after.non_hook_errors.last() == Some(message) {
+        return None;
+    }
+    Some(notice_v1(
+        Some(&format!(
+            "hook-notice-{turn:?}-{item:?}-{}",
+            state_after.errors.len()
+        )),
+        message,
+        None,
+    ))
 }
 
 /// Goals are objectives, never fabricated plan steps.
@@ -893,7 +1034,10 @@ pub fn project_plan_v1(plan: &ego_core::plan::Plan) -> v1::SessionUpdate {
             .iter()
             .map(|step| {
                 let status = match step.status {
-                    StepStatus::Pending | StepStatus::Blocked => v1::PlanEntryStatus::Pending,
+                    StepStatus::Pending
+                    | StepStatus::Blocked
+                    | StepStatus::Waiting
+                    | StepStatus::Cancelled => v1::PlanEntryStatus::Pending,
                     StepStatus::InProgress => v1::PlanEntryStatus::InProgress,
                     StepStatus::Completed => v1::PlanEntryStatus::Completed,
                 };
@@ -920,11 +1064,10 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
             model,
             estimated_upper_bound,
             cause,
-        } => Some(v2::SessionUpdate::AgentMessageChunk(v2::ContentChunk::new(
-            ego_core::public::cost_anomaly_message(model, estimated_upper_bound.as_ref(), *cause)
-                .into(),
-            format!("cost-anomaly-{turn:?}-{model}"),
-        ))),
+        } => Some(notice_v2(
+            Some(&format!("cost-anomaly-{turn:?}-{model}")),
+            &ego_core::public::cost_anomaly_message(model, estimated_upper_bound.as_ref(), *cause),
+        )),
 
         PublicEvent::ItemStarted {
             item,
@@ -1018,9 +1161,11 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         // See the module doc comment's "no counterpart in either version"
         // list. The two usage-shaped events need reduced state and are
         // handled by `project_acp_v2`.
-        PublicEvent::ChildProgress { .. }
+        PublicEvent::GenerationProfileSelected { .. }
+        | PublicEvent::ChildProgress { .. }
         | PublicEvent::ChildLifecycle { .. }
         | PublicEvent::SessionStarted { .. }
+        | PublicEvent::SessionCompacted { .. }
         | PublicEvent::TurnStarted { .. }
         | PublicEvent::MeteringSelected { .. }
         | PublicEvent::FallbackDecision { .. }
@@ -1029,7 +1174,9 @@ pub fn project_v2(event: &PublicEvent) -> Option<v2::SessionUpdate> {
         | PublicEvent::UsageUpdated { .. }
         | PublicEvent::ContextWindowUpdated { .. }
         | PublicEvent::Error { .. }
-        | PublicEvent::PlanUpdated { .. } => None,
+        | PublicEvent::PlanUpdated { .. }
+        | PublicEvent::FilterNotice { .. }
+        | PublicEvent::SkillSafety { .. } => None,
     }
 }
 
@@ -1057,6 +1204,30 @@ pub fn child_activity_meta(activity: serde_json::Value) -> v1::SessionUpdate {
             "ego".to_owned(),
             serde_json::json!({"childActivity": activity}),
         )]),
+    ))
+}
+
+/// An in-process compaction: the conversation continues in `targetSessionId`.
+/// Sent on the client's session id, before any update of the continuation.
+pub fn project_compacted_v1(event: &PublicEvent) -> Option<v1::SessionUpdate> {
+    let PublicEvent::SessionCompacted {
+        source,
+        source_seq,
+        target,
+    } = event
+    else {
+        return None;
+    };
+    Some(v1::SessionUpdate::SessionInfoUpdate(
+        v1::SessionInfoUpdate::new().meta(serde_json::Map::from_iter([(
+            "ego".to_owned(),
+            serde_json::json!({"compacted": {
+                "version": 1,
+                "sourceSessionId": source,
+                "sourceSeq": source_seq,
+                "targetSessionId": target,
+            }}),
+        )])),
     ))
 }
 
@@ -1104,4 +1275,38 @@ pub fn project_child_snapshot_v1(events: &[PublicEvent]) -> v1::SessionUpdate {
     child_activity_meta(serde_json::json!({
         "version":1,"kind":"snapshot","children":children.into_iter().map(|(turn,item,child)| serde_json::json!({"turnId":turn,"itemId":item,"child":child})).collect::<Vec<_>>()
     }))
+}
+
+/// Attach the dispatch identity from reduced durable state, never from display text.
+pub(crate) fn correlate_tool_updates(
+    updates: &mut [v1::SessionUpdate],
+    session: &str,
+    state: &SessionState,
+) {
+    for update in updates {
+        let v1::SessionUpdate::ToolCall(call) = update else {
+            continue;
+        };
+        let Ok(item_id) = call.tool_call_id.to_string().parse::<ItemId>() else {
+            continue;
+        };
+        let Some(item) = state
+            .items
+            .get(&item_id)
+            .filter(|item| item.tool_call_started.is_some())
+        else {
+            continue;
+        };
+        let id = ego_core::mcp::tool_call_correlation_id(session, item_id, item.call_id.as_deref());
+        call.meta
+            .get_or_insert_with(Default::default)
+            .insert("tuic/call_id".to_owned(), serde_json::json!(id));
+    }
+}
+
+/// Shared subscription quota, not context-window occupancy.
+pub fn rate_limits_v1(limits: &[ego_core::quota::RateLimits]) -> v1::SessionUpdate {
+    v1::SessionUpdate::SessionInfoUpdate(v1::SessionInfoUpdate::new().meta(
+        serde_json::Map::from_iter([("ego".into(), serde_json::json!({"rate_limits": limits}))]),
+    ))
 }

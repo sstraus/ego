@@ -465,7 +465,11 @@ where
                 .bindings_builder
                 .build_sink(session_id, request_state)?,
             None,
-        ))
+        )
+        .with_model_selection_ceiling(ego_core::model_catalogue::ModelSelectionCeiling {
+            models: self.config.policy.allowed_models.clone(),
+            effort: self.config.policy.max_thinking,
+        }))
     }
 
     fn schedule(&self, execution: RunExecution) -> Result<(), McpError> {
