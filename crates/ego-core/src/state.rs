@@ -1292,6 +1292,14 @@ pub struct SessionState {
     pub refusals: Vec<Refusal>,
     /// The last reported context-window occupancy.
     pub context: ContextWindow,
+    /// The journal position of the event that stated `context`. History items
+    /// after it are the unsent delta of the next request.
+    #[serde(default)]
+    pub context_measured_seq: Seq,
+    /// The position of the measurement before that one: tool results of calls
+    /// issued since then were not in the measured request.
+    #[serde(default)]
+    pub context_prev_measured_seq: Seq,
     /// Permission requests and decisions, in application order.
     pub permissions: Vec<PermissionEvent>,
     /// The latest complete admitted hook catalogue.
@@ -1404,6 +1412,8 @@ impl Default for SessionState {
             attribution_began: false,
             refusals: Vec::default(),
             context: ContextWindow::default(),
+            context_measured_seq: Seq::default(),
+            context_prev_measured_seq: Seq::default(),
             permissions: Vec::default(),
             hook_catalogue: HookCatalogueEvidence::default(),
             hook_occurrences: Vec::default(),
@@ -2639,6 +2649,8 @@ impl SessionState {
                 // record that states none leaves the last stated one standing,
                 // because "this build wrote no window" is not "the window went
                 // away".
+                self.context_prev_measured_seq = self.context_measured_seq;
+                self.context_measured_seq = ev.env.seq;
                 self.context = ContextWindow {
                     used_tokens: Some(*used_tokens),
                     provenance: Some(*provenance),

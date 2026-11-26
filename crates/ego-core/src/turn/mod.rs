@@ -11,6 +11,7 @@
 //! decision inside it is a pure function it calls.
 
 mod batch;
+mod call_args;
 mod catalogue;
 mod commands;
 mod compaction_fit;
@@ -120,6 +121,11 @@ use crate::store::session_store::{SessionStore, StoreError};
 /// The model has no other way to get the root: running `ego` itself would change the
 /// owner's saved configuration without the owner choosing session or permanent.
 const ROOT_DIALOG_UNAVAILABLE: &str = "No owner approval is possible now. Stop and report this to the owner; do not run ego commands to change roots, rules or configuration.";
+
+/// A directly invoked skill or command is the user's whole request. Without
+/// this line the instructions read as background data and a model may answer
+/// that it received no request.
+const DIRECT_SKILL_REQUEST: &str = "\nThe user invoked this skill or command directly. This is their request: carry out its instructions now.\n";
 
 enum HookGateResult {
     Continue,
@@ -2434,6 +2440,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             latest_user_request,
             constraints,
             owner_sandbox_grants: self.state().owner_sandbox_grants,
+            session_roots: self.state().session_roots.clone(),
             connection: self
                 .state()
                 .session_selections
@@ -5726,7 +5733,11 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 return Ok(std::ops::ControlFlow::Break(ended));
             }
 
-            let stop = settlement.outcome.stop();
+            let stop = if drained.degenerate {
+                StopReason::Error
+            } else {
+                settlement.outcome.stop()
+            };
             let unsent = settlement.outcome.delivery() == DeliveryCertainty::DefinitelyUnsent;
             let (reported, retry_after) = drained.provider_failure.unzip();
             let capacity = drained.capacity;
@@ -6185,10 +6196,12 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let policy_snapshot = walk.capture.snapshot();
         let descriptors = catalogue.descriptors();
         let mcp_servers = catalogue.mcp_servers();
-        if let Some(message) = context_capacity::exhausted(
-            self.state().context,
-            profile.capabilities.max_context_tokens,
-        ) {
+        let measured = self.state();
+        let unsent = context_capacity::unsent_delta_tokens(&measured);
+        let projected = context_capacity::projected(measured.context, unsent);
+        if let Some(message) =
+            context_capacity::exhausted(projected, profile.capabilities.max_context_tokens, unsent)
+        {
             if self.automatic_compaction {
                 return Ok(std::ops::ControlFlow::Break(Generated::Ended(
                     ExitReason::ContextOverflow,
@@ -6199,9 +6212,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 .map(std::ops::ControlFlow::Break);
         }
 
-        if self.automatic_compaction
-            && compaction_due(self.state().context, self.compaction_threshold)
-        {
+        if self.automatic_compaction && compaction_due(projected, self.compaction_threshold) {
             // Pressure recovery is a host transition, not a user-visible failure.
             return Ok(std::ops::ControlFlow::Break(Generated::Ended(
                 ExitReason::ContextOverflow,
@@ -6965,9 +6976,14 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 continue;
             }
             let rendered = format!(
-                "{marker} {}):\n{}\n",
+                "{marker} {}):\n{}\n{}",
                 invocation.provenance_tag(),
-                invocation.rendered_text()
+                invocation.rendered_text(),
+                if self.directly_invoked(invocation.id()) {
+                    DIRECT_SKILL_REQUEST
+                } else {
+                    ""
+                }
             );
             self.journal.append(
                 turn,
@@ -6983,6 +6999,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             Conversation::new(messages).expect("context data adds no tool call or answer"),
             stable_messages,
         ))
+    }
+
+    /// True when the user, not the model, invoked this skill or command.
+    fn directly_invoked(&self, invocation: crate::event::skill::SkillInvocationId) -> bool {
+        self.state().skill_events().iter().any(|event| {
+            matches!(event, crate::state::SkillEvent::Instruction(admitted)
+                if admitted.invocation == invocation
+                    && admitted.parent.is_none()
+                    && admitted.item.is_some())
+        })
     }
 
     fn durable_skill_messages(&self) -> Result<Vec<Message>, StoreError> {
@@ -7018,11 +7044,16 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     "rendered skill blob is not valid UTF-8",
                 ))
             })?;
+            let request = if evidence.parent.is_none() && evidence.item.is_some() {
+                DIRECT_SKILL_REQUEST
+            } else {
+                ""
+            };
             messages.push(Message::text(
                 Role::User,
                 format!(
                     "Admitted skill instruction (invocation {}; source={:?} \
-                     location={} digest={}):\n{text}",
+                     location={} digest={}):\n{text}{request}",
                     evidence.invocation, evidence.source, evidence.location, evidence.source_digest,
                 ),
             ));
@@ -7444,6 +7475,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
         let mut stated_cost: Option<Money> = None;
         let mut accounting_booked = false;
         let mut replay_unsafe = false;
+        let mut degenerate = false;
         let mut visible_text = false;
         let mut unrun_output = false;
         let mut provider_failure = None;
@@ -7483,6 +7515,55 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                 event => (event, None),
             };
             let event = project_generation_event(event);
+            // A degenerate argument flood aborts the generation as a retryable
+            // failure and is never stored; an oversize one is refused with a
+            // bounded journal copy.
+            let (event, refusal) = match event {
+                AiEvent::ToolCall { name, args, .. }
+                    if context.visibility == GenerationVisibility::Conversation
+                        && let Some(cause) = call_args::degenerate_cause(&args) =>
+                {
+                    let message = call_args::degenerate_message(&name, args.len(), cause);
+                    error_kind = Some(ErrorKind::Transient);
+                    error_message = Some(message.clone());
+                    degenerate = true;
+                    if let Err(error) = self.journal.append(
+                        turn,
+                        None,
+                        None,
+                        EventKind::Error {
+                            message,
+                            kind: ErrorKind::Transient,
+                        },
+                    ) {
+                        failure = Some(error.into());
+                    } else if let Err(error) = self.close_unstarted_siblings(turn, &output.pending)
+                    {
+                        failure = Some(error);
+                    }
+                    output.pending.clear();
+                    break;
+                }
+                AiEvent::ToolCall {
+                    call_id,
+                    name,
+                    args,
+                } if context.visibility == GenerationVisibility::Conversation
+                    && args.len() > call_args::MAX_TOOL_CALL_ARGS_BYTES =>
+                {
+                    let message = call_args::oversize_refusal(&name, args.len());
+                    let args = crate::generator::history::bounded_replay_args(&args).into_owned();
+                    (
+                        AiEvent::ToolCall {
+                            call_id,
+                            name,
+                            args,
+                        },
+                        Some(message),
+                    )
+                }
+                event => (event, refusal),
+            };
             if context.visibility == GenerationVisibility::Conversation
                 && let AiEvent::ToolCall { name, args, .. } = &event
             {
@@ -7708,6 +7789,7 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
             visible_text,
             message: output.message,
             unrun_output,
+            degenerate,
             provider_failure,
             capacity,
         }
@@ -10124,6 +10206,8 @@ struct Drained {
     /// Opaque reasoning or parsed tools, which drain never dispatches. Their
     /// recovery allowance is one retry, within the existing budget and deadline.
     unrun_output: bool,
+    /// The generation was aborted for a degenerate tool-argument flood.
+    degenerate: bool,
     /// The last host-safe failure the provider itself reported, and its
     /// `Retry-After`, if it reported one.
     provider_failure: Option<(String, Option<Duration>)>,

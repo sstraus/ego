@@ -1,0 +1,436 @@
+{
+  "schema": 1,
+  "run_id": "20261022T224702Z-b9449d9b",
+  "status": "aborted_infrastructure",
+  "source_commit": "8e873366",
+  "binary_sha256_before": null,
+  "binary_sha256_after": null,
+  "binary_provenance_gap": "Wrapper held pre-run hash only in memory; post-run binary deletion prevented receipt persistence. No request-time binary hash can be recovered from that wrapper.",
+  "ceiling_usd": "0.95",
+  "provider_ceiling_usd": "0.90",
+  "cost_usd": "0",
+  "cost_uncertain": false,
+  "provider_costs_usd": {
+    "openai-codex": "0",
+    "openai": "0",
+    "openrouter": "0",
+    "anthropic": "0"
+  },
+  "not_attempted": [
+    "openai",
+    "openrouter",
+    "anthropic"
+  ],
+  "cases": [
+    {
+      "workspace": "001-cache",
+      "case": "fork",
+      "session": "01a165cc-6b3e-714b-bfb7-8b9980b0b886",
+      "journal_sha256": "a1946507d639fca784429bd79c7129d826202e3f4499df204fb57fa9ecc1fa5c",
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6918,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0
+      }
+    },
+    {
+      "workspace": "001-cache",
+      "case": "multi-turn-tool-resume",
+      "session": "acc4ffcc-88c2-42b8-beae-143582e1211d",
+      "journal_sha256": "b72953341769bc37cd5222c5508f5837683fcb1987ac64e86de2087b11b9fc06",
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6743414634146342
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 1,
+            "weighted_share": 0.8064278166557011
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4217,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4441,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.9223147939653231,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4665,
+            "cache_read_tokens": 4224,
+            "cache_read_share": 0.9054662379421222,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4889,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.9163428103906729,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5125,
+            "cache_read_tokens": 4736,
+            "cache_read_share": 0.9240975609756098,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5349,
+            "cache_read_tokens": 4992,
+            "cache_read_share": 0.9332585530005608,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5573,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5797,
+            "cache_read_tokens": 5120,
+            "cache_read_share": 0.8832154562704847,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6033,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.9335322393502403,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6257,
+            "cache_read_tokens": 5376,
+            "cache_read_share": 0.8591976985775931,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6481,
+            "cache_read_tokens": 5888,
+            "cache_read_share": 0.9085017744175281,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6705,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.9354213273676361,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8287694691347958,
+        "later_zero_hits": 1,
+        "read_calls": 9
+      }
+    },
+    {
+      "workspace": "002-cache",
+      "case": "fork",
+      "session": "01a165cd-2494-75e2-a449-945d62b9d468",
+      "journal_sha256": "e1cd7589a9093f178fe87f9b8945464bcf9370052c2b67af79b0b82e6003f421",
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6963,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0
+      }
+    },
+    {
+      "workspace": "002-cache",
+      "case": "multi-turn-tool-resume",
+      "session": "32083a1a-df62-4a4c-a1b7-40341e649e78",
+      "journal_sha256": "f038061fb6295193c971257a1becb4453b73538257fbf31b3cc017d9c4a186dc",
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6717201166180758
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9293578527643873
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4221,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4449,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.9206563272645538,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4677,
+            "cache_read_tokens": 4224,
+            "cache_read_share": 0.9031430404105195,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4905,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.9133537206931702,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5145,
+            "cache_read_tokens": 4736,
+            "cache_read_share": 0.9205053449951409,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5373,
+            "cache_read_tokens": 4992,
+            "cache_read_share": 0.9290898939140145,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5601,
+            "cache_read_tokens": 5248,
+            "cache_read_share": 0.9369755400821282,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5829,
+            "cache_read_tokens": 5376,
+            "cache_read_share": 0.9222851260936696,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6069,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.9279947273026857,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6297,
+            "cache_read_tokens": 5888,
+            "cache_read_share": 0.9350484357630617,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6525,
+            "cache_read_tokens": 6144,
+            "cache_read_share": 0.9416091954022988,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6753,
+            "cache_read_tokens": 6400,
+            "cache_read_share": 0.9477269361765142,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9284844944257826,
+        "later_zero_hits": 0,
+        "read_calls": 9
+      }
+    },
+    {
+      "workspace": "003-cache",
+      "case": "multi-turn-tool-resume",
+      "session": "db07269f-9d56-42d7-9645-5d21e18f6d5b",
+      "journal_sha256": "7f16413ec34117fe277817584bdf71c82c38841f395961c47421cff426a44a30",
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.679388348287628
+          },
+          "later": {
+            "requests": 10,
+            "zero_hits": 2,
+            "weighted_share": 0.8255194253495018
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4222,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4451,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.9202426421028982,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_read_share": null,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4680,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5097,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.878948401020208,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5338,
+            "cache_read_tokens": 4864,
+            "cache_read_share": 0.9112026976395654,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5567,
+            "cache_read_tokens": 5120,
+            "cache_read_share": 0.9197054068618645,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5796,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.7729468599033816,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6025,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.9347717842323652,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6266,
+            "cache_read_tokens": 5888,
+            "cache_read_share": 0.939674433450367,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6495,
+            "cache_read_tokens": 6144,
+            "cache_read_share": 0.9459584295612009,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6724,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.9327781082688875,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6953,
+            "cache_read_tokens": 6528,
+            "cache_read_share": 0.9388753056234719,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8440181726400807,
+        "later_zero_hits": 2,
+        "read_calls": 9
+      }
+    }
+  ],
+  "failure": "FileNotFoundError launching fork after third cache repeat; mbx target executable disappeared during matrix. Runner aborted before result persistence.",
+  "direct_anthropic_reason": "deferred until 2026-11-01"
+}

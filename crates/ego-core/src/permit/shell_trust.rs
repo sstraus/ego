@@ -11,6 +11,10 @@ fn trusted_path(path: &Path) -> bool {
             "/bin",
             "/usr/bin",
             "/usr/sbin",
+            // Ubuntu 26.04 links `ls`, `wc` and friends from /usr/bin to the
+            // root-owned multicall binaries that its package installs here.
+            "/usr/lib/cargo/bin/coreutils",
+            "/usr/lib/cargo/bin/findutils",
             "/opt/homebrew/bin",
             "/opt/homebrew/opt",
             "/opt/homebrew/Cellar",
@@ -134,4 +138,22 @@ fn trusted_inner(program: &str, spec: &SpawnSpec, identity: &ExecutionIdentity) 
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trusted_path;
+    use std::path::Path;
+
+    // Catches: a distribution whose system tools resolve to packaged multicall
+    // binaries outside /usr/bin loses read-only approval for `ls`.
+    #[test]
+    fn packaged_system_multicall_binaries_are_trusted_and_lookalikes_are_not() {
+        assert!(trusted_path(Path::new("/usr/lib/cargo/bin/coreutils/ls")));
+        assert!(trusted_path(Path::new("/usr/lib/cargo/bin/findutils/find")));
+        assert!(!trusted_path(Path::new("/usr/lib/cargo/bin/coreutilsx/ls")));
+        assert!(!trusted_path(Path::new(
+            "/usr/lib/cargo/bin/coreutils/../x"
+        )));
+    }
 }

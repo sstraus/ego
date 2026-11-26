@@ -67,7 +67,10 @@ fn fixture() -> (tempfile::TempDir, PathBuf, LocalRepository) {
     fs::create_dir(&root).unwrap();
     git(&root, &["init", "-q", "-b", "master"]);
     fs::write(root.join("tracked"), "committed\n").unwrap();
-    git(&root, &["add", "tracked"]);
+    // No line-ending conversion, so the checkout reads back the bytes committed
+    // whatever `core.autocrlf` the host sets.
+    fs::write(root.join(".gitattributes"), "* -text\n").unwrap();
+    git(&root, &["add", "tracked", ".gitattributes"]);
     git(&root, &["commit", "-qm", "initial"]);
     let home = dir.path().join("ego");
     fs::create_dir(&home).unwrap();

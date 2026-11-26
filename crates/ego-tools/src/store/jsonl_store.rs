@@ -1521,6 +1521,14 @@ impl JsonlStore {
             0
         };
         let metadata_trailing = &metadata_trailing[owner_count..];
+        // Compaction and fork both continue the source's live session roots as
+        // owner-approval receipts in the same atomic seed image, directly after
+        // any owner sandbox grants and before descriptive metadata.
+        let root_count = metadata_trailing
+            .iter()
+            .take_while(|event| matches!(event.kind, EventKind::SessionRootGranted { .. }))
+            .count();
+        let metadata_trailing = &metadata_trailing[root_count..];
         let is_title = |event: &&DomainEvent| {
             matches!(
                 &event.kind,

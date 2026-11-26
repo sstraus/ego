@@ -137,6 +137,7 @@ pub struct PreparedCompaction {
     pub(crate) latest_user_request: Option<String>,
     pub(crate) constraints: ConstraintLedger,
     pub(crate) owner_sandbox_grants: Vec<crate::permit::SandboxGrant>,
+    pub(crate) session_roots: Vec<crate::permit::ProfileRoot>,
     pub(crate) connection: Option<String>,
     pub(crate) baseline: GenRequest,
     pub(crate) title: Option<String>,
@@ -179,6 +180,7 @@ impl PreparedCompaction {
         .with_latest_user_request(self.latest_user_request.clone())
         .with_constraints(self.constraints.clone())
         .with_owner_sandbox_grants(&self.owner_sandbox_grants)
+        .with_session_roots(&self.session_roots)
         .with_title(self.title.clone())
         .with_goal(self.goal.as_ref())
         .with_plan(&self.plan)
@@ -665,6 +667,7 @@ mod transition_contract_tests {
             latest_user_request: None,
             constraints: ConstraintLedger::default(),
             owner_sandbox_grants: Vec::new(),
+            session_roots: Vec::new(),
             connection: None,
             baseline: GenRequest {
                 web_search: None,

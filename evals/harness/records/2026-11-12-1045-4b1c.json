@@ -1,0 +1,36 @@
+{
+  "story": "1045-4b1c",
+  "surface_digests": {
+    "prompts": "0e26efac5474c5a8354c7c276642148ff3770a005c880459326e35c83ed60cc9",
+    "tools": "5c077e58e350b92a5ba0d980b2ab82b053ab476e8ae75af8a0c1a7075f7a86d6",
+    "context": "ce89d2adecd5f78301adf7360d3d44f9b9359b849340b5f2071d9a9946e72fe3",
+    "models": "79ead4632bda365b21ebe4ef05cd541d8f01ad907115a72cef85b7f5b7d781d8"
+  },
+  "base_commit": "04c1bce28491f09482f43fca2d3568f81dac9d46",
+  "candidate_commit": "ee7eea8bc",
+  "binary_sha256": {
+    "baseline": [
+      "1292f43598649e7b29b0e937f34d1229e0f65d530fc5f4033d51a21e0a5a32d7"
+    ],
+    "candidate": [
+      "7d242831280f5c1af4f21cc6f908be854d3505ef14c13e18875251c2734da4ce"
+    ]
+  },
+  "model": "openrouter/anthropic/claude-haiku-5.5",
+  "decision": "neutral",
+  "cost_flag": false,
+  "totals": {
+    "baseline": {
+      "runs": 18,
+      "invalid": 0,
+      "passes": 16,
+      "median_cost_usd": 0.003653205
+    },
+    "candidate": {
+      "runs": 18,
+      "invalid": 1,
+      "passes": 15,
+      "median_cost_usd": 0.00366689
+    }
+  }
+}

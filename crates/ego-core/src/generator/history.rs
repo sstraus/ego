@@ -71,6 +71,38 @@ const TORN: &str = "the tool call did not complete: the session ended before its
      It may already have taken effect. Check the current state of whatever it \
      would have changed before calling it again";
 
+/// Largest argument text of one past tool call that is replayed verbatim.
+pub(crate) const MAX_REPLAY_ARGS_BYTES: usize = 32 * 1024;
+
+/// Bytes of the original argument text kept as a faithful prefix when it is bounded.
+const REPLAY_ARGS_PREFIX_BYTES: usize = 1024;
+
+/// The argument text a past call is replayed with.
+///
+/// The journal keeps whatever the provider streamed; the request must not.
+/// An interrupted, refused or accepted call whose arguments exceed the bound
+/// is replayed as a valid JSON object holding a short prefix and the original
+/// length, so every provider encoder still receives an object.
+pub(crate) fn bounded_replay_args(args: &str) -> std::borrow::Cow<'_, str> {
+    if args.len() <= MAX_REPLAY_ARGS_BYTES {
+        return std::borrow::Cow::Borrowed(args);
+    }
+    let mut end = REPLAY_ARGS_PREFIX_BYTES;
+    while !args.is_char_boundary(end) {
+        end -= 1;
+    }
+    std::borrow::Cow::Owned(
+        serde_json::json!({
+            "ego_truncated_arguments": {
+                "original_bytes": args.len(),
+                "prefix": &args[..end],
+                "note": "the original arguments were too large to replay; only this prefix is kept",
+            }
+        })
+        .to_string(),
+    )
+}
+
 /// Rebuild `state`'s history as something a provider will accept, and say
 /// what had to be repaired to get there.
 ///
@@ -478,7 +510,7 @@ fn conversation_from_inner(
                         ContentBlock::ToolUse {
                             call_id: call_id.clone(),
                             name: call.tool_name.clone().unwrap_or_default(),
-                            args: call.args.clone(),
+                            args: bounded_replay_args(&call.args).into_owned(),
                         },
                     );
                 }
@@ -827,5 +859,57 @@ mod ordered_prompt_tests {
             .unwrap_err();
             assert!(matches!(error, HistoryError::ImagePromptInvalid { .. }));
         }
+    }
+}
+
+#[cfg(test)]
+mod bounded_replay_tests {
+    use super::*;
+
+    // Catches: an interrupted call's whole argument blob replayed into the next request.
+    #[test]
+    fn oversize_arguments_become_a_short_object_with_prefix_and_original_length() {
+        let args = format!("{{\"pad\":\"{}\"}}", "a".repeat(MAX_REPLAY_ARGS_BYTES * 4));
+        let bounded = bounded_replay_args(&args);
+        assert!(bounded.len() < 2_048);
+        let value: serde_json::Value = serde_json::from_str(&bounded).expect("valid JSON object");
+        assert_eq!(
+            value["ego_truncated_arguments"]["original_bytes"],
+            args.len()
+        );
+        assert!(
+            value["ego_truncated_arguments"]["prefix"]
+                .as_str()
+                .unwrap()
+                .starts_with("{\"pad\":\"aaa")
+        );
+    }
+
+    // Adjacent: arguments at the bound and the empty text replay verbatim.
+    #[test]
+    fn arguments_within_the_bound_replay_unchanged() {
+        let at_bound = "x".repeat(MAX_REPLAY_ARGS_BYTES);
+        assert!(matches!(
+            bounded_replay_args(&at_bound),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        assert_eq!(bounded_replay_args(""), "");
+    }
+
+    // Adjacent: a multibyte character straddling the prefix cut must not panic.
+    #[test]
+    fn prefix_cut_respects_utf8_boundaries() {
+        let args = "界".repeat(MAX_REPLAY_ARGS_BYTES);
+        let bounded = bounded_replay_args(&args);
+        assert!(serde_json::from_str::<serde_json::Value>(&bounded).is_ok());
+    }
+
+    // Adjacent: a whitespace flood keeps a faithful (whitespace) prefix and its length.
+    #[test]
+    fn whitespace_flood_keeps_length_not_bytes() {
+        let args = "\t ".repeat(200_000);
+        let bounded = bounded_replay_args(&args);
+        assert!(bounded.len() < 3_000);
+        assert!(bounded.contains(&args.len().to_string()));
     }
 }

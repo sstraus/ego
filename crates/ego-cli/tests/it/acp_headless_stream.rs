@@ -71,11 +71,17 @@ fn malformed_prompt_is_refused_then_two_stdio_turns_keep_attachment_and_history(
     );
     assert_eq!(second["result"]["stopReason"], "end_turn", "{second}");
     let stderr = host.finish();
-    assert_eq!(
-        stderr,
-        support::PLATFORM_SANDBOX_STDERR,
-        "unexpected diagnostics: {stderr}"
-    );
+    // Windows repeats the unconfined-sandbox notices per turn; no other line may appear.
+    let unexpected: Vec<_> = stderr
+        .lines()
+        .filter(|line| {
+            !support::PLATFORM_SANDBOX_STDERR
+                .lines()
+                .any(|known| known == *line)
+                && !(cfg!(windows) && line.contains("no effective confinement"))
+        })
+        .collect();
+    assert!(unexpected.is_empty(), "unexpected diagnostics: {stderr}");
 
     let generations = stub.generations();
     assert_eq!(generations.len(), 2, "malformed input or EOF added a turn");

@@ -3748,9 +3748,9 @@ followed by the successor's `session_started`; the final summary names the
 successor in `session`. A failed compaction keeps the typed `context_overflow`
 settlement (exit 4) and names `ego compact SOURCE` as the retry. A successor
 that overflows again before it reports any usage is not compacted again.
-The `ci` profile and sessions with session roots keep explicit recovery: its
-sanitized bundle covers one session, and session roots cannot cross an
-in-process session transition.
+The `ci` profile keeps explicit recovery: its sanitized bundle covers one
+session. A session with session roots compacts like any other: the successor
+journals the same session roots in its seed, so it needs no new approval.
 
 ACP keeps explicit recovery because it has no standard session-transition
 contract: the client would keep prompting the source. Ephemeral sources cannot

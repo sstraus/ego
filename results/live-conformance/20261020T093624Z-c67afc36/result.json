@@ -1,0 +1,94 @@
+{
+  "schema": 1,
+  "run_id": "20261020T093624Z-c67afc36",
+  "date": "2026-10-20T09:36:34.330102+00:00",
+  "ego_commit": "1f3901474cd16584b8eca48b805e86029d339ae4",
+  "binary_sha256": "b8eea72439cfd4da9b536358b76ddcca09117458524b0c32621a78a25c6e13cd",
+  "models": [
+    "openrouter/anthropic/claude-sonnet-5.5",
+    "openrouter/openai/gpt-6-luna"
+  ],
+  "suites": [
+    "skills"
+  ],
+  "fixture_seed": 419,
+  "fixture_hashes": {
+    "418/model/.ego/skills/model-check/SKILL.md": "21431c0d050c80fea2d4fff377117385ad05d4d41872479175b0318a94723c04"
+  },
+  "ceiling_usd": "0.05",
+  "provider_ceiling_usd": "0.05",
+  "cost_usd": "0",
+  "cost_uncertain": false,
+  "cases": [
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "model",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "model_override_attributed": false,
+      "tool_names": []
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "model",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "model_override_attributed": false,
+      "tool_names": []
+    }
+  ]
+}

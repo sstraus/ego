@@ -594,9 +594,9 @@ impl CliPrepared {
                     Err(settled) => return settled,
                 },
             };
-            // Session roots cannot cross an in-process session transition.
-            let automatic_compaction = (compaction_host && opening.session_roots.is_empty())
-                .then_some(self.effective.compaction.threshold);
+            // The compaction successor journals the source's session roots.
+            let automatic_compaction =
+                compaction_host.then_some(self.effective.compaction.threshold);
             let segment_turns = Turns {
                 parent_cancel: turns.parent_cancel.clone(),
                 schema: turns.schema,

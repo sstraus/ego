@@ -129,14 +129,18 @@ pub fn validate_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<(
             .ok_or_else(|| private_error("the private path has no Windows DACL"))?;
         let sddl = descriptor.as_sddl()?.to_string_lossy().into_owned();
         let sid = current_process_sid()?;
-        let inheritance = match kind {
-            PrivatePathKind::File => "",
-            PrivatePathKind::Directory => "OICI",
-        };
-        if sddl.starts_with("D:P")
-            && dacl.len() == 1
-            && sddl.ends_with(&format!("(A;{inheritance};FA;;;{sid})"))
-        {
+        // Render the expected entry through the same SDDL writer: it prints
+        // well-known accounts as aliases (for example `LA` for the built-in
+        // Administrator), so a literal SID string would never match them.
+        let expected = owner_only_descriptor(&sid, kind)?
+            .as_sddl()?
+            .to_string_lossy()
+            .into_owned();
+        let expected_entry = expected
+            .find('(')
+            .map(|start| &expected[start..])
+            .ok_or_else(|| private_error("the expected Windows DACL has no entry"))?;
+        if sddl.starts_with("D:P") && dacl.len() == 1 && sddl.ends_with(expected_entry) {
             return Ok(());
         }
         Err(private_error(

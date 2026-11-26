@@ -1,0 +1,22 @@
+[model."anthropic/anthropic/claude-haiku-5.5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = false
+reasoning_carryover = "portable"
+reasoning_efforts = { only = ["max", "xhigh", "high", "medium", "low", "off"] }
+default_reasoning_effort = "medium"
+cancel = "unsupported"
+cache = "short"
+transport = "sse"
+image_input = "unknown"
+audio_input = "unknown"
+
+[model."anthropic/anthropic/claude-haiku-5.5".pricing]
+revision = "https://openrouter.ai/api/v1/models#retrieved-2026-10-25-max-tier"
+currency = "USD"
+uncached_input = "0.0000005"
+output = "0.0000025"
+cache_read = "0.00000005"
+cache_write = "0.000000625"
+cache_write_extended = "0.000001"

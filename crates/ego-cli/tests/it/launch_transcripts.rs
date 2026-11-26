@@ -133,7 +133,7 @@ fn readable(raw: &str) -> String {
         } else {
             line.trim()
         };
-        let mut line = undouble(line);
+        let mut line = undouble(without_glued_status(line));
         // The real temporary root is wrapped at 79 cells before it is
         // redacted. Join this fixture's split question before identifying
         // modal redraws; otherwise the redraw starts with `[y/N]`, not Trust.
@@ -240,6 +240,24 @@ fn without_build_stamp(tail: &str) -> &str {
         }
     }
     tail
+}
+
+/// A Windows pseudo-console redraws the answer over a finished status row
+/// without a line break, so the answer follows `Esc to interrupt` directly.
+fn without_glued_status(line: &str) -> &str {
+    const END: &str = "Esc to interrupt";
+    if let Some(at) = line.find(END) {
+        let (head, tail) = line.split_at(at + END.len());
+        if is_thinking_repaint(head)
+            && tail
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            return tail;
+        }
+    }
+    line
 }
 
 fn is_prompt_repaint(line: &str) -> bool {

@@ -1,0 +1,120 @@
+[1;35m⠀⢀⡴⠋⠉⠉[36m⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄[0m
+[1;35m⠀⢴⡋⠉⠁⠀[36m⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇[0m
+[1;35m⠀⠀⠉⠉⠉⠀[36m⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀[0m
+εgo: ego 0.4.1
+[?2004h[6n[0m[?25l[4;1H[JProject files offered for trust:
+- /Users/stefano.straus/Gits/.tmp/.tmpjLt3Sg/AGENTS.md
+
+Yes: load project instructions, configuration, skills, hooks and MCP server
+declarations.
+No: continue without project files.
+
+Trust project files in /Users/stefano.straus/Gits/.tmp/.tmpjLt3Sg? [y/N] 78[?25h[0m[?25l[4;1H[JProject files offered for trust:
+- /Users/stefano.straus/Gits/.tmp/.tmpjLt3Sg/AGENTS.md
+
+Yes: load project instructions, configuration, skills, hooks and MCP server
+declarations.
+No: continue without project files.
+
+Trust project files in /Users/stefano.straus/Gits/.tmp/.tmpjLt3Sg? [y/N] yes78[?25h[J
+[?2004lεgo: sandbox is off; commands can access any file your user account can access
+
+εgo: model ollama/qwen3
+mode auto (trusted interactive default) · sandbox off (flags)
+     Ctrl+B backgrounds · Esc interrupts · Enter queues · Up recalls
+     Ctrl+Enter steers · Ctrl+S draft · Option+P models · Shift+Tab mode · /help
+]9;4;0;0[?2004h[6n[0m[?25l[4;1H[J[92m[96mqwen3 · off · auto ▱▱▱▱▱▱▱▱▱▱ ?/? /U/s/G/./.tmpjLt3Sg
+> [35m[0m[0m7[37m[0m
+ 8[?25h[?2004l[6n[0m[?25l[4;1H[J[92m[96m[35m[0m[0m[37m> /model[0m78[?25h[J
+[6n[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-11 of 31)
+[1;7m> 1. ollama/qwen3 current[0m
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[2m  2. anthropic/claude-fable-5-1[0m
+[2m  3. anthropic/claude-haiku-5-5[0m
+[2m  4. anthropic/claude-opus-5-5[0m
+[2m  5. anthropic/claude-sonnet-5-5[0m
+gemini — unavailable: not signed in
+Sign in with 'ego auth login gemini'
+[2m  6. gemini/gemini-3.1-pro-preview[0m
+[2m  7. gemini/gemini-3.5-flash-lite[0m
+[2m  8. gemini/gemini-3.8-flash[0m
+github-copilot — unavailable: not signed in
+Sign in with 'ego auth login github-copilot'
+[2m  9. github-copilot/claude-fable-5.1[0m
+[2m  10. github-copilot/claude-haiku-5.5[0m
+[2m  11. github-copilot/claude-opus-5.5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h[?2004l[6n[4;1H[J[?2004h[6n[0m[?25l[4;1H[J[92m[39mSelect model (1-4 of 4) · filter: anthropic
+anthropic — unavailable: not signed in
+Sign in with 'ego auth login anthropic'
+[1;7m> 1. anthropic/claude-fable-5-1[0m
+[2m  2. anthropic/claude-haiku-5-5[0m
+[2m  3. anthropic/claude-opus-5-5[0m
+[2m  4. anthropic/claude-sonnet-5-5[0m
+[2mType to filter; Up/Down or number selects. Enter continues, then s = this[0m
+[2msession only; Esc cancels.[0m[35m[0m[0m7[37m[0m8[?25h

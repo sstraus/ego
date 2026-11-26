@@ -93,6 +93,7 @@ fn azure_deployment_projects_through_cli_and_acp() {
 
     let refused = Ego::at(places.home_path(), places.workspace_path(), None)
         .args(["--profile", "chat", "--output", "text", "hello"])
+        .platform_sandbox()
         .run();
     assert_ne!(refused.code, Some(0));
     assert!(
@@ -127,9 +128,15 @@ fn configured_alias_reaches_headless_and_mcp_dispatch() {
     };
     let headless = command()
         .args(["--profile", "chat", "--output", "text", "hello"])
+        .platform_sandbox()
         .run();
     assert_eq!(headless.code, Some(0), "{}", headless.stderr);
 
+    // `ego mcp-server` takes no sandbox flag, and Windows has no confinement
+    // backend to start its runs under.
+    if cfg!(windows) {
+        return;
+    }
     let mut mcp = AcpHost::adopt(
         command()
             .subcommand("mcp-server")

@@ -618,10 +618,27 @@ fn fork_preserves_lineage_and_title_but_not_session_identity() {
     assert_eq!(meta.goal(source.id).unwrap().unwrap(), source_goal.value);
 }
 
-/// Catches: a fork copies the source session's terminal-approved root event
-/// into the target log and then treats it as the target's own consent.
+fn session_roots_of(store: &FakeStoreControl, id: SessionId) -> Vec<ego_core::permit::ProfileRoot> {
+    let events = store
+        .0
+        .0
+        .lock()
+        .unwrap()
+        .entries
+        .iter()
+        .filter_map(|(session, entry)| match entry {
+            SessionEntry::Event(event) if *session == id => Some(event.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    ego_core::state::SessionState::replay(events).session_roots
+}
+
+/// Catches: a fork loses the source's terminal-approved session root, so the
+/// derived session is unauthorized or re-prompts (F3/F4: derived sessions keep
+/// the source permissions, atomically, as a journaled receipt).
 #[test]
-fn fork_does_not_copy_session_root_consent() {
+fn fork_carries_session_root_receipts_in_its_first_events() {
     use ego_core::permit::{CanonPath, ProfileRoot, RootAccess};
 
     let (service, store, _runs) = service();
@@ -633,26 +650,90 @@ fn fork_does_not_copy_session_root_consent() {
     };
     store.append_event(source.id, grant);
     let target = futures::executor::block_on(service.fork(source.id)).unwrap();
-    let read_roots = |id| {
-        let events = store
-            .0
-            .0
-            .lock()
-            .unwrap()
-            .entries
-            .iter()
-            .filter_map(|(session, entry)| match entry {
-                SessionEntry::Event(event) if *session == id => Some(event.clone()),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        ego_core::state::SessionState::replay(events).session_roots
+    assert_eq!(session_roots_of(&store, source.id), vec![approved.clone()]);
+    assert_eq!(session_roots_of(&store, target.id), vec![approved]);
+}
+
+/// Catches: a root revoked in the source before the fork is resurrected in the fork.
+#[test]
+fn fork_does_not_carry_a_root_revoked_before_the_fork() {
+    use ego_core::permit::{CanonPath, ProfileRoot, RootAccess};
+
+    let (service, store, _runs) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap();
+    let kept = ProfileRoot::new(CanonPath::new("/outside/kept"), RootAccess::Read);
+    let revoked = ProfileRoot::new(CanonPath::new("/outside/revoked"), RootAccess::ReadWrite);
+    for (sequence, kind) in [
+        EventKind::SessionRootGranted {
+            root: revoked.clone(),
+        },
+        EventKind::SessionRootGranted { root: kept.clone() },
+        EventKind::RootRevoked {
+            path: revoked.path().clone(),
+        },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut grant = event("grant change", 1 + sequence as u64);
+        grant.kind = kind;
+        store.append_event(source.id, grant);
+    }
+    let target = futures::executor::block_on(service.fork(source.id)).unwrap();
+    assert_eq!(session_roots_of(&store, target.id), vec![kept]);
+}
+
+/// Catches: only the first fork carries roots; a fork of a fork loses them.
+#[test]
+fn fork_of_a_fork_keeps_session_roots() {
+    use ego_core::permit::{CanonPath, ProfileRoot, RootAccess};
+
+    let (service, store, _runs) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap();
+    let approved = ProfileRoot::new(CanonPath::new("/outside/chain"), RootAccess::Read);
+    let mut grant = event("source consent", 1);
+    grant.kind = EventKind::SessionRootGranted {
+        root: approved.clone(),
     };
-    assert_eq!(read_roots(source.id), vec![approved]);
-    assert!(
-        read_roots(target.id).is_empty(),
-        "fork inherited terminal consent"
-    );
+    store.append_event(source.id, grant);
+    let first = futures::executor::block_on(service.fork(source.id)).unwrap();
+    let second = futures::executor::block_on(service.fork(first.id)).unwrap();
+    assert_eq!(session_roots_of(&store, second.id), vec![approved]);
+}
+
+/// Catches: a fork of a session without roots invents a grant receipt.
+#[test]
+fn fork_without_session_roots_has_none() {
+    let (service, store, _runs) = service();
+    let source = service.create(PathBuf::from("/workspace")).unwrap();
+    let target = futures::executor::block_on(service.fork(source.id)).unwrap();
+    assert!(session_roots_of(&store, target.id).is_empty());
+}
+
+/// Catches: the provider-switch (neutral) fork drops filesystem roots, which
+/// are independent of the account or host, so a switch re-prompts every path.
+#[test]
+fn neutral_fork_for_a_provider_switch_carries_session_roots() {
+    use ego_core::permit::{CanonPath, ProfileRoot, RootAccess};
+
+    let approved = ProfileRoot::new(CanonPath::new("/outside/switch"), RootAccess::Read);
+    let mut state = ego_core::state::SessionState::default();
+    state.apply(&{
+        let mut grant = event("source consent", 1);
+        grant.kind = EventKind::SessionRootGranted {
+            root: approved.clone(),
+        };
+        grant
+    });
+    let prepared = ego_core::session::PreparedFork::neutral(
+        SessionId::new(),
+        &state,
+        ego_core::event::time::Timestamp::from_millis(1),
+        ego_core::run::RunSelections::empty(),
+    )
+    .unwrap();
+    let target = ego_core::state::SessionState::replay(prepared.seed().events().cloned());
+    assert_eq!(target.session_roots, vec![approved]);
 }
 
 #[test]

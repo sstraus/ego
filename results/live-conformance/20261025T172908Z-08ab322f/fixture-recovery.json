@@ -1,0 +1,38 @@
+[
+  {
+    "key": "418/description/.ego/skills/amber-check/SKILL.md",
+    "sha256": "78cca7930e0b7442026fdc158537f04a215371f63872188100dcc29002db2318",
+    "source": "/Users/stefano.straus/Gits/.tmp/ego-419-b6-blockers/20261022T234940Z-2f2af0fb/008-skill-description/.ego/skills/amber-check/SKILL.md"
+  },
+  {
+    "case": "description",
+    "prompt_source_session": "142f755a-a0ab-43ac-88d9-6decc422c41b"
+  },
+  {
+    "key": "418/model/.ego/skills/model-check/SKILL.md",
+    "sha256": "21431c0d050c80fea2d4fff377117385ad05d4d41872479175b0318a94723c04",
+    "source": "/Users/stefano.straus/Gits/.tmp/ego-419-b6-blockers/20261022T234940Z-2f2af0fb/010-skill-model/.ego/skills/model-check/SKILL.md"
+  },
+  {
+    "case": "model",
+    "prompt_source_session": "9ea73b31-f707-4443-9a71-3a78aff93b67"
+  },
+  {
+    "key": "418/tools/.ego/skills/tools-check/SKILL.md",
+    "sha256": "d718aa98cedb9011e1cbd2bec2e9f5210ee44f5928b56a04dd0c73dcb58596c8",
+    "source": "/Users/stefano.straus/Gits/.tmp/ego-419-b6-blockers/20261022T234940Z-2f2af0fb/011-skill-tools/.ego/skills/tools-check/SKILL.md"
+  },
+  {
+    "case": "tools",
+    "prompt_source_session": "c3dd2f17-ccb0-4a33-9172-3c703d13b531"
+  },
+  {
+    "key": "418/arguments/.ego/skills/args-check/SKILL.md",
+    "sha256": "6fa12ce9d8b4f8708583414b4e0a761314eb03e9f66507b922445ef475844f8f",
+    "source": "/Users/stefano.straus/Gits/.tmp/ego-419-b6-blockers/20261022T234940Z-2f2af0fb/012-skill-arguments/.ego/skills/args-check/SKILL.md"
+  },
+  {
+    "case": "arguments",
+    "prompt_source_session": "2c176456-96cb-4368-873e-6260415d7e2c"
+  }
+]

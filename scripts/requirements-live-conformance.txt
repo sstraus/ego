@@ -1,0 +1,2 @@
+# Recovery forwarding uses the OS verifier; never export certificates or bypass TLS.
+truststore==0.10.5

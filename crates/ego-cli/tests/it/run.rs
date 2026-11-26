@@ -1318,6 +1318,7 @@ fn a_missing_configured_root_still_starts_the_run_and_tells_the_model() {
             support::FIXTURE_SESSION_ID,
             "Say done",
         ])
+        .platform_sandbox()
         .run();
 
     assert_eq!(finished.code, Some(0), "stderr: {}", finished.stderr);
@@ -1329,7 +1330,10 @@ fn a_missing_configured_root_still_starts_the_run_and_tells_the_model() {
     let first = stub.generations()[0].to_string();
     let escaped = serde_json::to_string(missing).unwrap();
     assert!(
-        first.contains("Configuration notices") && first.contains(&escaped[1..escaped.len() - 1]),
+        first.contains("Configuration notices")
+            && (first.contains(&escaped[1..escaped.len() - 1])
+                // The notice sits inside a JSON string that is itself JSON text.
+                || first.contains(&escaped[1..escaped.len() - 1].replace('\\', "\\\\"))),
         "the model was not told: {first}"
     );
 }

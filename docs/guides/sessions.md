@@ -244,3 +244,33 @@ Sources: [catalogue](../../crates/ego-cli/src/catalogue.rs),
 [durable run controller](../../crates/ego-core/src/run.rs),
 [usage](../../crates/ego-cli/src/usage.rs), and
 [resume tests](../../crates/ego-cli/tests/it/resume_runtime.rs).
+
+## When compaction is due
+
+`compaction_due` (`ego_core::turn::compaction_due`) is pure arithmetic: it
+returns true when the occupancy it is given is at least the configured
+percentage of the model window, and false while the occupancy or the window is
+unknown. It never invents a number.
+
+The turn applies it twice before a request is sent. It adds the last measured
+occupancy to an estimate of what the request adds since that measurement (new
+prompt text, tool results, and tool-call arguments as they will be replayed, at
+about three bytes a token; deltas under 1,024 tokens are ignored). That
+projection is then compared with the window and with the threshold:
+
+- Projection at or above the window: the request is not sent. A host that
+  compacts automatically compacts first. Any other host stops with an error
+  that gives the measured and projected figures and three ways out: `/compact`
+  (its summarizer input is trimmed to fit even an over-window history), a model
+  with a larger window, or a new session.
+- Projection at or above the threshold, automatic compaction on: the turn ends
+  with a context-overflow stop and the host compacts, instead of failing after
+  a request that was too large.
+- Unknown occupancy (a fresh or just-compacted session): nothing is projected.
+
+A tool call whose argument text is larger than 32 KiB is replayed to the model
+as a short JSON object holding a 1 KiB prefix and the original length; the
+session journal keeps what was streamed. Arguments over 256 KiB are refused
+with a model-visible error, and a long run of whitespace or of one repeated
+short unit in the arguments aborts the generation as a retryable failure
+without storing the call.

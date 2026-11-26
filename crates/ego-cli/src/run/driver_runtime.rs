@@ -560,12 +560,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                         sink,
                     )?;
                     let opening = active.state().clone();
-                    // Session roots cannot cross an in-process session transition.
+                    // The compaction successor journals the source's session roots in
+                    // its seed, so the live policy stays equal to its own journal.
                     // Opt-in: `compaction.headless` (Boss, 2026-11-02, story 853-a59c).
-                    let automatic_compaction = (compaction_host
-                        && effective.compaction.headless
-                        && opening.session_roots.is_empty())
-                    .then_some(effective.compaction.threshold);
+                    let automatic_compaction = (compaction_host && effective.compaction.headless)
+                        .then_some(effective.compaction.threshold);
                     let segment_turns = Turns {
                         parent_cancel: turns.parent_cancel.clone(),
                         schema: turns.schema,
@@ -980,7 +979,7 @@ pub(super) async fn drive_execution<S: EventSink>(
                                     });
                                 let (line, model_compaction, automatic_compaction) =
                                     next_interactive_command(
-                                        seat.as_ref(),
+                                        (seat.as_ref(), diagnostics),
                                         status.as_ref(),
                                         &state,
                                         &args,
@@ -1067,13 +1066,11 @@ pub(super) async fn drive_execution<S: EventSink>(
                                 }
                             };
 
-                            // Fresh work can retry a transient failure, but cannot
-                            // remove the structural session-root blocker. A successor
+                            // Fresh work can retry a transient failure; a successor
                             // or root revocation re-arms recovery at its transition.
-                            if state.session_roots.is_empty()
-                                && (asked.as_ref().is_some_and(|input| {
-                                    !matches!(input, InteractiveTurnInput::Checkpoint)
-                                }) || !state.unacknowledged_prompts().is_empty())
+                            if asked.as_ref().is_some_and(|input| {
+                                !matches!(input, InteractiveTurnInput::Checkpoint)
+                            }) || !state.unacknowledged_prompts().is_empty()
                             {
                                 automatic_compaction_failed = false;
                             }
@@ -1350,14 +1347,17 @@ fn activate_session_transition<'store>(
         registry,
         config,
     } = activation;
-    // The process policy and OS guard were built for the source session.
-    // A successor must never reuse its session-only filesystem authority.
-    if !source_state.session_roots.is_empty() {
+    // The process policy and OS guard were built for the source session. Only
+    // a successor whose own journal holds the same session-root receipts may
+    // reuse them: compaction and fork seeds carry them atomically, a fresh
+    // session (/new, /clear) does not and must be admitted independently.
+    let source_roots = source_state.session_roots.clone();
+    if !source_roots.is_empty() && matches!(transition, EpochTransition::New { .. }) {
         return Err(RunTermination::Failed {
-            message: "session roots cannot cross an in-process session transition; preserve a factual handoff and start a fresh independently admitted ego session, not a same-ID resume".into(),
+            message: "a new session does not inherit session roots; start it with a fresh independently admitted ego session (not a same-ID resume), or use /fork or /compact, which carry them".into(),
         });
     }
-    match transition {
+    let started = match transition {
         EpochTransition::New { target, replay } => activate_new_session(
             active,
             source_state,
@@ -1405,7 +1405,26 @@ fn activate_session_transition<'store>(
         | EpochTransition::GrantRoot { .. } => {
             unreachable!("terminal transitions retain the driver control owner")
         }
+    }?;
+    ensure_successor_carries_roots(&source_roots, active.state())?;
+    Ok(started)
+}
+
+/// A successor may reuse the live policy only when its journal carries every
+/// source session root and no other. Anything else is a missing durable receipt.
+fn ensure_successor_carries_roots(
+    source: &[ego_core::permit::ProfileRoot],
+    successor: &SessionState,
+) -> Result<(), RunTermination> {
+    let carried = &successor.session_roots;
+    if source.iter().all(|root| carried.contains(root))
+        && carried.iter().all(|root| source.contains(root))
+    {
+        return Ok(());
     }
+    Err(RunTermination::Failed {
+        message: "the successor session did not journal the source session roots, so its authority differs from the live policy; stop here and resume the successor with 'ego resume' to admit it from its own journal".into(),
+    })
 }
 
 fn headless_input(resume: Option<RuntimeResume>, prompt: &RunPrompt) -> HeadlessInput<'_> {
@@ -1605,7 +1624,7 @@ impl IdleCompactionWatch<'_> {
 
 #[allow(clippy::too_many_arguments)]
 fn next_interactive_command(
-    seat: &dyn InteractiveSeat,
+    terminal: (&dyn InteractiveSeat, &dyn Diagnostics),
     status: Option<&InteractiveStatus>,
     state: &SessionState,
     args: &Args,
@@ -1615,14 +1634,15 @@ fn next_interactive_command(
     idle: Option<IdleCompactionWatch<'_>>,
     threshold: ego_core::compact::ContextPercent,
 ) -> (repl::Line, bool, Option<AutomaticCompaction>) {
+    let (seat, diagnostics) = terminal;
     let (automatic_compaction_failed, termination) = recovery;
     // Reopened attempts are journaled interruptions, not live terminal work.
     seat.set_compaction_availability(compaction_availability(pending_work));
     // Automatic recovery must not end the epoch owning an unconsumed result.
     // Explicit session transitions keep their existing operator admission.
-    let compaction_pending =
-        compaction_availability(pending_work || state.detached_execs.values().any(Option::is_none))
-            != repl::actions::Availability::Enabled;
+    let background_running = state.detached_execs.values().any(Option::is_none);
+    let compaction_pending = compaction_availability(pending_work || background_running)
+        != repl::actions::Availability::Enabled;
     let model_compaction = state.context_request.is_some() && !args.no_context_tool;
     let overflowed = matches!(termination, RunTermination::ContextOverflow { .. });
     // As in a headless run: a successor that overflows before it measured any
@@ -1651,8 +1671,14 @@ fn next_interactive_command(
     // Recovery of a turn cut at the context limit failed, or its successor was
     // cut before it measured usage: the task cannot continue without input.
     // Say so to the host instead of waiting idle (1076-c308).
-    if !compaction_pending && overflowed {
-        seat.hold_error("context_overflow");
+    if overflowed {
+        if background_running && recoverable {
+            diagnostics.note(
+                "The context needs recovery; automatic compaction is waiting for background commands to finish.",
+            );
+        } else if !compaction_pending {
+            seat.hold_error("context_overflow");
+        }
     }
     if let Some(first) = seeded.take() {
         return (repl::Line::Submitted(first), model_compaction, None);
@@ -4459,7 +4485,18 @@ async fn dispatch_session_navigation<'session: 'a, 'a, 'store: 'session>(
         ..
     } = input;
     let (pending_work, _, _) = posture;
-    if !state.session_roots.is_empty() && matches!(line, repl::Line::HostCommand(_)) {
+    // /fork carries the session roots in its seed; every other session change here
+    // would start or select a session whose own journal lacks them.
+    let carries_roots = matches!(
+        line,
+        repl::Line::HostCommand(
+            repl::HostCommand::Action(repl::actions::ActionId::Fork) | repl::HostCommand::Fork(_)
+        )
+    );
+    if !state.session_roots.is_empty()
+        && !carries_roots
+        && matches!(line, repl::Line::HostCommand(_))
+    {
         diagnostics.note(&session_root_recovery(active.id()));
         return Ok(CommandOutcome::Continue);
     }
@@ -4658,11 +4695,6 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
     if compaction_availability(pending_work) != repl::actions::Availability::Enabled {
         return Ok(CommandOutcome::Continue);
     }
-    if !state.session_roots.is_empty() {
-        *automatic_compaction_failed = true;
-        diagnostics.note(&session_root_recovery(active.id()));
-        return Ok(CommandOutcome::Continue);
-    }
     if automatic_compaction.is_none() && !seat.confirm_compaction(active.id()) {
         return Ok(CommandOutcome::Continue);
     }
@@ -4823,11 +4855,10 @@ async fn compact_session_command<'session: 'a, 'a, 'store: 'session>(
 
 fn session_root_recovery(source: SessionId) -> String {
     format!(
-        "Session change paused: session roots cannot cross into another session. The source session is still open: {source}. \
-         To keep its grants, continue here; same-ID resume retains these roots and does not unblock the change. \
-         For independent recovery, save a factual handoff, settle session-owned background work, then start a fresh session with ego (not ego resume). \
-         The fresh session needs its own approvals. Alternatively, inspect /config roots and explicitly revoke every session root with /config roots revoke EXACT_PATH; \
-         revocation stops live exec children and removes that access before re-admission. No grants or background work have been changed by this refusal."
+        "Session change paused: this session has session roots, and only /compact and /fork carry them to the new session (with a durable receipt). \
+         A new or selected session would not have them. The source session is still open: {source}. \
+         Next safe action: use /compact or /fork to keep these grants; or start a fresh session with ego (not ego resume), which needs its own approvals; \
+         or inspect /config roots and revoke a root with /config roots revoke EXACT_PATH. No grants or background work have been changed by this refusal."
     )
 }
 
@@ -5645,14 +5676,9 @@ async fn drive_interactive_turn_phase<'session: 'a, 'a, 'store: 'session>(
     } else {
         loop_
     };
-    // As in the headless driver, a root-bearing session has no automatic
-    // successor. Do not cut fresh work at the compaction threshold when the
-    // host cannot recover it; the actual context-capacity limit still applies.
-    let loop_ = if state.session_roots.is_empty() {
-        loop_.with_automatic_compaction()
-    } else {
-        loop_
-    };
+    // A root-bearing session compacts like any other: its successor journals
+    // the same session roots in its seed.
+    let loop_ = loop_.with_automatic_compaction();
     let mut loop_ = loop_
         .with_compaction_threshold(effective.compaction.threshold)
         .with_interactive_control(control);
@@ -6383,5 +6409,69 @@ access = "oauth"
         let missing = named_session_login_refusal(Some("removed"), &effective).unwrap();
         assert!(missing.contains("pinned account is absent"));
         assert!(missing.contains("cannot create a replacement"));
+    }
+}
+
+#[cfg(test)]
+mod session_root_transition_tests {
+    use super::*;
+    use ego_core::permit::{CanonPath, ProfileRoot, RootAccess};
+
+    fn root(path: &str) -> ProfileRoot {
+        ProfileRoot::new(CanonPath::new(path), RootAccess::Read)
+    }
+
+    fn successor(roots: &[ProfileRoot]) -> SessionState {
+        let mut state = SessionState::default();
+        state.session_roots = roots.to_vec();
+        state
+    }
+
+    // Catches: a successor journaling the same roots in another order is refused
+    // and an over-window session stays unrecoverable.
+    #[test]
+    fn a_successor_with_the_same_roots_in_any_order_may_reuse_the_live_policy() {
+        let (a, b) = (root("/outside/a"), root("/outside/b"));
+        assert!(
+            ensure_successor_carries_roots(&[a.clone(), b.clone()], &successor(&[b, a])).is_ok()
+        );
+        assert!(ensure_successor_carries_roots(&[], &successor(&[])).is_ok());
+    }
+
+    // Catches: a successor that lacks a durable root receipt reuses the source's
+    // live policy, so its journal and its authority silently disagree.
+    #[test]
+    fn a_successor_missing_a_source_root_is_refused_with_the_next_safe_action() {
+        let result = ensure_successor_carries_roots(&[root("/outside/a")], &successor(&[]));
+        let Err(RunTermination::Failed { message }) = result else {
+            panic!("a successor without the receipt must be refused");
+        };
+        assert!(message.contains("ego resume"), "{message}");
+    }
+
+    // Catches: a successor holding a root the source never had (or had revoked)
+    // runs under a policy that does not include it.
+    #[test]
+    fn a_successor_with_an_extra_root_is_refused() {
+        let result = ensure_successor_carries_roots(&[], &successor(&[root("/outside/extra")]));
+        assert!(matches!(result, Err(RunTermination::Failed { .. })));
+    }
+
+    // Catches: the remaining refusal (/new, /clear, session selection) names no
+    // working alternative, or still claims /compact and /fork cannot carry roots.
+    #[test]
+    fn the_remaining_refusal_names_compact_and_fork_as_the_way_to_keep_grants() {
+        let id = SessionId::new();
+        let message = session_root_recovery(id);
+        assert!(message.contains(&id.to_string()), "{message}");
+        assert!(
+            message.contains("/compact") && message.contains("/fork"),
+            "{message}"
+        );
+        assert!(
+            message.contains("session is still open") || message.contains("still open"),
+            "{message}"
+        );
+        assert!(!message.contains("cannot cross"), "{message}");
     }
 }

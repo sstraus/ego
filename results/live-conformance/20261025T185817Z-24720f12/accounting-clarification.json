@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "counts": {
+    "pass": 9,
+    "blocked": 5,
+    "fail": 2,
+    "stopped": 2
+  },
+  "new_known_usd": "0.026856705",
+  "cumulative_known_usd": "0.263057165",
+  "two_historic_unknown_actual_charges": true,
+  "historic_reservations_usd": {
+    "luna": "0.263268",
+    "sonnet": "0.039128"
+  },
+  "known_plus_historic_reservations_usd": "0.565453165",
+  "new_runner_uncertainty": true,
+  "new_unknown_event": {
+    "session": "cb658c53-9b60-4184-903d-771bbaa84dad",
+    "usage_reason": "provider_reported_no_usage",
+    "settlement_delivery": "definitely_unsent",
+    "interpretation": "Original runner marks cost unknown and stops; not evidence of a third possibly-sent or billed request. No zero-cost rewrite or continuation."
+  },
+  "duration_seconds": 284.7679810523987,
+  "luna_cache_retry_executed": false,
+  "recovery_executed": false
+}

@@ -1,0 +1,60 @@
+{
+  "run_id": "20261022T234940Z-2f2af0fb",
+  "scope": "Allowlisted durable failure events; no prompts or headers",
+  "cases": [
+    {
+      "case": "Claude cache repeat 3",
+      "session": "44e7a3e5-b86f-4ec5-b7a7-c3b7264c7027",
+      "journal_sha256": "f1496fb8cee7cb5745f020999a6c490757efb99c4e2f7599a972e5cd4e7b23a6",
+      "events": [
+        {
+          "journal_seq": 57,
+          "event": {
+            "kind": "TurnCompleted",
+            "ok": true,
+            "exit_reason": "Completed"
+          }
+        },
+        {
+          "journal_seq": 76,
+          "event": {
+            "kind": "Error",
+            "message": "openrouter models did not answer with what was needed: HTTP call timed out",
+            "error_kind": "unclassified"
+          }
+        },
+        {
+          "journal_seq": 77,
+          "event": {
+            "kind": "TurnCompleted",
+            "ok": false,
+            "exit_reason": "Provider"
+          }
+        }
+      ]
+    },
+    {
+      "case": "Luna skill tools",
+      "session": "d2c41259-2077-4f18-a61c-ee3bd88aee24",
+      "journal_sha256": "28918767ef46bfa9eb5d5da3461f92cc2dc25ef72112ae99a66681f68977355a",
+      "events": [
+        {
+          "journal_seq": 35,
+          "event": {
+            "kind": "Error",
+            "message": "openrouter models did not answer with what was needed: HTTP connection failed",
+            "error_kind": "unclassified"
+          }
+        },
+        {
+          "journal_seq": 36,
+          "event": {
+            "kind": "TurnCompleted",
+            "ok": false,
+            "exit_reason": "Provider"
+          }
+        }
+      ]
+    }
+  ]
+}

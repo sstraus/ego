@@ -94,13 +94,20 @@ impl<'session: 'turn, 'turn> TurnLoop<'session, 'turn> {
                     if self.cancel.is_cancelled() {
                         return Err("command preprocessing cancelled".into());
                     }
-                    let mut argv = vec![
-                        "/bin/sh".to_owned(),
-                        "-c".into(),
-                        command,
-                        "ego-command".into(),
-                    ];
-                    argv.extend(values.iter().cloned());
+                    // Windows has no /bin/sh. cmd.exe has no positional
+                    // parameters, so the argument words are not passed to it.
+                    let argv = if cfg!(windows) {
+                        vec!["cmd.exe".to_owned(), "/C".into(), command]
+                    } else {
+                        let mut argv = vec![
+                            "/bin/sh".to_owned(),
+                            "-c".into(),
+                            command,
+                            "ego-command".into(),
+                        ];
+                        argv.extend(values.iter().cloned());
+                        argv
+                    };
                     let args =
                         serde_json::json!({"argv":argv,"timeout_ms":30000,"background":false})
                             .to_string();

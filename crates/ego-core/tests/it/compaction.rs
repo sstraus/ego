@@ -4368,6 +4368,171 @@ fn owner_session_grants_survive_compaction_but_judge_grants_do_not() {
     assert!(SessionState::default().owner_sandbox_grants.is_empty());
 }
 
+// Session roots are durable owner-approval receipts; a compaction successor must
+// journal them in its own seed so its policy needs no new prompt (F3/F4).
+mod session_root_carryover {
+    use super::*;
+    use ego_core::permit::{ProfileRoot, RootAccess};
+
+    fn root(path: &str, access: RootAccess) -> ProfileRoot {
+        ProfileRoot::new(CanonPath::new(path), access)
+    }
+
+    fn source_state(events: Vec<EventKind>) -> SessionState {
+        let mut state = SessionState::default();
+        for kind in events {
+            state.apply(&event(kind));
+        }
+        state
+    }
+
+    fn compact(state: SessionState) -> (ego_core::session::TargetSeed, SessionState) {
+        let (compact_profile, _) = compaction_profile(
+            "compaction-model",
+            ThinkingLevel::Low,
+            32_000,
+            4_096,
+            false,
+            vec![
+                AiEvent::TextDelta { text: checkpoint() },
+                AiEvent::Stop(StopReason::Stop),
+            ],
+        );
+        let (main_profile, _) = compaction_profile(
+            "main-model",
+            ThinkingLevel::Low,
+            8_192,
+            512,
+            false,
+            Vec::new(),
+        );
+        let source = CompactionSource::new([
+            (GenerationRole::Compaction, Ok(compact_profile)),
+            (GenerationRole::Main, Ok(main_profile)),
+        ]);
+        let (mut turn, _, _) = compaction_turn_with_state(source, state);
+        let prepared =
+            futures::executor::block_on(turn.prepare_compaction(None, Vec::new())).unwrap();
+        let seed = prepared.target_seed(Timestamp::from_millis(2));
+        // Serialize and deserialize the durable target events as resume does.
+        let events = seed
+            .events()
+            .map(|event| {
+                serde_json::from_str::<DomainEvent>(&serde_json::to_string(event).unwrap()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        (seed, SessionState::replay(events))
+    }
+
+    // Catches: /compact of a session with a session root yields a successor whose
+    // journal lacks the grant, so its policy would prompt again (or be refused).
+    #[test]
+    fn compaction_successor_journals_the_source_session_roots_in_its_seed() {
+        let granted = root("/outside/exact", RootAccess::Read);
+        let state = source_state(vec![EventKind::SessionRootGranted {
+            root: granted.clone(),
+        }]);
+        let (seed, resumed) = compact(state);
+        assert_eq!(resumed.session_roots, vec![granted.clone()]);
+        // Same admission as the successor creation: the receipt is part of the
+        // seed image, using the event kind the source used.
+        assert!(seed.events().any(|event| matches!(
+            &event.kind,
+            EventKind::SessionRootGranted { root } if *root == granted
+        )));
+    }
+
+    // Catches: a root the owner revoked before compaction is resurrected in the successor.
+    #[test]
+    fn a_root_revoked_before_compaction_is_not_carried() {
+        let kept = root("/outside/kept", RootAccess::Read);
+        let revoked = root("/outside/revoked", RootAccess::ReadWrite);
+        let state = source_state(vec![
+            EventKind::SessionRootGranted {
+                root: revoked.clone(),
+            },
+            EventKind::SessionRootGranted { root: kept.clone() },
+            EventKind::RootRevoked {
+                path: revoked.path().clone(),
+            },
+        ]);
+        let (seed, resumed) = compact(state);
+        assert_eq!(resumed.session_roots, vec![kept]);
+        assert!(!seed.events().any(|event| matches!(
+            &event.kind,
+            EventKind::SessionRootGranted { root } if *root == revoked
+        )));
+    }
+
+    // Catches: carrying roots changes nothing for a session without any, or
+    // invents a receipt out of an empty grant set.
+    #[test]
+    fn compaction_without_session_roots_writes_no_root_receipt() {
+        let (seed, resumed) = compact(SessionState::default());
+        assert!(resumed.session_roots.is_empty());
+        assert!(
+            !seed
+                .events()
+                .any(|event| matches!(&event.kind, EventKind::SessionRootGranted { .. }))
+        );
+    }
+
+    // Catches: carryover widens or reorders authority: access level lost, or a
+    // permanent-root consent (saved config, not session-owned) copied as a session grant.
+    #[test]
+    fn compaction_keeps_each_root_access_and_never_copies_permanent_consent() {
+        let read = root("/outside/read", RootAccess::Read);
+        let write = root("/outside/write", RootAccess::ReadWrite);
+        let state = source_state(vec![
+            EventKind::SessionRootGranted { root: read.clone() },
+            EventKind::SessionRootGranted {
+                root: write.clone(),
+            },
+        ]);
+        let (seed, resumed) = compact(state);
+        assert_eq!(resumed.session_roots, vec![read, write]);
+        assert!(resumed.permanent_root_consents.is_empty());
+        assert!(!seed.events().any(|event| matches!(
+            &event.kind,
+            EventKind::PermanentRootGranted { .. } | EventKind::PermanentRootGrantPending { .. }
+        )));
+    }
+
+    // Catches: only the first compaction carries roots; a successor of a
+    // successor (repeated pressure recovery) silently drops them.
+    #[test]
+    fn roots_survive_a_chain_of_compactions() {
+        let granted = root("/outside/chain", RootAccess::Read);
+        let first = source_state(vec![EventKind::SessionRootGranted {
+            root: granted.clone(),
+        }]);
+        let (_, once) = compact(first);
+        let (_, twice) = compact(once);
+        assert_eq!(twice.session_roots, vec![granted]);
+    }
+
+    // Catches: carryover duplicates a root granted twice, so a revoke of its
+    // path would not remove every receipt.
+    #[test]
+    fn a_root_granted_twice_is_carried_once_and_revocable() {
+        let granted = root("/outside/twice", RootAccess::Read);
+        let state = source_state(vec![
+            EventKind::SessionRootGranted {
+                root: granted.clone(),
+            },
+            EventKind::SessionRootGranted {
+                root: granted.clone(),
+            },
+        ]);
+        let (_, mut resumed) = compact(state);
+        assert_eq!(resumed.session_roots, vec![granted.clone()]);
+        resumed.apply(&event(EventKind::RootRevoked {
+            path: granted.path().clone(),
+        }));
+        assert!(resumed.session_roots.is_empty());
+    }
+}
+
 mod idle_cache_expiry {
     use super::*;
     use ego_core::compact::{CompactionConfig, IdleCompaction};

@@ -50,12 +50,14 @@ fn a_clock_started_inside_a_suspension_counts_only_the_time_after_the_stop() {
     let stop = begin();
     sleep(ms(60));
     let clock = ActiveClock::start();
-    sleep(ms(60));
+    // The stop outlasts the active time by a wide margin, so scheduler jitter on
+    // a loaded runner cannot make a correct clock look like it charged the stop.
+    sleep(ms(300));
     drop(stop);
     sleep(ms(80));
     let elapsed = clock.elapsed();
     assert!(elapsed >= ms(80), "lost active time: {elapsed:?}");
-    assert!(elapsed < ms(140), "charged the stop: {elapsed:?}");
+    assert!(elapsed < ms(220), "charged the stop: {elapsed:?}");
 }
 
 /// Catches: one shared offset for every clock, so a clock started after a stop
@@ -65,11 +67,11 @@ fn clocks_either_side_of_a_suspension_each_see_only_their_own_share() {
     let _serial = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let before = ActiveClock::start();
     let stop = begin();
-    sleep(ms(120));
+    sleep(ms(400));
     drop(stop);
     let after = ActiveClock::start();
     sleep(ms(70));
-    assert!(before.elapsed() < ms(130), "before {:?}", before.elapsed());
+    assert!(before.elapsed() < ms(300), "before {:?}", before.elapsed());
     assert!(before.elapsed() >= ms(70), "before {:?}", before.elapsed());
     assert!(after.elapsed() >= ms(70), "after {:?}", after.elapsed());
 }

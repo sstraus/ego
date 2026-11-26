@@ -255,3 +255,55 @@ fn uncertain_publication_is_visible_but_retry_is_unsafe_and_collision_is_no_effe
         manifest_before
     );
 }
+
+// Catches: the store refuses a fork seed that carries the source's session-root
+// receipts (or publishes them outside the seed image), so a derived session
+// either cannot be created or exists for a moment without the source's grants.
+#[test]
+fn fork_seed_carries_session_roots_in_the_same_atomic_publication() {
+    use ego_core::permit::{CanonPath, ProfileRoot, RootAccess};
+    let root = tempdir().unwrap();
+    let source = SessionId::new();
+    let target = SessionId::new();
+    let store = JsonlStore::new(root.path(), "/workspace", Box::new(OsIo));
+    store.append(&source, &source_event()).unwrap();
+    let granted = [
+        ProfileRoot::new(CanonPath::new("/outside/read"), RootAccess::Read),
+        ProfileRoot::new(CanonPath::new("/outside/write"), RootAccess::ReadWrite),
+    ];
+    let mut state = ego_core::state::SessionState::default();
+    for root in &granted {
+        let mut event = source_event();
+        event.kind = EventKind::SessionRootGranted { root: root.clone() };
+        state.apply(&event);
+    }
+    let prepared = ego_core::session::PreparedFork::new(source, &state, SEED_TIMESTAMP).unwrap();
+    let opened = store.open_writer(&target, lease()).unwrap();
+    let publication = opened.writer.publish_target(prepared.seed());
+    assert!(matches!(
+        publication,
+        TargetPublication::PublishedDurably { .. }
+    ));
+    drop(opened);
+
+    let events = read_entries(&store, &target)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            SessionEntry::Event(event) => Some(event),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(events[0].kind, EventKind::Forked { .. }));
+    let carried = events[1..]
+        .iter()
+        .map(|event| match &event.kind {
+            EventKind::SessionRootGranted { root } => root.clone(),
+            other => panic!("unexpected seed event {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(carried, granted);
+    assert_eq!(
+        ego_core::state::SessionState::replay(events).session_roots,
+        granted
+    );
+}

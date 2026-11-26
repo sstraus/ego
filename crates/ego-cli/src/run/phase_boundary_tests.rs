@@ -802,7 +802,7 @@ fn idle_background_exec_settlement_starts_one_continuation() {
             ),
             (
                 "exec-failure",
-                "sleep 0.2; printf FAILED-RESULT; exit 7",
+                "sleep 1.2; printf FAILED-RESULT; exit 7",
                 None,
                 "exited code 7",
             ),
@@ -1264,6 +1264,7 @@ fn host_output_failure_cancels_the_active_interactive_turn() {
 #[cfg(unix)]
 #[derive(Debug)]
 struct PressureNativeSeat {
+    notes: Mutex<Vec<String>>,
     reads: std::sync::atomic::AtomicUsize,
     sessions: Mutex<Vec<SessionId>>,
     availability: Mutex<repl::actions::Availability>,
@@ -1271,6 +1272,13 @@ struct PressureNativeSeat {
     sender: crossbeam::channel::Sender<repl::Line>,
     case: String,
     cancel: CancelToken,
+}
+
+#[cfg(unix)]
+impl Diagnostics for PressureNativeSeat {
+    fn note(&self, message: &str) {
+        self.notes.lock().unwrap().push(message.to_owned());
+    }
 }
 
 #[cfg(unix)]
@@ -1296,6 +1304,15 @@ impl Reads for PressureNativeSeat {
             return repl::Line::Submitted("launch native work and wait for its receipt".into());
         }
         if read == 1 {
+            assert!(
+                self.notes
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|line| line
+                        .contains("compaction is waiting for background commands to finish")),
+                "the terminal must explain the context hold before waiting for input"
+            );
             assert_eq!(
                 self.sessions.lock().unwrap().len(),
                 1,
@@ -1442,6 +1459,7 @@ fn pressure_recovery_preserves_native_owner_until_real_settlement() {
         let (sender, wake) = crossbeam::channel::bounded(4);
         let cancel = CancelToken::new();
         let seat = Arc::new(PressureNativeSeat {
+            notes: Mutex::new(Vec::new()),
             reads: std::sync::atomic::AtomicUsize::new(0),
             sessions: Mutex::new(Vec::new()),
             availability: Mutex::new(repl::actions::Availability::Enabled),
@@ -1467,7 +1485,7 @@ fn pressure_recovery_preserves_native_owner_until_real_settlement() {
                 },
                 elicitor: None,
                 status: None,
-                diagnostics: &Stderr,
+                diagnostics: seat.as_ref(),
                 text_output: None,
                 evidence: Arc::new(EvidenceAdmissionService::new()),
             },

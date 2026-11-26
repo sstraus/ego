@@ -551,12 +551,14 @@ fn named_connections_never_offer_legacy_subscription_images() {
         } else {
             ""
         };
+        // Windows cannot confine IP networking, so it refuses a configured `off`.
+        let network = if cfg!(windows) { "" } else { "network='off'\n" };
         std::fs::write(
             places.home_path().join("config.toml"),
-            format!("model='anthropic/claude-opus-5-5'\nthinking='low'\nsandbox='off'\nnetwork='off'\n{accounts}"),
+            format!("model='anthropic/claude-opus-5-5'\nthinking='low'\nsandbox='off'\n{network}{accounts}"),
         )
         .unwrap();
-        let mut command = invocation(&places, &stub);
+        let mut command = invocation(&places, &stub).platform_sandbox();
         if explicit {
             command = command.args(["--connection", "account_b"]);
         }

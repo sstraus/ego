@@ -1,0 +1,67 @@
+[model."openrouter/anthropic/claude-sonnet-5.5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["max", "xhigh", "high", "medium", "low"] }
+default_reasoning_effort = "high"
+cancel = "unsupported"
+cache = "none"
+transport = "sse"
+image_input = "unknown"
+audio_input = "unknown"
+
+[model."openrouter/anthropic/claude-sonnet-5.5".pricing]
+revision = "https://openrouter.ai/api/v1/models#retrieved-2026-10-25-max-tier"
+currency = "USD"
+uncached_input = "0.000002"
+output = "0.00001"
+cache_read = "0.0000001"
+cache_write = "0.0000025"
+cache_write_extended = "0.000004"
+
+[model."openrouter/openai/gpt-6-luna".capabilities]
+schema_version = 6
+max_context_tokens = 1050000
+max_output_tokens = 128000
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["max", "xhigh", "high", "medium", "low", "off"] }
+default_reasoning_effort = "medium"
+cancel = "unsupported"
+cache = "none"
+transport = "sse"
+image_input = "unknown"
+audio_input = "unknown"
+
+[model."openrouter/openai/gpt-6-luna".pricing]
+revision = "https://openrouter.ai/api/v1/models#retrieved-2026-10-25-max-tier"
+currency = "USD"
+uncached_input = "0.0000002"
+output = "0.00000075"
+cache_read = "0.00000002"
+cache_write = "0.00000025"
+
+[model."openrouter/anthropic/claude-haiku-5.5".capabilities]
+schema_version = 6
+max_context_tokens = 1000000
+max_output_tokens = 128000
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+reasoning_efforts = { only = ["max", "xhigh", "high", "medium", "low", "off"] }
+default_reasoning_effort = "medium"
+cancel = "unsupported"
+cache = "none"
+transport = "sse"
+image_input = "unknown"
+audio_input = "unknown"
+
+[model."openrouter/anthropic/claude-haiku-5.5".pricing]
+revision = "https://openrouter.ai/api/v1/models#retrieved-2026-10-25-max-tier"
+currency = "USD"
+uncached_input = "0.0000005"
+output = "0.0000025"
+cache_read = "0.00000005"
+cache_write = "0.000000625"
+cache_write_extended = "0.000001"

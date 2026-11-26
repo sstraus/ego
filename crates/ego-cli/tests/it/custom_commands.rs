@@ -220,6 +220,7 @@ fn custom_commands_project_review_sends_real_git_diff_after_trust() {
         .ego(&stub)
         .conversing()
         .args(["--mode", "yolo", "--sandbox", "off"])
+        .idle_before_exit(settle())
         .run_pty("/review foo");
     assert_eq!(result.code, Some(0), "{}", result.stderr);
     let request = stub.conversation_generations()[0].to_string();
@@ -247,11 +248,17 @@ fn pasted_custom_command_stays_literal_and_never_runs_its_shell() {
         .ego(&stub)
         .conversing()
         .args(["--mode", "yolo", "--sandbox", "off"])
+        .idle_before_exit(settle())
         .run_pty("\x1b[200~/review\x1b[201~");
     assert_eq!(result.code, Some(0), "{}", result.stdout);
     assert!(
         !marker.exists(),
         "bracketed paste executed the command shell"
+    );
+    assert!(
+        !stub.conversation_generations().is_empty(),
+        "{}",
+        result.stdout
     );
     assert!(
         stub.conversation_generations()[0]
@@ -279,10 +286,21 @@ fn typed_custom_command_selects_its_admitted_operation() {
         .ego(&stub)
         .conversing()
         .args(["--mode", "yolo", "--sandbox", "off"])
+        .idle_before_exit(settle())
         .run_pty("/review");
     assert_eq!(result.code, Some(0), "{}", result.stdout);
-    assert!(ego.workspace_path().join("typed-command-effect").exists());
+    assert!(
+        ego.workspace_path().join("typed-command-effect").exists(),
+        "{}",
+        result.stdout
+    );
     let generations = stub.conversation_generations();
     assert_eq!(generations.len(), 1);
     assert!(generations[0].to_string().contains("TYPED-EXPANDED"));
+}
+
+/// Windows redraws a composer while the turn runs, which the harness reads as
+/// the turn ending and answers with EOF; give the turn time to reach the provider.
+fn settle() -> std::time::Duration {
+    std::time::Duration::from_secs(if cfg!(windows) { 3 } else { 0 })
 }

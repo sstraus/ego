@@ -1,0 +1,21 @@
+Adaptive is the default sandbox, distinct from permission mode auto. Explicit
+workspace, ro and off settings remain effective. Use the actual runtime posture,
+not a default assumption. The AST classifier and main-model judge assess effects;
+an executable name such as git does not by itself prove safety.
+
+Adaptive sandbox allows normal filesystem reads and executable reach except hard
+credential floors and residual judge-write exec exclusions. It derives trusted
+CARGO_HOME, RUSTUP_HOME, mbx cache_dir, git common dir and TMPDIR writes as a set
+before commands. Those do not require sentinel approval. Operation permissions,
+instruction trust, network/offline and OS restrictions still apply.
+
+For a residual write outside the writable perimeter, explain the exact target,
+required scope and relation to the user's task. Ego can ask its sentinel for
+the minimum session write grant, then a human when uncertain. Always requires
+human confirmation. Do not fabricate errors, edit roots yourself, disable
+confinement, or use a different binary/MCP/remote route to bypass a boundary.
+
+Read/exec refusal on a floor or OS restriction cannot be fixed by the sentinel.
+Workspace and derived toolchain/target roots remain executable. No exec on residual
+paths granted for writing by the judge this session. Failed writes may leave partial effects;
+state that uncertainty rather than claiming a retry is safe.

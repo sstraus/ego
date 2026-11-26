@@ -715,6 +715,72 @@ fn skill_descriptor_exposes_model_choices_without_leaking_bodies_or_user_only_sk
     assert!(!empty.descriptor().description.contains("Description for"));
 }
 
+// Catches: a turn opened by invoking a skill or command directly commits no
+// `UserPrompt`, so the protocol filter refuses it with "requires a committed
+// user turn" and the first turn of a session cannot run.
+#[test]
+fn direct_skill_turn_is_a_user_turn_for_protocol_filter_state() {
+    use ego_core::event::domain::GenerationRole;
+    use ego_core::generator::filter_state::FilterStateExchange;
+    let blobs = RecordingBlobStore::with_order(Arc::new(Mutex::new(Vec::new())));
+    let store = RecordingSessionStore::with_order(Arc::new(Mutex::new(Vec::new())));
+    let clock = FixedClock;
+    let sink = NullSink;
+    let journal = SharedJournal::new(Journal::new(
+        SessionId::new(),
+        &store,
+        &clock,
+        &sink,
+        Producer::Main,
+        Default::default(),
+    ));
+    let catalogue = SkillCatalogue::new(vec![spec("explain", DIGEST_A, true, true)]).unwrap();
+    SkillInvocation::admit(
+        &catalogue,
+        SkillOperation::Invoke {
+            name: "explain".to_owned(),
+            arguments: String::new(),
+            bare: false,
+        },
+        &blobs,
+        &journal,
+    )
+    .unwrap();
+    let turn = store
+        .entries()
+        .into_iter()
+        .find_map(|entry| match entry {
+            SessionEntry::Event(DomainEvent {
+                kind: EventKind::SkillInstructionAdmitted { .. },
+                env,
+                ..
+            }) => Some(env.turn),
+            _ => None,
+        })
+        .expect("the skill instruction is journaled");
+    let namespace = "e".repeat(64);
+    let (read, snapshot) = FilterStateExchange::read(namespace.clone());
+    journal
+        .filter_state(turn, GenerationRole::Main, read)
+        .unwrap();
+    assert_eq!(
+        futures::executor::block_on(snapshot)
+            .unwrap()
+            .unwrap()
+            .turn_index,
+        0
+    );
+    // An unrelated prompt-less turn stays refused.
+    let (read, rejected) = FilterStateExchange::read(namespace);
+    journal
+        .filter_state(TurnId::new(), GenerationRole::Main, read)
+        .unwrap();
+    assert_eq!(
+        futures::executor::block_on(rejected).unwrap().err(),
+        Some("protocol_filter requires a committed user turn")
+    );
+}
+
 #[test]
 fn durable_admission_and_rendered_blobs_are_forced_in_order_and_resume_uses_captured_authority() {
     let order = Arc::new(Mutex::new(Vec::new()));

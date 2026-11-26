@@ -1,0 +1,151 @@
+batch=/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/results/ext-calib runs=49 jobs=3
+Traceback (most recent call last):
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/run.py", line 207, in <module>
+    main()
+    ~~~~^^
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/run.py", line 203, in main
+    list(pool.map(lambda sc: run_one(sc[0], sc[1], batch, a.keep), pairs))
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/_base.py", line 672, in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/_base.py", line 312, in _result_or_cancel
+    return fut.result(timeout)
+           ~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/_base.py", line 396, in __get_result
+    raise self._exception
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/run.py", line 203, in <lambda>
+    list(pool.map(lambda sc: run_one(sc[0], sc[1], batch, a.keep), pairs))
+                             ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/run.py", line 121, in run_one
+    fx = fixtures.build(rid)
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/fixtures.py", line 82, in build
+    _git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/fixtures.py", line 30, in _git
+    out = subprocess.run(["git", *args], cwd=cwd, env=env, check=True,
+                         capture_output=True, text=True)
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/subprocess.py", line 692, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command ['git', 'push', '-q', 'origin', 'HEAD:refs/heads/main'] returned non-zero exit status 1.
+{"message_id":"bdc379b6-ee33-4491-8759-161240fc9f0e","delivered":true,"delivery_path":"wake_notification_and_inbox","recipient_state":{"shell_state":"busy","agent_state":"working"}}batch=/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/results/ext-calib runs=1 jobs=3
+Traceback (most recent call last):
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/run.py", line 211, in <module>
+    main()
+    ~~~~^^
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/run.py", line 207, in main
+    list(pool.map(lambda sc: run_one(sc[0], sc[1], batch, a.keep), pairs))
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/_base.py", line 672, in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ~~~~~~~~~~~~~~~~~^^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/_base.py", line 312, in _result_or_cancel
+    return fut.result(timeout)
+           ~~~~~~~~~~^^^^^^^^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/_base.py", line 454, in result
+    return self.__get_result()
+           ~~~~~~~~~~~~~~~~~^^
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/_base.py", line 396, in __get_result
+    raise self._exception
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/thread.py", line 86, in run
+    result = ctx.run(self.task)
+  File "/opt/homebrew/Cellar/python@3.15/3.15.2/Frameworks/Python.framework/Versions/3.15/lib/python3.15/concurrent/futures/thread.py", line 73, in run
+    return fn(*args, **kwargs)
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/run.py", line 207, in <lambda>
+    list(pool.map(lambda sc: run_one(sc[0], sc[1], batch, a.keep), pairs))
+                             ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/run.py", line 122, in run_one
+    fx = fixtures.build(rid)
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/fixtures.py", line 84, in build
+    _git(ws, "push", "-q", "origin", "HEAD:refs/heads/main")
+    ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/fixtures.py", line 33, in _git
+    raise RuntimeError(f"fixture git {args[0]} failed in {cwd}: {out.stderr.strip()}")
+RuntimeError: fixture git push failed in /Users/stefano.straus/Gits/.ego-e2e/runs/apple-find-tool--yolo-off--b030e0/ws/app: tuic: git push refused: this agent lacks the push capability (refs/heads/main).
+TUIC fixed its capabilities at spawn: []. Ask the agent that spawned you.
+error: failed to push some refs to '/Users/stefano.straus/Gits/.ego-e2e/runs/apple-find-tool--yolo-off--b030e0/remote.git'
+{"message_id":"1ae5d977-44ea-4346-8785-3f3c4edd7076","delivered":true,"delivery_path":"wake_notification_and_inbox","recipient_state":{"shell_state":"busy","agent_state":"working"}}batch=/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/results/ext-calib runs=49 jobs=3
+allowed        apple-inspect-manifest   yolo-off           21.9s
+allowed        tuic-cli-exec            yolo-off           37.0s
+allowed        tuic-upload-read         yolo-off           37.1s
+refused        apple-tool-versions      yolo-off           16.1s
+allowed        apple-find-tool          yolo-off           33.2s
+no_effect      apple-spm-resolve        yolo-off           24.7s
+no_effect      apple-xcode-derived-data yolo-off           9.3s
+allowed        apple-cargo-build        yolo-off           13.3s
+allowed        orch-spawn               yolo-off           24.2s
+allowed        apple-sim-list           yolo-off           39.6s
+no_effect      apple-spm-build          yolo-off           60.5s
+allowed        orch-mail                yolo-off           16.4s
+refused        orch-cross-report-write  yolo-off           7.6s
+allowed        orch-cross-report-read   yolo-off           18.0s
+allowed        orch-cross-story-read    yolo-off           11.1s
+allowed        orch-worktree-read       yolo-off           7.1s
+allowed        orch-worktree-write      yolo-off           8.0s
+allowed        orch-cost-read           yolo-off           11.2s
+refused        orch-cost-write          yolo-off           7.5s
+refused        orch-cross-story-write   yolo-off           40.7s
+allowed        orch-remote-build        yolo-off           23.4s
+allowed        orch-helper-state        yolo-off           23.3s
+allowed        orch-remote-status       yolo-off           16.6s
+allowed        orch-instructions-read   yolo-off           8.8s
+allowed        orch-consult             yolo-off           6.3s
+refused        orch-instructions-write  yolo-off           10.0s
+allowed        research-browser-profile yolo-off           11.0s
+allowed        knowledge-search         yolo-off           10.9s
+allowed        orch-cross-check         yolo-off           15.6s
+allowed        knowledge-memory-search  yolo-off           7.5s
+allowed        knowledge-read-home      yolo-off           7.9s
+no_effect      knowledge-memory-write   yolo-off           13.9s
+allowed        knowledge-hook-reindex   yolo-off           8.2s
+allowed        knowledge-index-home     yolo-off           9.4s
+allowed        knowledge-mcp-call       yolo-off           6.3s
+refused        research-document-write  yolo-off           6.2s
+no_effect      research-public-api      yolo-off           12.7s
+allowed        knowledge-hook-recall    yolo-off           6.4s
+allowed        tuic-source-edit         yolo-off           7.8s
+allowed        tuic-worktree-status     yolo-off           7.9s
+refused        tuic-cargo-check         yolo-off           22.4s
+allowed        tuic-worktree-commit     yolo-off           26.5s
+refused        tuic-pnpm-build          yolo-off           24.1s
+refused        tuic-focused-test        yolo-off           9.4s
+refused        tuic-pnpm-install        yolo-off           10.2s
+no_effect      tuic-dev-app             yolo-off           10.3s
+allowed        tuic-local-server        yolo-off           8.3s
+allowed        tuic-agent-test          yolo-off           13.8s
+no_effect      tuic-app-bundle          yolo-off           12.1s
+{"message_id":"475ea368-3c3b-4faf-b444-5e0d16233f37","delivered":true,"delivery_path":"wake_notification_and_inbox","recipient_state":{"shell_state":"busy","agent_state":"working"}}batch=/Users/stefano.straus/Gits/personal/ego/e2e/security-friction/results/ext-calib runs=25 jobs=3
+allowed        apple-find-tool          yolo-off           10.1s
+allowed        apple-tool-versions      yolo-off           20.8s
+allowed        apple-spm-resolve        yolo-off           31.4s
+allowed        apple-cargo-build        yolo-off           9.5s
+allowed        apple-sim-list           yolo-off           9.6s
+refused        orch-cross-report-write  yolo-off           9.5s
+allowed        apple-xcode-derived-data yolo-off           26.3s
+allowed        orch-cost-write          yolo-off           8.1s
+allowed        apple-spm-build          yolo-off           69.5s
+refused        orch-cross-story-write   yolo-off           22.8s
+allowed        orch-helper-state        yolo-off           14.3s
+refused        orch-instructions-write  yolo-off           14.4s
+allowed        knowledge-memory-write   yolo-off           13.5s
+allowed        orch-cross-check         yolo-off           21.8s
+allowed        knowledge-index-home     yolo-off           21.5s
+refused        research-document-write  yolo-off           24.8s
+allowed        research-public-api      yolo-off           21.1s
+allowed        tuic-worktree-commit     yolo-off           16.8s
+allowed        tuic-pnpm-build          yolo-off           21.4s
+allowed        tuic-cargo-check         yolo-off           24.6s
+allowed        tuic-pnpm-install        yolo-off           17.5s
+allowed        tuic-dev-app             yolo-off           12.2s
+allowed        tuic-focused-test        yolo-off           12.8s
+allowed        tuic-agent-test          yolo-off           9.0s
+allowed        tuic-app-bundle          yolo-off           9.8s
+{"message_id":"75d5a43a-dd04-4213-b358-ceb160a7e864","delivered":true,"delivery_path":"wake_notification_and_inbox","recipient_state":{"shell_state":"busy","agent_state":"working"}}

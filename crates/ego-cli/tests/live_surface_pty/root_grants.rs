@@ -231,8 +231,9 @@ fn terminal_session_root_is_denied_live_and_admitted_only_on_same_id_resume() {
     );
 }
 
-/// Catches: root-bearing clear/compaction advertises an ineffective same-ID
-/// restart, or fresh/queued work repeatedly re-arms the structural blocker.
+/// Catches: a root-bearing /clear or /new advertises an ineffective same-ID
+/// restart instead of /compact, /fork or a root revocation. Pressure with roots
+/// now compacts and carries them (1208-097a), covered in ego-cli headless_compaction.
 #[test]
 fn resumed_session_root_recovery_is_actionable_and_pressure_does_not_rearm() {
     let outside = tempfile::tempdir().unwrap();
@@ -288,20 +289,7 @@ fn resumed_session_root_recovery_is_actionable_and_pressure_does_not_rearm() {
     input.flush().unwrap();
     assert!(session.quit(input).success());
 
-    let gate = ReleaseGate::new();
-    let resumed = Stub::start(Plan {
-        completions: vec![
-            Reply::Sse(support::costing("PRESSURE-1142", 244796, 4)),
-            Reply::GatedPaced {
-                head: String::new(),
-                tail: support::costing("QUEUED-1142", 244796, 4),
-                gate: gate.clone(),
-            },
-            Reply::Sse(text("AFTER-1142")),
-        ],
-        context_length: Some(272000),
-        ..Plan::default()
-    });
+    let resumed = Stub::start(Plan::default());
     let ego = places.ego(&resumed).subcommand("resume").args([
         support::FIXTURE_SESSION_ID,
         "--model",
@@ -314,7 +302,9 @@ fn resumed_session_root_recovery_is_actionable_and_pressure_does_not_rearm() {
     let (session, mut input, reader) = PtySession::start(&ego, 40, 160, None);
     let mut output = Vec::new();
     until_prompt_from(&reader, &mut output, 0);
-    for command in ["/clear", "/compact", "/new", "/fork"] {
+    // /compact and /fork carry session roots to the successor (1208-097a);
+    // only a fresh session, which has no receipts, still refuses.
+    for command in ["/clear", "/new"] {
         let start = output.len();
         input.write_all(format!("{command}\r").as_bytes()).unwrap();
         input.flush().unwrap();
@@ -328,7 +318,7 @@ fn resumed_session_root_recovery_is_actionable_and_pressure_does_not_rearm() {
             "/config roots",
             "/config roots revoke EXACT_PATH",
             "start a fresh session with ego",
-            "same-ID resume retains these roots",
+            "only /compact and /fork carry them",
         ] {
             assert!(
                 shown.contains(expected),
@@ -345,42 +335,6 @@ fn resumed_session_root_recovery_is_actionable_and_pressure_does_not_rearm() {
         resumed.generations().is_empty(),
         "refusal requested a checkpoint"
     );
-    let pressure = output.len();
-    input.write_all(b"reach context pressure\r").unwrap();
-    input.flush().unwrap();
-    until_normalized(&reader, &mut output, pressure, "PRESSURE-1142");
-    until_prompt_from(&reader, &mut output, pressure);
-    drain_until_quiet(&reader, &mut output);
-    let fresh = output.len();
-    input.write_all(b"continue work\r").unwrap();
-    input.flush().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while resumed.generations().len() < 2 {
-        assert!(Instant::now() < deadline, "fresh work did not start");
-        thread::sleep(Duration::from_millis(10));
-    }
-    // Queue real operator input while the pressured response is in flight.
-    input.write_all(b"queued followup\r").unwrap();
-    input.flush().unwrap();
-    gate.release();
-    until_normalized(&reader, &mut output, fresh, "AFTER-1142");
-    until_prompt_from(&reader, &mut output, fresh);
-    drain_until_quiet(&reader, &mut output);
-    let shown = support::notice_prose(&normalized(&output[pressure..]));
-    assert!(
-        !shown.contains("session is still open"),
-        "structural blocker re-armed: {shown}"
-    );
-    assert_eq!(
-        resumed.generations().len(),
-        3,
-        "queued input was lost or compacted"
-    );
-    assert!(
-        resumed.generations()[2]
-            .to_string()
-            .contains("queued followup")
-    );
     // Exercise the advertised narrowing recovery through the real owner command.
     let revoked = output.len();
     input
@@ -396,7 +350,7 @@ fn resumed_session_root_recovery_is_actionable_and_pressure_does_not_rearm() {
     until_prompt_from(&reader, &mut output, cleared);
     assert_eq!(
         resumed.generations().len(),
-        3,
+        0,
         "clear requested a checkpoint"
     );
     input.write_all(b"/quit\r").unwrap();

@@ -67,6 +67,22 @@ pub struct Journal<'a> {
     interrupted_tasks: Vec<ItemId>,
 }
 
+/// Turns the user opened by invoking a skill or command directly. Such a turn
+/// commits a skill instruction instead of a `UserPrompt` item, yet it is a
+/// user turn for the protocol filter.
+fn direct_skill_turns(state: &SessionState) -> std::collections::HashSet<TurnId> {
+    state
+        .skill_events()
+        .iter()
+        .filter_map(|event| match event {
+            crate::state::SkillEvent::Instruction(admitted) if admitted.parent.is_none() => {
+                Some(admitted.turn)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
 struct UncertainAppend {
     event: DomainEvent,
     cause: String,
@@ -223,13 +239,14 @@ impl<'s> SharedJournal<'s> {
             return Err("protocol_filter journal state unavailable");
         }
         let key = format!("{}:{namespace}", journal.session);
-        let turns: std::collections::HashSet<_> = journal
+        let mut turns: std::collections::HashSet<_> = journal
             .state
             .items
             .values()
             .filter(|item| item.kind == crate::state::ItemKind::UserPrompt)
             .map(|item| item.turn)
             .collect();
+        turns.extend(direct_skill_turns(&journal.state));
         Ok((
             crate::generator::filter_state::FilterStateSnapshot {
                 session_id: journal.session,
@@ -286,11 +303,13 @@ impl<'s> SharedJournal<'s> {
             .unwrap_or_default();
         // Fork and compaction journals contain local events only. A lineage
         // sequence belongs to the source journal, not this journal's ordering.
+        let skill_turns = direct_skill_turns(&journal.state);
         let has_source = journal
             .state
             .items
             .values()
             .any(|item| item.kind == crate::state::ItemKind::UserPrompt)
+            || !skill_turns.is_empty()
             || (matches!(
                 journal.state.lineage,
                 Some(crate::session::SessionLineage::Compaction { .. })
@@ -308,6 +327,12 @@ impl<'s> SharedJournal<'s> {
             .min();
         let boundary = match first_prompt {
             Some(first_prompt) => first_prompt,
+            None if skill_turns.contains(&turn) => {
+                // A directly invoked skill or command is this turn's user input.
+                // Its instruction is the latest durable event of the turn.
+                let mut boundary = journal.state.last_seq;
+                boundary.next()
+            }
             None if (role == crate::event::domain::GenerationRole::Compaction
                 || (matches!(
                     role,
@@ -351,6 +376,7 @@ impl<'s> SharedJournal<'s> {
             })
             .map(|item| item.turn)
             .collect::<std::collections::HashSet<_>>();
+        preceding_turns.extend(skill_turns.iter().filter(|id| **id != turn));
         if matches!(
             journal.state.lineage,
             Some(crate::session::SessionLineage::Compaction { .. })

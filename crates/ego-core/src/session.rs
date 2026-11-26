@@ -596,6 +596,17 @@ impl TargetSeed {
         self
     }
 
+    /// Carry the source's live session roots as durable owner-approval receipts.
+    /// The caller passes the replayed source roots (revocations already applied),
+    /// so a revoked root is never re-granted. They are pushed as trailing events of
+    /// the same atomic target-log image as the lineage seed.
+    pub(crate) fn with_session_roots(mut self, roots: &[crate::permit::ProfileRoot]) -> Self {
+        for root in roots {
+            self.push_trailing(EventKind::SessionRootGranted { root: root.clone() });
+        }
+        self
+    }
+
     pub(crate) fn with_latest_user_request(mut self, text: Option<String>) -> Self {
         if let EventKind::CompactionSeeded {
             latest_user_request,
@@ -860,6 +871,7 @@ impl PreparedFork {
     fn with_tip_metadata(seed: TargetSeed, state: &SessionState) -> Self {
         Self {
             seed: seed
+                .with_session_roots(&state.session_roots)
                 .with_title(state.title.clone())
                 .with_goal(state.goal.as_ref())
                 .with_plan(&state.plan)
@@ -927,6 +939,8 @@ impl PreparedFork {
                         .and_then(|selections| selections.connection()),
                 )
                 .with_prompt_snapshot(prefix.prompt_snapshot.clone())
+                // Authority is the source's current grants, not the prefix's.
+                .with_session_roots(&state.session_roots)
                 .with_title(prefix.title.clone())
                 .with_goal(prefix.goal.as_ref())
                 .with_plan(&prefix.plan)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Workflow Refocus"
+  short_description: "Reassess long-running work for speed and focus"
+  default_prompt: "Find the largest avoidable workflow delay. Apply one safe correction."

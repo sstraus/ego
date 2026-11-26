@@ -1,0 +1,46 @@
+{
+  "claude-1.json": {
+    "url": "https://api.github.com/repos/anthropics/claude-code/releases?per_page=1&page=1",
+    "recorded_at": "2026-11-01T05:44:18.051476+00:00",
+    "sha256": "39e3e6cbe73977eaba8539bf500914ce7b0500101d6ba552a4ebe93e8f40a06d"
+  },
+  "claude-2.json": {
+    "url": "https://api.github.com/repos/anthropics/claude-code/releases?per_page=1&page=2",
+    "recorded_at": "2026-11-01T05:44:21.276263+00:00",
+    "sha256": "2389d51144eeef35f31eea74c9038c574b48cf1a9b1dd588a8d5f366780cd2cd"
+  },
+  "claude-3.json": {
+    "url": "https://api.github.com/repos/anthropics/claude-code/releases?per_page=1&page=3",
+    "recorded_at": "2026-11-01T05:44:22.816894+00:00",
+    "sha256": "4f11a774c01949eb369eaa20a77ed6dd42632efd93fe4a43d6a472503c027bb8"
+  },
+  "codex-1.json": {
+    "url": "https://api.github.com/repos/openai/codex/releases?per_page=1&page=1",
+    "recorded_at": "2026-11-01T05:44:24.313972+00:00",
+    "sha256": "ce85515732962ba618514728ff1ef4fa4d4c81e4ba7081d70704734b9020dfb2"
+  },
+  "gemini-1.json": {
+    "url": "https://api.github.com/repos/google-gemini/gemini-cli/releases?per_page=1&page=1",
+    "recorded_at": "2026-11-01T05:44:25.070466+00:00",
+    "sha256": "096feb3f931ae524e35a45d2226bceed2d4d773dd2341c5ceb4f75e51034602e"
+  },
+  "grok-1.json": {
+    "url": "https://api.github.com/repos/xai-org/grok-build/releases?per_page=1&page=1",
+    "recorded_at": "2026-11-01T05:44:25.801586+00:00",
+    "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+  },
+  "grok-commits-1.json": {
+    "url": "https://api.github.com/repos/xai-org/grok-build/commits?per_page=1&page=1",
+    "recorded_at": "2026-11-01T05:44:42.335988+00:00",
+    "sha256": "219637c222b52b914a6c101c4184c34a96dfee52a332f79145468dac9a21e3ca"
+  },
+  "grok-README.md": {
+    "url": "https://raw.githubusercontent.com/xai-org/grok-build/main/README.md",
+    "recorded_at": "2026-11-01T05:48:31.477297+00:00",
+    "sha256": "322066de9f5bc136295bd0ae4f1752cef3d8dcb1a8f9d88044609e7b6d7abcf7"
+  },
+  "grok-product-changelog": {
+    "url": "https://x.ai/build/changelog",
+    "error": "SSL: SSLV3_ALERT_HANDSHAKE_FAILURE during recording; no response fixture available"
+  }
+}

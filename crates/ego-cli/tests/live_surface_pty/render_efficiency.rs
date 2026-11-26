@@ -31,7 +31,17 @@ fn quiet_working_ticks_do_not_query_the_cursor() {
     until(&reader, &mut output, b"EFFICIENCY-HELD");
     drain_until_quiet(&reader, &mut output);
     let mark = output.len();
-    until_normalized(&reader, &mut output, mark, "Working 2s");
+    // A loaded runner can skip the 2s frame; any later tick proves quiet ticking.
+    while !["Working 2s", "Working 3s", "Working 4s"]
+        .iter()
+        .any(|frame| normalized(&output[mark..]).contains(frame))
+    {
+        output.extend(
+            reader
+                .recv_timeout(PROGRESS_DEADLINE)
+                .expect("a status tick"),
+        );
+    }
     drain_until_quiet(&reader, &mut output);
     let ticks = output[mark..].to_vec();
     let mark = output.len();

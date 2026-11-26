@@ -4,3 +4,8 @@
 /crates/ego-cli/tests/goldens/plan/* text eol=lf
 /crates/ego-cli/tests/fixtures/1143-named-quota-output.json text eol=lf
 /crates/ego-cli/tests/fixtures/expand-664.expected.txt text eol=lf
+/crates/ego-cli/tests/goldens/launch/* text eol=lf
+/crates/ego-cli/tests/goldens/render/* text eol=lf
+/crates/ego-cli/tests/goldens/tuicommander/* text eol=lf
+/completions/* text eol=lf
+/docs/reference/cli.md text eol=lf

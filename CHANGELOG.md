@@ -14,6 +14,18 @@ conformance repairs, or that an earlier version section already lists. The relea
 
 ## [Unreleased]
 
+### Fixed
+
+- Explain why Ego is waiting when the context needs compaction but a background command still owns an outstanding result (#1144-6e73).
+- `/compact`, automatic compaction and `/fork` now work in a session that holds session roots, so an over-window session that used grants is no longer stuck. The new session keeps the same roots, recorded in its first events in the same step that creates it, so it does not ask again. A root you revoked before the change is not carried. `/new`, `/clear` and session selection still refuse and now name `/compact` and `/fork` as the way to keep the grants. A cold `ego compact` also carries session roots.
+- A session no longer grows past its context window because a tool call streamed a huge argument (for example a flood of whitespace) that was then replayed in every later request. Arguments over 32 KiB are replayed as a short prefix with the original length, arguments over 256 KiB are refused with an explanation the model can act on, and a whitespace or repetition flood aborts the generation and retries it without saving the call.
+- Ego now estimates the size of the next request before sending it. When the last measured context plus the new input would exceed the window, it compacts first (or tells you how to recover) instead of failing after the fact, and the "context is full" message lists ways out that work. See "When compaction is due" in the sessions guide.
+- On Windows, a `!`command`` inside a custom command now runs through `cmd.exe` instead of a `/bin/sh` that does not exist there (#1208-097a). The command words are not passed to it as positional parameters.
+- A system tool that a newer Ubuntu release installs outside `/usr/bin` (the packaged coreutils and findutils) no longer makes a read-only shell command ask for approval (#1208-097a).
+- On Windows, the check of a private file or directory now accepts a user account that the permission writer prints as an alias, so the credential store and the auth store open for it (#1208-097a).
+- A skill or slash command typed as the first input of a session no longer fails with `protocol_filter requires a committed user turn` when a protocol filter is active.
+- A skill or slash command typed on its own now reaches the model as the user's request. Before, its instructions arrived as background data and some models answered that they had received no request.
+
 ## [0.4.20] - 2026-11-25
 
 <!-- internal: #732-5e09 is already covered in 0.4.19. -->

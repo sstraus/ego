@@ -131,13 +131,13 @@ own handling; this contract covers perimeter roots only.
 - **Source:** `CacheTransport`, `CacheLifetimeLearning`, adapter dispatch and attempt settlement.
 - **Date:** 2026-11-14.
 
-## Session roots do not cross an in-process session change
+## Only `/compact` and `/fork` carry session roots to another session
 
-- **Observed:** `/compact`, `/clear`, `/new` and `/fork` refuse a session change when the source holds session roots. Same-ID resume keeps those roots and cannot remove the blocker.
-- **Why by design:** The process policy and OS guard were admitted for the source. A successor must not borrow its session-only filesystem authority.
-- **Workaround:** Keep the source open, save a factual handoff and settle session-owned background work, then start a fresh `ego` session with independent admission, not `ego resume SOURCE`. Alternatively, inspect `/config roots` and explicitly revoke every session-scoped root with `/config roots revoke EXACT_PATH` if that access is no longer needed. Revocation stops live exec children and re-admits the source before another transition. Neither the refusal nor fresh operator input transfers grants. A separate cold compaction excludes session roots but retains owner sandbox grants; do not use it for a zero-grant-transfer requirement.
-- **Source:** `crates/ego-cli/src/run/driver_runtime.rs`.
-- **Date:** 2026-11-17.
+- **Observed:** `/clear`, `/new` and session selection refuse a session change when the source holds session roots. `/compact`, automatic compaction (interactive and headless) and `/fork` do not: they carry the roots.
+- **Why by design:** The process policy and OS guard were admitted for the source. A successor may reuse them only when its own journal holds the same `SessionRootGranted` receipts, written in the successor's seed in the same atomic publication that creates it. A root revoked before the change is not carried. A fresh or selected session has no such receipt and needs its own approvals.
+- **Workaround:** Use `/compact` or `/fork` to keep the grants. For a fresh session, save a factual handoff, settle session-owned background work, then start `ego` (not `ego resume SOURCE`), or revoke a root with `/config roots revoke EXACT_PATH`. Owner sandbox grants travel with compaction as before. A provider switch forks with the same roots, because they are filesystem authority independent of the account.
+- **Source:** `crates/ego-cli/src/run/driver_runtime.rs`, `crates/ego-core/src/session.rs` (`with_session_roots`), `crates/ego-tools/src/store/jsonl_store.rs` (seed validation).
+- **Date:** 2026-11-26.
 
 ## A new interactive input phase does not retain the previous provider socket
 
