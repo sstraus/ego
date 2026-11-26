@@ -80,7 +80,13 @@ fn custom_commands_shell_failure_refuses_partial_provider_prompt() {
         "config.toml",
         "model = \"ollama/qwen3\"\nthinking = \"off\"\nsandbox = \"off\"\n",
     );
-    ego.home_file("commands/review.md", "Review !`printf partial; exit 7`");
+    // cmd.exe on Windows, /bin/sh elsewhere; both leave the partial text and exit 7.
+    let template = if cfg!(windows) {
+        "Review !`echo partial& exit 7`"
+    } else {
+        "Review !`printf partial; exit 7`"
+    };
+    ego.home_file("commands/review.md", template);
     let result = places
         .ego(&stub)
         .args(["/review", "--mode", "yolo", "--sandbox", "off"])
@@ -229,6 +235,10 @@ fn custom_commands_project_review_sends_real_git_diff_after_trust() {
 }
 
 // Catches: core slash interception executes bracketed-paste data as a command.
+// DEFERRED (2026-11-26) — the Windows console API delivers no bracketed-paste
+// event, so a paste there arrives as typed keys and is a typed command. Cover
+// the Windows paste path once the terminal layer reads VT input.
+#[cfg(unix)]
 #[test]
 fn pasted_custom_command_stays_literal_and_never_runs_its_shell() {
     let stub = Stub::start(plan());
