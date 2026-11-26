@@ -24,9 +24,7 @@ fn permit_boundaries_are_private() {
     // A private target directory: the shared one can hold a metadata artifact
     // that a restored build cache reports as fresh but rustc cannot load.
     let private = std::env::temp_dir().join("ego-permit-privacy-target");
-    let library = cargo_metadata_artifact(root, Some(&private));
-    let mut dependencies = OsString::from("dependency=");
-    dependencies.push(library.parent().expect("the artifact has a parent"));
+    let (library, search_dirs) = cargo_metadata_artifact(root, Some(&private));
     let mut dependency = OsString::from("ego_core=");
     dependency.push(&library);
     let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
@@ -38,8 +36,11 @@ fn permit_boundaries_are_private() {
             "-o",
             "-",
         ])
-        .arg("-L")
-        .arg(dependencies)
+        .args(search_dirs.iter().flat_map(|directory| {
+            let mut dependencies = OsString::from("dependency=");
+            dependencies.push(directory);
+            [OsString::from("-L"), dependencies]
+        }))
         .arg("--extern")
         .arg(dependency)
         .arg(&fixture)
@@ -107,7 +108,9 @@ fn permit_boundaries_are_private() {
     assert_eq!(rejected, expected, "{stderr}");
 }
 
-fn cargo_metadata_artifact(root: &Path, target_dir: Option<&Path>) -> PathBuf {
+/// The ego-core metadata artifact and every directory holding a dependency
+/// artifact: newer Cargo layouts spread them over per-package build directories.
+fn cargo_metadata_artifact(root: &Path, target_dir: Option<&Path>) -> (PathBuf, Vec<PathBuf>) {
     let mut command = Command::new("cargo");
     if let Some(target_dir) = target_dir {
         command.arg("--config").arg("build.incremental=false");
@@ -130,25 +133,38 @@ fn cargo_metadata_artifact(root: &Path, target_dir: Option<&Path>) -> PathBuf {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    std::str::from_utf8(&output.stdout)
+    let messages: Vec<Value> = std::str::from_utf8(&output.stdout)
         .expect("Cargo diagnostics are UTF-8")
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|message| {
-            message["reason"] == "compiler-artifact" && message["target"]["name"] == "ego_core"
-        })
+        .filter(|message| message["reason"] == "compiler-artifact")
+        .collect();
+    let files = |message: &Value| -> Vec<PathBuf> {
+        message["filenames"]
+            .as_array()
+            .expect("Cargo lists the artifact files")
+            .iter()
+            .filter_map(Value::as_str)
+            .map(PathBuf::from)
+            .collect()
+    };
+    let library = messages
+        .iter()
+        .filter(|message| message["target"]["name"] == "ego_core")
         .find_map(|message| {
-            message["filenames"]
-                .as_array()
-                .expect("Cargo lists the artifact files")
-                .iter()
-                .filter_map(Value::as_str)
-                .map(Path::new)
-                .find(|path| {
-                    path.extension()
-                        .is_some_and(|extension| extension == "rmeta")
-                })
-                .map(Path::to_owned)
+            files(message).into_iter().find(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "rmeta")
+            })
         })
-        .expect("Cargo reports the ego-core metadata artifact")
+        .expect("Cargo reports the ego-core metadata artifact");
+    let mut directories: Vec<PathBuf> = Vec::new();
+    for path in messages.iter().flat_map(files) {
+        if let Some(parent) = path.parent()
+            && !directories.iter().any(|known| known == parent)
+        {
+            directories.push(parent.to_owned());
+        }
+    }
+    (library, directories)
 }

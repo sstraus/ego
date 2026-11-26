@@ -4,6 +4,10 @@
 //! through the ordinary headless resume and exits with that turn's status.
 //! Every test here drives the real binary against the loopback provider fake.
 
+// The two owner-wait arms need a Windows reproduction (the first queued turn
+// never reaches the provider there), so they run on Unix hosts only.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
+
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -75,6 +79,7 @@ fn user_texts(generation: &serde_json::Value) -> Vec<String> {
 // Catches: two queued prompts on one session both opening it, so the second
 // either fails on the writer lease or runs a turn beside the first.
 #[test]
+#[cfg(unix)]
 fn concurrent_queued_prompts_run_one_turn_at_a_time() {
     let places = Places::new();
     let (second, gate) = held("Second.");
@@ -229,6 +234,7 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
 // wait, so a queued prompt run from that checkout exits at once with "in use
 // by another ego process" while the owner runs, instead of waiting for it.
 #[test]
+#[cfg(unix)]
 fn a_queued_prompt_waits_for_the_owner_of_a_worktree_session() {
     let places = Places::new();
     let (second, gate) = held("Second.");
