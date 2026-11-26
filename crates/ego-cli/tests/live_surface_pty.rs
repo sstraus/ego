@@ -870,8 +870,12 @@ fn across_root_picker_contract(case: &str) {
             shown.find("Orchid cross-root").unwrap() < shown.find("Older record").unwrap(),
             "{shown}"
         );
+        // Wait for the picker to close: an Esc followed at once by `/quit` is
+        // one Alt-key chord, and the picker would stay open.
+        let canceled = output.len();
         input.write_all(b"\x1b").unwrap();
         input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, canceled);
     } else if case == "missing" {
         until_normalized(&reader, &mut output, start, "unavailable");
         input.write_all(b"\r").unwrap();

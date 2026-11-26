@@ -501,9 +501,28 @@ impl Write for LogBuffer {
     }
 }
 
+/// A process-wide fallback sink: a failed call may be reported from a runtime
+/// thread that the test's scoped subscriber does not cover.
+fn global_log() -> &'static LogBuffer {
+    static LOG: std::sync::OnceLock<LogBuffer> = std::sync::OnceLock::new();
+    LOG.get_or_init(|| {
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let _ = tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(move || writer.clone())
+                .with_ansi(false)
+                .finish(),
+        );
+        buffer
+    })
+}
+
 /// Run one generation through the real adapter and return what an operator
 /// with `EGO_LOG=warn` would read.
 async fn warn_log_of_one_generation(port: u16) -> String {
+    global_log().0.lock().expect("log buffer lock").clear();
     let buffer = LogBuffer::default();
     let writer = buffer.clone();
     let subscriber = tracing_subscriber::fmt()
@@ -530,6 +549,10 @@ async fn warn_log_of_one_generation(port: u16) -> String {
     );
     let bytes = buffer.0.lock().expect("log buffer lock").clone();
     let mut log = String::from_utf8(bytes).expect("UTF-8 log");
+    // Records emitted by a thread that never entered the scoped subscriber.
+    log.push_str(&String::from_utf8_lossy(&std::mem::take(
+        &mut *global_log().0.lock().expect("log buffer lock"),
+    )));
     log.push_str(&format!("\nevents: {events:?}\n"));
     log
 }
