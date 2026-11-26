@@ -182,6 +182,8 @@ fn browser_login_saves_a_connection_without_switching_the_current_account() {
     input.flush().unwrap();
     until_normalized(&reader, &mut output, start, "OAUTH-PTY-TURN");
     until_prompt_from(&reader, &mut output, start);
+    // The turn's status row can outlive the first prompt; login is refused until it ends.
+    drain_until_quiet(&reader, &mut output);
     let start = output.len();
     input.write_all(b"/login anthropic\r").unwrap();
     input.flush().unwrap();

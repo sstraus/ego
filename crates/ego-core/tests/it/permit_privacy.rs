@@ -28,7 +28,7 @@ fn permit_boundaries_are_private() {
     let mut dependencies = OsString::from("dependency=");
     dependencies.push(library.parent().expect("the artifact has a parent"));
     let mut dependency = OsString::from("ego_core=");
-    dependency.push(library);
+    dependency.push(&library);
     let output = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
         .current_dir(root)
         .args([
@@ -92,7 +92,16 @@ fn permit_boundaries_are_private() {
         ("E0624", "mint", "method `mint` is private"),
         ("E0599", "with_approver", "no method named `with_approver` found for reference `&PolicyEngine` in the current scope"),
     ].map(|(code, token, message)| (code.to_owned(), token, message.to_owned()));
-    assert_eq!(error_count, expected.len(), "{stderr}");
+    let context = format!(
+        "library={library:?} exists={} rustc={:?} dependencies={:?}\n{stderr}",
+        library.exists(),
+        std::env::var_os("RUSTC"),
+        std::fs::read_dir(library.parent().unwrap()).map(|entries| entries
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+            .filter(|name| name.contains("ego_core"))
+            .collect::<Vec<_>>()),
+    );
+    assert_eq!(error_count, expected.len(), "{context}");
     rejected.sort_unstable();
     expected.sort_unstable();
     assert_eq!(rejected, expected, "{stderr}");
