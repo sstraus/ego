@@ -1,2 +1,3 @@
 /CHANGELOG.md merge=union
 /crates/ego-acp/tests/golden/session_v*.jsonl text eol=lf
+/crates/ego-ai/tests/goldens/**/*.sse text eol=lf
