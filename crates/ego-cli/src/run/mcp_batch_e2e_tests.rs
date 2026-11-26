@@ -207,14 +207,26 @@ impl StdioFixture {
         let log = workspace.path().join("dispatch.log");
         std::fs::write(&log, "").unwrap();
         let python = if cfg!(windows) {
-            "python.exe"
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
+                .map(|directory| directory.join("python.exe"))
+                .find(|candidate| candidate.is_file())
+                .map_or_else(
+                    || "python.exe".to_owned(),
+                    |path| path.display().to_string(),
+                )
         } else {
-            "/usr/bin/python3"
+            "/usr/bin/python3".to_owned()
+        };
+        // A Windows interpreter cannot start without the system root.
+        let inherit = if cfg!(windows) {
+            "inherit_env=['SystemRoot','WINDIR']\n"
+        } else {
+            ""
         };
         std::fs::write(
         home.path().join("config.toml"),
         format!(
-            "sandbox = 'off'\n[mcp.servers.fixture]\ntransport='stdio'\ncommand={python:?}\nargs=[{:?}, {:?}, {:?}, {scenario:?}]\n",
+            "sandbox = 'off'\n[mcp.servers.fixture]\ntransport='stdio'\ncommand={python:?}\n{inherit}args=[{:?}, {:?}, {:?}, {scenario:?}]\n",
             server.display().to_string(),
             log.display().to_string(),
             latency.as_secs_f64().to_string(),

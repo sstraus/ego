@@ -507,7 +507,7 @@ async fn warn_log_of_one_generation(port: u16) -> String {
     let buffer = LogBuffer::default();
     let writer = buffer.clone();
     let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+        .with_max_level(tracing::Level::WARN)
         .with_writer(move || writer.clone())
         .with_ansi(false)
         .finish();

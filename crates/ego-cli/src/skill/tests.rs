@@ -23,9 +23,9 @@ struct Roots {
 impl Roots {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("skill roots");
-        let system = dir.path().join("etc/ego/skills");
-        let user = dir.path().join("home/.ego/skills");
-        let project = dir.path().join("workspace/.ego/skills");
+        let system = dir.path().join("etc").join("ego").join("skills");
+        let user = dir.path().join("home").join(".ego").join("skills");
+        let project = dir.path().join("workspace").join(".ego").join("skills");
         for root in [&system, &user, &project] {
             fs::create_dir_all(root).expect("create skill root");
         }

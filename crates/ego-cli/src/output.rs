@@ -1913,7 +1913,7 @@ mod tests {
             let requests = bytes.windows(4).filter(|w| w == b"\x1b[6n").count();
             for _ in answered..requests {
                 if writer
-                    .write_all(b"\x1b[1;1R")
+                    .write_all(b"\x1b[2;1R")
                     .and_then(|()| writer.flush())
                     .is_err()
                 {
@@ -2051,8 +2051,22 @@ mod tests {
             });
         reading.join().expect("reader thread");
         let text = String::from_utf8_lossy(&bytes);
+        // A pseudoconsole may re-encode colour sequences, so compare the layout.
+        let mut plain = String::new();
+        let mut rest = &*text;
+        while let Some(at) = rest.find("\x1b[") {
+            plain.push_str(&rest[..at]);
+            let tail = &rest[at + 2..];
+            let end = tail
+                .find(|c: char| c.is_ascii_alphabetic())
+                .map_or(tail.len(), |i| i + 1);
+            rest = &tail[end..];
+        }
+        plain.push_str(rest);
         assert_eq!(
-            text.matches(&format!("εgo: {ROW}\r\n")).count(),
+            plain
+                .matches("εgo: 123456789012345678901234567890\r\n")
+                .count(),
             2,
             "painted rows must remain intact: {text:?}"
         );
