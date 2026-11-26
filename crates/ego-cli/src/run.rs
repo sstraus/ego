@@ -274,7 +274,9 @@ mod tests;
 #[path = "run/phase_boundary_tests.rs"]
 mod phase_boundary_tests;
 
-#[cfg(test)]
+// The stdio fixture is a POSIX Python server; Windows spawn semantics are not
+// yet reproduced by it, so the end-to-end arms run on Unix hosts only.
+#[cfg(all(test, unix))]
 #[path = "run/mcp_batch_e2e_tests.rs"]
 mod mcp_batch_e2e_tests;
 

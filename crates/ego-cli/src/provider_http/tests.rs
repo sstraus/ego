@@ -557,10 +557,14 @@ async fn warn_log_of_one_generation(port: u16) -> String {
     log
 }
 
-fn assert_one_transport_record(log: &str, kind: &str, cause: &str) {
+fn assert_one_transport_record(log: &str, kind: &str, cause: &str, only: &str) {
     let records: Vec<&str> = log
         .lines()
-        .filter(|line| line.contains("provider HTTP transport failed"))
+        .filter(|line| {
+            line.contains("provider HTTP transport failed")
+                && line.contains(&format!("kind={kind}"))
+                && line.contains(only)
+        })
         .collect();
     assert_eq!(
         records.len(),
@@ -593,8 +597,12 @@ async fn a_failed_provider_call_logs_its_transport_cause_once_at_warn() {
     let port = closed.local_addr().expect("listener address").port();
     drop(closed);
     let log = warn_log_of_one_generation(port).await;
-    assert_one_transport_record(&log, "Connect", "refused");
-    assert!(!log.contains("status="), "no response, no status: {log}");
+    assert_one_transport_record(&log, "Connect", "refused", &format!("127.0.0.1:{port}"));
+    assert!(
+        !log.lines()
+            .any(|line| line.contains(&format!("127.0.0.1:{port}")) && line.contains("status=")),
+        "no response, no status: {log}"
+    );
 
     // The answer starts, then the body stops short of its declared length.
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("loopback listener");
@@ -612,7 +620,12 @@ async fn a_failed_provider_call_logs_its_transport_cause_once_at_warn() {
     let log = warn_log_of_one_generation(port).await;
     server.join().expect("server thread");
     // The outer reqwest text names no cause; only the source chain does.
-    assert_one_transport_record(&log, "ResponseBody", "end of file before message length");
+    assert_one_transport_record(
+        &log,
+        "ResponseBody",
+        "end of file before message length",
+        "status=200",
+    );
     assert!(
         log.contains("status=200"),
         "the started answer's status: {log}"

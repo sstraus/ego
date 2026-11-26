@@ -21,13 +21,10 @@ fn permit_boundaries_are_private() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let fixture = root.join("tests/ui/permit_boundaries_are_private.rs");
     let source = std::fs::read(&fixture).expect("the privacy fixture is readable");
-    let mut library = cargo_metadata_artifact(root, None);
-    if !library.exists() {
-        // A fresh unit's artifact can be pruned from a restored build cache
-        // without cargo noticing; a private target directory rebuilds it.
-        let private = std::env::temp_dir().join("ego-permit-privacy-target");
-        library = cargo_metadata_artifact(root, Some(&private));
-    }
+    // A private target directory: the shared one can hold a metadata artifact
+    // that a restored build cache reports as fresh but rustc cannot load.
+    let private = std::env::temp_dir().join("ego-permit-privacy-target");
+    let library = cargo_metadata_artifact(root, Some(&private));
     let mut dependencies = OsString::from("dependency=");
     dependencies.push(library.parent().expect("the artifact has a parent"));
     let mut dependency = OsString::from("ego_core=");
