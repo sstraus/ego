@@ -100,7 +100,8 @@ fn repaint_contract(case: &str) {
         parser.process(&output[transition..]);
         parser.screen().contents()
     } else {
-        until_normalized(&reader, &mut output, transition, "Working 2s");
+        // Wait for a fresh repaint, not for an exact elapsed second.
+        until_normalized(&reader, &mut output, transition, "Working ");
         drain_until_quiet(&reader, &mut output);
         parser.process(&output[transition..]);
         let visible = parser.screen().contents();

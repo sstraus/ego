@@ -529,7 +529,9 @@ async fn warn_log_of_one_generation(port: u16) -> String {
         "the forced transport failure must end the attempt: {events:?}"
     );
     let bytes = buffer.0.lock().expect("log buffer lock").clone();
-    String::from_utf8(bytes).expect("UTF-8 log")
+    let mut log = String::from_utf8(bytes).expect("UTF-8 log");
+    log.push_str(&format!("\nevents: {events:?}\n"));
+    log
 }
 
 fn assert_one_transport_record(log: &str, kind: &str, cause: &str) {

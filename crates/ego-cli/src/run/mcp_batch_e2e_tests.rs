@@ -206,10 +206,15 @@ impl StdioFixture {
         std::fs::write(&server, SERVER).unwrap();
         let log = workspace.path().join("dispatch.log");
         std::fs::write(&log, "").unwrap();
+        let python = if cfg!(windows) {
+            "python.exe"
+        } else {
+            "/usr/bin/python3"
+        };
         std::fs::write(
         home.path().join("config.toml"),
         format!(
-            "sandbox = 'off'\n[mcp.servers.fixture]\ntransport='stdio'\ncommand='/usr/bin/python3'\nargs=[{:?}, {:?}, {:?}, {scenario:?}]\n",
+            "sandbox = 'off'\n[mcp.servers.fixture]\ntransport='stdio'\ncommand={python:?}\nargs=[{:?}, {:?}, {:?}, {scenario:?}]\n",
             server.display().to_string(),
             log.display().to_string(),
             latency.as_secs_f64().to_string(),

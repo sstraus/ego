@@ -769,8 +769,8 @@ mod skill_roots_474 {
         // Catches: missing project discovery, misleading diagnostics, or shadowing that blocks a rescan.
         let roots = Roots::new();
         let workspace = roots.project.parent().unwrap().parent().unwrap();
-        let alias = workspace.join(".github/skills");
-        let portable = workspace.join(".agents/skills");
+        let alias = workspace.join(".github").join("skills");
+        let portable = workspace.join(".agents").join("skills");
         let winner = roots.write(&portable, "shared", &valid_for("shared", ""), "winner");
         roots.write(&alias, "shared", &valid_for("shared", ""), "shadowed");
         roots.write(
@@ -800,7 +800,7 @@ mod skill_roots_474 {
         assert!(
             report.contains(&format!(
                 "{}: not found",
-                workspace.join(".codex/skills").display()
+                workspace.join(".codex").join("skills").display()
             )),
             "{report}"
         );

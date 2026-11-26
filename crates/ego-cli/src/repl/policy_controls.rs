@@ -854,11 +854,10 @@ mod tests {
                 })
                 .map(|entry| entry.rule().to_string())
                 .collect::<Vec<_>>();
-            let remembered = format!(
-                "read({})",
-                crate::ai_test_support::native("/workspace/new").display()
+            assert!(
+                allow.iter().any(|rule| rule == "read(/workspace/new)"),
+                "Remember lost: {allow:?}"
             );
-            assert!(allow.contains(&remembered), "Remember lost: {allow:?}");
             assert_eq!(
                 allow.iter().any(|rule| rule == "read(/workspace/old)"),
                 !revoke,

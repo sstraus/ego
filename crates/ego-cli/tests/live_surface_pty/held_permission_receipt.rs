@@ -39,10 +39,19 @@ async fn permission_decision_reaches_run_with_a_held_printer_row() {
         return;
     }
 
-    let call = r#"{"argv":["/bin/sh","-c","printf decision-received > decision-received"],"timeout_ms":5000}"#;
+    let (program, flag, script) = if cfg!(windows) {
+        ("cmd.exe", "/C", "echo decision-received>decision-received")
+    } else {
+        (
+            "/bin/sh",
+            "-c",
+            "printf decision-received > decision-received",
+        )
+    };
+    let call = serde_json::json!({"argv": [program, flag, script], "timeout_ms": 5000});
     let stub = Stub::start(Plan {
         completions: vec![
-            Reply::Sse(tool_call("held-355", "exec", call)),
+            Reply::Sse(tool_call("held-355", "exec", &call.to_string())),
             Reply::Sse(text("HELD-355-DONE")),
         ],
         ..Plan::default()
@@ -169,7 +178,8 @@ async fn permission_decision_reaches_run_with_a_held_printer_row() {
         assert!(
             shown
                 .lines()
-                .any(|row| row.starts_with("Allowed run /bin/sh")),
+                .any(|row| row.starts_with("Allowed run ")
+                    && row.to_ascii_lowercase().contains(program)),
             "receipt missing: {shown}"
         );
         press(b"/quit\r");
@@ -179,7 +189,7 @@ async fn permission_decision_reaches_run_with_a_held_printer_row() {
     drop(pair);
     reader_thread.join().unwrap();
     assert_eq!(
-        progressed_before_release.as_deref(),
+        progressed_before_release.as_deref().map(str::trim_end),
         Some("decision-received"),
         "receipt blocked the real run decision behind the held bounded(1) printer row"
     );

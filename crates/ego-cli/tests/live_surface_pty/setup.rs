@@ -43,9 +43,10 @@ fn slash_setup_opens_settings_without_model_generation_and_esc_keeps_config() {
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
     until_normalized(&reader, &mut output, return_start, "Setup · Settings");
+    let exit_start = output.len();
     input.write_all(b"\x1b").unwrap();
     input.flush().unwrap();
-    until_prompt_from(&reader, &mut output, start);
+    until_prompt_from(&reader, &mut output, exit_start);
     input.write_all(b"/quit\r").unwrap();
     input.flush().unwrap();
     assert!(session.quit(input).success());

@@ -1896,6 +1896,35 @@ mod tests {
         serde_json::to_value(report).expect("§4.1's object serialises")
     }
 
+    /// Read a PTY to its end while answering cursor-position requests: a
+    /// Windows pseudoconsole blocks its child until the host replies.
+    fn read_answering_cursor_reports(
+        reader: &mut dyn std::io::Read,
+        writer: &mut dyn std::io::Write,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let mut answered = 0;
+        while let Ok(length) = reader.read(&mut chunk) {
+            if length == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..length]);
+            let requests = bytes.windows(4).filter(|w| w == b"\x1b[6n").count();
+            for _ in answered..requests {
+                if writer
+                    .write_all(b"\x1b[1;1R")
+                    .and_then(|()| writer.flush())
+                    .is_err()
+                {
+                    return bytes;
+                }
+            }
+            answered = requests;
+        }
+        bytes
+    }
+
     // Catches: resume's stderr adapter emits LF without CR while the seat owns raw mode.
     #[test]
     fn raw_mode_stderr_diagnostics_restore_column_zero() {
@@ -1909,7 +1938,6 @@ mod tests {
         }
 
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-        use std::io::Read;
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 24,
@@ -1929,9 +1957,9 @@ mod tests {
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().expect("reader");
         let (sender, receiver) = std::sync::mpsc::channel();
+        let mut writer = pair.master.take_writer().expect("writer");
         let reading = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = reader.read_to_end(&mut bytes);
+            let bytes = read_answering_cursor_reports(&mut reader, &mut writer);
             let _ = sender.send(bytes);
         });
         // Wait for the child, then close the master: a Windows pseudoconsole
@@ -1976,7 +2004,6 @@ mod tests {
         }
 
         use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
-        use std::io::Read;
         let pair = NativePtySystem::default()
             .openpty(PtySize {
                 rows: 24,
@@ -1996,9 +2023,9 @@ mod tests {
         drop(pair.slave);
         let mut reader = pair.master.try_clone_reader().expect("reader");
         let (sender, receiver) = std::sync::mpsc::channel();
+        let mut writer = pair.master.take_writer().expect("writer");
         let reading = std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            let _ = reader.read_to_end(&mut bytes);
+            let bytes = read_answering_cursor_reports(&mut reader, &mut writer);
             let _ = sender.send(bytes);
         });
         // Wait for the child, then close the master: a Windows pseudoconsole
