@@ -721,6 +721,15 @@ async fn websocket_ping_pong_reset_stream_idle_timeout() {
         }
         tokio::time::sleep(Duration::from_millis(80)).await;
         socket.send(Message::Text("alive".into())).await.unwrap();
+        // Read what the client sent back (its Pong replies) before closing:
+        // Windows resets a socket closed with unread data, and the reset can
+        // overtake the message still in flight.
+        while let Ok(Some(_)) = tokio::time::timeout(
+            Duration::from_millis(300),
+            futures::StreamExt::next(&mut socket),
+        )
+        .await
+        {}
     });
     let target = NetworkTarget::new("127.0.0.1", port).unwrap();
     let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();

@@ -1984,7 +1984,18 @@ mod tests {
                 panic!("raw diagnostic child did not finish: output did not end: {error}")
             });
         reading.join().expect("reader thread");
-        let text = String::from_utf8_lossy(&bytes);
+        // A Windows pseudoconsole repaints modes between rows, so compare the
+        // rows with the control sequences removed.
+        let lossy = String::from_utf8_lossy(&bytes);
+        let mut text = String::new();
+        let mut chars = lossy.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\u{1b}' && chars.peek() == Some(&'[') {
+                chars.by_ref().find(|c| ('\u{40}'..='\u{7e}').contains(c) && *c != '[');
+            } else {
+                text.push(ch);
+            }
+        }
         assert!(
             text.contains("εgo: raw-one\r\nraw-two\r\n")
                 && text.contains("εgo: raw-block-one\r\nraw-block-two\r\n"),

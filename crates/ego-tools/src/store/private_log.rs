@@ -237,7 +237,7 @@ fn publish_hardened_directory(root: &Path) -> io::Result<()> {
     fs::DirBuilder::new().create(&staging)?;
     // Close the hardened handle before the rename: it does not share DELETE.
     let hardened = open_directory(&staging, true).map(drop);
-    let published = hardened.and_then(|()| fs::rename(&staging, root));
+    let published = hardened.and_then(|()| rename_into_place(&staging, root));
     match published {
         Ok(()) => Ok(()),
         Err(_) if root.is_dir() => {
@@ -247,6 +247,35 @@ fn publish_hardened_directory(root: &Path) -> io::Result<()> {
         Err(error) => {
             let _ = fs::remove_dir(&staging);
             Err(error)
+        }
+    }
+}
+
+/// Rename a freshly hardened directory into place.
+///
+/// A virus scanner or indexer can hold a handle on a directory that was just
+/// created, and Windows then refuses its rename with an access or sharing
+/// error for a few milliseconds. Retry that refusal a bounded number of times;
+/// a creator that finds the path already published stops at once.
+#[cfg(windows)]
+fn rename_into_place(staging: &Path, root: &Path) -> io::Result<()> {
+    const ACCESS_DENIED: i32 = 5;
+    const SHARING_VIOLATION: i32 = 32;
+    let mut attempt = 0;
+    loop {
+        match fs::rename(staging, root) {
+            Err(error)
+                if attempt < 20
+                    && !root.exists()
+                    && matches!(
+                        error.raw_os_error(),
+                        Some(ACCESS_DENIED | SHARING_VIOLATION)
+                    ) =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            result => return result,
         }
     }
 }
