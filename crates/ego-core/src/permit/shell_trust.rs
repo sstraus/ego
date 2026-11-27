@@ -140,14 +140,13 @@ fn trusted_inner(program: &str, spec: &SpawnSpec, identity: &ExecutionIdentity) 
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::trusted_path;
     use std::path::Path;
 
     // Catches: a distribution whose system tools resolve to packaged multicall
     // binaries outside /usr/bin loses read-only approval for `ls`.
-    #[cfg(unix)]
     #[test]
     fn packaged_system_multicall_binaries_are_trusted_and_lookalikes_are_not() {
         assert!(trusted_path(Path::new("/usr/lib/cargo/bin/coreutils/ls")));
