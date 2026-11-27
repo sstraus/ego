@@ -374,13 +374,18 @@ fn validate(file: &File, directory: bool) -> io::Result<()> {
         SecurityInformation::Dacl,
     )?;
     let sid = current_process_sid()?;
-    let inheritance = if directory { "OICI" } else { "" };
+    let entry = crate::privacy::owner_only_entry(
+        &sid,
+        if directory {
+            crate::privacy::PrivatePathKind::Directory
+        } else {
+            crate::privacy::PrivatePathKind::File
+        },
+    )
+    .map_err(|_| invalid())?;
     let dacl = descriptor.dacl().ok_or_else(invalid)?;
     let sddl = descriptor.as_sddl()?.to_string_lossy().into_owned();
-    if !sddl.starts_with("D:P")
-        || dacl.len() != 1
-        || !sddl.ends_with(&format!("(A;{inheritance};FA;;;{sid})"))
-    {
+    if !sddl.starts_with("D:P") || dacl.len() != 1 || !sddl.ends_with(&entry) {
         return Err(invalid());
     }
     Ok(())

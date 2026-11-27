@@ -370,11 +370,9 @@ fn a_system_deny_still_wins_over_every_suggested_rule() {
     let mut rules = Ruleset::default();
     Ruleset::merge(
         &mut rules.deny,
-        Rule::load(&format!(
-            "write({}/**)",
-            support::native("/workspace/.git").display()
-        ))
-        .unwrap(),
+        // An absolute pattern has no drive: its leading `/` is the root of every
+        // volume, so this one covers `C:\workspace\.git` on Windows too.
+        Rule::load("write(/workspace/.git/**)").unwrap(),
         Source::System,
     );
     Ruleset::merge(

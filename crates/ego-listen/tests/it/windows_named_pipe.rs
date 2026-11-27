@@ -109,7 +109,17 @@ fn assert_owner_only_pipe_dacl<H: AsRawHandle>(pipe: &H, current_sid: &Sid) {
         .expect("the kernel descriptor serializes to SDDL")
         .to_string_lossy()
         .into_owned();
-    let expected_dacl = format!("P(A;;FA;;;{current_sid})");
+    // The writer prints well-known accounts as aliases, so spell the expected
+    // descriptor through the same writer rather than from the SID string.
+    let expected_dacl = format!("D:P(A;;FA;;;{current_sid})")
+        .parse::<windows_permissions::LocalBox<windows_permissions::SecurityDescriptor>>()
+        .expect("the expected descriptor parses")
+        .as_sddl()
+        .expect("the expected descriptor serializes")
+        .to_string_lossy()
+        .strip_prefix("D:")
+        .expect("a DACL section")
+        .to_owned();
     assert!(
         sddl.split_once("D:")
             .is_some_and(|(_, dacl)| dacl == expected_dacl),

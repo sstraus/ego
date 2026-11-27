@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use ego_tools::privacy::{PrivatePathKind, harden_private_path};
+use ego_tools::privacy::{PrivatePathKind, harden_private_path, owner_only_entry};
 use tempfile::tempdir;
 use windows_permissions::constants::{SeObjectType, SecurityInformation};
 use windows_permissions::utilities::current_process_sid;
@@ -39,19 +39,18 @@ fn private_files_and_directories_admit_only_the_current_windows_user() {
     harden_private_path(&file, PrivatePathKind::File).unwrap();
 
     let sid = current_process_sid().unwrap();
+    let directory_entry = owner_only_entry(&sid, PrivatePathKind::Directory).unwrap();
+    let file_entry = owner_only_entry(&sid, PrivatePathKind::File).unwrap();
     let (directory_dacl, directory_aces) = dacl(&directory);
     assert!(directory_dacl.starts_with("D:P"), "{directory_dacl}");
     assert_eq!(directory_aces, 1, "{directory_dacl}");
     assert!(
-        directory_dacl.ends_with(&format!("(A;OICI;FA;;;{sid})")),
+        directory_dacl.ends_with(&directory_entry),
         "{directory_dacl}"
     );
 
     let (file_dacl, file_aces) = dacl(&file);
     assert!(file_dacl.starts_with("D:P"), "{file_dacl}");
     assert_eq!(file_aces, 1, "{file_dacl}");
-    assert!(
-        file_dacl.ends_with(&format!("(A;;FA;;;{sid})")),
-        "{file_dacl}"
-    );
+    assert!(file_dacl.ends_with(&file_entry), "{file_dacl}");
 }
