@@ -1991,7 +1991,9 @@ mod tests {
         let mut chars = lossy.chars().peekable();
         while let Some(ch) = chars.next() {
             if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-                chars.by_ref().find(|c| ('\u{40}'..='\u{7e}').contains(c) && *c != '[');
+                chars
+                    .by_ref()
+                    .find(|c| ('\u{40}'..='\u{7e}').contains(c) && *c != '[');
             } else {
                 text.push(ch);
             }
