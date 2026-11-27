@@ -30,17 +30,19 @@ def test_targets():
     )
 
 
-def command(only, skip):
+def commands(only, skip):
     base = ['cargo', 'test', '--workspace', '--no-fail-fast']
     if only:
         if only not in test_targets():
             raise SystemExit(f'test-gate: no integration-test target named {only!r}')
-        return base + ['--test', only]
-    names = [name for name in test_targets() if name != skip]
-    arguments = ['--lib', '--bins', '--doc']
-    for name in names:
-        arguments += ['--test', name]
-    return base + arguments
+        return [base + ['--test', only]]
+    arguments = ['--lib', '--bins']
+    for name in test_targets():
+        if name != skip:
+            arguments += ['--test', name]
+    # Cargo refuses `--doc` next to other target selectors, so doc tests are
+    # their own command.
+    return [base + arguments, base + ['--doc']]
 
 
 if __name__ == '__main__':
@@ -50,8 +52,11 @@ if __name__ == '__main__':
     group.add_argument('--skip', help='run everything except this target')
     parser.add_argument('--print', action='store_true', help='print the command and stop')
     arguments = parser.parse_args()
-    argv = command(arguments.only, arguments.skip)
+    runs = commands(arguments.only, arguments.skip)
     if arguments.print:
-        print(' '.join(argv))
+        for argv in runs:
+            print(' '.join(argv))
         sys.exit(0)
-    sys.exit(subprocess.call(argv, close_fds=True))
+    # Run every command even when an earlier one fails, then report the worst.
+    codes = [subprocess.call(argv, close_fds=True) for argv in runs]
+    sys.exit(next((code for code in codes if code), 0))
