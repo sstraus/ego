@@ -1,22 +1,23 @@
-# The gate, on every platform the product claims to run on.
+# The gate, split into jobs that run, fail and retry on their own.
 #
-# Every step here calls a `just` recipe rather than spelling out a cargo
-# invocation. That is deliberate and it is the whole design of this file: a
-# contributor running `just gate` and this workflow run the same commands by
-# construction, so "it passed locally" and "it passed in CI" cannot come apart
-# through a flag that was added in one place and not the other.
+# Every step calls a `just` recipe rather than spelling out a cargo invocation:
+# a contributor running `just gate` and this workflow run the same commands, so
+# "it passed locally" and "it passed in CI" cannot come apart through a flag
+# added in one place only.
 #
-# NOT YET RUNNING. `AGENTS.md` records "No remote until Boss decides", so this
-# repository has no remote and nothing has ever executed this file. It is
-# committed anyway because the alternative — writing it on the day a remote
-# appears — is writing it under time pressure, and because the `justfile` half
-# of it is useful today regardless. See story 113-1211 for the decision this is
-# waiting on.
+# Why jobs and not one long job per platform: a formatting error used to hide
+# every lint and test result behind it, and a failure in one test binary hid
+# the binaries after it, so each fix cost a full cold cycle. Now every job
+# stands alone, `cargo test` keeps going after a red target, and a failed job
+# reruns by itself (`gh run rerun <run> --failed`, or `--job <id>`).
 #
-# The `windows-latest` leg is expected to fail until stories 110-8301 and
-# 111-4e26 land native Windows confinement and process ownership. That is
-# honest rather than convenient: a matrix that omitted Windows would report
-# green for a platform the product does not yet support.
+# To run one platform only, start the workflow by hand and choose it in
+# `platform`. A push or pull request runs all three.
+#
+# The terminal suite on Windows is reported but does not block the `gate` job:
+# its harness depends on the Windows pseudo-console and the product's native
+# Windows confinement and process ownership (stories 110-8301, 111-4e26) are
+# still open. The job still shows red, so the gap stays visible.
 
 name: gate
 
@@ -24,6 +25,13 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to run, or all
+        type: choice
+        default: all
+        options: [all, ubuntu-latest, macos-latest, windows-latest]
 
 # A second push to the same branch makes the first run's answer irrelevant.
 concurrency:
@@ -37,66 +45,126 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
-  gate:
-    name: gate (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      # Do not cancel Linux because Windows failed. Until 110-8301 lands,
-      # Windows failing is the expected state, and fail-fast would hide every
-      # other platform's answer behind it.
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-
+  # The platforms this run covers, in one place.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.os.outputs.os }}
     steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - uses: Swatinem/rust-cache@v2
-
-      - uses: extractions/setup-just@v2
-
-      # Keep test fixtures outside the repository. Confinement probes require
-      # a temporary root outside the grant, and fixtures must not inherit Git roots.
-      - name: Set a temporary directory outside the checkout
-        shell: bash
+      - id: os
         env:
-          EGO_RUNNER_TEMP: ${{ runner.temp }}
+          CHOICE: ${{ inputs.platform }}
         run: |
-          dir="$EGO_RUNNER_TEMP/ego-test"
-          mkdir -p "$dir"
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            dir=$(cygpath -w "$dir")
-            printf 'TMP=%s\nTEMP=%s\n' "$dir" "$dir" >> "$GITHUB_ENV"
+          if [ -z "$CHOICE" ] || [ "$CHOICE" = all ]; then
+            echo 'os=["ubuntu-latest","macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
           else
-            printf 'TMPDIR=%s\n' "$dir" >> "$GITHUB_ENV"
+            echo "os=[\"$CHOICE\"]" >> "$GITHUB_OUTPUT"
           fi
 
+  # Text-only checks: no toolchain, one platform.
+  static:
+    name: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
       - run: just portable-paths-check
-      - run: just fmt-check
       - run: just catalogue-check
-      - run: just lint
-      - run: just test
 
-      # The live check, and the only provider that is free and credential-less.
-      # Where Ollama is not installed this reports a skip in the job summary
-      # rather than passing silently: a smoke that did not run is not a smoke
-      # that succeeded, and a green check mark that means "we did not look" is
-      # the failure mode this step exists to avoid.
-      - name: Smoke against Ollama, where it exists
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+          cache-key: fmt
+      - run: just fmt-check
+
+  lint:
+    name: lint (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          cache-key: lint
+      - run: just lint
+
+  # Everything except the terminal suite: library, binary, doc and the other
+  # integration targets.
+  test:
+    name: test (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: test
+      - run: just test-rest
+
+  # The terminal suite, alone because it is the slowest and the most sensitive
+  # to the platform's pseudo-console.
+  pty:
+    name: pty (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    # Visible as a red job, but not part of the `gate` verdict. See the header.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: pty
+      - run: just test-pty
+
+  # The live check, and the only provider that is free and credential-less.
+  # Where Ollama is not installed this reports a skip in the job summary rather
+  # than passing silently: a smoke that did not run is not a smoke that
+  # succeeded.
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for Ollama
+        id: ollama
         shell: bash
         run: |
           if command -v ollama >/dev/null 2>&1; then
-            just smoke ollama
-            echo "ollama smoke: ran" >> "$GITHUB_STEP_SUMMARY"
+            echo found=true >> "$GITHUB_OUTPUT"
           else
-            echo "ollama smoke: SKIPPED — no ollama on ${{ matrix.os }}" \
-              >> "$GITHUB_STEP_SUMMARY"
+            echo found=false >> "$GITHUB_OUTPUT"
+            echo "ollama smoke: SKIPPED — no ollama on ${{ matrix.os }}" >> "$GITHUB_STEP_SUMMARY"
           fi
+      - if: steps.ollama.outputs.found == 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: smoke
+      - if: steps.ollama.outputs.found == 'true'
+        run: just smoke ollama
 
   msrv:
     name: msrv
@@ -111,15 +179,13 @@ jobs:
         id: msrv
         run: echo "version=$(just _msrv)" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@master
+      - uses: ./.github/actions/setup-rust
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
-
-      - uses: Swatinem/rust-cache@v2
+          cache-key: msrv
 
       # `check`, not `test`: this job answers "does the promised toolchain
-      # compile this?", which is what `rust-version` claims. Whether the tests
-      # pass is the `gate` job's question and is already answered on stable.
+      # compile this?", which is what `rust-version` claims.
       - run: cargo check --workspace --all-targets
 
   audit:
@@ -130,5 +196,21 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           # The policy is `deny.toml`, committed next to the manifest.
-          # The action already defaults arguments to --all-features.
           command: check
+
+  # The one verdict a branch rule or a release check reads. It fails when any
+  # job it waits for failed or was skipped, whatever the order they finished in.
+  gate:
+    name: gate
+    if: always()
+    needs: [plan, static, fmt, lint, test, pty, smoke, msrv, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -Eq 'failure|cancelled|skipped'; then
+            echo 'a gate job did not succeed' >&2
+            exit 1
+          fi

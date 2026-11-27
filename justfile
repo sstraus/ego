@@ -68,7 +68,16 @@ lint-windows target="x86_64-pc-windows-gnu":
 
 # The full suite, the way CI runs it.
 test:
-    {{ python }} -B scripts/run-gate-command.py cargo test --workspace
+    {{ python }} -B scripts/run-gate-command.py cargo test --workspace --no-fail-fast
+
+# The two slices CI runs as separate jobs, so one can be retried alone. Together
+# they cover what `test` covers; the terminal suite is the slow one.
+test-rest:
+    {{ python }} -B scripts/test-gate.py --skip live_surface_pty
+
+# The terminal suite alone.
+test-pty:
+    {{ python }} -B scripts/test-gate.py --only live_surface_pty
 
 # Local iteration only, deliberately not part of `gate`: nextest's
 # process-per-test model is what makes it fast and also what makes it a
