@@ -1,0 +1,25 @@
+Filtering the log data using "composedMessage CONTAINS[c] "Sandbox:" AND composedMessage CONTAINS[c] "pnpm""
+Timestamp               Ty Process[PID:TID]
+2026-10-25 11:32:19.240 E  kernel[0:58065a1] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-create /Users/stefano.straus/Library/pnpm/_tmp_29242_0e585d00
+2026-10-25 11:32:19.241 E  kernel[0:58065a1] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-create /_tmp_29242_0e5f3eb8
+2026-10-25 11:32:19.241 E  kernel[0:58065a1] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-create /Users/_tmp_29242_0e66c480
+2026-10-25 11:32:19.242 E  kernel[0:58065a1] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-create /Users/stefano.straus/_tmp_29242_0e6ceea0
+2026-10-25 11:32:19.242 E  kernel[0:58065a1] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-create /Users/stefano.straus/Gits/_tmp_29242_0e725188
+2026-10-25 11:32:19.242 E  kernel[0:58065a1] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-create /Users/stefano.straus/scratch/_tmp_29242_0e7756b0
+2026-10-25 11:32:19.244 E  kernel[0:58065a1] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-create /Users/stefano.straus/scratch/_tmp_29242_0e8c1f00
+2026-10-25 11:32:19.352 E  kernel[0:58065b9] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-create /Users/stefano.straus/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock
+2026-10-25 11:32:19.450 E  kernel[0:58065a1] (Sandbox) Sandbox: pnpm(29242) deny(1) file-write-mode /private/tmp/pnpm-store-operation-locks-501
+2026-10-25 11:32:20.014 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Library/pnpm/_tmp_29318_00e21300
+2026-10-25 11:32:20.015 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /_tmp_29318_00ec2138
+2026-10-25 11:32:20.016 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/_tmp_29318_00f8e6c0
+2026-10-25 11:32:20.016 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/_tmp_29318_010156e8
+2026-10-25 11:32:20.017 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Gits/_tmp_29318_0109ee20
+2026-10-25 11:32:20.018 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Gits/personal/_tmp_29318_011724f0
+2026-10-25 11:32:20.019 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/_tmp_29318_012194d0
+2026-10-25 11:32:20.019 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/_tmp_29318_012891e0
+2026-10-25 11:32:20.020 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/_tmp_29318_013733f8
+2026-10-25 11:32:20.020 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/_tmp_29318_013e09f8
+2026-10-25 11:32:20.021 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.tmpi9m3qs/_tmp_29318_01462818
+2026-10-25 11:32:20.023 E  kernel[0:5806683] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.tmpi9m3qs/_tmp_29318_016a51e8
+2026-10-25 11:32:20.120 E  kernel[0:58066cf] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-create /Users/stefano.straus/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock
+2026-10-25 11:32:20.209 E  kernel[0:580669d] (Sandbox) Sandbox: pnpm(29318) deny(1) file-write-mode /private/tmp/pnpm-store-operation-locks-501

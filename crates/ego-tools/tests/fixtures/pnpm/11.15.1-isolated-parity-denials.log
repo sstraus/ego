@@ -1,0 +1,14 @@
+Filtering the log data using "composedMessage CONTAINS[c] "Sandbox:" AND composedMessage CONTAINS[c] "pnpm""
+Timestamp               Ty Process[PID:TID]
+2026-10-25 13:18:20.130 E  kernel[0:5908664] (Sandbox) Sandbox: pnpm(32770) deny(1) system-socket domain:32 type:2 protocol:2
+2026-10-25 13:18:20.335 E  kernel[0:5904ebe] (Sandbox) 11 duplicate reports for Sandbox: pnpm(32770) deny(1) system-socket domain:32 type:2 protocol:2
+2026-10-25 13:18:22.795 E  kernel[0:5904ebe] (Sandbox) Sandbox: pnpm(33009) deny(1) mach-lookup com.apple.securityd.xpc
+2026-10-25 13:18:22.797 E  kernel[0:5908a78] (Sandbox) Sandbox: pnpm(33009) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains
+2026-10-25 13:18:22.797 E  kernel[0:5908a78] (Sandbox) 1 duplicate report for Sandbox: pnpm(33009) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains
+2026-10-25 13:18:22.797 E  kernel[0:5908a78] (Sandbox) Sandbox: pnpm(33009) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains/login.keychain-db
+2026-10-25 13:18:22.797 E  kernel[0:5908a78] (Sandbox) Sandbox: pnpm(33009) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains
+2026-10-25 13:18:22.797 E  kernel[0:5908a78] (Sandbox) 1 duplicate report for Sandbox: pnpm(33009) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains
+2026-10-25 13:18:22.797 E  kernel[0:5908a78] (Sandbox) Sandbox: pnpm(33009) deny(1) file-read-metadata /Users/stefano.straus/Library/Keychains/login.keychain-db
+2026-10-25 13:18:22.797 E  kernel[0:590823c] (Sandbox) Sandbox: pnpm(33009) deny(1) mach-lookup com.apple.SecurityServer
+2026-10-25 13:18:22.855 E  kernel[0:5904ebe] (Sandbox) Sandbox: pnpm(33009) deny(1) mach-lookup com.apple.SystemConfiguration.DNSConfiguration
+

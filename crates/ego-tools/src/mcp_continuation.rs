@@ -14,7 +14,7 @@ use fd_lock::RwLock;
 use serde::{Deserialize, Serialize};
 
 use crate::clock::SystemClock;
-use crate::store::{AtomicReplacePublication, OsIo, StoreIo};
+use crate::store::{AtomicReplacePublication, OsIo, StoreIo, committed_jsonl_prefix};
 
 const JOURNAL_FILE: &str = "continuations.jsonl";
 const LOCK_FILE: &str = "continuations.lock";
@@ -169,7 +169,7 @@ impl JsonlContinuationJournal {
         let Some(bytes) = self.io.read(&self.path).map_err(|_| unavailable())? else {
             return Ok(BTreeMap::new());
         };
-        let committed = committed_prefix(&bytes);
+        let committed = committed_jsonl_prefix(&bytes);
         let records = decode_committed(committed)?;
         if committed.len() != bytes.len() {
             match self
@@ -275,13 +275,6 @@ impl JsonlContinuationJournal {
             self.append_locked(&settled)
         })
     }
-}
-
-fn committed_prefix(bytes: &[u8]) -> &[u8] {
-    bytes
-        .iter()
-        .rposition(|byte| *byte == b'\n')
-        .map_or(&[][..], |last| &bytes[..=last])
 }
 
 fn decode_committed(

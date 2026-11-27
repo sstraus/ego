@@ -4,15 +4,7 @@ use ego_core::permit::{AdaptivePerimeter, RunConfinement};
 use std::path::Path;
 
 pub(in crate::exec) const GIT_ENTRY: &str = "(^|/)[.][gG][iI][tT]$";
-/// The one list of Git control names; both metadata floors derive from it.
-pub(in crate::exec) const GIT_CONTROLS: [&str; 6] = [
-    "config",
-    "config.worktree",
-    "hooks",
-    "commondir",
-    "gitdir",
-    "info/attributes",
-];
+pub(in crate::exec) use ego_core::permit::GIT_CONTROLS;
 
 fn escaped(name: &str) -> String {
     name.replace('.', "[.]")
@@ -62,6 +54,10 @@ pub(in crate::exec) fn metadata_boundary() -> &'static str {
 // the module boundary otherwise covers every directory beneath `modules/`.
 pub(in crate::exec) const METADATA_MODULE_TRANSIENT: &str =
     "/modules/.+/(rebase-merge|rebase-apply|sequencer|objects/[^/]+|refs/.+|logs/.+)$";
+/// SSH public material under the home directory: signing reads it, and it
+/// holds no secret. The private keys beside it stay behind the credential floor.
+#[cfg(target_os = "macos")]
+pub(in crate::exec) const SSH_PUBLIC: &str = "/[.]ssh/([^/]+[.]pub|allowed_signers)$";
 pub(in crate::exec) const ENV: &str = "(^|/)[.]env[^/]*(/|$)";
 // Case variants name the same files on the usual macOS filesystem.
 pub(in crate::exec) const AGENT_INSTRUCTIONS: &str =
@@ -71,7 +67,7 @@ pub(in crate::exec) const OPERATOR_INSTRUCTIONS: &str = "/[.]([cC][oO][dD][eE][x
 pub(in crate::exec) const OPERATOR_BOUNDARY: &str =
     "/[.]([cC][oO][dD][eE][xX]|[cC][lL][aA][uU][dD][eE](-[pP][rR][iI][vV][aA][tT][eE])?)(/.*)?$";
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 pub(in crate::exec) fn rooted_pattern(root: &Path, suffix: &str) -> String {
     format!("^{}{suffix}", regex::escape(&root.to_string_lossy()))
 }
@@ -134,7 +130,9 @@ pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
         .chain(&perimeter.controls)
         .any(|floor| path.starts_with(floor.as_path()))
         || (GIT.is_match(&text) && !path.is_dir())
-        || INSTRUCTIONS.is_match(&text)
+        // Instruction files inside the workspace are development work, as the edit
+        // tool treats them; beyond it they stay read-only.
+        || (INSTRUCTIONS.is_match(&text) && !path.starts_with(policy.workspace().as_path()))
         || rooted_matches(perimeter.home.as_path(), &OPERATOR)
         || metadata_roots(perimeter).any(|root| rooted_matches(root, &CONTROL))
         || (path.is_dir()
@@ -146,9 +144,11 @@ pub(in crate::exec) fn blocks(path: &Path, policy: &RunConfinement) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use ego_core::permit::{CanonPath, Confinement};
 
     // Catches: literal-prefix optimization changes root boundaries or suffix matching.
+    #[cfg(unix)]
     #[test]
     fn cached_floor_matches_rooted_contract_for_literal_roots_and_transients() {
         let temporary = tempfile::tempdir().unwrap();

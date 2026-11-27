@@ -17,7 +17,19 @@ use crate::catalogue::{
 };
 use crate::http::{Http, HttpRequest, Method, exchange, public_header};
 use crate::provider::{ProviderRow, ResolvedCredential};
-use crate::wire::openai_completions::OpenRouterCompletions;
+use crate::wire::openai_completions::{OPENROUTER_REASONING_DIALECT, OpenRouterCompletions};
+
+/// Whether this mapping can send `model`'s reasoning back.
+///
+/// The mapping replays plain reasoning text as `reasoning_content`, which
+/// OpenRouter documents as enough only for models that return raw reasoning
+/// strings; Anthropic, OpenAI and Gemini families return signed or encrypted
+/// reasoning that needs `reasoning_details`. DeepSeek's thinking models return
+/// raw strings, and their own contract requires the earlier reasoning on tool
+/// turns. Other routed families stay unsupported until one is proved.
+fn replays_reasoning(model: &str, has_reasoning: bool) -> bool {
+    has_reasoning && model.starts_with("deepseek/")
+}
 
 #[derive(Deserialize)]
 struct Envelope {
@@ -98,6 +110,7 @@ async fn inventory(
             }
             let parameters = model.supported_parameters;
             let has_reasoning = parameters.iter().any(|parameter| parameter == "reasoning");
+            let replays = replays_reasoning(&model.id, has_reasoning);
             let reasoning_efforts = if has_reasoning {
                 model
                     .reasoning
@@ -137,10 +150,15 @@ async fn inventory(
                     supports_parallel_tool_calls: parameters
                         .iter()
                         .any(|parameter| parameter == "parallel_tool_calls"),
-                    reasoning_carryover: ReasoningCarryover::Unsupported,
+                    reasoning_carryover: if replays {
+                        ReasoningCarryover::SameProviderOnly
+                    } else {
+                        ReasoningCarryover::Unsupported
+                    },
                     reasoning_efforts,
                     default_reasoning_effort,
-                    reasoning_state_dialect: None,
+                    reasoning_state_dialect: replays
+                        .then(|| OPENROUTER_REASONING_DIALECT.to_owned()),
                     cancel: CancelSemantics::Unsupported,
                     cache: CacheRetention::None,
                     transport: Transport::Sse,

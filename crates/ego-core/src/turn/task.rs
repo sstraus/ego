@@ -14,12 +14,35 @@ use crate::run::{RunAppend, RunRevision, RunTransaction};
 use crate::sink::EventSink;
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore};
 
+/// Owner-configured defaults for task children (`[task]`). A field left unset
+/// keeps the parent's value. Precedence: explicit task call, named agent,
+/// this default, parent. Forks use only the explicit call and parent.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ChildDefaults {
+    pub model: Option<ModelRef>,
+    pub effort: Option<crate::generator::types::ThinkingLevel>,
+}
+
+impl ChildDefaults {
+    /// Apply one higher layer field by field.
+    pub fn merge(&mut self, layer: &ChildDefaults) {
+        if layer.model.is_some() {
+            self.model.clone_from(&layer.model);
+        }
+        if layer.effort.is_some() {
+            self.effort = layer.effort;
+        }
+    }
+}
+
 /// A trusted, immutable task definition. All authority fields are ceilings.
 #[derive(Clone, Debug)]
 pub struct NamedAgent {
     pub name: String,
     pub prompt: String,
     pub model: Option<ModelRef>,
+    pub effort: Option<crate::generator::types::ThinkingLevel>,
     pub tools: Option<BTreeSet<String>>,
     pub mode: Option<Mode>,
     pub deny: Vec<crate::permit::rule::Rule>,
@@ -30,9 +53,13 @@ pub struct NamedAgent {
 
 struct NamedModelSource {
     owner: Arc<dyn GenerationModelSource>,
-    model: ModelRef,
+    model: Option<ModelRef>,
+    effort: Option<crate::generator::types::ThinkingLevel>,
 }
 impl GenerationModelSource for NamedModelSource {
+    fn catalogue(&self) -> Result<crate::model_catalogue::ModelCatalogue, String> {
+        self.owner.catalogue()
+    }
     fn resolve<'a>(
         &'a self,
         request: GenerationModelRequest,
@@ -40,7 +67,16 @@ impl GenerationModelSource for NamedModelSource {
         'a,
         Result<GenerationProfile, crate::generation_model_source::GenerationModelError>,
     > {
-        self.owner.resolve(request.with_model(self.model.clone()))
+        let request = match &self.model {
+            Some(model) if request.model().is_none() => request.with_model(model.clone()),
+            Some(_) => request,
+            None => request,
+        };
+        let request = match self.effort {
+            Some(effort) => request.with_thinking(effort),
+            None => request,
+        };
+        self.owner.resolve(request)
     }
 }
 
@@ -50,9 +86,13 @@ pub(crate) struct TaskRequest {
     name: String,
     prompt: String,
     agent: Option<String>,
-    plan_step: Option<String>,
+    model: Option<ModelRef>,
+    effort: Option<crate::generator::types::ThinkingLevel>,
+    worklist_step: Option<String>,
     #[serde(default)]
     background: bool,
+    #[serde(default)]
+    fork: bool,
 }
 
 pub(super) fn descriptor() -> ToolDescriptor {
@@ -61,8 +101,11 @@ pub(super) fn descriptor() -> ToolDescriptor {
         description: "Run an isolated child agent with your tools, permissions, sandbox, offline posture and shared budget. Children cannot delegate. Returns only its bounded final answer. Set background=true for durable standalone work that must outlive this parent turn; returns an ID immediately. ".into(),
         parameters: json!({"type":"object", "additionalProperties":false,
             "required":["name","prompt"], "properties": {
+                "model":{"type":"string","minLength":1,"description":"Canonical provider/model ID from model_catalogue. Overrides named-agent and task defaults. Forks support explicit selection if the target accepts the inherited conversation. No silent model substitution."},
+                "effort":{"type":"string","enum":["off","minimal","low","medium","high","xhigh","max"],"description":"Reasoning effort supported by the selected model, as reported by model_catalogue. Explicit values override child defaults; omitted fork values inherit the parent."},
                 "background":{"type":"boolean", "default":false, "description":"Launch a durable child and return its ID without waiting. Parent interruption does not cancel it."},
-                "plan_step":{"type":"string", "description":"Optional foreground-only binding to an existing durable plan step. Omit or leave empty when unbound. Child execution marks a bound step in_progress, then completed or blocked. Background tasks do not accept a plan binding."},
+                "fork":{"type":"boolean", "default":false, "description":"Start the child from this conversation instead of an empty one, so the prompt only needs the directive. Cache reuse depends on model and provider. The child runs one turn, cannot delegate, and returns only its final answer. Not valid with background or agent."},
+                "worklist_step":{"type":"string", "description":"Optional foreground-only binding to an existing durable worklist action. Omit or leave empty when unbound. Child execution marks a bound step in_progress, then completed or blocked. Background tasks do not accept a worklist binding."},
                 "name":{"type":"string", "minLength":1,"maxLength":80},
                 "prompt":{"type":"string", "minLength":1,"maxLength":65536},
                 "agent":{"type":"string", "minLength":1,"maxLength":80}
@@ -73,7 +116,7 @@ pub(super) fn descriptor() -> ToolDescriptor {
 pub(super) fn parse(params: Value) -> Result<TaskRequest, String> {
     let mut request: TaskRequest = serde_json::from_value(params)
         .map_err(|error| format!("task was called with invalid arguments: {error}"))?;
-    request.plan_step = request.plan_step.filter(|id| !id.trim().is_empty());
+    request.worklist_step = request.worklist_step.filter(|id| !id.trim().is_empty());
     if request.name.trim().is_empty()
         || request.name.chars().count() > 80
         || request.name.chars().any(char::is_control)
@@ -95,16 +138,28 @@ pub struct BackgroundTaskLaunch {
     pub started: EventId,
     pub prompt: String,
     pub model: Option<ModelRef>,
+    pub model_explicit: bool,
+    pub effort: Option<crate::generator::types::ThinkingLevel>,
     pub mode: Mode,
     pub policy: GenerationPolicyDigest,
     pub tools: BTreeSet<String>,
 }
 
 pub trait BackgroundTaskPort: Send + Sync {
+    /// Rebuilding the session must not end work owned by this port.
+    fn readmission_ready(&self) -> bool {
+        false
+    }
+
     /// Aggregate corrected usage across the durable family, including the parent.
     /// Hosts without a separate durable child ledger retain local accounting.
     fn family_usage(&self) -> Result<Option<Usage>, StoreError> {
         Ok(None)
+    }
+
+    /// The same durable execution facts used by task inspection.
+    fn execution_profiles(&self) -> Result<Vec<crate::model_catalogue::ActiveTaskProfile>, String> {
+        Ok(Vec::new())
     }
 
     fn launch_task(&self, task: BackgroundTaskLaunch) -> BoxFuture<'_, Result<(), String>>;
@@ -114,7 +169,7 @@ pub trait BackgroundTaskPort: Send + Sync {
 
 /// Task guidance is the same in every host; external coordination uses its own API.
 pub fn delegation_guidance() -> &'static str {
-    "For delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Continue ready, non-overlapping work while the child runs, including independent validation; do not end your turn merely to wait for unrelated research. Wait only when the next action depends on the child's result or no independent work remains. A launch receipt or running lifecycle status is not a completed result; report the child as running until its final result or failure is delivered. Use /tasks to inspect or cancel it."
+    crate::model_prompts::DELEGATION_GUIDANCE
 }
 
 /// Only accounting crosses into the parent's durable log. Conversation and
@@ -130,8 +185,10 @@ impl SessionStore for TaskStore<'_> {
     fn append(&self, _: &SessionId, event: &DomainEvent) -> Result<(), StoreError> {
         let kind = match &event.kind {
             EventKind::GenerationStarted { attempt, .. } => Some(EventKind::GenerationStarted {
+                profile: None,
                 attempt: *attempt,
                 role: GenerationRole::Subagent,
+                cache: None,
                 snapshot: None,
             }),
             kind @ (EventKind::UsageUpdated { .. }
@@ -231,6 +288,8 @@ struct TaskSink<'s> {
     name: String,
     item: ItemId,
     child_turn: Mutex<Option<TurnId>>,
+    /// Output tokens already in a forked child's inherited state.
+    inherited_output_tokens: u64,
 }
 
 impl TaskSink<'_> {
@@ -252,6 +311,18 @@ impl EventSink for TaskSink<'_> {
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         use crate::public::{ChildIdentity, ChildOutcome, ChildPhase};
         match event {
+            PublicEvent::GenerationProfileSelected { profile, .. } => {
+                if let Err(error) = self.parent.append(
+                    self.turn,
+                    Some(self.item),
+                    None,
+                    EventKind::TaskProfileSelected {
+                        profile: profile.clone(),
+                    },
+                ) {
+                    tracing::error!(%error, "child profile publication failed");
+                }
+            }
             PublicEvent::TurnStarted { turn } => {
                 *self.child_turn.lock().expect("child lifecycle lock") = Some(*turn);
                 if let Err(error) = self.parent.publish(&PublicEvent::ChildLifecycle {
@@ -281,7 +352,10 @@ impl EventSink for TaskSink<'_> {
                 turn: self.turn,
                 item: self.item,
                 activity,
-                output_tokens: state.usage.output_tokens,
+                output_tokens: state
+                    .usage
+                    .output_tokens
+                    .saturating_sub(self.inherited_output_tokens),
             })
         {
             tracing::error!(%error, "child activity publication failed");
@@ -395,6 +469,8 @@ struct TaskExecution<'s, 't> {
     runtime: GenerationRuntime,
     tools: Tools<'t>,
     cancel: CancelToken,
+    /// The parent context of a `fork: true` child; `None` for a clean child.
+    fork: Option<Arc<ForkSeed>>,
     judge: Option<JudgeContext>,
     analysis_cache: Option<(
         Arc<dyn crate::permit::analysis::PermissionAnalysisCache>,
@@ -402,6 +478,7 @@ struct TaskExecution<'s, 't> {
     )>,
     analysis_observation: Option<ExecObservation>,
     effect_ceiling: Option<Arc<BTreeSet<String>>>,
+    skill_review_enabled: bool,
     elicitor: Option<Arc<dyn Elicitor>>,
 }
 
@@ -419,17 +496,25 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
                 started,
                 events: Mutex::new(Vec::new()),
             };
+            // The child's own items and usage start after the inherited state.
+            let state = self
+                .fork
+                .as_ref()
+                .map(|seed| seed.state.clone())
+                .unwrap_or_default();
+            let inherited_seq = state.last_seq;
             let sink = TaskSink {
                 parent: self.parent.clone(),
                 turn: self.turn,
                 name: request.name,
                 item,
                 child_turn: Mutex::new(None),
+                inherited_output_tokens: state.usage.output_tokens,
             };
             let mut child = TurnLoop::new(
                 Session {
                     id: self.session,
-                    state: SessionState::default(),
+                    state,
                     store: &store,
                     evidence: self.evidence,
                     clock: self.clock,
@@ -441,6 +526,7 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
             )
             .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?;
             let parent = self.parent.clone();
+            let background_profiles = self.background.clone();
             child.task_usage = Some(Arc::new(move || {
                 if let Some(port) = &self.background
                     && let Some(usage) = port.family_usage()?
@@ -449,12 +535,33 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
                 }
                 parent.inspect(|state| state.usage).map_err(Into::into)
             }));
+            let parent_profiles = self.parent.clone();
+            child.task_family_profiles = Some(Arc::new(move || {
+                let mut profiles = parent_profiles
+                    .inspect(crate::model_catalogue::active_foreground_tasks)
+                    .map_err(|error| error.to_string())?;
+                if let Some(port) = &background_profiles {
+                    profiles.extend(port.execution_profiles()?);
+                }
+                Ok(profiles)
+            }));
             child.generation_role = GenerationRole::Subagent;
+            child.skill_review_enabled = self.skill_review_enabled;
             child.judge = self.judge;
             child.analysis_cache = self.analysis_cache;
             child.analysis_observation = self.analysis_observation;
             child.inherited_effect_tools = self.effect_ceiling;
             child.elicitor = self.elicitor;
+            if let Some(seed) = &self.fork {
+                child.prompt_snapshot = seed.prompt_snapshot.clone();
+                child.lineage_root = seed.lineage_root;
+                child.ancestor = seed.ancestor.clone();
+                child.single_turn = true;
+            }
+            // A fork inherits conversation context, not the parent's root
+            // role. Every accepted internal child gets its own worker role
+            // before its first model request, independent of named-agent text.
+            child.activate_internal_child_role();
             let outcome = child.run(&request.prompt).await;
             // Storage/accounting errors can abandon a turn without TurnCompleted.
             // The actual foreground owner still retracts its admitted child once.
@@ -464,7 +571,9 @@ impl<'s: 't, 't> TaskExecution<'s, 't> {
             let final_text = state
                 .items
                 .values()
-                .filter(|item| item.kind == crate::state::ItemKind::Assistant)
+                .filter(|item| {
+                    item.kind == crate::state::ItemKind::Assistant && item.seq > inherited_seq
+                })
                 .max_by_key(|item| item.seq)
                 .map(|item| item.text.clone())
                 .unwrap_or_default();
@@ -541,6 +650,36 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     continue;
                 }
             };
+            let refusal = if self.tools.is_task_child() {
+                Some("a task child cannot delegate; answer the directive yourself")
+            } else if request.fork && request.background {
+                Some(
+                    "fork does not accept background; a durable child cannot inherit this conversation",
+                )
+            } else if request.fork && request.agent.is_some() {
+                Some(
+                    "fork does not accept agent; a forked child inherits this conversation and your tools",
+                )
+            } else if request.fork && self.fork_seed.is_none() {
+                Some("fork has no parent request to inherit")
+            } else {
+                None
+            };
+            if let Some(error) = refusal {
+                self.journal.append(
+                    turn,
+                    Some(call.item),
+                    Some(call.started),
+                    EventKind::ToolCallCompleted {
+                        ok: false,
+                        result: self
+                            .tools
+                            .masked_result(ToolResult::builtin(error.to_owned())),
+                    },
+                )?;
+                completed.insert(call.item);
+                continue;
+            }
             let definition = request
                 .agent
                 .as_ref()
@@ -599,10 +738,11 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     continue;
                 }
             };
-            if let Some(id) = &request.plan_step {
+            if let Some(id) = &request.worklist_step {
                 let update = crate::plan::PlanUpdate::Step {
                     id: id.clone(),
                     status: crate::plan::StepStatus::InProgress,
+                    reason: None,
                 };
                 let valid = if claimed_steps.insert(id.clone()) {
                     let mut plan = self.state().plan;
@@ -611,7 +751,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                             return error;
                         }
                         let advice = if plan.steps.is_empty() {
-                            "no plan steps are defined; omit plan_step for an unbound task"
+                            "no worklist actions are defined; omit worklist_step for an unbound task"
                                 .to_owned()
                         } else {
                             let ids = plan
@@ -621,13 +761,15 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             format!(
-                                "available plan steps: {ids}; omit plan_step for an unbound task"
+                                "available worklist actions: {ids}; omit worklist_step for an unbound task"
                             )
                         };
                         format!("{error}; {advice}")
                     })
                 } else {
-                    Err(format!("plan step already assigned in this batch: {id}"))
+                    Err(format!(
+                        "worklist action already assigned in this batch: {id}"
+                    ))
                 };
                 if let Err(error) = valid {
                     self.journal.append(
@@ -645,8 +787,8 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
             }
             if request.background {
                 // Do not silently drop named-agent policy or plan ownership on a durable run.
-                let launched = if request.agent.is_some() || request.plan_step.is_some() {
-                    Err("background task does not accept agent or plan_step; use an explicit prompt".to_owned())
+                let launched = if request.agent.is_some() || request.worklist_step.is_some() {
+                    Err("background task does not accept agent or worklist_step; use an explicit prompt".to_owned())
                 } else if let Some(port) = &self.background_task_port {
                     let mut tools: BTreeSet<_> = self.tools.effect_names().into_iter().collect();
                     if let Some(ceiling) = self.inherited_effect_tools.as_ref() {
@@ -666,7 +808,20 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                         item: call.item,
                         started: call.started,
                         prompt: request.prompt,
-                        model: self.main_model_identity.clone(),
+                        model_explicit: request.model.is_some(),
+                        model: request
+                            .model
+                            .clone()
+                            .or_else(|| self.tools.child_defaults.model.clone())
+                            .or_else(|| self.main_model_identity.clone()),
+                        effort: request
+                            .effort
+                            .or(self.tools.child_defaults.effort)
+                            .or_else(|| {
+                                self.execution_profile
+                                    .as_ref()
+                                    .map(|profile| profile.effort)
+                            }),
                         mode: snapshot.mode(),
                         policy: snapshot
                             .analysis_cache_digest(self.tools.mcp_output_root())
@@ -700,15 +855,41 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
             if let Some(definition) = &definition {
                 request.prompt = format!("{}\n\n{}", definition.prompt, request.prompt);
             }
-            let source = match definition
-                .as_ref()
-                .and_then(|definition| definition.model.clone())
-            {
-                Some(model) => Arc::new(NamedModelSource {
+            // Omitted fork overrides keep the actual parent selection, not child defaults.
+            let defaults = if request.fork {
+                &ChildDefaults::default()
+            } else {
+                &self.tools.child_defaults
+            };
+            let selected_model = request
+                .model
+                .clone()
+                .or_else(|| {
+                    definition
+                        .as_ref()
+                        .and_then(|definition| definition.model.clone())
+                })
+                .or_else(|| defaults.model.clone());
+            let child_model = selected_model
+                .clone()
+                .or_else(|| self.main_model_identity.clone());
+            let child_effort = request
+                .effort
+                .or_else(|| definition.as_ref().and_then(|definition| definition.effort))
+                .or(defaults.effort)
+                .or_else(|| {
+                    self.execution_profile
+                        .as_ref()
+                        .map(|profile| profile.effort)
+                });
+            let source = if child_model.is_some() || child_effort.is_some() {
+                Arc::new(NamedModelSource {
                     owner: self.source.clone(),
-                    model,
-                }) as Arc<dyn GenerationModelSource>,
-                None => self.source.clone(),
+                    model: child_model.clone(),
+                    effort: child_effort,
+                }) as Arc<dyn GenerationModelSource>
+            } else {
+                self.source.clone()
             };
             let task = TaskExecution {
                 session: self.session_id,
@@ -727,10 +908,7 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     gate: self.gate.clone(),
                     config: {
                         let mut config = self.config.clone();
-                        if definition
-                            .as_ref()
-                            .is_some_and(|definition| definition.model.is_some())
-                        {
+                        if selected_model.is_some() {
                             config.fallbacks.clear();
                         }
                         config
@@ -748,9 +926,12 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                         definition
                             .as_ref()
                             .and_then(|definition| definition.tools.clone()),
+                        request.fork,
                     )
                     .map_err(|error| StoreError::Io(std::io::Error::other(error.to_string())))?,
                 cancel: self.cancel.clone(),
+                skill_review_enabled: self.skill_review_enabled,
+                fork: request.fork.then(|| self.fork_seed.clone()).flatten(),
                 judge: self.judge.clone(),
                 analysis_cache: self.analysis_cache.clone(),
                 analysis_observation: self.analysis_observation.clone(),
@@ -769,39 +950,32 @@ impl<'s: 't, 't> TurnLoop<'s, 't> {
                     })
                     .or_else(|| self.inherited_effect_tools.clone()),
             };
-            if let Some(id) = &request.plan_step {
-                self.journal.append(
-                    turn,
-                    None,
-                    Some(call.started),
-                    EventKind::PlanUpdated {
-                        update: crate::plan::PlanUpdate::Step {
-                            id: id.clone(),
-                            status: crate::plan::StepStatus::InProgress,
-                        },
-                    },
-                )?;
-            }
             let journal = self.journal.clone();
             let item = call.item;
             let started = call.started;
             work.push(async move {
-                let step = request.plan_step.clone();
+                let binding = if let Some(id) = request.worklist_step.clone() {
+                    match journal.start_worklist_task(turn, item, started, id)? {
+                        Ok(binding) => Some(binding),
+                        Err(error) => {
+                            journal.append(
+                                turn,
+                                Some(item),
+                                Some(started),
+                                EventKind::ToolCallCompleted {
+                                    ok: false,
+                                    result: ToolResult::builtin(error),
+                                },
+                            )?;
+                            return Ok(item);
+                        }
+                    }
+                } else {
+                    None
+                };
                 let outcome = task.run(started, item, request).await;
-                if let Some(id) = step {
-                    let status = if matches!(&outcome, Ok((true, _))) {
-                        crate::plan::StepStatus::Completed
-                    } else {
-                        crate::plan::StepStatus::Blocked
-                    };
-                    journal.append(
-                        turn,
-                        None,
-                        Some(started),
-                        EventKind::PlanUpdated {
-                            update: crate::plan::PlanUpdate::Step { id, status },
-                        },
-                    )?;
+                if let Some(binding) = binding {
+                    binding.finish(matches!(&outcome, Ok((true, _))))?;
                 }
                 let (ok, result) = outcome?;
                 journal.append(

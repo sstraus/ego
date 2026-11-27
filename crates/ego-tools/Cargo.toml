@@ -7,7 +7,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock"] }
+base64 = "0.22.1"
+jiff = "0.2.39"
 # Match reqwest's OS trust policy, including system-managed inspection CAs.
 async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-platform-verifier"] }
 ego-core.workspace = true
@@ -15,13 +16,20 @@ ego-mcp.workspace = true
 fd-lock = "4.0.4"
 futures = "0.3.34"
 getrandom = "0.3.4"
-# Use a caret range so the MSRV-aware resolver selects the newest allowed
-# release without manually keeping an exact version aligned with the floor.
+# `0.4` and not `0.4.20`, the version `docs/internals/04-crates.md` names: a caret range
+# lets the MSRV-aware resolver pick the newest release our declared floor
+# allows, instead of a number here having to be kept level with that floor by
+# hand. It held us at `0.4.19` while the workspace declared 1.86, because
+# `0.4.20` raised its own floor to 1.88; the workspace declares 1.88 now, so
+# the same line resolves forward on its own.
 globset = "0.4"
 ignore = "0.4"
 jsonschema = { version = "0.49.9", default-features = false }
+# PDF text extraction for `read` (story 864); without default features no clock, rayon or time crates.
+lopdf = { version = "0.42", default-features = false }
 keyring = { version = "=4.1.6", default-features = false, features = ["v1"] }
 regex = "1.12"
+ring = "0.17.14"
 reqwest = { version = "0.13", default-features = false, features = [
     "rustls",
     "rustls-native-certs",
@@ -30,7 +38,7 @@ reqwest = { version = "0.13", default-features = false, features = [
 ] }
 # Already locked transitively; typed, payload-free TLS diagnostics only.
 rustls = { version = "0.23.46", default-features = false, features = ["std"] }
-rusqlite = { version = "0.40", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -41,19 +49,24 @@ html2text = "0.17"
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["compat"] }
+toml = "1.1.4"
 toml_edit = "0.25.13"
 tracing = "0.1.44"
-url = "2.5.8"
+url = "2.5.9"
 zeroize = "1.9.0"
+# Cold session storage (story 841): ego's own zstd siblings, cross-platform.
+zstd = { version = "0.14", default-features = false }
 yaml-rust2.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", features = ["process", "signal", "term", "user", "fs"] }
+nix = { version = "0.31.3", features = ["process", "signal", "term", "user", "fs", "net"] }
 # Already locked transitively; safe descriptor-relative enumeration and unlink.
 rustix = { version = "1.1.4", features = ["fs"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 landlock = "0.4.7"
+# Story 841: lower only the cold storage thread (Linux nice is per task).
+rustix = { version = "1.1.4", features = ["fs", "process", "thread"] }
 
 [target.'cfg(windows)'.dependencies]
 process-wrap = { path = "../../vendor/process-wrap", default-features = false, features = [
@@ -84,3 +97,9 @@ test-support = []
 [lints]
 workspace = true
 
+[dev-dependencies]
+ego-tools = { path = ".", features = ["test-support"] }
+uuid = { version = "1.24.1", features = ["v7"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+nix = { version = "0.31.3", features = ["resource"] }

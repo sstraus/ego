@@ -39,7 +39,7 @@ use crate::cli::{
 use crate::output::{Diagnostics, Stderr, Stdout, note};
 use crate::session;
 
-/// Print the session catalogue for `ego ls`.
+/// `ego ls`: the catalogue, printed (`CLI.md` §4.6).
 ///
 /// A `RunTermination` like everything else, so one exit-code table answers for
 /// the whole binary: a store that cannot be listed is `Failed` (exit 1) and a
@@ -574,12 +574,33 @@ async fn forked(args: &ForkArgs, out: &Stdout) -> Result<Ended, RunTermination> 
     ))
 }
 
-fn render_fork_result(
-    target: SessionId,
-    publication: &LifecyclePublication,
-    output: Output,
+/// Rewrite the resolved resume target before any run or CI admission.
+pub async fn publish_resume_fork(
+    args: &mut crate::cli::Args,
     out: &Stdout,
-) -> Ended {
+) -> Result<(), RunTermination> {
+    let usage = |error: UsageError| RunTermination::UsageError {
+        message: error.to_string(),
+    };
+    let root = workspace(args.directory.as_ref()).map_err(usage)?;
+    let chosen = super::composition::chosen(args, &root, None).map_err(usage)?;
+    let lifecycle =
+        SessionLifecycle::new(chosen.store, Arc::new(NoLiveRuns), Arc::new(SystemClock));
+    let created = lifecycle
+        .fork_for_prompt(chosen.id)
+        .await
+        .map_err(|error| RunTermination::Failed {
+            message: format!("the fork failed: {error}"),
+        })?;
+    note_fork_publication(created.id, &created.publication, out);
+    args.session = crate::cli::SessionChoice::Resume(Some(crate::cli::ResumeTarget::Id(
+        created.id.to_string(),
+    )));
+    args.fork_for_prompt = false;
+    Ok(())
+}
+
+fn note_fork_publication(target: SessionId, publication: &LifecyclePublication, out: &Stdout) {
     match publication {
         LifecyclePublication::PublishedWithProjectionWarning { diagnostic }
         | LifecyclePublication::PublishedDurabilityUncertain { diagnostic } => out.note(&format!(
@@ -587,6 +608,15 @@ fn render_fork_result(
         )),
         LifecyclePublication::Published | LifecyclePublication::NotPublished { .. } => {}
     }
+}
+
+pub(super) fn render_fork_result(
+    target: SessionId,
+    publication: &LifecyclePublication,
+    output: Output,
+    out: &Stdout,
+) -> Ended {
+    note_fork_publication(target, publication, out);
 
     let mut ended = Ended {
         termination: RunTermination::Done,
@@ -640,10 +670,13 @@ fn listed(args: &crate::cli::LsArgs, out: &Stdout) -> Result<(), RunTermination>
     };
 
     match args.output {
-        // Emit the catalogue object even when empty, so scripts can distinguish an empty store
-        // from missing output.
+        // §4.6's single object. Rendered even when there is nothing to list:
+        // a script that gets no output cannot tell an empty store from a
+        // command that failed to run.
         Output::Json => render(out, &crate::catalogue::Listing::of(&metas), "the listing")?,
-        // JSONL catalogue output emits one session per line.
+        // One session per line, which is what §4.2's spelling means for a
+        // list: the unit of a catalogue is a session, as the unit of a run is
+        // an event.
         Output::Jsonl => {
             for meta in &metas {
                 render(out, &crate::catalogue::Row::of(meta), "a session")?;
@@ -682,7 +715,11 @@ fn tabulate(out: &Stdout, metas: &[SessionMeta], root: &Path, all: bool) {
 /// `what` names the thing rather than the error: a `Listing` and a `Row` fail
 /// for the same reason and the operator needs to know which of the two the
 /// command was in the middle of.
-fn render<T: serde::Serialize>(out: &Stdout, value: &T, what: &str) -> Result<(), RunTermination> {
+pub(super) fn render<T: serde::Serialize>(
+    out: &Stdout,
+    value: &T,
+    what: &str,
+) -> Result<(), RunTermination> {
     match serde_json::to_string(value) {
         Ok(line) => {
             out.line(&line);
@@ -698,6 +735,19 @@ fn render<T: serde::Serialize>(out: &Stdout, value: &T, what: &str) -> Result<()
 pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
     use std::io::{IsTerminal, Write};
     let result = async {
+        if args.incompatible {
+            if !args.yes || args.source.is_some() || args.force {
+                return Err("--incompatible requires --yes and cannot be combined with a session ID or --force".to_owned());
+            }
+            return remove_incompatible(args, out);
+        }
+        if args.expired {
+            if !args.yes || args.source.is_some() || args.force {
+                return Err("--expired requires --yes and cannot be combined with a session ID or --force".to_owned());
+            }
+            return remove_expired(args, out);
+        }
+        let source = args.source.ok_or("a session ID is required")?;
         if !args.yes {
             if !std::io::stdin().is_terminal() {
                 return Err(
@@ -705,7 +755,7 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
                         .to_owned(),
                 );
             }
-            eprint!("Delete session {}? [y/N] ", args.source);
+            eprint!("Delete session {}? [y/N] ", source);
             std::io::stderr()
                 .flush()
                 .map_err(|error| error.to_string())?;
@@ -725,7 +775,7 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
         let store = Arc::new(session::jsonl(store_root, root.clone()));
         let lifecycle = SessionLifecycle::new(store, Arc::new(NoLiveRuns), Arc::new(SystemClock));
         let publication = lifecycle
-            .delete_with_force(args.source, args.force)
+            .delete_with_force(source, args.force)
             .await
             .map_err(|error| error.to_string())?;
         match publication {
@@ -735,12 +785,12 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
             }
             _ => {}
         }
-        if let Err(error) = ego_tools::checkpoint::CheckpointFs::close(&root, args.source) {
+        if let Err(error) = ego_tools::checkpoint::CheckpointFs::close(&root, source) {
             Stderr.note(&format!(
                 "session deleted, but checkpoint cleanup failed: {error}"
             ));
         }
-        out.line(&format!("deleted {}", args.source));
+        out.line(&format!("deleted {}", source));
         Ok(())
     }
     .await;
@@ -748,6 +798,86 @@ pub async fn rm(args: &crate::cli::RmArgs, out: &Stdout) -> Ended {
         Ok(()) => RunTermination::Done,
         Err(message) => RunTermination::Failed { message },
     })
+}
+
+/// Run one retention pass now, whatever the time of the last one.
+fn remove_expired(args: &crate::cli::RmArgs, out: &Stdout) -> Result<(), String> {
+    use ego_core::event::time::Clock;
+    let retain = crate::config::user_effective()
+        .map_err(|error| error.to_string())?
+        .sessions
+        .retention();
+    let root = workspace(args.directory.as_ref()).map_err(|error| error.to_string())?;
+    let store_root = rooted_path(
+        &root,
+        session::store_root(args.session_dir.as_ref()).map_err(|error| error.to_string())?,
+    );
+    let store = session::jsonl(store_root, root);
+    let Some(report) = store
+        .prune_expired_sessions(retain, SystemClock.now(), false)
+        .map_err(|error| error.to_string())?
+    else {
+        return Err("another ego process is running session retention now".to_owned());
+    };
+    for id in &report.deleted {
+        out.line(&format!("deleted expired session {id}"));
+    }
+    out.line(&format!(
+        "deleted {} sessions not opened for {} days, freed {} bytes; kept {} open or held; history.sqlite {} -> {} bytes",
+        report.deleted.len(),
+        retain.as_secs() / 86_400,
+        report.freed_bytes,
+        report.kept_in_use,
+        report.history_bytes_before,
+        report.history_bytes_after,
+    ));
+    Ok(())
+}
+
+/// Keep unreadable-but-not-incompatible logs, and retain/report readable descendants.
+fn remove_incompatible(args: &crate::cli::RmArgs, out: &Stdout) -> Result<(), String> {
+    use ego_core::session::SessionLineage;
+    use ego_core::store::session_store::StoreError;
+    let root = workspace(args.directory.as_ref()).map_err(|error| error.to_string())?;
+    let store_root = rooted_path(
+        &root,
+        session::store_root(args.session_dir.as_ref()).map_err(|error| error.to_string())?,
+    );
+    let store = session::jsonl(store_root, root);
+    let mut incompatible = Vec::new();
+    let metas = store
+        .cleanup_inventory(&mut |id, error| {
+            if matches!(error, StoreError::UnsupportedLog { .. }) {
+                incompatible.push(id);
+            } else {
+                Stderr.note(&format!("kept {id}: {error}"));
+            }
+        })
+        .map_err(|error| error.to_string())?;
+    for meta in metas {
+        if let Some(SessionLineage::Fork { source, .. } | SessionLineage::Compaction { source, .. }) =
+            meta.lineage
+            && incompatible.contains(&source)
+        {
+            out.line(&format!(
+                "kept {}: structural parent {source} has an unsupported format",
+                meta.id
+            ));
+        }
+    }
+    let mut failures = Vec::new();
+    for id in incompatible {
+        match store.remove_incompatible(&id) {
+            Ok(true) => out.line(&format!("deleted incompatible session {id}")),
+            Ok(false) => out.line(&format!("kept {id}: its format is now readable")),
+            Err(error) => failures.push(format!("kept {id}: {error}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(failures.join("; "))
+    }
 }
 
 #[cfg(test)]

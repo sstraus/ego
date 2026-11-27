@@ -9,9 +9,20 @@ use std::sync::Weak;
 pub(super) struct BackgroundRows {
     owner: Weak<()>,
     pub(super) rows: BTreeMap<SubagentInvocationId, BackgroundRow>,
+    inputs: BTreeMap<SubagentInvocationId, TaskInput>,
+    attached: Option<SubagentInvocationId>,
+    parent_drafts: Option<SessionId>,
+}
+
+struct TaskInput {
+    alias: String,
+    ingress: InteractiveIngress,
+    transcript: String,
+    settled: bool,
 }
 
 pub(super) struct BackgroundRow {
+    pub(super) profile: Option<ego_core::model_catalogue::ExecutionProfile>,
     pub(super) name: String,
     pub(super) activity: String,
     pub(super) started: Instant,
@@ -41,6 +52,18 @@ fn bounded_text(text: &str, limit: usize) -> String {
         .collect()
 }
 
+impl BackgroundRows {
+    pub(super) fn attached_alias(&self) -> Option<&str> {
+        self.attached.and_then(|id| self.alias(&id))
+    }
+
+    pub(super) fn alias(&self, invocation: &SubagentInvocationId) -> Option<&str> {
+        self.inputs
+            .get(invocation)
+            .map(|input| input.alias.as_str())
+    }
+}
+
 impl BackgroundTaskSurface {
     fn attach(status: &SharedStatus) -> Self {
         let owner = Arc::new(());
@@ -50,11 +73,77 @@ impl BackgroundTaskSurface {
             .background_children = BackgroundRows {
             owner: Arc::downgrade(&owner),
             rows: BTreeMap::new(),
+            inputs: BTreeMap::new(),
+            attached: None,
+            parent_drafts: None,
         };
         repaint_status(status);
         Self {
             owner,
             status: Arc::downgrade(status),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_surface() -> (Self, impl FnMut(&str) -> bool) {
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        let surface = Self::attach(&status);
+        let mut drafts = DraftStash::new(SessionId::new());
+        (surface, move |arguments| {
+            attachment_command(&status, arguments, &mut drafts)
+        })
+    }
+
+    pub(crate) fn register_input(
+        &self,
+        invocation: SubagentInvocationId,
+        alias: String,
+        ingress: InteractiveIngress,
+    ) {
+        if let Some(status) = self.status.upgrade() {
+            let mut locked = status.lock().expect("surface status lock");
+            if Weak::ptr_eq(
+                &locked.background_children.owner,
+                &Arc::downgrade(&self.owner),
+            ) {
+                locked
+                    .background_children
+                    .inputs
+                    .entry(invocation)
+                    .or_insert(TaskInput {
+                        alias,
+                        ingress,
+                        transcript: String::new(),
+                        settled: false,
+                    });
+            }
+        }
+    }
+
+    pub(crate) fn seed_conversation(&self, invocation: SubagentInvocationId, state: &SessionState) {
+        let mut items: Vec<_> = state.items.values().collect();
+        items.sort_by_key(|item| item.seq);
+        let transcript = items
+            .into_iter()
+            .filter_map(|item| match item.kind {
+                ego_core::state::ItemKind::UserPrompt => Some(format!("You: {}\n", item.text)),
+                ego_core::state::ItemKind::Assistant => Some(format!("{}\n", item.text)),
+                ego_core::state::ItemKind::ToolCall => item
+                    .tool_name
+                    .as_ref()
+                    .map(|name| format!("[tool {name}]\n")),
+                _ => None,
+            })
+            .collect::<String>();
+        if let Some(status) = self.status.upgrade() {
+            let mut locked = status.lock().expect("surface status lock");
+            if Weak::ptr_eq(
+                &locked.background_children.owner,
+                &Arc::downgrade(&self.owner),
+            ) && let Some(input) = locked.background_children.inputs.get_mut(&invocation)
+            {
+                input.transcript = transcript;
+            }
         }
     }
 
@@ -77,6 +166,7 @@ impl BackgroundTaskSurface {
         let handle = self.handle(invocation);
         handle.change(|rows| {
             rows.entry(invocation).or_insert_with(|| BackgroundRow {
+                profile: None,
                 name: bounded_text(name, 80),
                 activity: if recovered { "Recovering" } else { "Working" }.into(),
                 started: Instant::now(),
@@ -89,8 +179,17 @@ impl BackgroundTaskSurface {
 
 impl Drop for BackgroundTaskSurface {
     fn drop(&mut self) {
-        self.handle(SubagentInvocationId::new())
-            .change(BTreeMap::clear);
+        if let Some(status) = self.status.upgrade() {
+            let mut locked = status.lock().expect("surface status lock");
+            if Weak::ptr_eq(
+                &locked.background_children.owner,
+                &Arc::downgrade(&self.owner),
+            ) {
+                locked.background_children = BackgroundRows::default();
+            }
+            drop(locked);
+            repaint_status(&status);
+        }
     }
 }
 
@@ -113,6 +212,14 @@ impl BackgroundActivity {
         repaint_status(&status);
     }
 
+    pub(crate) fn profile(&self, profile: &ego_core::model_catalogue::ExecutionProfile) {
+        self.change(|rows| {
+            if let Some(row) = rows.get_mut(&self.invocation) {
+                row.profile = Some(profile.clone());
+            }
+        });
+    }
+
     pub(crate) fn progress(&self, activity: Option<&str>, output_tokens: u64) {
         self.change(|rows| {
             if let Some(row) = rows.get_mut(&self.invocation) {
@@ -124,11 +231,135 @@ impl BackgroundActivity {
         });
     }
 
+    pub(crate) fn conversation(&self, event: &ego_core::public::PublicEvent) {
+        use ego_core::public::{ItemKind, PublicEvent};
+        let text = match event {
+            PublicEvent::ItemCompleted {
+                kind: ItemKind::UserMessage,
+                text: Some(text),
+                ..
+            } => format!("\nYou: {text}\n"),
+            PublicEvent::ItemDelta {
+                kind: ItemKind::AgentMessage,
+                text,
+                ..
+            } => text.clone(),
+            PublicEvent::ItemStarted {
+                kind: ItemKind::Tool,
+                name: Some(name),
+                ..
+            } => {
+                format!("\n[tool {name}]\n")
+            }
+            _ => return,
+        };
+        let Some(status) = self.status.upgrade() else {
+            return;
+        };
+        let visible = {
+            let mut locked = status.lock().expect("surface status lock");
+            if !Weak::ptr_eq(&locked.background_children.owner, &self.owner) {
+                return;
+            }
+            let rows = &mut locked.background_children;
+            let visible = rows.attached == Some(self.invocation);
+            if let Some(input) = rows.inputs.get_mut(&self.invocation) {
+                input.transcript.push_str(&text);
+                visible.then(|| input.alias.clone())
+            } else {
+                None
+            }
+        };
+        if let Some(alias) = visible {
+            commit_to_transcript(
+                &status,
+                &format!("[{alias}] {}", ego_core::permit::terminal_safe(&text)),
+            );
+        }
+    }
+
     pub(crate) fn settled(&self) {
+        if let Some(status) = self.status.upgrade() {
+            let mut locked = status.lock().expect("surface status lock");
+            if Weak::ptr_eq(&locked.background_children.owner, &self.owner)
+                && let Some(input) = locked.background_children.inputs.get_mut(&self.invocation)
+            {
+                input.settled = true;
+            }
+        }
         self.change(|rows| {
             rows.remove(&self.invocation);
         });
     }
+}
+
+/// Only the terminal owner changes the input target. Settlement never redirects
+/// a prompt back into the parent: the user must explicitly detach.
+pub(super) fn attached_input(status: &SharedStatus) -> Option<InteractiveIngress> {
+    let locked = status.lock().expect("surface status lock");
+    let rows = &locked.background_children;
+    rows.attached
+        .and_then(|id| rows.inputs.get(&id))
+        .map(|input| input.ingress.clone())
+}
+
+/// Returns true only for a terminal-local attachment command. Listing and
+/// cancellation remain with the durable task owner.
+pub(super) fn attachment_command(
+    status: &SharedStatus,
+    arguments: &str,
+    drafts: &mut DraftStash,
+) -> bool {
+    let words: Vec<_> = arguments.split_whitespace().collect();
+    let [selected] = words.as_slice() else {
+        return false;
+    };
+    let message = {
+        let mut locked = status.lock().expect("surface status lock");
+        let rows = &mut locked.background_children;
+        if *selected == "/detach" {
+            rows.attached = None;
+            if let Some(parent) = rows.parent_drafts.take() {
+                drafts.activate(parent);
+            }
+            "Returned to parent; child execution is unchanged.".to_owned()
+        } else {
+            let found = rows
+                .inputs
+                .iter()
+                .find(|(id, input)| input.alias == *selected || id.to_string() == *selected)
+                .map(|(id, input)| {
+                    (
+                        *id,
+                        input.alias.clone(),
+                        input.transcript.clone(),
+                        input.settled,
+                    )
+                });
+            let Some((id, alias, transcript, settled)) = found else {
+                return false;
+            };
+            if settled {
+                format!("{alias} completed; no live input.\n{transcript}")
+            } else {
+                if rows.parent_drafts.is_none() {
+                    rows.parent_drafts = Some(drafts.active());
+                }
+                drafts.activate(
+                    id.to_string()
+                        .parse()
+                        .expect("invocation UUID is a session draft namespace"),
+                );
+                rows.attached = Some(id);
+                format!(
+                    "Attached to {alias}; messages go only to this child. /detach returns to parent.\n{transcript}"
+                )
+            }
+        }
+    };
+    commit_to_transcript(status, &ego_core::permit::terminal_safe(&message));
+    repaint_status(status);
+    true
 }
 
 impl Seat {
@@ -149,6 +380,74 @@ mod tests {
         Waiting::new(Arc::clone(status))
             .render_prompt_indicator(PromptEditMode::Emacs)
             .into_owned()
+    }
+
+    // Catches: child settlement redirecting later human text into the parent,
+    // or attachment selecting the parent's saved composer drafts.
+    #[test]
+    fn settled_attachment_keeps_closed_child_target_until_explicit_detach() {
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        let surface = BackgroundTaskSurface::attach(&status);
+        let parent = SessionId::new();
+        let id = SubagentInvocationId::new();
+        let (ingress, control) = ego_core::turn::interactive_control();
+        surface.register_input(id, "t1".into(), ingress);
+        let mut drafts = DraftStash::new(parent);
+        drafts.push_active(ComposerDraft {
+            images: crate::repl::ImageDraft::default(),
+            text: "parent draft".into(),
+            cursor: 12,
+            origin: InputOrigin::Typed,
+        });
+        assert!(attachment_command(&status, "t1", &mut drafts));
+        assert_ne!(drafts.active(), parent);
+        assert_eq!(drafts.active_count(), 0);
+        surface.handle(id).settled();
+        drop(control);
+        let selected =
+            attached_input(&status).expect("settlement cannot return the input seat to parent");
+        assert_eq!(
+            futures::executor::block_on(selected.submit("child-only message".into(), Vec::new())),
+            Err(ego_core::turn::ControlError::Closed)
+        );
+        assert!(attachment_command(&status, "/detach", &mut drafts));
+        assert!(attached_input(&status).is_none());
+        assert_eq!(drafts.active(), parent);
+        assert_eq!(drafts.pop_active().unwrap().text, "parent draft");
+    }
+
+    // Catches: an acknowledged human directive replayed after its answer by
+    // terminal-thread acknowledgement timing instead of child journal order.
+    #[test]
+    fn attachment_replays_durable_user_and_child_output_in_order() {
+        let status = Arc::new(Mutex::new(SurfaceStatus::default()));
+        let surface = BackgroundTaskSurface::attach(&status);
+        let id = SubagentInvocationId::new();
+        let (ingress, _control) = ego_core::turn::interactive_control();
+        surface.register_input(id, "t1".into(), ingress);
+        let child = surface.handle(id);
+        let turn = TurnId::new();
+        for event in [
+            PublicEvent::ItemCompleted {
+                turn,
+                item: ItemId::new(),
+                kind: ego_core::public::ItemKind::UserMessage,
+                ok: true,
+                text: Some("directive".into()),
+            },
+            PublicEvent::ItemDelta {
+                turn,
+                item: ItemId::new(),
+                kind: ego_core::public::ItemKind::AgentMessage,
+                text: "answer".into(),
+            },
+        ] {
+            ego_core::sink::EventSink::publish(&child, &event, &SessionState::default());
+        }
+        assert_eq!(
+            status.lock().unwrap().background_children.inputs[&id].transcript,
+            "\nYou: directive\nanswer"
+        );
     }
 
     // Catches: parent settlement removes background rows, or same-name child usage is merged.

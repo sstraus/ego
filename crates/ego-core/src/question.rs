@@ -480,4 +480,26 @@ pub trait Elicitor: Send + Sync {
         question: crate::event::id::ItemId,
         request: QuestionRequest,
     ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>>;
+
+    /// Ask a transient question that the host must dismiss at its deadline.
+    fn elicit_until<'a>(
+        &'a self,
+        question: crate::event::id::ItemId,
+        request: QuestionRequest,
+        deadline: Option<std::time::Instant>,
+    ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
+        if deadline.is_some() {
+            return Box::pin(futures::future::ready(Ok(QuestionOutcome::Unavailable)));
+        }
+        self.elicit(question, request)
+    }
+
+    /// Confirm a root grant through the host's permission surface when available.
+    fn confirm_root<'a>(
+        &'a self,
+        question: crate::event::id::ItemId,
+        request: QuestionRequest,
+    ) -> BoxFuture<'a, Result<QuestionOutcome, ElicitorError>> {
+        self.elicit(question, request)
+    }
 }

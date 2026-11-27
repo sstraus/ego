@@ -65,6 +65,8 @@ use hyper_util::service::TowerToHyperService;
 use serde::{Deserialize, Serialize};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
 
+#[path = "configuration.rs"]
+mod configuration;
 #[path = "prompt_turn.rs"]
 mod prompt_turn;
 #[path = "resume.rs"]
@@ -536,6 +538,8 @@ pub struct McpConfinement {
 /// starts their processes.
 #[derive(Clone)]
 pub struct McpAdmissionContext {
+    /// Explicit owner retry of this admission; never inferred from a repeated request.
+    pub explicit_retry: bool,
     pub session: SessionId,
     pub root: RunRoot,
     /// Absent where the connection has no session controls.
@@ -688,7 +692,9 @@ pub trait RunBindingsBuilder: Send + Sync {
 /// Production ACP bindings: live updates plus the existing question adapter.
 #[derive(Debug, Default)]
 pub struct AcpRunBindingsBuilder {
+    rate_limits: Option<Arc<dyn ego_core::quota::RateLimitsReader>>,
     controls: Option<Arc<dyn SessionControls>>,
+    model_catalogue: Option<Arc<ego_core::model_catalogue::ModelCatalogue>>,
     permission_rules: Option<Arc<dyn crate::permission::PermissionRuleWriter>>,
     sandbox_store: Option<Arc<dyn crate::sandbox::SandboxGrantStore>>,
     /// One list per session: a session answer outlives the prompt that asked
@@ -709,11 +715,29 @@ impl AcpRunBindingsBuilder {
     pub fn with_controls(controls: Option<Arc<dyn SessionControls>>) -> Self {
         Self {
             controls,
+            model_catalogue: None,
+            rate_limits: None,
             permission_rules: None,
             sandbox_store: None,
             sandbox_sessions: std::sync::Mutex::default(),
             residual_sessions: std::sync::Mutex::default(),
         }
+    }
+
+    pub fn with_rate_limits(
+        mut self,
+        reader: Option<Arc<dyn ego_core::quota::RateLimitsReader>>,
+    ) -> Self {
+        self.rate_limits = reader;
+        self
+    }
+
+    pub fn with_model_catalogue(
+        mut self,
+        catalogue: Option<Arc<ego_core::model_catalogue::ModelCatalogue>>,
+    ) -> Self {
+        self.model_catalogue = catalogue;
+        self
     }
 
     /// Keep "allow always" sandbox answers for the workspace in `store`.
@@ -735,6 +759,7 @@ impl AcpRunBindingsBuilder {
 }
 
 struct AcpSinkFactory {
+    rate_limits: Option<Arc<dyn ego_core::quota::RateLimitsReader>>,
     child_activity: bool,
     connection: ConnectionTo<Client>,
     session: v1::SessionId,
@@ -746,9 +771,7 @@ impl EventSinkFactory for AcpSinkFactory {
         self.connection
             .send_notification(v1::SessionNotification::new(
                 self.session.clone(),
-                v1::SessionUpdate::AgentMessageChunk(v1::ContentChunk::new(
-                    message.to_owned().into(),
-                )),
+                crate::project::notice_v1(None, message, None),
             ))
             .map_err(|error| error.to_string())
     }
@@ -761,7 +784,8 @@ impl EventSinkFactory for AcpSinkFactory {
                 capabilities.clone(),
                 self.root.as_path().to_path_buf(),
             )
-            .with_child_activity(self.child_activity),
+            .with_child_activity(self.child_activity)
+            .with_rate_limits(self.rate_limits.clone()),
         )
     }
 }
@@ -816,9 +840,11 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             root.as_path().to_path_buf(),
             self.sandbox_store.clone(),
             session_grants,
-        );
+        )
+        .with_rules(self.permission_rules.clone());
         let bindings = ego_core::run::RunExecutionBindings::new(
             Arc::new(AcpSinkFactory {
+                rate_limits: self.rate_limits.clone(),
                 child_activity: capabilities.child_activity_available(),
                 connection,
                 session,
@@ -826,6 +852,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
             }),
             Some(elicitor),
         )
+        .with_model_catalogue(self.model_catalogue.clone())
         .with_human(human)
         .with_sandbox_grants(Arc::new(sandbox_grants))
         .with_residual_desk(residual);
@@ -839,7 +866,7 @@ impl RunBindingsBuilder for AcpRunBindingsBuilder {
 /// What `durable_agent_with_compaction` puts in its `initialize` answer.
 ///
 /// Exposed so a local surface can say what this build advertises without
-/// connecting to it. is why: TUICommander read the pause extension
+/// connecting to it. Story 092 is why: TUICommander read the pause extension
 /// as two separately versioned entries while this crate publishes one `hold`
 /// naming both methods, and because nothing local could report the shape, the
 /// only way to find the mismatch was to run a second implementation and watch
@@ -911,6 +938,11 @@ fn capabilities(compaction: bool, lifecycle: bool) -> v1::AgentCapabilities {
         ego.insert(
             "compact".to_owned(),
             serde_json::json!({"version": 1, "method": "_ego/compact"}),
+        );
+        // A prompt past the threshold compacts in process; this update names the successor.
+        ego.insert(
+            "compacted".to_owned(),
+            serde_json::json!({"version": 1, "update": "session_info_update", "field": "_meta.ego.compacted"}),
         );
     }
     if lifecycle {
@@ -1118,6 +1150,11 @@ struct Registered {
     cancel_requested: bool,
     mcp: Option<Arc<dyn SessionMcpAdmission>>,
     session_approval: Arc<AtomicBool>,
+    /// The durable session this wire id drives after an in-process
+    /// compaction; `None` while it drives the session it names.
+    durable: Option<SessionId>,
+    /// The successor the in-flight prompt compacted into, applied when it settles.
+    compacted: Option<SessionId>,
 }
 
 /// A `session/cancel` that arrives while a prompt is accepted but the run it
@@ -1249,6 +1286,8 @@ impl Sessions {
                 cancel_requested: false,
                 mcp,
                 session_approval,
+                durable: None,
+                compacted: None,
             },
         );
         Some(generation)
@@ -1456,6 +1495,7 @@ impl Sessions {
         id: &v1::SessionId,
         generation: RegistrationGeneration,
         snapshot: &RunSnapshot,
+        successor: Option<SessionId>,
     ) -> bool {
         if let Some(session) = self
             .lock()
@@ -1465,6 +1505,14 @@ impl Sessions {
         {
             let cancel_requested = session.cancel_requested;
             session.run = Some((snapshot.run_id(), snapshot.revision()));
+            if let Some(target) = successor {
+                // The run belongs to the source; the next prompt starts one in
+                // the successor, so no earlier command can replay into it.
+                session.durable = Some(target);
+                session.run = None;
+                session.start_request = None;
+                session.answered.clear();
+            }
             session.withdrawal = None;
             session.active_cancel = None;
             session.busy = false;
@@ -1489,6 +1537,40 @@ impl Sessions {
             session.steering = None;
             self.1.notify_waiters();
         }
+    }
+
+    /// Record that the in-flight prompt continued in `target`.
+    fn compacted(&self, id: &v1::SessionId, generation: RegistrationGeneration, target: SessionId) {
+        if let Some(session) = self
+            .lock()
+            .sessions
+            .get_mut(id)
+            .filter(|session| session.generation == generation)
+        {
+            session.compacted = Some(target);
+        }
+    }
+
+    /// The successor the settled prompt compacted into, if any.
+    fn take_compaction(
+        &self,
+        id: &v1::SessionId,
+        generation: RegistrationGeneration,
+    ) -> Option<SessionId> {
+        self.lock()
+            .sessions
+            .get_mut(id)
+            .filter(|session| session.generation == generation)
+            .and_then(|session| session.compacted.take())
+    }
+
+    /// The durable session that requests naming `id` reach.
+    fn durable(&self, id: &v1::SessionId, named: SessionId) -> SessionId {
+        self.lock()
+            .sessions
+            .get(id)
+            .and_then(|session| session.durable)
+            .unwrap_or(named)
     }
 
     fn steering(
@@ -2003,6 +2085,7 @@ fn unsupported_block(what: &str) -> String {
 /// resume path.
 async fn hold<const RELEASE: bool>(
     lifecycle: Option<&dyn LifecycleOperations>,
+    sessions: &Sessions,
     unadmitted: &UnadmittedSessions,
     request: &AcpHoldRequest<RELEASE>,
     responder: Responder<serde_json::Value>,
@@ -2020,7 +2103,9 @@ async fn hold<const RELEASE: bool>(
         );
     }
     let session = match request.session_id.parse::<SessionId>() {
-        Ok(session) if !session.uuid().is_nil() => session,
+        Ok(session) if !session.uuid().is_nil() => {
+            sessions.durable(&v1::SessionId::new(request.session_id.clone()), session)
+        }
         _ => {
             return responder.respond_with_error(
                 Error::invalid_params().data(format!("invalid {method} sessionId")),
@@ -2137,6 +2222,10 @@ trait LifecycleOperations: Send + Sync {
     fn goal(&self, id: SessionId) -> Result<Option<ego_core::goal::GoalRecord>, LifecycleError>;
     fn plan(&self, id: SessionId) -> Result<ego_core::plan::Plan, LifecycleError>;
     fn lineage_info(&self, id: SessionId) -> Result<Option<SessionLineageInfo>, LifecycleError>;
+    fn listed_row(
+        &self,
+        meta: &SessionMeta,
+    ) -> Result<(HoldState, Option<SessionLineageInfo>), LifecycleError>;
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment>;
     fn resume<'a>(
         &'a self,
@@ -2212,6 +2301,13 @@ where
         SessionLifecycle::lineage_info(self, id)
     }
 
+    fn listed_row(
+        &self,
+        meta: &SessionMeta,
+    ) -> Result<(HoldState, Option<SessionLineageInfo>), LifecycleError> {
+        SessionLifecycle::listed_row(self, meta)
+    }
+
     fn load<'a>(&'a self, id: SessionId, root: &'a Path) -> LifecycleFuture<'a, SessionAttachment> {
         Box::pin(SessionLifecycle::load(self, id, root))
     }
@@ -2268,15 +2364,17 @@ where
 
 /// The generation controls this session offers, or nothing.
 ///
-/// Absent controls stay absent rather than becoming an empty picker.
-/// An unreadable seat produces a warning and omission, not a session-open
-/// refusal: session creation does not depend on the picker.
+/// Absent controls stay absent rather than becoming an empty picker, which is
+/// the same fallback rule `docs/internals/06-acp.md` §3 applies to usage and cost. A
+/// seat that cannot be read is a warning and an omission, not a refusal to
+/// open the session: creating a session has never depended on the picker.
 fn config_options(
     controls: Option<&Arc<dyn SessionControls>>,
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
     session: SessionId,
 ) -> Option<Vec<v1::SessionConfigOption>> {
     match controls?.state(session) {
-        Ok(state) => Some(crate::controls::options(&state)),
+        Ok(state) => Some(configuration::options(&state, admission, session)),
         Err(error) => {
             tracing::warn!(%error, "the session config options could not be read");
             None
@@ -2612,7 +2710,7 @@ impl UnadmittedSession {
             Ok(_) => refusal,
             Err(error) => {
                 if let Err(quarantine) = lifecycle.quarantine(self.session) {
-                    // DEFERRED (2026-10-04): operator accepts failed quarantine publication
+                    // DEFERRED (2026-10-04): Boss accepts failed quarantine publication
                     // plus a writer-held deletion lease. No durable write can hide the
                     // refused id; ACP stdio reconnect starts a new process and may expose it.
                     self.hidden_for_good = true;
@@ -2652,6 +2750,7 @@ fn spawns_process(servers: &[v1::McpServer]) -> bool {
 ///
 /// The caller has already measured the session's confinement: admission starts
 /// the servers' processes, and they start under the pick this reads.
+#[allow(clippy::too_many_arguments)]
 async fn admit_session_mcp(
     admitter: &dyn McpSessionAdmitter,
     servers: Vec<v1::McpServer>,
@@ -2660,7 +2759,16 @@ async fn admit_session_mcp(
     admission: Option<&Arc<dyn SessionConfinementAdmission>>,
     session: SessionId,
     root: &RunRoot,
+    meta: Option<&v1::Meta>,
 ) -> Result<Option<Arc<dyn SessionMcpAdmission>>, Error> {
+    let explicit_retry = match meta
+        .and_then(|meta| meta.get("ego"))
+        .and_then(|ego| ego.get("mcpRetry"))
+    {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => return Err(Error::invalid_params().data("_meta.ego.mcpRetry must be a boolean")),
+    };
     validate_mcp_servers(&servers).map_err(refused_params)?;
     if servers.is_empty() {
         return Ok(None);
@@ -2684,6 +2792,7 @@ async fn admit_session_mcp(
         None => None,
     };
     let context = McpAdmissionContext {
+        explicit_retry,
         session,
         root: root.clone(),
         confinement,
@@ -3036,15 +3145,30 @@ fn emit_config_options(
     connection: &ConnectionTo<Client>,
     id: &v1::SessionId,
     controls: Option<&Arc<dyn SessionControls>>,
+    admission: Option<&Arc<dyn SessionConfinementAdmission>>,
     session: SessionId,
 ) -> Result<(), Error> {
-    let Some(options) = config_options(controls, session) else {
+    let Some(controls) = controls else {
         return Ok(());
+    };
+    let update = match controls.state(session) {
+        Ok(state) => {
+            v1::ConfigOptionUpdate::new(configuration::options(&state, admission, session))
+                .meta(configuration::readiness("ready"))
+        }
+        Err(error) => failed_config_options(&error),
     };
     connection.send_notification(v1::SessionNotification::new(
         id.clone(),
-        v1::SessionUpdate::ConfigOptionUpdate(v1::ConfigOptionUpdate::new(options)),
+        v1::SessionUpdate::ConfigOptionUpdate(update),
     ))
+}
+
+fn failed_config_options(error: &ControlError) -> v1::ConfigOptionUpdate {
+    let mut meta = configuration::readiness("failed");
+    meta["ego"]["error"] =
+        serde_json::to_value(control_error(error)).expect("ACP errors serialize to JSON");
+    v1::ConfigOptionUpdate::new(Vec::new()).meta(meta)
 }
 
 fn emit_attachment(
@@ -3058,6 +3182,7 @@ fn emit_attachment(
         &attachment.replay,
         attachment.context_window,
         &attachment.root,
+        &attachment.id.to_string(),
     ) {
         connection.send_notification(v1::SessionNotification::new(id.clone(), update))?;
     }
@@ -3250,6 +3375,7 @@ where
         confinement.clone(),
         trust.clone(),
         lifecycle.clone(),
+        advertises_compaction,
     );
     Agent
         .builder()
@@ -3416,6 +3542,7 @@ where
                                 confinement.as_ref(),
                                 session,
                                 &root,
+                                request.meta.as_ref(),
                             )
                             .await,
                             Err(error) => Err(error),
@@ -3473,13 +3600,18 @@ where
                     // Measurement now runs after the response. Its complete
                     // offer arrives as a later config_option_update, while
                     // the first prompt awaits the same admission.
+                    if pending_measurement.is_some() && controls.is_some() {
+                        let meta = profile_meta.get_or_insert_with(serde_json::Map::new);
+                        let ego = meta.entry("ego".to_owned()).or_insert_with(|| serde_json::json!({}));
+                        ego["configOptions"] = serde_json::json!({"state": "pending"});
+                    }
                     responder.respond(
                         v1::NewSessionResponse::new(id.clone())
                             .meta(profile_meta)
                             .config_options(
                                 pending_measurement
                                     .is_none()
-                                    .then(|| config_options(controls.as_ref(), session))
+                                    .then(|| config_options(controls.as_ref(), confinement.as_ref(), session))
                                     .flatten(),
                             ),
                     )?;
@@ -3500,6 +3632,7 @@ where
                     if let Some(pending) = pending_measurement {
                         let connection = cx.clone();
                         let controls = controls.clone();
+                        let confinement = confinement.clone();
                         if let Err(error) = cx.spawn(async move {
                             match pending.await {
                                 Ok(()) => {
@@ -3507,6 +3640,7 @@ where
                                         &connection,
                                         &id,
                                         controls.as_ref(),
+                                        confinement.as_ref(),
                                         session,
                                     ) {
                                         tracing::warn!(%error, "measured ACP config options could not be delivered");
@@ -3519,12 +3653,7 @@ where
                                     connection.send_notification(v1::SessionNotification::new(
                                         id.clone(),
                                         v1::SessionUpdate::ConfigOptionUpdate(
-                                            v1::ConfigOptionUpdate::new(Vec::new()).meta(
-                                                serde_json::Map::from_iter([(
-                                                    "ego".to_owned(),
-                                                    serde_json::json!({"error": control_error(&error)}),
-                                                )]),
-                                            ),
+                                            failed_config_options(&error),
                                         ),
                                     ))?;
                                 }
@@ -3575,9 +3704,21 @@ where
                             next => break next,
                         }
                     };
-                    let items = visible.into_iter().map(|meta| {
-                        let lineage = lifecycle.lineage_info(meta.id)?;
-                        lifecycle.hold(meta.id).map(|hold| session_info(meta, hold, lineage))
+                    // The catalogue row already says whether a session has lineage,
+                    // so only a derived session pays for a log replay here.
+                    let items = visible.into_iter().filter_map(|meta| {
+                        let info = lifecycle
+                            .listed_row(&meta)
+                            .map(|(hold, lineage)| session_info(meta.clone(), hold, lineage));
+                        match info {
+                            // A session removed after the catalogue read is not a reason
+                            // to hide every other session.
+                            Err(error @ (LifecycleError::UnknownSession { .. } | LifecycleError::Deleted | LifecycleError::Replay(_) | LifecycleError::Store(_))) => {
+                                tracing::warn!(session = %meta.id, %error, "session/list skipped a session that is no longer readable");
+                                None
+                            }
+                            info => Some(info),
+                        }
                     }).collect::<Result<Vec<_>, _>>();
                     match items {
                         Ok(items) => responder.respond(
@@ -3682,6 +3823,7 @@ where
                         confinement.as_ref(),
                         id,
                         &root,
+                        request.meta.as_ref(),
                     )
                     .await
                     {
@@ -3737,7 +3879,7 @@ where
                     // would be dropped.
                     let delivered = (|| { responder.respond(
                         v1::LoadSessionResponse::new()
-                            .config_options(config_options(controls.as_ref(), id))
+                            .config_options(config_options(controls.as_ref(), confinement.as_ref(), id))
                             .meta(session_meta(hold, attachment.meta.summary.as_deref(), lifecycle.lineage_info(id).map_err(|error| lifecycle_error(&error))?)),
                     ).and_then(|()| {
                     notices.register(request.session_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
@@ -3755,7 +3897,7 @@ where
                         let watched_id = request.session_id.clone();
                         spawner.spawn(Box::pin(async move {
                             let snapshot = subscription.await;
-                            watched.finish(&watched_id, generation, &snapshot);
+                            watched.finish(&watched_id, generation, &snapshot, None);
                         }));
                     }
                     delivered
@@ -3852,6 +3994,7 @@ where
                         confinement.as_ref(),
                         id,
                         &root,
+                        request.meta.as_ref(),
                     )
                     .await
                     {
@@ -3902,7 +4045,7 @@ where
                     } else { None };
                     let delivered = responder.respond(
                         v1::ResumeSessionResponse::new()
-                            .config_options(config_options(controls.as_ref(), id)),
+                            .config_options(config_options(controls.as_ref(), confinement.as_ref(), id)),
                     ).and_then(|()| {
                     notices.register(request.session_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
                     // Queue the snapshot before execution can publish live updates.
@@ -3919,7 +4062,7 @@ where
                         let watched_id = request.session_id.clone();
                         spawner.spawn(Box::pin(async move {
                             let snapshot = subscription.await;
-                            watched.finish(&watched_id, generation, &snapshot);
+                            watched.finish(&watched_id, generation, &snapshot, None);
                         }));
                     }
                     delivered
@@ -4034,6 +4177,7 @@ where
                             confinement.as_ref(),
                             child,
                             &root,
+                            request.meta.as_ref(),
                         )
                         .await,
                         Err(error) => Err(error),
@@ -4064,7 +4208,7 @@ where
                     // message.
                     responder.respond(
                         v1::ForkSessionResponse::new(child_id.clone())
-                            .config_options(config_options(controls.as_ref(), child)),
+                            .config_options(config_options(controls.as_ref(), confinement.as_ref(), child)),
                     )?;
                     notices.register(child_id.clone(), cx.clone(), sessions.clone(), Arc::clone(&prompt_handler));
                     emit_info(&cx, &child_id, &attachment.meta, Some(lifecycle.as_ref()))
@@ -4306,6 +4450,7 @@ where
                 let lifecycle = lifecycle.clone();
                 let confinement = confinement.clone();
                 let unadmitted = unadmitted.clone();
+                let sessions = sessions.clone();
                 move |request: AcpCompactRequest,
                       responder: Responder<serde_json::Value>,
                       _cx| {
@@ -4314,6 +4459,7 @@ where
                     let lifecycle = lifecycle.clone();
                     let confinement = confinement.clone();
                     let unadmitted = unadmitted.clone();
+                    let sessions = sessions.clone();
                     async move {
                     let Some(compaction) = compaction else {
                         return responder.respond_with_error(Error::method_not_found());
@@ -4324,7 +4470,9 @@ where
                         );
                     }
                     let source = match request.session_id.parse::<SessionId>() {
-                        Ok(source) if !source.uuid().is_nil() => source,
+                        Ok(source) if !source.uuid().is_nil() => {
+                            sessions.durable(&v1::SessionId::new(request.session_id.clone()), source)
+                        }
                         _ => {
                             return responder.respond_with_error(
                                 Error::invalid_params().data("invalid compaction sessionId"),
@@ -4383,12 +4531,14 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let unadmitted = unadmitted.clone();
+                let sessions = sessions.clone();
                 move |request: AcpHoldRequest<false>,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let lifecycle = lifecycle.clone();
                     let unadmitted = unadmitted.clone();
-                    async move { hold(lifecycle.as_deref(), &unadmitted, &request, responder).await }
+                    let sessions = sessions.clone();
+                    async move { hold(lifecycle.as_deref(), &sessions, &unadmitted, &request, responder).await }
                 }
             },
             on_receive_request!(),
@@ -4397,12 +4547,14 @@ where
             {
                 let lifecycle = lifecycle.clone();
                 let unadmitted = unadmitted.clone();
+                let sessions = sessions.clone();
                 move |request: AcpHoldRequest<true>,
                       responder: Responder<serde_json::Value>,
                       _cx| {
                     let lifecycle = lifecycle.clone();
                     let unadmitted = unadmitted.clone();
-                    async move { hold(lifecycle.as_deref(), &unadmitted, &request, responder).await }
+                    let sessions = sessions.clone();
+                    async move { hold(lifecycle.as_deref(), &sessions, &unadmitted, &request, responder).await }
                 }
             },
             on_receive_request!(),
@@ -4421,7 +4573,7 @@ where
                         return responder.respond_with_error(Error::method_not_found());
                     };
                     let session = match parse_session(&request.session_id) {
-                        Ok(session) => session,
+                        Ok(session) => sessions.durable(&request.session_id, session),
                         Err(error) => return responder.respond_with_error(error),
                     };
                     if let Err(error) = unadmitted.refuse(session) {
@@ -4454,7 +4606,7 @@ where
                     };
                     let Some(change) = change else {
                         return responder.respond(v1::SetSessionConfigOptionResponse::new(
-                            crate::controls::options(&state),
+                            configuration::options(&state, confinement.as_ref(), session),
                         ));
                     };
                     // Refused rather than staged. Staging it would leave the
@@ -4471,7 +4623,7 @@ where
                     };
                     match staged {
                         Ok(state) => {
-                            let options = crate::controls::options(&state);
+                            let options = configuration::options(&state, confinement.as_ref(), session);
                             responder.respond(v1::SetSessionConfigOptionResponse::new(options.clone()))?;
                             cx.send_notification(v1::SessionNotification::new(request.session_id.clone(),
                                 v1::SessionUpdate::ConfigOptionUpdate(v1::ConfigOptionUpdate::new(options))))?;

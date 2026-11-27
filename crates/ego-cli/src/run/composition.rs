@@ -71,10 +71,12 @@ pub(crate) fn rooted_path(root: &Path, path: PathBuf) -> PathBuf {
 /// component untouched, so a symlinked file still arrives at the loader as a
 /// symlink and is still refused by name instead of quietly followed.
 ///
-/// The operator named this file; proceeding without it ignores an instruction that was
-/// given, which is the silently vacuous flag `--budget` was fixed for one flag over — and
-/// `--system @file` already exits 2 for the same mistake. `symlink_metadata` rather than
-/// `exists`, because a *dangling* symlink must reach the loader and be refused as the
+/// **A file that is not there refuses the run.** `CLI.md` §4.4: invalid config
+/// is never skipped silently. The operator named this file; proceeding without
+/// it ignores an instruction that was given, which is the silently vacuous
+/// flag `--budget` was fixed for one flag over — and `--system @file` already
+/// exits 2 for the same mistake. `symlink_metadata` rather than `exists`,
+/// because a *dangling* symlink must reach the loader and be refused as the
 /// symlink it is, not reported here as an absence.
 pub(super) fn explicit(path: &Path, cwd: &Path) -> Result<PathBuf, UsageError> {
     let refuse =
@@ -110,8 +112,13 @@ pub(super) fn rooted_at_file(value: &str, cwd: &Path) -> Result<String, UsageErr
     prompt::at_file(&format!("@{}", rooted.display()))
 }
 
-/// Resolve instructions and system prompt. Bare or untrusted headless execution makes zero
-/// `InstructionIo` calls through `Selection::Disabled`, not reads that happen to return empty.
+/// The instructions and system prompt this run generates under.
+///
+/// **`--bare`, and a headless run in an untrusted workspace, call
+/// `InstructionIo` zero times.** Not "read nothing" — make no call at all, so
+/// nothing is stat'd, opened or read, and there is nothing for a dialog to be
+/// raised about. That is the mechanism behind §4.4, and it is
+/// `Selection::Disabled` doing it, one layer down.
 pub(super) fn instructions(
     effective: &Effective,
     args: &Args,
@@ -152,7 +159,7 @@ pub(super) fn instructions(
             &discovery_root,
             cwd,
             &selection,
-            Limits::default(),
+            effective.instructions.limits(),
             home.as_deref(),
         )
         .map_err(|err| UsageError(err.to_string()))?;
@@ -201,6 +208,25 @@ pub(super) fn instructions(
 
         system_prompt(&set, root, &selection)
     };
+    if replacement.is_none()
+        && let Some(store) = memory_store(effective, args, root)
+    {
+        use ego_core::memory::Loaded;
+        let location = store.location();
+        match ego_core::memory::load(store.as_ref()) {
+            Loaded::Text(text) => {
+                assembled = ego_core::memory::frame(assembled, &location, &text);
+            }
+            Loaded::Absent => {}
+            Loaded::TooLarge { bytes } => diagnostics.note(&format!(
+                "{location} was not used: {bytes} bytes is over the {} byte memory limit",
+                ego_core::memory::MAX_BYTES
+            )),
+            Loaded::Unreadable(error) => {
+                diagnostics.note(&format!("{location} was not used: {error}"));
+            }
+        }
+    }
     if replacing.is_none()
         && let Some(name) = args.output_style.as_deref()
     {
@@ -240,7 +266,90 @@ pub(super) fn tools(
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
-    tools_with_mode(selected, skills, profile, history, environment, None)
+    tools_with_mode(
+        selected,
+        skills,
+        profile,
+        history,
+        environment,
+        None,
+        OptInTools::default(),
+    )
+}
+
+/// The tools a run has only when the owner turned them on.
+#[derive(Default)]
+pub(super) struct OptInTools {
+    pub(super) memory: Option<Arc<dyn ego_core::memory::MemoryStore>>,
+    /// The workspace whose language servers the `lsp` tool asks.
+    pub(super) lsp: Option<std::path::PathBuf>,
+    pub(super) build_recipes: Option<Arc<dyn ego_core::build_recipe::BuildRecipeStore>>,
+}
+
+pub(super) fn opt_in_tools(effective: &Effective, args: &Args, root: &Path) -> OptInTools {
+    OptInTools {
+        memory: memory_store(effective, args, root),
+        lsp: effective.lsp.then(|| root.to_path_buf()),
+        build_recipes: crate::build_recipes::store(
+            effective.build_recipes,
+            args.bare,
+            crate::config::ego_home().as_deref(),
+            root,
+        ),
+    }
+}
+
+/// The language servers of `root`, shared by every registry this process
+/// builds for it, so a skill rescan or a compaction does not restart them.
+fn lsp_pool(root: &Path, environment: ego_core::permit::EnvPolicy) -> ego_tools::lsp::LspPool {
+    static POOLS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<std::path::PathBuf, ego_tools::lsp::LspPool>>,
+    > = std::sync::OnceLock::new();
+    POOLS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(root.to_path_buf())
+        .or_insert_with(|| ego_tools::lsp::LspPool::new(root, environment))
+        .clone()
+}
+
+/// The workspace memory of this run, when the owner turned it on.
+pub(super) fn memory_store(
+    effective: &Effective,
+    args: &Args,
+    root: &Path,
+) -> Option<Arc<dyn ego_core::memory::MemoryStore>> {
+    crate::memory::store(
+        effective.memory,
+        args.bare,
+        crate::config::ego_home().as_deref(),
+        root,
+    )
+}
+
+/// The tool selection of this run: explicit argv, else the restored session selection or config.
+pub(super) fn selected_tools<'a>(
+    args: &'a Args,
+    effective: &'a Effective,
+) -> Option<&'a Vec<String>> {
+    args.tools.as_ref().or(effective.tools.as_ref())
+}
+
+// Declare search for per-generation resolution, without default external fallback.
+// The configured catalogue is explicit input so this policy is independent of
+// the process environment and can be checked with a configured backend.
+pub(super) fn configure_web_search(all: &mut Vec<RegisteredTool>, selected: Option<&Vec<String>>) {
+    if selected.is_none_or(|names| !names.iter().any(|name| name == "web_search_external")) {
+        all.retain(|tool| tool.descriptor().name != "web_search_external");
+    }
+    if selected.is_none_or(|names| names.iter().any(|name| name == "web_search")) {
+        all.retain(|tool| tool.descriptor().name != "web_search");
+        all.push(RegisteredTool::Effect(match selected {
+            Some(_) => ego_tools::tools::selected_web_search(),
+            None => ego_tools::tools::default_web_search(),
+        }));
+    }
 }
 
 pub(super) fn tools_with_mode(
@@ -250,26 +359,28 @@ pub(super) fn tools_with_mode(
     history: Option<Arc<dyn ego_core::history::SessionHistory>>,
     environment: ego_core::permit::EnvPolicy,
     _model: Option<&str>,
+    opt_in: OptInTools,
 ) -> Result<Vec<RegisteredTool>, UsageError> {
+    let lsp = opt_in.lsp.map(|root| lsp_pool(&root, environment.clone()));
     let mut all: Vec<_> = ego_tools::tools::builtins_with_environment(environment)
         .into_iter()
         .map(RegisteredTool::Effect)
         .collect();
-    if selected.is_some_and(|names| names.iter().any(|name| name == "web_search")) {
-        let local = all
-            .iter()
-            .find(|tool| tool.descriptor().name == "web_search")
-            .and_then(RegisteredTool::as_effect)
-            .cloned();
-        all.retain(|tool| tool.descriptor().name != "web_search");
-        all.push(RegisteredTool::Effect(
-            ego_tools::tools::selected_web_search(local),
-        ));
-    }
+    configure_web_search(&mut all, selected);
     all.push(RegisteredTool::HumanInput(Arc::new(AskQuestionTool)));
     all.push(RegisteredTool::Task);
+    all.push(RegisteredTool::ModelCatalogue);
     all.push(RegisteredTool::Goal);
     all.push(RegisteredTool::Plan);
+    if let Some(store) = opt_in.memory {
+        all.push(RegisteredTool::Memory(store));
+    }
+    if let Some(pool) = lsp {
+        all.push(RegisteredTool::CodeIntel(Arc::new(pool)));
+    }
+    if let Some(store) = opt_in.build_recipes {
+        all.push(RegisteredTool::BuildRecipe(store));
+    }
     if let Some(source) = history {
         for tool in [
             ego_core::history::HistoryTool::Search,
@@ -282,7 +393,8 @@ pub(super) fn tools_with_mode(
         }
     }
 
-    if let Some(skills) = skills.filter(|catalogue| !catalogue.specs().is_empty()) {
+    // Keep the tool shape when the first skill is added or the last is removed.
+    if let Some(skills) = skills {
         all.push(RegisteredTool::skill(skills));
     }
     let Some(names) = selected else {
@@ -293,8 +405,8 @@ pub(super) fn tools_with_mode(
             .iter()
             .any(|tool| tool.descriptor().name == name.as_str())
         {
-            if name == "web_search" {
-                return Err(UsageError("--tools web_search: no search backend configured; set EXA_API_KEY to enable Exa (account credits and possible paid charges); no fallback is used".into()));
+            if name == "web_search_external" {
+                return Err(UsageError("--tools web_search_external: no search backend configured; set EXA_API_KEY to enable Exa (account credits and possible paid charges); no fallback is used".into()));
             }
             let known: Vec<String> = all.iter().map(|tool| tool.descriptor().name).collect();
             return Err(UsageError(format!(
@@ -311,12 +423,15 @@ pub(super) fn tools_with_mode(
 
 /// The capability names `session.started` publishes.
 ///
-/// Advertise capabilities from observed collaborators, not a handwritten list that can
-/// claim unavailable behavior.
+/// Feature detection by name (`CLI.md` §4.2), so a consumer never parses a
+/// version — and by *observation*, not by a hand-written list: a capability
+/// this build does not have must not be advertised, and the cheapest way to
+/// keep that true is to derive each one from the thing that provides it.
 pub(super) fn capabilities(
     tools: &[RegisteredTool],
     instructions: bool,
     schema: bool,
+    hooks_off: bool,
 ) -> Vec<String> {
     let mut names = Vec::new();
     if !tools.is_empty() {
@@ -327,6 +442,9 @@ pub(super) fn capabilities(
     }
     if schema {
         names.push("schema".to_string());
+    }
+    if hooks_off {
+        names.push("hooks_off".to_string());
     }
     names.push("jsonl".to_string());
     names
@@ -378,40 +496,54 @@ impl FrozenRuleResolver {
         &self,
         snapshot: &RuleSnapshot,
     ) -> Result<Ruleset, PolicyControlError> {
-        if snapshot.target != UserConfigTarget::Base
+        let selected_target = self
+            .selected_profile
+            .as_ref()
+            .map(|(name, _)| name.as_str());
+        if matches!(&snapshot.target, UserConfigTarget::Profile(name) if Some(name.as_str()) != selected_target)
             || (!snapshot.permissions_present
                 && (!snapshot.allow.is_empty() || !snapshot.deny.is_empty()))
         {
             return Err(PolicyControlError::Resolution {
-                diagnostic: "a frozen policy resolution requires a valid base rule snapshot".into(),
+                diagnostic: "a frozen policy resolution requires an admitted rule target".into(),
             });
         }
 
         let mut layers = self.layers.clone();
-        if let Some(user) = layers.iter_mut().find(|layer| layer.source == Source::User) {
-            let captured_judge = user
-                .value
-                .permissions
+        if !layers.iter().any(|layer| layer.source == Source::User) {
+            layers.push(Sourced {
+                source: Source::User,
+                value: ConfigLayer::default(),
+            });
+        }
+        let user = layers
+            .iter_mut()
+            .find(|layer| layer.source == Source::User)
+            .expect("user layer inserted above");
+        // Overlay only session-published transactions, not mutable config files.
+        // A Base edit must not restore a stale frozen selected-profile layer.
+        let published = self.selection.published_rule_snapshots()?;
+        for snapshot in published.iter().chain(std::iter::once(snapshot)) {
+            let permissions = match &snapshot.target {
+                UserConfigTarget::Base => &mut user.value.permissions,
+                UserConfigTarget::Profile(name) => {
+                    &mut user
+                        .value
+                        .profile
+                        .entry(name.to_string())
+                        .or_default()
+                        .permissions
+                }
+            };
+            let captured_judge = permissions
                 .as_ref()
                 .and_then(|permissions| permissions.judge.clone());
-            user.value.permissions = (snapshot.permissions_present || captured_judge.is_some())
-                .then(|| PermCfg {
+            *permissions =
+                (snapshot.permissions_present || captured_judge.is_some()).then(|| PermCfg {
                     judge: captured_judge,
                     allow: snapshot.allow.clone(),
                     deny: snapshot.deny.clone(),
                 });
-        } else if snapshot.permissions_present {
-            layers.push(Sourced {
-                source: Source::User,
-                value: ConfigLayer {
-                    permissions: Some(PermCfg {
-                        judge: None,
-                        allow: snapshot.allow.clone(),
-                        deny: snapshot.deny.clone(),
-                    }),
-                    ..ConfigLayer::default()
-                },
-            });
         }
 
         resolve_selected(
@@ -449,17 +581,15 @@ impl FrozenPolicyResolver for FrozenRuleResolver {
         after: &RuleSnapshot,
         affected: &[RuleMutation],
     ) -> Result<FrozenRuleResolution, PolicyControlError> {
-        if before.target != UserConfigTarget::Base
-            || after.target != UserConfigTarget::Base
-            || before.target != after.target
-        {
+        if before.target != after.target {
             return Err(PolicyControlError::Resolution {
-                diagnostic: "a frozen policy resolution requires one base rule transaction".into(),
+                diagnostic: "a frozen policy resolution requires one rule target".into(),
             });
         }
 
         let before_rules = self.resolve_rules(before)?;
         let after_rules = self.resolve_rules(after)?;
+        let selected = self.selection.next_snapshot()?;
         let stored_changed = before != after;
         let comparisons = affected
             .iter()
@@ -473,7 +603,7 @@ impl FrozenPolicyResolver for FrozenRuleResolver {
                 )
             })
             .collect();
-        let mode = self.selection.next_snapshot()?.mode;
+        let mode = selected.mode;
         Ok(FrozenRuleResolution {
             next: GenerationPolicySnapshot {
                 mode,
@@ -528,7 +658,7 @@ pub(super) fn handle_policy_request(
             else {
                 return Err(mismatch());
             };
-            write_rows(crate::rules::render_list_rows(&rows));
+            write_rows(crate::rules::render_list_summary(&rows));
             Ok(None)
         }
         PolicyControlRequest::Permission(PermissionInput::Explain { call, workspace }) => {
@@ -585,7 +715,7 @@ pub(super) fn handle_policy_request(
                     ));
                     Ok(None)
                 }
-                repl::Confirmation::Propagate(line) => Ok(Some(line)),
+                repl::Confirmation::Propagate(line) => Ok(Some(*line)),
             }
         }
         PolicyControlRequest::Permission(PermissionInput::ConfirmRemember(_)) => Err(mismatch()),
@@ -786,7 +916,7 @@ pub(super) fn rooted_settings(
     let trust = trust_for(&root);
     let layers = config::layers(&root, args, trust)?;
     let selected_profile = config::profile(args);
-    let effective = config::resolve_session_profile(
+    let mut effective = config::resolve_session_profile(
         &layers,
         trust,
         selected_profile
@@ -796,6 +926,7 @@ pub(super) fn rooted_settings(
         &cwd,
     )
     .map_err(|err| UsageError(err.to_string()))?;
+    config::apply_account_selector(&mut effective, args)?;
     // Checked here, where the posture and the trust it was resolved from are
     // the same pair. A frozen run resolves its posture from the trust its
     // capture pinned and then reports `Untrusted` — it is a child, not a seat
@@ -805,6 +936,15 @@ pub(super) fn rooted_settings(
         debug_assert_eq!(effective.posture, Posture::Bare);
     }
     finish_rooted_settings(args, cwd, effective, trust, Some(layers), diagnostics)
+}
+
+pub(crate) fn captured_session_policy(
+    root: &ego_core::run::RunRoot,
+    args: &crate::cli::Args,
+    capture: &config::FrozenRunConfig,
+) -> Result<ego_core::permit::RunConfinement, UsageError> {
+    frozen_rooted_settings(args, root.as_path().to_path_buf(), capture, &Stderr)
+        .map(|settings| settings.confinement)
 }
 
 pub(super) fn frozen_rooted_settings(
@@ -855,8 +995,10 @@ pub(super) fn finish_rooted_settings(
         .transpose()?;
     let root = cwd.clone();
 
-    // Report requested budgets reduced by administrator ceilings. Money clamps travel through
-    // the gate; token clamps are announced here.
+    // §4 requires the clamp be stated, not silent: a `--budget 20$` reduced to
+    // an administrator's $5 must not read as binding at $20. The money half
+    // travels into the gate, which publishes it on every `MeteringSelected`;
+    // the token half has no such carrier, so it is said here.
     if let Some(asked) = effective.clamped.tokens {
         diagnostics.note(&format!(
             "the token ceiling of {asked} was reduced to {} by a system ceiling",
@@ -869,18 +1011,43 @@ pub(super) fn finish_rooted_settings(
 
     if let Some(home) = std::env::var_os("HOME") {
         for warning in super::profile_roots::defaults(&mut effective, Path::new(&home)) {
-            diagnostics.note(&warning);
+            if args.plain || args.quiet {
+                diagnostics.note(&warning);
+            } else {
+                diagnostics.startup_detail(&warning);
+            }
         }
     }
     if let Some(directory) = &args.read_only_dir {
         super::read_directory::apply(&mut effective, &root, directory)?;
-        diagnostics.note(&format!(
-            "read-only launch directory: {}",
+        let message = format!(
+            "read-only launch directory: {} (only this directory is added as read-only; the workspace keeps its own access)",
             directory.display()
-        ));
+        );
+        if args.plain || args.quiet {
+            diagnostics.note(&message);
+        } else {
+            diagnostics.startup_detail(&message);
+        }
     }
-    let roots =
-        super::profile_roots::admit(&effective, &CanonPath::new(&root)).map_err(UsageError)?;
+    for allowed in &args.allow_dirs {
+        super::read_directory::apply_allow(&mut effective, &root, &allowed.path, allowed.access)?;
+        let message = format!(
+            "allowed for this run: {} ({})",
+            allowed.path.display(),
+            allowed.access.as_str()
+        );
+        if args.plain || args.quiet {
+            diagnostics.note(&message);
+        } else {
+            diagnostics.startup_detail(&message);
+        }
+    }
+    let (roots, root_notes) = super::profile_roots::admit_noted(&effective, &CanonPath::new(&root))
+        .map_err(UsageError)?;
+    for note in &root_notes {
+        diagnostics.note(note);
+    }
 
     #[cfg(target_os = "linux")]
     for read in roots
@@ -926,6 +1093,7 @@ pub(super) fn finish_rooted_settings(
     .with_exec_paths(exec_paths)
     .with_roots(roots);
 
+    crate::session::set_checkpoints(effective.checkpoints);
     Ok(Settings {
         run_deadline,
         root,
@@ -948,6 +1116,14 @@ pub(super) struct Materials {
     pub(super) slug: String,
 }
 
+/// `--timeout` already ran out: a stdin read that failed then ended the run on
+/// the deadline, not on a usage error.
+pub(super) fn expired(deadline: Option<std::time::Instant>) -> Option<RunTermination> {
+    deadline
+        .is_some_and(|deadline| std::time::Instant::now() >= deadline)
+        .then_some(RunTermination::TimedOut)
+}
+
 /// Everything a turn needs that comes from a file, a flag or stdin.
 ///
 /// Ordinary runs gather these before choosing a store or resolving a model.
@@ -957,20 +1133,50 @@ pub(super) struct Materials {
 pub(super) fn materials(
     settings: &Settings,
     args: &Args,
-    seeded: bool,
+    driver: &Driver<'_>,
     history: Arc<dyn ego_core::history::SessionHistory>,
     diagnostics: &dyn Diagnostics,
 ) -> Result<Materials, UsageError> {
-    let text = if let Some(agent_file) = &args.agent_file {
-        if seeded {
-            prompt::seed_agent_file(agent_file.body(), args.stdin, &prompt::ProcessStdin)?
-        } else {
-            prompt::assemble_agent_file(agent_file.body(), args.stdin, &prompt::ProcessStdin)?
+    let seeded = matches!(driver, Driver::Interactive { .. });
+    let text = if args.stdin == crate::cli::Stdin::Jsonl {
+        String::new()
+    } else if matches!(
+        driver,
+        Driver::Interactive {
+            seed_opening_prompt: false,
+            ..
         }
-    } else if seeded {
-        prompt::seed(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
+    ) {
+        // Re-admission must not read stdin again or submit the argv/agent-file
+        // body as another user request. Configuration and history stay intact.
+        String::new()
+    } else if let Some(agent_file) = &args.agent_file {
+        if seeded {
+            prompt::seed_agent_file(
+                agent_file.body(),
+                args.stdin,
+                &prompt::ProcessStdin(settings.run_deadline),
+            )?
+        } else {
+            prompt::assemble_agent_file(
+                agent_file.body(),
+                args.stdin,
+                &prompt::ProcessStdin(settings.run_deadline),
+            )?
+        }
+    } else if seeded || !args.answers.is_empty() {
+        // A validated answer resumes existing work; it needs no fresh prompt.
+        prompt::seed(
+            args.prompt.as_deref(),
+            args.stdin,
+            &prompt::ProcessStdin(settings.run_deadline),
+        )?
     } else {
-        prompt::assemble(args.prompt.as_deref(), args.stdin, &prompt::ProcessStdin)?
+        prompt::assemble(
+            args.prompt.as_deref(),
+            args.stdin,
+            &prompt::ProcessStdin(settings.run_deadline),
+        )?
     };
     prepared_materials(settings, args, text, history, diagnostics)
 }
@@ -1007,14 +1213,19 @@ pub(super) fn prepared_materials(
         &settings.cwd,
         diagnostics,
     )?;
-    let skills = discover_skills(settings, diagnostics)?;
+    // Skills and the custom commands they carry are prompt commands: none under the exclusive policy.
+    let skills = if args.exclusive_read_only {
+        None
+    } else {
+        discover_skills(settings, diagnostics)?
+    };
     let skill_capture = skills
         .as_ref()
         .map(|catalogue| catalogue.capture())
         .transpose()
         .map_err(|error| UsageError(error.to_string()))?;
     let registry = tools_with_mode(
-        args.tools.as_ref(),
+        selected_tools(args, &settings.effective),
         skill_capture
             .as_ref()
             .map(crate::skill::SkillCatalogueCapture::core),
@@ -1026,8 +1237,7 @@ pub(super) fn prepared_materials(
         Some(history),
         settings
             .effective
-            .exec
-            .policy()
+            .exec_policy()
             .map_err(|error| UsageError(error.to_string()))?,
         args.model.as_deref().or_else(|| {
             settings
@@ -1036,6 +1246,7 @@ pub(super) fn prepared_materials(
                 .as_ref()
                 .map(|model| model.0.as_str())
         }),
+        opt_in_tools(&settings.effective, args, &settings.root),
     )?;
     let slug = args
         .model
@@ -1248,7 +1459,11 @@ impl CliAutoPreflight {
         let Some(identity) = effective.judge.as_ref().or(effective.model.as_ref()) else {
             return Self::new(CapturedAutoPreflight::DeferredDynamic);
         };
-        let profile = match model::supplied_request_profile(identity) {
+        let profile = match model::supplied_request_profile(
+            identity,
+            &effective.providers,
+            &effective.connections,
+        ) {
             Ok(Some(profile)) => profile,
             Ok(None) => return Self::new(CapturedAutoPreflight::DeferredDynamic),
             Err(error) => {
@@ -1333,6 +1548,7 @@ pub(super) struct GenerationPreflightInput<'a> {
     pub(super) session_id: SessionId,
     pub(super) confinement: &'a RunConfinement,
     pub(super) effective: &'a Effective,
+    pub(super) connection_binding: Option<&'a str>,
     pub(super) slug: String,
     pub(super) cancel: &'a CancelToken,
     pub(super) run_deadline: Option<std::time::Instant>,
@@ -1376,6 +1592,7 @@ pub(super) async fn generation_preflight_inner(
         session_id,
         confinement,
         effective,
+        connection_binding,
         slug,
         cancel,
         run_deadline,
@@ -1415,10 +1632,14 @@ pub(super) async fn generation_preflight_inner(
             .map_err(|error| RunTermination::UsageError {
                 message: error.to_string(),
             })?;
-        let (snapshot, _) = models::build_startup_catalogue_snapshot(
+        let (snapshot, _) = models::build_interactive_catalogue_snapshot(
             &http,
             &crate::onboarding::ProcessEnvironment,
             &observed,
+            effective.connection.as_deref(),
+            slug.split_once('/').map(|(provider, _)| provider),
+            effective,
+            true,
         )
         .await?;
         let catalogue_snapshot = Arc::new(snapshot);
@@ -1480,7 +1701,13 @@ pub(super) async fn generation_preflight_inner(
             effective.ceilings.clone(),
             effective.auth.clone(),
         )
+        .with_connections(effective.connection.clone(), effective.connections.clone())
+        .with_connection_binding(connection_binding.map(str::to_owned))
+        .with_provider_instances(effective.providers.clone())
+        .with_protocol_filter(effective.protocol_filter.clone())
+        .with_catalogue_snapshot(human_picker.as_ref().map(|(snapshot, _)| snapshot.as_ref()))
         .with_output_limit(effective.max_output_tokens)
+        .with_cache_ttl_seconds(effective.cache_ttl_seconds)
         .with_offline(confinement.offline())
         .with_proxy(proxy),
     );

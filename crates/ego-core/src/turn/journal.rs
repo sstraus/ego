@@ -1,7 +1,10 @@
 //! The one place a `DomainEvent` is assembled, persisted and reduced.
 //!
-//! The journal centralizes envelope construction so turn callers share
-//! item and permission identity rules.
+//! See `docs/internals/decisions/2026-08-21-the-turn-loop.md` §5. Before this existed,
+//! eight test files built their own `Envelope`, and they disagreed with each
+//! other — `tests/public_golden.rs:167` gives a permission its own `ItemId`
+//! while `tests/reducer.rs:143` reuses the tool's. That is what a contract
+//! with no implementation looks like.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -35,13 +38,19 @@ use crate::store::session_store::{SessionStore, StoreError};
 /// same reason one layer out: a host told about an event that was never written
 /// would be reporting a turn nobody can resume into.
 ///
-/// Publish the reduced state including the current event. Cumulative
-/// consumers cannot reconstruct the correct ordering independently.
+/// That ordering is also why the sink is handed [`SessionState`]: at the
+/// moment of publication this journal holds the reduction *including* the
+/// event it is publishing, which is precisely what a consumer projecting
+/// cumulative figures needs and cannot obtain for itself in the right order.
+/// See `docs/internals/decisions/2026-08-21-what-a-sink-is-handed.md`.
 pub struct Journal<'a> {
     session: SessionId,
     store: &'a dyn SessionStore,
     clock: &'a dyn Clock,
-    /// Where the public projection goes the moment it is durable.
+    /// Where the public projection goes the moment it is durable. Held rather
+    /// than accumulated: `CLI.md` §4.2 says *live*, and a `Vec` handed over
+    /// at turn end is a different contract wearing the same flag — as well as
+    /// a buffer that grows for the life of the session.
     sink: &'a dyn EventSink,
     producer: Producer,
     /// Continues from the resumed state's `last_seq`, so reloading a session
@@ -50,9 +59,33 @@ pub struct Journal<'a> {
     state: SessionState,
     /// The exact event whose append returned an error. Until its durable
     /// disposition is resolved, no different event may consume this sequence.
-    uncertain_append: Option<DomainEvent>,
+    uncertain_append: Option<UncertainAppend>,
     /// Only attempts inherited when opening this journal, never live sibling work.
     interrupted_attempts: Vec<(EventId, crate::generator::attempt::AttemptRef)>,
+    /// Process-owned task futures, never reconstructed from recorded open calls.
+    worklist_executions: std::collections::BTreeMap<ItemId, String>,
+    interrupted_tasks: Vec<ItemId>,
+}
+
+/// Turns the user opened by invoking a skill or command directly. Such a turn
+/// commits a skill instruction instead of a `UserPrompt` item, yet it is a
+/// user turn for the protocol filter.
+fn direct_skill_turns(state: &SessionState) -> std::collections::HashSet<TurnId> {
+    state
+        .skill_events()
+        .iter()
+        .filter_map(|event| match event {
+            crate::state::SkillEvent::Instruction(admitted) if admitted.parent.is_none() => {
+                Some(admitted.turn)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+struct UncertainAppend {
+    event: DomainEvent,
+    cause: String,
 }
 
 /// A cloneable append authority for one borrow-scoped session journal.
@@ -74,6 +107,13 @@ pub enum SharedJournalError {
     Synchronization,
     /// The sole underlying journal append failed.
     Store(StoreError),
+    /// Finalization refused because a failed append has unknown durability.
+    UncertainAppend {
+        session: SessionId,
+        seq: Seq,
+        operation: String,
+        cause: String,
+    },
 }
 
 impl fmt::Display for SharedJournalError {
@@ -82,6 +122,18 @@ impl fmt::Display for SharedJournalError {
             Self::InUse => f.write_str("the shared journal still has live append handles"),
             Self::Synchronization => f.write_str("the shared journal lock is poisoned"),
             Self::Store(error) => error.fmt(f),
+            Self::UncertainAppend {
+                session,
+                seq,
+                operation,
+                cause,
+            } => write!(
+                f,
+                "cannot finalize after failure to append {operation} at event sequence {seq}: \
+                 {cause}. The record's durability is unknown. Retrying in this process cannot \
+                 help. After resolving the store error, run `ego resume {session}` to reopen \
+                 the saved journal before repeating any action."
+            ),
         }
     }
 }
@@ -90,7 +142,7 @@ impl std::error::Error for SharedJournalError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Store(error) => Some(error),
-            Self::InUse | Self::Synchronization => None,
+            Self::InUse | Self::Synchronization | Self::UncertainAppend { .. } => None,
         }
     }
 }
@@ -112,9 +164,7 @@ impl From<SharedJournalError> for StoreError {
     fn from(error: SharedJournalError) -> Self {
         match error {
             SharedJournalError::Store(error) => error,
-            error @ (SharedJournalError::InUse | SharedJournalError::Synchronization) => {
-                StoreError::Io(std::io::Error::other(error.to_string()))
-            }
+            error => StoreError::Io(std::io::Error::other(error.to_string())),
         }
     }
 }
@@ -144,6 +194,17 @@ impl<'s> SharedJournal<'s> {
         Ok(())
     }
 
+    pub(crate) fn wants_exec_progress(&self) -> bool {
+        self.lock()
+            .is_ok_and(|journal| journal.sink.wants_exec_progress())
+    }
+
+    pub(crate) fn exec_progress(&self, item: ItemId, elapsed: std::time::Duration, output: &[u8]) {
+        if let Ok(journal) = self.lock() {
+            journal.sink.exec_progress(item, elapsed, output);
+        }
+    }
+
     pub fn cache_observed(
         &self,
         prefix: &crate::generator::attempt::CachePrefix,
@@ -159,10 +220,58 @@ impl<'s> SharedJournal<'s> {
             .map_err(|_| SharedJournalError::Synchronization)
     }
 
+    /// Read-only egress view of this session's committed filter namespace.
+    /// Session-start hooks may run before the first user prompt exists.
+    pub fn egress_filter_snapshot(
+        &self,
+        namespace: &str,
+    ) -> Result<
+        (
+            crate::generator::filter_state::FilterStateSnapshot,
+            Option<TurnId>,
+        ),
+        &'static str,
+    > {
+        let journal = self
+            .lock()
+            .map_err(|_| "protocol_filter journal unavailable")?;
+        if journal.uncertain_append.is_some() {
+            return Err("protocol_filter journal state unavailable");
+        }
+        let key = format!("{}:{namespace}", journal.session);
+        let mut turns: std::collections::HashSet<_> = journal
+            .state
+            .items
+            .values()
+            .filter(|item| item.kind == crate::state::ItemKind::UserPrompt)
+            .map(|item| item.turn)
+            .collect();
+        turns.extend(direct_skill_turns(&journal.state));
+        Ok((
+            crate::generator::filter_state::FilterStateSnapshot {
+                session_id: journal.session,
+                turn_index: (turns.len() as u64).saturating_sub(1),
+                state: journal
+                    .state
+                    .protocol_filter_variables
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_default(),
+            },
+            journal
+                .state
+                .items
+                .values()
+                .max_by_key(|item| item.seq)
+                .map(|item| item.turn),
+        ))
+    }
+
     /// Append through the existing journal sequence.
     pub fn filter_state(
         &self,
         turn: TurnId,
+        role: crate::event::domain::GenerationRole,
         exchange: crate::generator::filter_state::FilterStateExchange,
     ) -> Result<(), StoreError> {
         use crate::generator::filter_state::{FilterStateOperation, FilterStateSnapshot};
@@ -192,6 +301,93 @@ impl<'s> SharedJournal<'s> {
             .get(&key)
             .cloned()
             .unwrap_or_default();
+        // Fork and compaction journals contain local events only. A lineage
+        // sequence belongs to the source journal, not this journal's ordering.
+        let skill_turns = direct_skill_turns(&journal.state);
+        let has_source = journal
+            .state
+            .items
+            .values()
+            .any(|item| item.kind == crate::state::ItemKind::UserPrompt)
+            || !skill_turns.is_empty()
+            || (matches!(
+                journal.state.lineage,
+                Some(crate::session::SessionLineage::Compaction { .. })
+            ) && journal
+                .state
+                .items
+                .values()
+                .any(|item| item.kind == crate::state::ItemKind::ContextCheckpoint));
+        let first_prompt = journal
+            .state
+            .items
+            .values()
+            .filter(|item| item.turn == turn && item.kind == crate::state::ItemKind::UserPrompt)
+            .map(|item| item.seq)
+            .min();
+        let boundary = match first_prompt {
+            Some(first_prompt) => first_prompt,
+            None if skill_turns.contains(&turn) => {
+                // A directly invoked skill or command is this turn's user input.
+                // Its instruction is the latest durable event of the turn.
+                let mut boundary = journal.state.last_seq;
+                boundary.next()
+            }
+            None if (role == crate::event::domain::GenerationRole::Compaction
+                || (matches!(
+                    role,
+                    crate::event::domain::GenerationRole::Main
+                        | crate::event::domain::GenerationRole::Judge
+                        | crate::event::domain::GenerationRole::GoalCheck
+                ) && (journal
+                    .state
+                    .turn(turn)
+                    .is_some_and(|state| state.checkpoint_continued)
+                    || journal.state.items.values().any(|item| {
+                        item.turn == turn
+                            && matches!(
+                                item.kind,
+                                crate::state::ItemKind::GoalContinuation
+                                    | crate::state::ItemKind::DetachedExecNotification
+                                    | crate::state::ItemKind::HostContext
+                            )
+                    }))))
+                && has_source =>
+            {
+                // Durable source provenance permits host continuation without
+                // inventing a user prompt. Count only this session's user turns;
+                // variables remain isolated by the current journal session ID.
+                let mut boundary = journal.state.last_seq;
+                boundary.next()
+            }
+            None => {
+                let _ = reply.send(Err("protocol_filter requires a committed user turn"));
+                return Ok(());
+            }
+        };
+        let mut preceding_turns = journal
+            .state
+            .items
+            .values()
+            .filter(|item| {
+                item.kind == crate::state::ItemKind::UserPrompt
+                    && item.seq < boundary
+                    && item.turn != turn
+            })
+            .map(|item| item.turn)
+            .collect::<std::collections::HashSet<_>>();
+        preceding_turns.extend(skill_turns.iter().filter(|id| **id != turn));
+        if matches!(
+            journal.state.lineage,
+            Some(crate::session::SessionLineage::Compaction { .. })
+        ) {
+            // A continued checkpoint owns a real filter turn even without a
+            // user prompt. Input delivered on that turn must count only once.
+            preceding_turns.extend(journal.state.turns.iter().filter_map(|(id, state)| {
+                (state.checkpoint_continued && *id != turn).then_some(*id)
+            }));
+        }
+        let turn_index = preceding_turns.len() as u64;
         if let FilterStateOperation::Save {
             expected_revision,
             writes,
@@ -228,6 +424,7 @@ impl<'s> SharedJournal<'s> {
         }
         let _ = reply.send(Ok(FilterStateSnapshot {
             session_id: journal.session,
+            turn_index,
             state: journal
                 .state
                 .protocol_filter_variables
@@ -249,6 +446,264 @@ impl<'s> SharedJournal<'s> {
         self.lock()?
             .append(turn, item, parent, kind)
             .map_err(Into::into)
+    }
+
+    /// Admit and publish one model worklist request under the sole state lock.
+    /// Only actually running task futures can provide concurrency exemptions.
+    pub fn worklist(
+        &self,
+        turn: TurnId,
+        update: crate::plan::PlanUpdate,
+    ) -> Result<Result<crate::plan::Plan, String>, SharedJournalError> {
+        let mut journal = self.lock()?;
+        let live = journal.worklist_executions.values().cloned().collect();
+        let next = match journal.state.plan.admitted(&update, &live) {
+            Ok(next) => next,
+            Err(error) => return Ok(Err(error)),
+        };
+        for (item, id) in &journal.worklist_executions {
+            let old = journal.state.plan.steps.iter().find(|step| &step.id == id);
+            let new = next.steps.iter().find(|step| &step.id == id);
+            if old != new {
+                return Ok(Err(format!(
+                    "worklist action {id} is owned by running task {item}; wait for its settlement"
+                )));
+            }
+        }
+        journal.append(turn, None, None, EventKind::PlanUpdated { update })?;
+        Ok(Ok(journal.state.plan.clone()))
+    }
+
+    /// Bind only when the task future is polled and owns execution, not at preparation.
+    pub(crate) fn start_worklist_task(
+        &self,
+        turn: TurnId,
+        item: ItemId,
+        parent: EventId,
+        id: String,
+    ) -> Result<Result<WorklistTask<'s>, String>, SharedJournalError> {
+        let mut journal = self.lock()?;
+        let valid_item = journal.state.items.get(&item).is_some_and(|call| {
+            call.tool_name.as_deref() == Some("task")
+                && call.ok.is_none()
+                && call.tool_call_started == Some(parent)
+                && serde_json::from_str::<serde_json::Value>(&call.args)
+                    .ok()
+                    .is_some_and(|args| {
+                        args.get("worklist_step")
+                            .and_then(serde_json::Value::as_str)
+                            == Some(id.as_str())
+                            && args.get("background").and_then(serde_json::Value::as_bool)
+                                != Some(true)
+                    })
+        });
+        if !valid_item
+            || journal.worklist_executions.contains_key(&item)
+            || journal
+                .worklist_executions
+                .values()
+                .any(|bound| bound == &id)
+        {
+            return Ok(Err(format!(
+                "worklist action {id} needs a unique live foreground task execution"
+            )));
+        }
+        let mut live: std::collections::BTreeSet<_> =
+            journal.worklist_executions.values().cloned().collect();
+        live.insert(id.clone());
+        let update = crate::plan::PlanUpdate::Step {
+            id: id.clone(),
+            status: crate::plan::StepStatus::InProgress,
+            reason: None,
+        };
+        if let Err(error) = journal.state.plan.admitted(&update, &live) {
+            return Ok(Err(error));
+        }
+        journal.append(turn, None, Some(parent), EventKind::PlanUpdated { update })?;
+        journal.worklist_executions.insert(item, id);
+        Ok(Ok(WorklistTask {
+            journal: self.clone(),
+            turn,
+            item,
+            parent,
+            settled: false,
+        }))
+    }
+
+    fn settle_worklist_task(
+        &self,
+        turn: TurnId,
+        item: ItemId,
+        parent: EventId,
+        success: bool,
+        reason: &str,
+    ) -> Result<(), SharedJournalError> {
+        let mut journal = self.lock()?;
+        let Some(id) = journal.worklist_executions.get(&item).cloned() else {
+            return Ok(());
+        };
+        // Remove live ownership even if persistence fails: an ended future is not live.
+        journal.worklist_executions.remove(&item);
+        if journal
+            .state
+            .plan
+            .steps
+            .iter()
+            .any(|step| step.id == id && step.status == crate::plan::StepStatus::InProgress)
+        {
+            let update = crate::plan::PlanUpdate::Step {
+                id,
+                status: if success {
+                    crate::plan::StepStatus::Completed
+                } else {
+                    crate::plan::StepStatus::Blocked
+                },
+                reason: (!success).then(|| reason.to_owned()),
+            };
+            let live = journal.worklist_executions.values().cloned().collect();
+            journal
+                .state
+                .plan
+                .admitted(&update, &live)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
+            journal.append(turn, None, Some(parent), EventKind::PlanUpdated { update })?;
+        }
+        Ok(())
+    }
+
+    /// Explicit turn cancellation is host-owned and does not depend on a stale clone.
+    pub(crate) fn cancel_worklist(&self, turn: TurnId) -> Result<(), SharedJournalError> {
+        let mut journal = self.lock()?;
+        let mut steps = journal.state.plan.steps.clone();
+        let mut changed = false;
+        for step in &mut steps {
+            if matches!(
+                step.status,
+                crate::plan::StepStatus::Pending | crate::plan::StepStatus::InProgress
+            ) {
+                step.status = crate::plan::StepStatus::Cancelled;
+                step.reason = None;
+                changed = true;
+            }
+        }
+        if changed {
+            let update = crate::plan::PlanUpdate::Replace { steps };
+            let live = journal.worklist_executions.values().cloned().collect();
+            journal
+                .state
+                .plan
+                .admitted(&update, &live)
+                .map_err(|error| StoreError::Io(std::io::Error::other(error)))?;
+            journal.append(turn, None, None, EventKind::PlanUpdated { update })?;
+        }
+        Ok(())
+    }
+
+    /// Model goal operations share the journal lock with native lifecycle changes.
+    pub(crate) fn model_goal(
+        &self,
+        turn: TurnId,
+        request: crate::goal::GoalRequest,
+        ceilings: &crate::ceiling::Ceilings,
+    ) -> Result<Result<crate::goal::GoalRecord, crate::goal::GoalRefusal>, SharedJournalError> {
+        use crate::goal::{GoalOwner, GoalRefusal, GoalRequest, GoalState};
+        if let GoalRequest::Cancel { goal_id } = request {
+            return self.cancel_goal(turn, goal_id, GoalOwner::Automated);
+        }
+        let mut journal = self.lock()?;
+        let kind = match request {
+            GoalRequest::Create { objective } => {
+                if journal
+                    .state
+                    .goal
+                    .as_ref()
+                    .is_some_and(|goal| goal.state == GoalState::Active)
+                {
+                    return Ok(Err(GoalRefusal::ActiveGoalExists));
+                }
+                if journal.state.automatic_work_paused() {
+                    return Ok(Err(GoalRefusal::AutomaticWorkPaused));
+                }
+                EventKind::GoalSet {
+                    id: crate::event::id::GoalId::new(),
+                    objective,
+                    owner: GoalOwner::Automated,
+                    ceilings: ceilings.clone(),
+                    derived_from: None,
+                }
+            }
+            GoalRequest::Cancel { .. } => unreachable!("cancel delegates before taking the lock"),
+        };
+        journal.append(turn, None, None, kind)?;
+        Ok(Ok(journal
+            .state
+            .goal
+            .clone()
+            .expect("committed goal operation")))
+    }
+
+    /// Cancel the exact current goal under the session's sole state lock.
+    /// A duplicate cancellation is harmless; stale ids and widened ownership refuse.
+    pub fn cancel_goal(
+        &self,
+        turn: TurnId,
+        goal_id: crate::event::id::GoalId,
+        cancelled_by: crate::goal::GoalOwner,
+    ) -> Result<Result<crate::goal::GoalRecord, crate::goal::GoalRefusal>, SharedJournalError> {
+        use crate::goal::{GoalRefusal, GoalState, GoalTransition};
+        let mut journal = self.lock()?;
+        let Some(goal) = journal.state.goal.as_ref() else {
+            return Ok(Err(GoalRefusal::NoActiveGoal));
+        };
+        if goal.id != goal_id {
+            return Ok(Err(GoalRefusal::StaleGoal));
+        }
+        if let Err(error) = goal.admits_cancellation_by(cancelled_by) {
+            return Ok(Err(error));
+        }
+        if goal.state == GoalState::Cancelled {
+            return Ok(Ok(goal.clone()));
+        }
+        let transition = GoalTransition::Cancelled { cancelled_by };
+        if let Err(error) = goal.admits(&transition) {
+            return Ok(Err(error));
+        }
+        journal.append(
+            turn,
+            None,
+            None,
+            EventKind::GoalTransitioned {
+                id: goal_id,
+                transition,
+            },
+        )?;
+        Ok(Ok(journal
+            .state
+            .goal
+            .clone()
+            .expect("committed goal cancellation")))
+    }
+
+    /// Linearize a goal-check result or continuation against native cancellation.
+    /// False means cancellation/replacement won; no stale event is published.
+    pub(crate) fn append_goal_event(
+        &self,
+        turn: TurnId,
+        item: Option<ItemId>,
+        goal_id: crate::event::id::GoalId,
+        kind: EventKind,
+    ) -> Result<bool, SharedJournalError> {
+        let mut journal = self.lock()?;
+        if !journal.state.goal.as_ref().is_some_and(|goal| {
+            goal.id == goal_id
+                && (goal.state == crate::goal::GoalState::Active
+                    || (goal.state == crate::goal::GoalState::Blocked
+                        && matches!(kind, EventKind::GoalCheckStopped { .. })))
+        }) {
+            return Ok(false);
+        }
+        journal.append(turn, item, None, kind)?;
+        Ok(true)
     }
 
     /// Validate and durably update pins under the session's sole state lock.
@@ -412,12 +867,62 @@ impl<'s> SharedJournal<'s> {
         let journal = journal
             .into_inner()
             .map_err(|_| SharedJournalError::Synchronization)?;
-        if journal.uncertain_append.is_some() {
-            return Err(SharedJournalError::Store(uncertain_append_error(
-                "the journal cannot finalize with an unresolved uncertain append",
-            )));
+        if let Some(pending) = journal.uncertain_append {
+            let event = pending.event;
+            let operation = match event.kind {
+                EventKind::HookLifecycleReached { occurrence, .. } => {
+                    format!("{} hook reach", occurrence.lifecycle().as_str())
+                }
+                EventKind::HookInvocationStarted { lifecycle, .. } => {
+                    format!("{} hook start", lifecycle.as_str())
+                }
+                EventKind::HookInvocationSettled { .. } => "hook settlement".to_owned(),
+                _ => "session event".to_owned(),
+            };
+            return Err(SharedJournalError::UncertainAppend {
+                session: journal.session,
+                seq: event.env.seq,
+                operation,
+                cause: pending.cause,
+            });
         }
         Ok(journal.into_state())
+    }
+}
+
+/// A task's concurrency exception cannot outlive its owning future.
+pub(crate) struct WorklistTask<'s> {
+    journal: SharedJournal<'s>,
+    turn: TurnId,
+    item: ItemId,
+    parent: EventId,
+    settled: bool,
+}
+impl WorklistTask<'_> {
+    pub(crate) fn finish(mut self, success: bool) -> Result<(), SharedJournalError> {
+        self.settled = true;
+        self.journal.settle_worklist_task(
+            self.turn,
+            self.item,
+            self.parent,
+            success,
+            "child task returned a failure or was cancelled",
+        )
+    }
+}
+impl Drop for WorklistTask<'_> {
+    fn drop(&mut self) {
+        if !self.settled
+            && let Err(error) = self.journal.settle_worklist_task(
+                self.turn,
+                self.item,
+                self.parent,
+                false,
+                "child task execution was interrupted",
+            )
+        {
+            tracing::warn!(%error, "interrupted worklist task settlement could not be persisted");
+        }
     }
 }
 
@@ -553,15 +1058,62 @@ impl HookJournalPort for SharedJournal<'_> {
         started: HookStartedEvidence,
         result: &HookResult,
     ) -> Result<EventId, HookRunError> {
-        self.lock()
-            .map_err(|error| HookRunError::new(error.to_string()))?
+        let mut journal = self
+            .lock()
+            .map_err(|error| HookRunError::new(error.to_string()))?;
+        let turn = occurrence.causality().turn();
+        let hook = started.hook();
+        let settled = journal
             .hook_settled(
-                occurrence.causality().turn(),
+                turn,
                 occurrence.causality().item_id(),
                 started,
                 result.clone(),
             )
-            .map_err(|error| HookRunError::new(error.to_string()))
+            .map_err(|error| HookRunError::new(error.to_string()))?;
+        if let HookResult::Failure { failure } = result {
+            let kind = serde_json::to_value(failure.kind())
+                .ok()
+                .and_then(|kind| kind.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let cause = failure.feedback().map_or_else(
+                || {
+                    use crate::event::hook::HookFailureKind;
+                    let reason = match failure.kind() {
+                        HookFailureKind::EffectDenied => "the hook effect was denied",
+                        HookFailureKind::TimedOut => "the hook timed out",
+                        HookFailureKind::Cancelled => "the hook was cancelled",
+                        HookFailureKind::MalformedResult => "the hook result was malformed",
+                        HookFailureKind::BackendUnavailable => "the hook backend was unavailable",
+                        HookFailureKind::HandlerFailed => "the hook handler failed",
+                        HookFailureKind::EvidenceFailed => "hook evidence could not be recorded",
+                        HookFailureKind::DeliveryUncertain => {
+                            "hook delivery could not be confirmed"
+                        }
+                    };
+                    format!(": {reason}")
+                },
+                |feedback| format!(": {}", feedback.head()),
+            );
+            let message = format!(
+                "{} hook {hook} failed to run ({kind}){cause}",
+                occurrence.key().lifecycle().as_str()
+            );
+            // The settlement is durable; a lost notice must not turn it into uncertainty.
+            if let Err(error) = journal.append_with_producer(
+                turn,
+                None,
+                Some(settled),
+                Producer::Hook(hook),
+                EventKind::Error {
+                    message,
+                    kind: crate::generator::types::ErrorKind::Unclassified,
+                },
+            ) {
+                tracing::warn!(%error, "hook failure notice was not recorded");
+            }
+        }
+        Ok(settled)
     }
 }
 
@@ -589,6 +1141,11 @@ impl<'a> Journal<'a> {
             sink,
             producer,
             interrupted_attempts,
+            worklist_executions: Default::default(),
+            interrupted_tasks: crate::model_catalogue::active_foreground_tasks(&state)
+                .into_iter()
+                .filter_map(|task| task.id.parse().ok())
+                .collect(),
             seq: state.last_seq,
             state,
             uncertain_append: None,
@@ -601,6 +1158,51 @@ impl<'a> Journal<'a> {
         use crate::generator::types::{ErrorKind, StopReason};
         use crate::state::{ChargeAttribution, Usage};
 
+        while let Some(&item) = self.interrupted_tasks.last() {
+            if let Some(call) = self.state.items.get(&item).filter(|call| call.ok.is_none()) {
+                let parent = call.tool_call_started;
+                let id = serde_json::from_str::<serde_json::Value>(&call.args)
+                    .ok()
+                    .and_then(|args| {
+                        args.get("worklist_step")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    });
+                if let Some(id) = id.filter(|id| {
+                    self.state.plan.steps.iter().any(|step| {
+                        &step.id == id && step.status == crate::plan::StepStatus::InProgress
+                    })
+                }) {
+                    self.append(
+                        turn,
+                        None,
+                        parent,
+                        EventKind::PlanUpdated {
+                            update: crate::plan::PlanUpdate::Step {
+                                id,
+                                status: crate::plan::StepStatus::Blocked,
+                                reason: Some(
+                                    "task execution interrupted by the previous process ending"
+                                        .into(),
+                                ),
+                            },
+                        },
+                    )?;
+                }
+                self.append(
+                    turn,
+                    Some(item),
+                    parent,
+                    EventKind::ToolCallCompleted {
+                        ok: false,
+                        result: crate::permit::ToolResult::builtin(
+                            "task execution interrupted by the previous process ending",
+                        ),
+                    },
+                )?;
+            }
+            self.interrupted_tasks.pop();
+        }
         while let Some(&(parent, attempt)) = self.interrupted_attempts.last() {
             if !self.state.live_attempts.contains_key(&attempt.attempt()) {
                 self.interrupted_attempts.pop();
@@ -689,7 +1291,10 @@ impl<'a> Journal<'a> {
             kind,
         };
         if let Err(error) = self.store.append(&self.session, &event) {
-            self.uncertain_append = Some(event);
+            self.uncertain_append = Some(UncertainAppend {
+                event,
+                cause: error.to_string(),
+            });
             return Err(error);
         }
         self.commit(event);
@@ -731,7 +1336,11 @@ impl<'a> Journal<'a> {
                 "only a subagent settlement can retry an uncertain append",
             ));
         }
-        let Some(event) = self.uncertain_append.clone() else {
+        let Some(event) = self
+            .uncertain_append
+            .as_ref()
+            .map(|pending| pending.event.clone())
+        else {
             return self.append(turn, item, parent, kind);
         };
         if event.env.turn != turn
@@ -769,7 +1378,7 @@ impl<'a> Journal<'a> {
                 "only a durable subagent settlement can reconcile an uncertain append",
             )));
         }
-        if self.uncertain_append.as_ref() != Some(event) {
+        if self.uncertain_append.as_ref().map(|pending| &pending.event) != Some(event) {
             return Err(uncertain_append_error(
                 "durable settlement is not the journal's exact uncertain event",
             ));

@@ -1,0 +1,22 @@
+[
+  {
+    "source": "/Users/stefano.straus/scratch/ego-419run/work/20261026T155905Z-091ca486/sessions/0b0a8086-c491-4d4b-be4d-b29cf703a3ab/events.jsonl",
+    "line": 14,
+    "payload": {
+      "kind": "invoke",
+      "name": "amber-check",
+      "arguments": "",
+      "bare": false,
+      "invocation": "",
+      "path": ""
+    }
+  },
+  {
+    "source": "/Users/stefano.straus/scratch/ego-419run/work/20261026T155905Z-091ca486/sessions/2b2d51a6-05d4-4514-92d7-3d0eeb444f32/events.jsonl",
+    "line": 19,
+    "payload": {
+      "kind": "invoke",
+      "name": "amber-check"
+    }
+  }
+]

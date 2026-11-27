@@ -1,4 +1,6 @@
-//! Typed tool descriptions and guarded execution ports.
+//! `Tool`, the dynamic-dispatch trait every tool implements, and `Typed<T>`,
+//! the adapter builtin tools use to get a `schemars`-derived JSON Schema and
+//! typed params for free (`ARCHITECTURE.md` §3.2).
 
 use futures::future::BoxFuture;
 use schemars::JsonSchema;
@@ -16,6 +18,9 @@ use crate::generator::attempt::DeliveryCertainty;
 use crate::mcp::{ForeignResult, ToolExecution};
 use crate::store::evidence::{EvidenceError, EvidencePage, EvidenceRef};
 use crate::suspension::ContinuationError;
+
+/// Maximum bytes of one recorded compact process answer.
+pub const MAX_MODEL_PROJECTION_BYTES: usize = 8 * 1024;
 
 /// Maximum UTF-8 bytes exposed for one failed-tool diagnostic.
 pub const MAX_TOOL_ERROR_DIAGNOSTIC_BYTES: usize = 4 * 1024;
@@ -59,6 +64,8 @@ pub enum ToolError {
     Process(ProcessError),
     /// Durable MCP continuation authority could not be prepared or recorded.
     Continuation(ContinuationError),
+    /// A builtin failed after producing durable per-file evidence.
+    WriteFailed(Box<ToolResult>),
     /// A foreign effect failed after its delivery certainty was known.
     Foreign {
         message: String,
@@ -76,6 +83,7 @@ impl std::fmt::Display for ToolError {
             ToolError::Process(err) => write!(f, "{err}"),
             ToolError::Continuation(err) => write!(f, "{err}"),
             ToolError::Foreign { message, .. } => f.write_str(message),
+            ToolError::WriteFailed(result) => f.write_str(&result.model_text()),
         }
     }
 }
@@ -98,13 +106,15 @@ impl ToolError {
             | Self::Fs(_)
             | Self::Evidence(_)
             | Self::Process(_)
-            | Self::Continuation(_) => None,
+            | Self::Continuation(_)
+            | Self::WriteFailed(_) => None,
         }
     }
 
     pub fn into_failed_result(self) -> ToolResult {
         match self {
             Self::Process(error) => error.into_failed_result(),
+            Self::WriteFailed(result) => *result,
             error => ToolResult::builtin(bounded_diagnostic(&error.to_string())),
         }
     }
@@ -352,9 +362,65 @@ impl ToolContentBlock {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResult {
     pub content: Vec<ToolContentBlock>,
+    /// Validated image inputs, replayed through the existing user image blocks.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    images: Vec<crate::generator::types::ImageRef>,
     provenance: ToolResultProvenance,
+    /// Exact compact answer sent to the model for this call. Raw process
+    /// blocks and their evidence references stay unchanged for display/read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_projection: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     line_change: Option<LineChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    before_image: Option<Box<BeforeImage>>,
+    /// The session file checkpoint a builtin write created, so a rewind can
+    /// find exactly the file changes after a turn. Journaled, never sent to
+    /// the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<Box<str>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    file_writes: Vec<FileWriteEvidence>,
+    /// Set by the turn loop when the admitted effect was a read-only inspection
+    /// of one session process. Absent in every record written before it existed,
+    /// which therefore stays ordinary work.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    session_inspection: bool,
+    /// The output totals an admitted inspection read, set by the built-in status
+    /// read and kept by the turn loop only on an admitted inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    session_output: Option<super::SessionOutputObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileWriteEvidence {
+    pub path: String,
+    pub completed: bool,
+    pub before_image: Option<BeforeImage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_image: Option<String>,
+    pub checkpoint: Option<String>,
+    pub possibly_modified: bool,
+    pub summary: String,
+    pub notice: Option<String>,
+}
+
+/// Most bytes of a replaced file kept as a before image. A larger file is
+/// recorded as [`BeforeImage::Omitted`] so a journal never carries a second
+/// copy of a large file.
+pub const BEFORE_IMAGE_LIMIT: usize = 64 * 1024;
+
+/// What a file held before a builtin write replaced it. For the terminal
+/// diff only: it is journaled with the result and never sent to the model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "text", rename_all = "snake_case")]
+pub enum BeforeImage {
+    /// The file did not exist.
+    New,
+    /// The UTF-8 text the file held, at most [`BEFORE_IMAGE_LIMIT`] bytes.
+    Text(String),
+    /// Too large, not text, or a protected credential file.
+    Omitted,
 }
 
 /// Lines observed in one successful builtin file edit. Missing means unknown.
@@ -377,6 +443,25 @@ impl ToolResult {
         for block in &mut self.content {
             block.text = values.mask(&block.text);
         }
+        if let Some(projection) = &mut self.model_projection {
+            *projection = values.mask(projection);
+        }
+        if let Some(BeforeImage::Text(text)) = self.before_image.as_deref_mut() {
+            *text = values.mask(text);
+        }
+        for file in &mut self.file_writes {
+            if let Some(BeforeImage::Text(text)) = &mut file.before_image {
+                *text = values.mask(text);
+            }
+            if let Some(text) = &mut file.after_image {
+                *text = values.mask(text);
+            }
+            file.path = values.mask(&file.path);
+            file.summary = values.mask(&file.summary);
+            if let Some(notice) = &mut file.notice {
+                *notice = values.mask(notice);
+            }
+        }
         if let ToolResultProvenance::Foreign { result } = &mut self.provenance {
             result.mask_secrets(values);
         }
@@ -384,10 +469,59 @@ impl ToolResult {
 
     pub fn builtin(text: impl Into<String>) -> Self {
         Self {
+            images: Vec::new(),
             content: vec![ToolContentBlock::builtin(text)],
             provenance: ToolResultProvenance::Builtin,
+            model_projection: None,
             line_change: None,
+            before_image: None,
+            checkpoint: None,
+            file_writes: Vec::new(),
+            session_inspection: false,
+            session_output: None,
         }
+    }
+
+    pub fn with_images(mut self, images: Vec<crate::generator::types::ImageRef>) -> Self {
+        self.images = images;
+        self
+    }
+
+    pub fn images(&self) -> &[crate::generator::types::ImageRef] {
+        &self.images
+    }
+
+    pub fn with_file_writes(mut self, files: Vec<FileWriteEvidence>) -> Self {
+        self.file_writes = files;
+        self
+    }
+
+    pub fn file_writes(&self) -> &[FileWriteEvidence] {
+        &self.file_writes
+    }
+
+    pub(crate) fn set_session_inspection(&mut self, inspection: bool) {
+        self.session_inspection = inspection;
+        if !inspection {
+            // Only an admitted inspection owns an output observation.
+            self.session_output = None;
+        }
+    }
+
+    /// Record the output totals the built-in status read observed.
+    pub fn with_session_output(mut self, observation: super::SessionOutputObservation) -> Self {
+        self.session_output = Some(observation);
+        self
+    }
+
+    /// The output totals an admitted inspection observed, if it read any.
+    pub(crate) fn session_output(&self) -> Option<super::SessionOutputObservation> {
+        self.session_output
+    }
+
+    /// Whether the admitted effect was a read-only inspection of one session process.
+    pub(crate) fn session_inspection(&self) -> bool {
+        self.session_inspection
     }
 
     pub fn with_line_change(mut self, change: LineChange) -> Self {
@@ -399,22 +533,65 @@ impl ToolResult {
         self.line_change
     }
 
+    pub fn with_before_image(mut self, image: BeforeImage) -> Self {
+        self.before_image = Some(Box::new(image));
+        self
+    }
+
+    pub fn before_image(&self) -> Option<&BeforeImage> {
+        self.before_image.as_deref()
+    }
+
+    pub fn with_checkpoint(mut self, checkpoint: Option<String>) -> Self {
+        self.checkpoint = checkpoint.map(String::into_boxed_str);
+        self
+    }
+
+    pub fn checkpoint(&self) -> Option<&str> {
+        self.checkpoint.as_deref()
+    }
+
     pub fn new(content: Vec<ToolContentBlock>) -> Self {
         Self {
+            images: Vec::new(),
             content,
             provenance: ToolResultProvenance::Builtin,
+            model_projection: None,
             line_change: None,
+            before_image: None,
+            checkpoint: None,
+            file_writes: Vec::new(),
+            session_inspection: false,
+            session_output: None,
         }
     }
 
     pub fn from_foreign(result: ForeignResult) -> Self {
         let content = vec![ToolContentBlock::builtin(result.visible_text().to_owned())];
+        let images = result
+            .model_content()
+            .iter()
+            .filter_map(|block| {
+                if let crate::mcp::ForeignContent::Image { image } = block {
+                    Some(image.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
         Self {
+            images,
             content,
             provenance: ToolResultProvenance::Foreign {
                 result: Box::new(result),
             },
+            model_projection: None,
             line_change: None,
+            before_image: None,
+            checkpoint: None,
+            file_writes: Vec::new(),
+            session_inspection: false,
+            session_output: None,
         }
     }
 
@@ -432,8 +609,28 @@ impl ToolResult {
         }
     }
 
+    pub fn provenance_foreign_truncated(&self) -> bool {
+        matches!(&self.provenance, ToolResultProvenance::Foreign { result } if result.visible_truncated())
+    }
+
+    /// The image-bearing foreign result's ordered projection. The image list
+    /// remains the existing event/blob retention root, not a second store.
+    pub fn foreign_model_content(&self) -> Option<&[crate::mcp::ForeignContent]> {
+        match &self.provenance {
+            ToolResultProvenance::Foreign { result } if !result.model_content().is_empty() => {
+                Some(result.model_content())
+            }
+            _ => None,
+        }
+    }
+
     pub fn provenance(&self) -> &ToolResultProvenance {
         &self.provenance
+    }
+
+    /// True when a foreign server answered the call with an error result.
+    pub fn foreign_tool_error(&self) -> bool {
+        matches!(&self.provenance, ToolResultProvenance::Foreign { result } if result.tool_error())
     }
 
     /// True when the complete result was produced in memory and carries no
@@ -446,10 +643,76 @@ impl ToolResult {
             })
     }
 
+    /// Freeze one bounded process answer without replacing complete evidence.
+    /// Replay reads this recorded answer, not the recipe that selected it.
+    pub fn set_model_projection(&mut self, text: String) -> Result<(), ToolError> {
+        if text.len() > MAX_MODEL_PROJECTION_BYTES
+            || !self
+                .content
+                .iter()
+                .any(ToolContentBlock::backend_owned_pipe)
+        {
+            return Err(ToolError::InvalidParams(format!(
+                "a process projection needs process evidence and at most {MAX_MODEL_PROJECTION_BYTES} bytes"
+            )));
+        }
+        self.model_projection = Some(text);
+        Ok(())
+    }
+
+    /// Fold build progress in the process previews (see
+    /// [`crate::exec_output::compact`]) into the recorded model answer, and
+    /// say where the complete output is. Nothing changes unless a preview
+    /// actually shrinks. Large output becomes a bounded tail excerpt; builtin
+    /// blocks such as the exit status and the evidence itself stay as they are.
+    pub fn compact_process_progress(&mut self) {
+        let mut changed = false;
+        let mut parts = Vec::new();
+        for block in &self.content {
+            match &block.provenance {
+                ToolOutputProvenance::Process {
+                    stream,
+                    encoding: ToolOutputEncoding::Utf8,
+                    ..
+                } if block.full_output.is_some() => {
+                    let compact = crate::exec_output::compact(block.text.as_bytes());
+                    if compact.trim_end().len() < block.text.trim_end().len() {
+                        changed = true;
+                        let reference = block.full_output.as_ref().expect("checked above");
+                        parts.push(format!(
+                            "[{stream}]\n{}\n[complete output: read_tool_result {reference}]",
+                            compact.trim_end()
+                        ));
+                    } else {
+                        parts.push(format!("[{stream}]\n{}", block.text));
+                    }
+                }
+                ToolOutputProvenance::Process { stream, .. } => {
+                    parts.push(format!("[{stream}]\n{}", block.text));
+                }
+                _ => parts.push(block.text.clone()),
+            }
+        }
+        if changed {
+            let _ = self.set_model_projection(parts.join("\n\n"));
+        }
+    }
+
+    /// The recorded compact answer, when one replaced the raw previews.
+    pub fn model_projection(&self) -> Option<&str> {
+        self.model_projection.as_deref()
+    }
+
     /// The single textual answer provider protocols accept for a tool call.
     /// Provenance stays explicit when several process streams are projected
     /// into that one protocol field.
     pub fn model_text(&self) -> String {
+        if let Some(projection) = &self.model_projection {
+            return projection.clone();
+        }
+        if let ToolResultProvenance::Foreign { result } = &self.provenance {
+            return result.model_text();
+        }
         let one_builtin = self.content.as_slice();
         if let [
             ToolContentBlock {
@@ -566,22 +829,29 @@ fn base64(bytes: &[u8]) -> String {
     output
 }
 
-/// Preparation describes exact requested effects without executing them.
+/// One tool, dynamically dispatched (`ARCHITECTURE.md` §3.2): MCP tools are
+/// dynamic by nature, and boxing one trait beats a static registry macro
+/// plus a second registration mechanism for builtins.
 ///
-/// `execute` receives [`GuardedIo`], never a raw filesystem or separate
-/// permit. The grant stays inside `GuardedFs`, so callers cannot mispair
-/// a tool call with another call's permit.
+/// `execute` receives the call and a [`GuardedIo`] — never the raw `Fs`, and
+/// no longer a `Permit` either. Every tool that ever existed took the permit
+/// and ignored it, because the authority reaches a tool only as the seam's
+/// willingness to act: `io.read(p)` succeeds exactly when the permit covers
+/// `p`. Handing the permit over as well gave a tool a second, unchecked
+/// handle on its own grant, and gave a caller two values to pair — which is
+/// what `docs/internals/decisions/2026-08-21-a-permit-nobody-can-widen.md` §3 exists to
+/// prevent. The permit now lives inside the `GuardedFs` and dies with it.
 pub trait Tool: Send + Sync {
     fn descriptor(&self) -> ToolDescriptor;
 
-    /// Explicit operator admission of provider-executed paid search.
+    /// Catalogue admission of provider-executed search.
     fn admits_hosted_search(&self) -> bool {
         false
     }
 
-    /// Configured local executor used only when the resolved provider is non-native.
-    fn local_search_tool(&self) -> Option<std::sync::Arc<dyn Tool>> {
-        None
+    /// Whether this declaration needs verified default-search capability facts.
+    fn default_hosted_search(&self) -> bool {
+        false
     }
 
     fn prepare(&self, params: Value, ctx: &PrepareCtx<'_>) -> Result<PreparedCall, ToolError>;
@@ -607,9 +877,9 @@ pub trait TypedTool: Send + Sync {
         false
     }
 
-    /// Configured local executor used only when the resolved provider is non-native.
-    fn local_search_tool(&self) -> Option<std::sync::Arc<dyn Tool>> {
-        None
+    /// Whether this declaration needs verified default-search capability facts.
+    fn default_hosted_search(&self) -> bool {
+        false
     }
 
     fn prepare_typed(
@@ -627,16 +897,18 @@ pub trait TypedTool: Send + Sync {
         'io: 'a;
 }
 
-/// Tool execution receives only guarded effect adapters.
+/// Adapts any [`TypedTool`] into a [`Tool`]: derives the JSON Schema via
+/// `schemars`, and turns a parse failure into `ToolError::InvalidParams` —
+/// model feedback, not a panic (`ARCHITECTURE.md` §3.2).
 pub struct Typed<T>(pub T);
 
 impl<T: TypedTool> Tool for Typed<T> {
-    fn local_search_tool(&self) -> Option<std::sync::Arc<dyn Tool>> {
-        self.0.local_search_tool()
-    }
-
     fn admits_hosted_search(&self) -> bool {
         self.0.admits_hosted_search()
+    }
+
+    fn default_hosted_search(&self) -> bool {
+        self.0.default_hosted_search()
     }
 
     fn descriptor(&self) -> ToolDescriptor {
@@ -668,6 +940,47 @@ impl<T: TypedTool> Tool for Typed<T> {
 #[cfg(test)]
 mod line_change_tests {
     use super::*;
+
+    // Catches: file-write images or operator evidence bypass secret masking before journaling.
+    #[test]
+    fn file_write_evidence_masks_secrets_in_journal_and_preserves_context() {
+        let secret = "secret-token-42";
+        let mut result = ToolResult::builtin(format!("output {secret}")).with_file_writes(vec![
+            FileWriteEvidence {
+                path: format!("/workspace/{secret}/file.txt"),
+                completed: true,
+                before_image: Some(BeforeImage::Text(format!("before {secret} retained"))),
+                after_image: Some(format!("after {secret} retained")),
+                checkpoint: None,
+                possibly_modified: false,
+                summary: format!("summary {secret} retained"),
+                notice: Some(format!("notice {secret} retained")),
+            },
+        ]);
+        result.mask_secrets(&crate::secrets::SecretValues::new([secret
+            .as_bytes()
+            .to_vec()]));
+        let journal = serde_json::to_string(&result).unwrap();
+        assert!(!journal.contains(secret), "secret leaked in {journal}");
+        for context in [
+            "/workspace/",
+            "file.txt",
+            "before ",
+            "after ",
+            "summary ",
+            "notice ",
+            "retained",
+            "output ",
+        ] {
+            assert!(
+                journal.contains(context),
+                "missing {context:?} in {journal}"
+            );
+        }
+        let file = &result.file_writes()[0];
+        assert!(!format!("{file:?}").contains(secret));
+        assert!(file.after_image.as_ref().unwrap().contains("retained"));
+    }
 
     #[test]
     fn line_change_survives_journal_json_without_rewriting_older_results() {

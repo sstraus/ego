@@ -213,6 +213,15 @@ impl AdmittedHttpProfile {
         http: &dyn Http,
         request: HttpRequest,
     ) -> Result<HttpResponse, HttpError> {
+        self.execute_with_redirects(http, request, true).await
+    }
+
+    pub(crate) async fn execute_with_redirects(
+        &self,
+        http: &dyn Http,
+        request: HttpRequest,
+        follow_redirects: bool,
+    ) -> Result<HttpResponse, HttpError> {
         let mut call = http.begin_call();
         let mut request = request;
         let mut identities = HashSet::new();
@@ -236,9 +245,9 @@ impl AdmittedHttpProfile {
             let host = request.url.host_str().unwrap_or_default().to_owned();
             match call.execute(prepared).await {
                 Err(error) => {
-                    return Err(HttpError::transport(error)
-                        .at_host(host)
-                        .promote(prior_effect));
+                    return Err(
+                        HttpError::transport(error, Some(&host), None).promote(prior_effect)
+                    );
                 }
                 Ok(OneHopResponse::Response {
                     status,
@@ -248,9 +257,7 @@ impl AdmittedHttpProfile {
                 }) => {
                     let body = body.map(move |chunk| {
                         chunk.map(bytes::Bytes::from).map_err(|error| {
-                            HttpError::transport(error)
-                                .at_host(host.clone())
-                                .promote(true)
+                            HttpError::transport(error, Some(&host), Some(status)).promote(true)
                         })
                     });
                     return Ok(HttpResponse {
@@ -260,6 +267,12 @@ impl AdmittedHttpProfile {
                     });
                 }
                 Ok(OneHopResponse::Redirect { location, .. }) => {
+                    if !follow_redirects {
+                        return Err(HttpError::profile(
+                            HttpProfileError::InvalidRedirect,
+                            DeliveryCertainty::PossiblySent,
+                        ));
+                    }
                     prior_effect = true;
                     let location = std::str::from_utf8(&location).map_err(|_| {
                         HttpError::profile(
@@ -362,7 +375,7 @@ pub enum Method {
 }
 
 impl Method {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Get => "GET",
             Self::Post => "POST",
@@ -442,7 +455,7 @@ pub struct HttpResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HttpFailure {
-    ProtocolFilter(&'static str),
+    ProtocolFilter(crate::protocol_filter::FilterFailure),
     Profile(HttpProfileError),
     Authority,
     Offline,
@@ -451,6 +464,7 @@ enum HttpFailure {
     Connect,
     Exchange,
     ResponseBody,
+    IdleTimeout,
     Cancelled,
     TimedOut,
 }
@@ -465,7 +479,7 @@ pub struct HttpError {
 }
 
 impl HttpError {
-    pub(crate) fn protocol_filter(message: &'static str) -> Self {
+    pub(crate) fn protocol_filter(message: crate::protocol_filter::FilterFailure) -> Self {
         Self {
             failure: HttpFailure::ProtocolFilter(message),
             delivery: DeliveryCertainty::PossiblySent,
@@ -474,11 +488,8 @@ impl HttpError {
         }
     }
 
-    pub(crate) fn protocol_filter_message(&self) -> Option<&'static str> {
-        match self.failure {
-            HttpFailure::ProtocolFilter(message) => Some(message),
-            _ => None,
-        }
+    pub(crate) fn is_protocol_filter(&self) -> bool {
+        matches!(self.failure, HttpFailure::ProtocolFilter(_))
     }
     fn profile(failure: HttpProfileError, delivery: DeliveryCertainty) -> Self {
         Self {
@@ -489,7 +500,20 @@ impl HttpError {
         }
     }
 
-    pub(crate) fn transport(error: TransportError) -> Self {
+    /// The one conversion of a provider transport failure, and so the one place
+    /// it is logged: every provider call, HTTP or WebSocket, passes here when
+    /// its transport fails. The rendered error keeps only the failure class, so
+    /// the transport's own detail would otherwise be lost.
+    ///
+    /// The record carries the failure kind, the endpoint host, the HTTP status
+    /// when a response had started, and the transport's source chain. The
+    /// transport adapter strips the URL from that chain before it gets here, and
+    /// no header, body or credential reaches this function.
+    pub(crate) fn transport(
+        error: TransportError,
+        host: Option<&str>,
+        status: Option<u16>,
+    ) -> Self {
         let failure = match error.failure() {
             TransportFailure::AuthoritySpent
             | TransportFailure::AuthorityMismatch
@@ -500,23 +524,35 @@ impl HttpError {
             TransportFailure::Connect(_) => HttpFailure::Connect,
             TransportFailure::Exchange(_) => HttpFailure::Exchange,
             TransportFailure::ResponseBody(_) => HttpFailure::ResponseBody,
+            TransportFailure::IdleTimeout => HttpFailure::IdleTimeout,
             TransportFailure::Cancelled => HttpFailure::Cancelled,
             TransportFailure::TimedOut => HttpFailure::TimedOut,
         };
+        let detail = match error.failure() {
+            TransportFailure::Resolution(detail)
+            | TransportFailure::InvalidRequest(detail)
+            | TransportFailure::Connect(detail)
+            | TransportFailure::Exchange(detail)
+            | TransportFailure::ResponseBody(detail) => Some(detail.as_str()),
+            _ => None,
+        };
+        tracing::warn!(
+            kind = ?failure,
+            host,
+            status,
+            delivery = ?error.delivery(),
+            detail,
+            "provider HTTP transport failed"
+        );
         Self {
             failure,
             delivery: error.delivery(),
-            host: None,
+            host: host.map(str::to_owned),
             connect_source: match error.failure() {
                 TransportFailure::Connect(source) => Some(source.clone()),
                 _ => None,
             },
         }
-    }
-
-    fn at_host(mut self, host: String) -> Self {
-        self.host = Some(host);
-        self
     }
 
     fn promote(mut self, prior_effect: bool) -> Self {
@@ -532,7 +568,8 @@ impl HttpError {
 
     pub fn kind(&self) -> ErrorKind {
         match self.failure {
-            HttpFailure::ProtocolFilter(_) => ErrorKind::Invalid,
+            HttpFailure::ProtocolFilter(failure) => failure.kind(),
+            HttpFailure::IdleTimeout => ErrorKind::IdleTimeout,
             HttpFailure::Profile(_)
             | HttpFailure::Authority
             | HttpFailure::Offline
@@ -549,13 +586,13 @@ impl HttpError {
 
 #[cfg(test)]
 pub(crate) fn test_http_error(error: TransportError) -> HttpError {
-    HttpError::transport(error)
+    HttpError::transport(error, None, None)
 }
 
 impl fmt::Display for HttpError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self.failure {
-            HttpFailure::ProtocolFilter(message) => message,
+            HttpFailure::ProtocolFilter(failure) => return f.write_str(&failure.message()),
             HttpFailure::Profile(failure) => return write!(f, "{failure}"),
             HttpFailure::Authority => "HTTP authority was invalid",
             HttpFailure::Offline => "HTTP is unavailable under offline confinement",
@@ -564,6 +601,7 @@ impl fmt::Display for HttpError {
             HttpFailure::Connect => "HTTP connection failed",
             HttpFailure::Exchange => "HTTP exchange failed",
             HttpFailure::ResponseBody => "HTTP response body failed",
+            HttpFailure::IdleTimeout => "response stream was idle for too long",
             HttpFailure::Cancelled => "HTTP call was cancelled",
             HttpFailure::TimedOut => "HTTP call timed out",
         };
@@ -598,6 +636,18 @@ pub trait HttpCall: Send {
 
 /// Consumer-owned HTTP port. Beginning once creates one logical call scope.
 pub trait Http: Send + Sync {
+    /// Publish response quota to the host-owned shared snapshot store.
+    fn observe_rate_limits(&self, _provider: &str, _credential: &str, _headers: &[HttpHeader]) {}
+
+    /// Publish quota stated by one decoded stream event, to the same store.
+    fn observe_rate_limit_event(
+        &self,
+        _provider: &str,
+        _credential: &str,
+        _event: &serde_json::Value,
+    ) {
+    }
+
     fn begin_call(&self) -> Box<dyn HttpCall>;
 
     fn open_websocket(
@@ -660,8 +710,12 @@ pub(crate) async fn fetch(
 /// This is the same rule `oauth::BuiltInFlow::classify` applies to the login
 /// half and `RunTermination::after_turn` applies to the mid-turn half.
 ///
-/// `ego::body` is disabled in CLI filters unless the operator explicitly names
-/// that target, so `EGO_LOG=info` does not print request or response bodies.
+/// That subscriber now exists, and the "can drop it" is no longer advice:
+/// `ego::body` is off in every filter `ego-cli` builds unless an operator names
+/// the target, so `EGO_LOG=info` — the level someone sets to watch something
+/// else entirely — does not print this.
+/// `docs/internals/decisions/2026-09-07-diagnostics-get-a-destination-before-a-switch.md`
+/// §3a.
 pub(crate) fn refusal(answer: &Exchange) -> String {
     tracing::warn!(
         target: "ego::body",
@@ -671,6 +725,9 @@ pub(crate) fn refusal(answer: &Exchange) -> String {
     );
     format!("it answered {}", answer.status)
 }
+
+// Bounds buffered control-plane bodies, not provider response streams.
+const MAX_CONTROL_PLANE_BODY: usize = 32 * 1024 * 1024;
 
 pub(crate) async fn exchange(
     http: &Arc<dyn Http>,
@@ -688,7 +745,13 @@ pub(crate) async fn exchange(
 
     let mut bytes = Vec::new();
     while let Some(chunk) = body.next().await {
-        bytes.extend_from_slice(&chunk.map_err(|error| error.to_string())?);
+        let chunk = chunk.map_err(|error| error.to_string())?;
+        if chunk.len() > MAX_CONTROL_PLANE_BODY - bytes.len() {
+            return Err(format!(
+                "HTTP response body exceeds the {MAX_CONTROL_PLANE_BODY}-byte limit"
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
     }
     Ok(Exchange {
         status,

@@ -6,13 +6,25 @@
 //! of the answer — which protocol and which schema a host will actually meet —
 //! was in none of them.
 //!
-//! Everything here is a compile-time constant. There is no build script and no
-//! git hash: a version that changes when the working tree is dirty tells a bug
-//! reporter something ego cannot then look up, and the package version plus the
-//! wire versions is what anyone acting on the report actually needs.
+//! Everything here is a compile-time constant. The build script adds the commit
+//! the binary was cut from and the profile, so an owner who runs many builds of
+//! one version can tell which of them hosts a session. It records the commit and
+//! never a dirty flag: a version that changes with the working tree tells a bug
+//! reporter something ego cannot then look up.
 
 /// The package version, which is what a release is named after.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The short commit this binary was built from, or `unknown` outside a checkout.
+pub const COMMIT: &str = env!("EGO_BUILD_COMMIT");
+
+/// `debug` or `release`.
+pub const PROFILE: &str = env!("EGO_BUILD_PROFILE");
+
+/// The startup line: version, commit and profile of the running binary.
+pub fn identity() -> String {
+    format!("ego {VERSION} \u{b7} {COMMIT} \u{b7} {PROFILE}")
+}
 
 /// Where the notes for this release live.
 ///
@@ -27,7 +39,7 @@ pub const RELEASE_NOTES: &str = "https://github.com/sstraus/ego/releases";
 /// remembering to edit a string here.
 pub fn summary() -> String {
     format!(
-        "ego {VERSION} — ACP protocol {} — release notes: {RELEASE_NOTES}",
+        "ego {VERSION} ({COMMIT}, {PROFILE}) — ACP protocol {} — release notes: {RELEASE_NOTES}",
         ego_acp::negotiate::SERVED
     )
 }

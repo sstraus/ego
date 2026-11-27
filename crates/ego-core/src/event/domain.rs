@@ -1,6 +1,6 @@
 //! `DomainEvent`: the exhaustive internal reducer input.
 //!
-//! Durable session events.
+//! See `ARCHITECTURE.md` §1 for the variant set and the envelope fields.
 
 use serde::{Deserialize, Serialize};
 
@@ -24,16 +24,17 @@ use crate::generator::types::{ErrorKind, ImageRef, ReasoningState};
 use crate::goal::{GoalOwner, GoalTransition};
 use crate::permit::residual::{ResidualOutcome, ResidualScope};
 use crate::permit::{
-    Authority, CanonPath, DetachedExecSnapshot, Escalation, ExecObservation, ToolResult,
-    ToolResultProvenance,
+    Authority, CanonPath, DetachedExecLines, DetachedExecSnapshot, Escalation, ExecObservation,
+    ToolResult, ToolResultProvenance,
 };
 use crate::question::{QuestionOutcome, QuestionRequest, QuestionTarget};
 use crate::run::{CancelReason, DeniedBy, RequestId, RunId, RunSelections, RunSettlement};
 use crate::state::Usage;
 use crate::store::blob::{BlobId, BlobRef};
 
-/// Domain-event envelope: monotonic sequence, stable session/turn/item IDs, causal parent,
-/// observation timestamp, and producer identity.
+/// The full envelope every `DomainEvent` carries, per ARCH §1: a monotonic
+/// sequence number, stable session/turn/item identity, a causal parent, an
+/// observation timestamp and a producer identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Envelope {
     /// Position in the total order. Authoritative for ordering — see
@@ -54,6 +55,25 @@ pub struct Envelope {
     pub producer: Producer,
 }
 
+/// What the judge read for one decision: the redacted facts exactly as sent, the
+/// revision of its instructions, the model and the context sizes. Private evidence,
+/// never conversation content or permission authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JudgeInputRecord {
+    /// The facts JSON inside the request's `untrusted_action_json` block.
+    pub facts: String,
+    /// Exact instructions when recorded by a version that supports replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// SHA-256 of the judge instructions that accompanied `facts`.
+    pub instructions_sha256: String,
+    pub model: String,
+    pub task_bytes: usize,
+    pub agent_reason_bytes: usize,
+    pub recent_calls: usize,
+    pub roots: usize,
+}
+
 /// Which generation lifecycle opened an attempt.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -65,6 +85,7 @@ pub enum GenerationRole {
     Compaction,
     Subagent,
     Hook,
+    SkillReview,
 }
 
 /// Why one ordered fallback candidate was changed or skipped before admission.
@@ -119,8 +140,13 @@ pub enum SubagentTerminal {
 
 /// Who stopped a turn that did not finish on its own.
 ///
-/// Turn-interrupting timeouts must be durable so replay, JSONL and CLI
-/// report the same cause. Limits reached between turns belong to the run level.
+/// Carried by [`ExitReason::Cancelled`] rather than left to the run level,
+/// because a timeout that interrupts a turn has to be durable: without this,
+/// the log and `PublicEvent::TurnCompleted` would say `Cancelled` while the
+/// CLI printed `timeout`, and replay, JSONL and ACP would give three accounts
+/// of one fact. A limit applied *between* turns is not here — that is the run
+/// level's, where it is true. See
+/// `docs/internals/decisions/2026-08-21-two-levels-of-ending.md`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CancelCause {
     /// A human asked for it — `SIGINT`, or an interactive interrupt.
@@ -132,36 +158,58 @@ pub enum CancelCause {
     Host,
 }
 
-/// How a turn ended, paired with `ok` on completion. Invocation termination has a different
-/// lifetime: a between-turn limit is not the cause of the preceding completed turn.
+/// How a turn ended. Deliberately one field (paired with `ok` on
+/// `TurnCompleted`), never a separate error field alongside it (ARCH §1
+/// review note: "one error field, never two").
+///
+/// The variants are the *turn's* vocabulary. Why an invocation ended is
+/// [`RunTermination`](crate::run::RunTermination), which is a different
+/// question with a different lifetime: `max_turns` fires between two
+/// completed turns, and is not honestly a cause of the one before it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExitReason {
     /// The turn ran to completion.
     Completed,
     /// The turn was stopped before it finished, by whom it says.
     Cancelled(CancelCause),
-    /// A host-requested resumable hold at a safe boundary. Keep it distinct from cancellation
-    /// so hosts do not discard state that remains resumable.
+    /// The turn stopped at a safe boundary because a host asked it to, and
+    /// can be continued.
+    ///
+    /// Top-level and deliberately not a [`CancelCause`]. `CancelCause`
+    /// answers *who* stopped the turn, and every one of its values maps to
+    /// ACP's `StopReason::Cancelled`; a host told its resumable hold was
+    /// "cancelled" throws away the turn state it was holding open, which is
+    /// the opposite of what it asked for.
+    /// `docs/decisions/2026-09-03-acp-host-control-is-negotiated-per-\
+    /// session.md` rejects "pause as cancel plus a later prompt" by name.
     Paused,
     /// The turn was stopped by a budget limit.
     Budget,
-    /// The invocation requests something the resolved model cannot do. Nothing
-    /// was sent and no internal component failed; only the caller can change the
-    /// request, so retry cannot resolve it.
+    /// The run was asked for something it cannot do, and no retry will change
+    /// that: `CLI.md` §4.3's exit 2. Distinct from [`Provider`] because
+    /// nothing was sent, and from [`Internal`] because nothing of ours
+    /// failed — the invocation and the resolved model disagree, and the
+    /// caller is the only party who can settle it. See
+    /// `docs/internals/decisions/2026-08-21-a-request-the-model-will-not-take.md`.
     ///
     /// [`Provider`]: ExitReason::Provider
     /// [`Internal`]: ExitReason::Internal
     Usage,
-    /// An unresolved permission ends a headless run rather than prompting indefinitely or
-    /// allowing the model to answer for the user.
+    /// A call needed a grant that nobody in this run could give. `CLI.md`
+    /// §4.4: a headless run never hangs on a prompt, so an unresolvable
+    /// permission ends it rather than being answered on the model's behalf.
     PermissionRequired,
     /// The provider explicitly reported that the model context window was
     /// exhausted. This is settled and never an automatic retry signal.
     ContextOverflow,
-    /// The provider or the network failed.
+    /// The provider or the network failed. Distinct from [`Internal`] because
+    /// `CLI.md` §4.3 makes them different exits — a script retries 4 and does
+    /// not retry 1.
     ///
     /// [`Internal`]: ExitReason::Internal
     Provider,
+    /// A local generation guard stopped unsafe or degenerate tool output.
+    Guard,
     /// **We** failed. Never reported as a provider error: telling a script to
     /// retry our own defect is worse than telling it nothing.
     Internal,
@@ -205,20 +253,20 @@ pub struct ToolTiming {
 /// The exhaustive set of internal reducer inputs, per ARCH §1:
 ///
 /// ```text
-/// SessionTitleChanged | SessionDeleted | HostContextAppended | SessionPauseRequested |
+/// SessionTitleChanged | SessionDeleted | HostContextAppended | McpTaskResultDelivered | SessionPauseRequested |
 /// ProtocolFilterVariablesSaved |
 /// SessionPaused | SessionPauseObserved | SessionResumed | SessionSelectionsSelected | GoalSet |
 /// ContextRequested | ContextRequestConsumed | ContextCooldown |
-/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | PromptQueued | PromptDeliveryExpedited |
-/// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessage |
-/// ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted | ToolCallStarted | ToolCallDelta |
-/// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted |
+/// GoalAllowanceInherited | GoalTransitioned | GoalCheckConfigured | GoalContinuation | GoalUpdated | GoalCheckStopped | PlanUpdated | WorklistContinuation | PromptQueued | PromptDeliveryExpedited |
+/// PromptRetracted | UserPrompt | AssistantDelta | AssistantMessageStarted | AssistantMessage |
+/// ReasoningDelta | ReasoningState | ProviderContent | ContextCommandStarted | BatchMemberStarted | ToolCallStarted | ToolCallDelta |
+/// ToolCallCompleted | ToolCallMeasured | DetachedExecStarted | DetachedExecOutput |
 /// DetachedExecSettled | QuestionRequested | QuestionSettled | QuestionMemberSettled |
 /// PermissionRequested | PermissionAmended | PermissionDecided |
-/// SessionRootGranted | PermanentRootGrantPending | PermanentRootGranted | RootRevoked | GenerationStarted | FallbackDecision | ExecutionObserved |
-/// ExecutionMeasured | JudgeResponse | SandboxResidualDecided |
+/// SessionRootGranted | PermanentRootGrantPending | PermanentRootGranted | RootRevoked | TaskProfileSelected | GenerationStarted | FallbackDecision | ExecutionObserved |
+/// ExecutionMeasured | JudgeResponse | SandboxResidualDecided | SandboxOwnerGranted |
 /// AttemptSettled | CostAnomaly | UsageUpdated | UsageCorrected | ContextWindowUpdated | ProviderLimitsObserved |
-/// TurnCompleted | PinsChanged | CompactionSeeded | Compacted | Forked |
+/// CheckpointContinued | TurnCompleted | PinsChanged | CompactionSeeded | Compacted | Forked |
 /// HookCatalogueAdmitted | HookLifecycleReached | HookInvocationStarted |
 /// HookInvocationSettled | SubagentRequested | SubagentSpawned |
 /// SubagentSettled | BackgroundTaskRequested | SubagentCompletionDelivered |
@@ -234,9 +282,14 @@ pub struct ToolTiming {
 /// earlier one wrote. `tests/codec.rs`'s committed `golden/store_log.jsonl`
 /// pins those bytes.
 ///
-/// Additive durable changes must decode when absent: optional or defaulted
-/// fields qualify, required fields do not. Renames and retagging need a
-/// `CODEC_VERSION` bump and migration rather than a fixture-only update.
+/// What is additive, precisely: a new variant, or a new field **that decodes
+/// when it is absent** (an `Option`, or `#[serde(default)]` on a type that
+/// has one). A required field is not — a record written before it existed
+/// has no value for it and fails to decode, which is the same break as a
+/// rename. Renaming or re-tagging an existing variant or field is a
+/// `CODEC_VERSION` bump plus a migration, not a fixture update. (This note
+/// used to say "adding a variant or a field is fine", which was overbroad;
+/// corrected in `docs/internals/decisions/2026-08-21-attempt-accounting-ledger.md`.)
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum EventKind {
@@ -249,12 +302,25 @@ pub enum EventKind {
     },
     /// An authoritative plan replacement or step progress transition.
     PlanUpdated { update: crate::plan::PlanUpdate },
+    /// One natural-stop worklist continuation, including its durable progress boundary.
+    WorklistContinuation {
+        completed: Vec<String>,
+        text: String,
+    },
     /// Operator-facing metadata. The session identity and lineage do not change.
     SessionTitleChanged { title: Option<String> },
     /// Durable soft deletion. Storage remains available to lineage replay.
     SessionDeleted,
-    /// Record pause intent before reaching its safe boundary so a crash cannot lose the request
-    /// and admit more effects. Report `pending` until `SessionPaused` exists.
+    /// A host asked for this session's work to stop at its next safe
+    /// boundary, in a way it can later continue.
+    ///
+    /// The *intent*, not the boundary: the request is recorded before the
+    /// turn has stopped, because a pause that were only recorded once it had
+    /// taken effect would be lost by a crash in the window between asking and
+    /// stopping, and replay would then say the session is running and admit
+    /// more effects. `docs/decisions/2026-09-03-acp-host-control-is-\
+    /// negotiated-per-session.md` names that window: the response reports
+    /// `pending` until [`SessionPaused`](Self::SessionPaused) exists.
     SessionPauseRequested { request: RequestId },
     /// The safe boundary the request asked for was reached: the indivisible
     /// effect that was in flight settled truthfully, and nothing new was
@@ -323,6 +389,9 @@ pub enum EventKind {
         id: GoalId,
         transition: GoalTransition,
     },
+    /// A host-authorized prompt-less checkpoint started a new turn. It adds
+    /// no conversation message and cannot count as a user prompt.
+    CheckpointContinued,
     /// Input accepted for later delivery. Its envelope turn determines on
     /// replay whether it was accepted as a busy-turn steer or at an ordinary
     /// queue boundary.
@@ -351,8 +420,16 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         queued_prompt: Option<QueuedPromptId>,
     },
-    /// A streamed increment of the assistant's message.
+    /// A streamed increment of the assistant's message, in logs written
+    /// before story 842. New turns publish chunks live only and persist the
+    /// assembled [`EventKind::AssistantMessage`].
+    // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
     AssistantDelta { text: String },
+    /// The assistant's message item began before the generation opened
+    /// another item. It carries no text: it only gives the item its place in
+    /// the log, so the one [`EventKind::AssistantMessage`] written at the
+    /// close is the item's only completion.
+    AssistantMessageStarted,
     /// The assistant's final, assembled message.
     AssistantMessage { text: String },
     /// A streamed increment of the model's reasoning/thinking.
@@ -374,6 +451,16 @@ pub enum EventKind {
     },
     /// An explicit user MCP context selection, not a provider-issued tool call.
     ContextCommandStarted { name: String, args: String },
+    /// One member of an `mcp_batch` call. It is an effect call of its own,
+    /// with its own permission and result events, but it is never a provider
+    /// call: `batch` names the outer provider-issued call and `index` its
+    /// position, so replay can skip it and recovery can still tear it.
+    BatchMemberStarted {
+        batch: ItemId,
+        index: u8,
+        name: String,
+        args: String,
+    },
     /// A tool call began, with its name and raw (unvalidated) arguments.
     ToolCallStarted {
         name: String,
@@ -409,6 +496,15 @@ pub enum EventKind {
     DetachedExecStarted { id: DetachedExecId },
     /// Ego-owned append-only provider context; never an operator prompt.
     HostContextAppended { text: String },
+    /// An owned MCP task result accepted at the existing evidence publication boundary.
+    McpTaskResultDelivered {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<ToolResult>,
+    },
+    /// Monitored lines of a running process, delivered to the model at a
+    /// generation boundary before the settlement of the same process.
+    DetachedExecOutput { output: DetachedExecLines },
     /// One terminal observation, delivered to the model at a generation boundary.
     DetachedExecSettled { snapshot: DetachedExecSnapshot },
     /// A typed human-input request became durable before any host was asked.
@@ -452,7 +548,8 @@ pub enum EventKind {
         /// `None` is the judge's durable escalation, not a denial.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allowed: Option<bool>,
-        /// The deciding rule, mode, boundary or external party.
+        /// The rules, the mode, the boundary or the party that decided —
+        /// `docs/internals/decisions/2026-08-21-a-permit-nobody-can-widen.md` §7.
         ///
         /// `Option` because a required field would not decode from a record
         /// written before it existed, which this type's own doc comment names
@@ -463,12 +560,24 @@ pub enum EventKind {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    /// The actual profile of a foreground child, attributed to its parent task item.
+    /// Projects to public `GenerationProfileSelected` with that item.
+    TaskProfileSelected {
+        profile: crate::model_catalogue::ExecutionProfile,
+    },
     /// One generation was admitted and is on its way to the provider.
     ///
     /// Opens the attempt's lifecycle in the log, which is what makes a
     /// resumed session able to say that a request was in flight — and, once
     /// `AttemptSettled` arrives, whether it may safely be sent again.
+    /// A present profile projects to public `GenerationProfileSelected`
+    /// without a task item; the attempt identity stays internal.
     GenerationStarted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<crate::model_catalogue::ExecutionProfile>,
+        /// Request policy, not a provider-reported cache expiry.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cache: Option<crate::usage::PromptCacheRequest>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         snapshot: Option<crate::session::PromptSnapshot>,
         attempt: AttemptRef,
@@ -484,6 +593,8 @@ pub enum EventKind {
     SessionSelectionsSelected { selections: RunSelections },
     /// A terminal-approved root bound to this session's durable log.
     SessionRootGranted { root: crate::permit::ProfileRoot },
+    /// An explicit owner path/access approval, never a judge verdict.
+    SandboxOwnerGranted { grant: crate::permit::SandboxGrant },
     /// Durable intent before publishing the configured root; never grants authority.
     PermanentRootGrantPending {
         consent: crate::permit::PermanentRootConsent,
@@ -510,6 +621,10 @@ pub enum EventKind {
         attempt: AttemptRef,
         text: String,
         truncated: bool,
+        /// The exact input behind `text`, so the decision can be replayed offline.
+        /// Absent in sessions recorded before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<JudgeInputRecord>,
     },
     /// The loop decided one refused write of a running exec. Written before
     /// a grant is published to the session desk, so the log never holds less
@@ -528,9 +643,12 @@ pub enum EventKind {
     },
     /// One attempt reached a terminal state.
     ///
-    /// Carries no money: `UsageUpdated` is the single accounting fact. The
-    /// `UsageReport` in `outcome` is provider evidence, not another booking;
-    /// the reducer checks it against the booked values.
+    /// Carries no money. `UsageUpdated` is the single accounting fact
+    /// (`docs/internals/decisions/2026-08-21-attempt-accounting-ledger.md`); two events
+    /// carrying the same figure are two events that can disagree once they
+    /// are bytes on disk. The `UsageReport` inside `outcome` is the
+    /// provider's own report, kept as *evidence* about the bookings rather
+    /// than as a booking: the reducer checks the two against each other.
     AttemptSettled {
         attempt: AttemptRef,
         outcome: Outcome,
@@ -642,6 +760,8 @@ pub enum EventKind {
     Forked {
         source: SessionId,
         at_seq: Seq,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        neutral: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         snapshot: Option<crate::session::PromptSnapshot>,
     },
@@ -762,7 +882,17 @@ impl EventKind {
                 references.extend(images.iter().map(|image| image.reference().clone()));
                 references.extend(audio.iter().map(|audio| audio.reference().clone()));
             }
-            Self::ToolCallCompleted { result, .. } => {
+            Self::ToolCallCompleted { result, .. }
+            | Self::McpTaskResultDelivered {
+                result: Some(result),
+                ..
+            } => {
+                references.extend(
+                    result
+                        .images()
+                        .iter()
+                        .map(|image| image.reference().clone()),
+                );
                 references.extend(
                     result
                         .content
@@ -845,17 +975,21 @@ impl EventKind {
             EventKind::GoalCheckStopped { .. } => "goal_check_stopped",
             EventKind::GoalUpdated { .. } => "goal_updated",
             EventKind::PlanUpdated { .. } => "plan_updated",
+            EventKind::WorklistContinuation { .. } => "worklist_continuation",
             EventKind::GoalTransitioned { .. } => "goal_transitioned",
+            EventKind::CheckpointContinued => "checkpoint_continued",
             EventKind::PromptQueued { .. } => "prompt_queued",
             EventKind::PromptDeliveryExpedited { .. } => "prompt_delivery_expedited",
             EventKind::PromptRetracted { .. } => "prompt_retracted",
             EventKind::ProtocolFilterVariablesSaved { .. } => "protocol_filter_variables_saved",
             EventKind::UserPrompt { .. } => "user_prompt",
             EventKind::AssistantDelta { .. } => "assistant_delta",
+            EventKind::AssistantMessageStarted => "assistant_message_started",
             EventKind::AssistantMessage { .. } => "assistant_message",
             EventKind::ReasoningDelta { .. } => "reasoning_delta",
             EventKind::ReasoningState { .. } => "reasoning_state",
             EventKind::ContextCommandStarted { .. } => "context_command_started",
+            EventKind::BatchMemberStarted { .. } => "batch_member_started",
             EventKind::ProviderContent { .. } => "provider_content",
             EventKind::ToolCallStarted { .. } => "tool_call_started",
             EventKind::ToolCallDelta { .. } => "tool_call_delta",
@@ -863,6 +997,8 @@ impl EventKind {
             EventKind::ToolCallMeasured { .. } => "tool_call_measured",
             EventKind::DetachedExecStarted { .. } => "detached_exec_started",
             EventKind::HostContextAppended { .. } => "host_context_appended",
+            EventKind::McpTaskResultDelivered { .. } => "mcp_task_result_delivered",
+            EventKind::DetachedExecOutput { .. } => "detached_exec_output",
             EventKind::DetachedExecSettled { .. } => "detached_exec_settled",
             EventKind::QuestionRequested { .. } => "question_requested",
             EventKind::QuestionSettled { .. } => "question_settled",
@@ -870,10 +1006,12 @@ impl EventKind {
             EventKind::PermissionRequested { .. } => "permission_requested",
             EventKind::PermissionAmended { .. } => "permission_amended",
             EventKind::PermissionDecided { .. } => "permission_decided",
+            EventKind::TaskProfileSelected { .. } => "task_profile_selected",
             EventKind::GenerationStarted { .. } => "generation_started",
             EventKind::FallbackDecision { .. } => "fallback_decision",
             EventKind::SessionSelectionsSelected { .. } => "session_selections_selected",
             EventKind::SessionRootGranted { .. } => "session_root_granted",
+            EventKind::SandboxOwnerGranted { .. } => "sandbox_owner_granted",
             EventKind::PermanentRootGrantPending { .. } => "permanent_root_grant_pending",
             EventKind::PermanentRootGranted { .. } => "permanent_root_granted",
             EventKind::RootRevoked { .. } => "root_revoked",

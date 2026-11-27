@@ -1,0 +1,15 @@
+{
+  "provenance": "CapturedClientDerived",
+  "source": "OpenAI Codex CLI source, codex-rs/app-server/tests/suite/v2/compaction.rs at commit 748ab55",
+  "read": "2026-11-08",
+  "wire": "openai-codex-responses",
+  "cases": [
+    {"name": "five-hour usage limit", "status": 429, "expect": "refused",
+     "body": {"error": {"type": "usage_limit_reached", "message": "request failed", "limit_window_minutes": 300}}},
+    {"name": "weekly usage limit", "status": 429, "expect": "refused",
+     "body": {"error": {"type": "usage_limit_reached", "message": "request failed", "limit_window_minutes": 10080}}},
+    {"name": "session budget", "status": 400, "expect": "refused",
+     "source": "codex-rs/codex-api/src/error.rs parse_terminal_provider_error at rust-v0.168.0 (309da486), read 2026-11-13",
+     "body": {"error": {"code": "budget_reached", "message": "request failed"}}}
+  ]
+}

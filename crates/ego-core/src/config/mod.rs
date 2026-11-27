@@ -1,11 +1,21 @@
 //! Strict configuration and the trust gate.
 //!
-//! Pure configuration resolution over injected sources; core performs no file I/O.
+//! See `ARCHITECTURE.md` and `plans/m0a-contracts.md` Step 12. Resolution is a
+//! pure function over injected sources — no file I/O lives in core.
 
+mod connection;
 mod discovery;
+
+pub use connection::{AccountNumbers, ConnectionAccess, ConnectionConfig, select_connection};
 mod error;
+mod grants;
 mod layer;
 mod mutation;
+mod provider;
+pub use provider::{
+    AZURE_OPENAI, ProviderEndpoint, ProviderInstance, ProviderInstanceId, ProviderInstanceModel,
+    ProviderModelContract, ProviderProfile, ProvidersLayer, ResolvedProviders,
+};
 mod provenance;
 mod resolve;
 pub mod rule_management;
@@ -22,13 +32,13 @@ pub use discovery::{
     system_prompt,
 };
 pub use error::ConfigError;
+pub use grants::ProjectGrants;
 pub use layer::{
     AuthProviderLayer, ConfigLayer, ExecEnvironment, ExecLayer, FORBIDDEN_AUTH_HEADER_NAMES,
     InstructionConfig, McpEnvironmentName, McpHttpAuth, McpHttpConfig, McpHttpProfile, McpHttpUrl,
     McpLayer, McpLayerEntry, McpServerConfig, McpServerName, McpStdioConfig, McpValueError, Mode,
-    ModelRef, Network, PermCfg, ProfileLayer, ProtocolFilterConfig, StatusProvider,
-    StatusSegmentName, StatuslineLayer, UiLayer, is_forbidden_auth_header,
-    is_protocol_filter_identity_header,
+    ModelRef, Network, PermCfg, ProfileLayer, ProtocolFilterConfig, SessionStorageConfig,
+    StatusProvider, StatusSegmentName, StatuslineLayer, UiLayer, is_forbidden_auth_header,
 };
 pub use mutation::{
     ManagedRuleEffect, RuleMutation, RuleMutationFacts, RuleSnapshot, UserConfigBatch,
@@ -44,7 +54,7 @@ pub use resolve::{
 pub use ruleset::{OriginSet, Ruleset, SourcedRule};
 pub use source::{Source, Sourced, Trust};
 pub use vocabulary::{ManagedConfigKey, ManagedConfigValue, ProfileName, UserConfigTarget};
-pub use windows_unconfined::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger, UnconfinedRecord};
+pub use windows_unconfined::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger};
 pub use workspace_trust::{
     ExecutableDeclaration, ExecutableSurface, ProgramEvidence, TRUST_DIGEST_MAX_BYTES,
     TrustInventory, TrustLedger, TrustRecord, TrustedContent,

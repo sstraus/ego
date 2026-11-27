@@ -11,10 +11,6 @@ use crate::config::ModelRef;
 use crate::permit::residual::{ResidualScope, ResidualWriteEvidence};
 use crate::permit::{ExecCaps, PreparedCall, RunConfinement};
 
-/// The versioned prompt the v3 evaluation set scores.
-const RESIDUAL_INSTRUCTIONS: &str =
-    include_str!("../../../../../evals/sandbox-auto/v3/judge-system.txt");
-
 #[derive(Serialize)]
 struct ResidualFacts<'a> {
     call: CanonicalCall,
@@ -38,7 +34,7 @@ impl JudgeInput {
             residual_write: evidence,
         })
         .expect("the closed residual projection always serializes");
-        Self::with_facts(RESIDUAL_INSTRUCTIONS, canonical, call)
+        Self::with_facts(crate::model_prompts::RESIDUAL_INSTRUCTIONS, canonical, call)
     }
 
     /// The candidate exactly as the judge reads it. A write verdict must name

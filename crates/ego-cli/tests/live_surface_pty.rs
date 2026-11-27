@@ -1,0 +1,11797 @@
+#[path = "live_surface_pty/answer_wrap.rs"]
+mod answer_wrap;
+#[path = "live_surface_pty/background_notice.rs"]
+mod background_notice;
+#[path = "live_surface_pty/blank_prompt.rs"]
+mod blank_prompt;
+#[path = "live_surface_pty/bottom_row.rs"]
+mod bottom_row;
+#[path = "live_surface_pty/bottom_row_capture.rs"]
+mod bottom_row_capture;
+#[path = "live_surface_pty/busy_commands.rs"]
+mod busy_commands;
+#[cfg(unix)]
+#[path = "live_surface_pty/busy_interrupt_raw.rs"]
+mod busy_interrupt_raw;
+#[path = "live_surface_pty/busy_notice.rs"]
+mod busy_notice;
+#[path = "live_surface_pty/exec_risk_reason.rs"]
+mod exec_risk_reason;
+#[path = "live_surface_pty/expand_finish.rs"]
+mod expand_finish;
+#[path = "live_surface_pty/file_picker.rs"]
+mod file_picker;
+#[path = "live_surface_pty/finish_queue.rs"]
+mod finish_queue;
+#[path = "live_surface_pty/foreign_judge_reason.rs"]
+mod foreign_judge_reason;
+#[cfg(unix)]
+#[path = "live_surface_pty/goal_ancestry.rs"]
+mod goal_ancestry;
+#[path = "live_surface_pty/goal_launch.rs"]
+mod goal_launch;
+#[path = "live_surface_pty/goal_stop.rs"]
+mod goal_stop;
+#[path = "live_surface_pty/goal_visibility.rs"]
+mod goal_visibility;
+#[path = "live_surface_pty/help_latency.rs"]
+mod help_latency;
+#[path = "live_surface_pty/image_receipt.rs"]
+mod image_receipt;
+#[path = "live_surface_pty/image_refusal.rs"]
+mod image_refusal;
+#[path = "live_surface_pty/kitty_keyboard.rs"]
+mod kitty_keyboard;
+#[cfg(unix)]
+#[path = "live_surface_pty/launcher_parent.rs"]
+mod launcher_parent;
+#[path = "live_surface_pty/live_width.rs"]
+mod live_width;
+#[path = "live_surface_pty/mcp_inventory.rs"]
+mod mcp_inventory;
+#[cfg(unix)]
+#[path = "live_surface_pty/mcp_login.rs"]
+mod mcp_login;
+#[path = "live_surface_pty/metadata_refusal.rs"]
+mod metadata_refusal;
+#[path = "live_surface_pty/missing_program.rs"]
+mod missing_program;
+#[path = "live_surface_pty/modal_answers.rs"]
+mod modal_answers;
+#[path = "live_surface_pty/mode_picker.rs"]
+mod mode_picker;
+#[path = "live_surface_pty/named_key_startup.rs"]
+mod named_key_startup;
+#[path = "live_surface_pty/native_control_lifecycle.rs"]
+mod native_control_lifecycle;
+#[path = "live_surface_pty/native_export_control.rs"]
+mod native_export_control;
+#[path = "live_surface_pty/native_login_inventory.rs"]
+mod native_login_inventory;
+#[path = "live_surface_pty/native_model_control.rs"]
+mod native_model_control;
+#[path = "live_surface_pty/native_name_control.rs"]
+mod native_name_control;
+#[path = "live_surface_pty/native_permission_inspection.rs"]
+mod native_permission_inspection;
+#[path = "live_surface_pty/notice_wrap.rs"]
+mod notice_wrap;
+#[path = "live_surface_pty/owned_footprint.rs"]
+mod owned_footprint;
+#[path = "live_surface_pty/owner_administration.rs"]
+mod owner_administration;
+#[cfg(unix)]
+#[path = "live_surface_pty/permanent_cursor.rs"]
+mod permanent_cursor;
+#[path = "live_surface_pty/permission_receipts.rs"]
+mod permission_receipts;
+#[path = "live_surface_pty/picker_roles.rs"]
+mod picker_roles;
+#[path = "live_surface_pty/pinned_plan.rs"]
+mod pinned_plan;
+#[path = "live_surface_pty/plan_denial.rs"]
+mod plan_denial;
+#[path = "live_surface_pty/prompt_echo.rs"]
+mod prompt_echo;
+#[path = "live_surface_pty/prompt_readiness.rs"]
+mod prompt_readiness;
+#[path = "live_surface_pty/provider_login.rs"]
+mod provider_login;
+#[path = "live_surface_pty/queued_controls.rs"]
+mod queued_controls;
+#[path = "live_surface_pty/raw_columns.rs"]
+mod raw_columns;
+#[path = "live_surface_pty/remembered_exec.rs"]
+mod remembered_exec;
+#[path = "live_surface_pty/render_efficiency.rs"]
+mod render_efficiency;
+#[path = "live_surface_pty/resize_after_accept.rs"]
+mod resize_after_accept;
+#[cfg(unix)]
+#[path = "live_surface_pty/resume_pages.rs"]
+mod resume_pages;
+#[path = "live_surface_pty/retry_line.rs"]
+mod retry_line;
+#[path = "live_surface_pty/root_approval_continuation.rs"]
+mod root_approval_continuation;
+#[path = "live_surface_pty/root_approval_critic.rs"]
+mod root_approval_critic;
+#[path = "live_surface_pty/root_grants.rs"]
+mod root_grants;
+#[path = "live_surface_pty/root_prompt_evidence.rs"]
+mod root_prompt_evidence;
+#[path = "live_surface_pty/root_readmission.rs"]
+mod root_readmission;
+#[path = "live_surface_pty/root_revoke.rs"]
+mod root_revoke;
+#[path = "live_surface_pty/sandbox_grants.rs"]
+mod sandbox_grants;
+#[cfg(target_os = "macos")]
+#[path = "live_surface_pty/session_exec_grants.rs"]
+mod session_exec_grants;
+#[path = "live_surface_pty/setup.rs"]
+mod setup;
+#[path = "live_surface_pty/shell_escape.rs"]
+mod shell_escape;
+#[path = "live_surface_pty/shell_rows.rs"]
+mod shell_rows;
+#[path = "live_surface_pty/slash_completion.rs"]
+mod slash_completion;
+#[path = "live_surface_pty/slash_inspections.rs"]
+mod slash_inspections;
+#[path = "live_surface_pty/stable_prompt.rs"]
+mod stable_prompt;
+#[cfg(unix)]
+#[path = "live_surface_pty/startup_cursor.rs"]
+mod startup_cursor;
+#[path = "live_surface_pty/startup_order.rs"]
+mod startup_order;
+#[path = "live_surface_pty/startup_provenance.rs"]
+mod startup_provenance;
+#[path = "live_surface_pty/status_compact.rs"]
+mod status_compact;
+#[path = "live_surface_pty/status_history.rs"]
+mod status_history;
+#[path = "live_surface_pty/status_providers.rs"]
+mod status_providers;
+#[path = "live_surface_pty/status_template.rs"]
+mod status_template;
+#[path = "live_surface_pty/stuck_turn.rs"]
+mod stuck_turn;
+mod support;
+#[path = "live_surface_pty/task_rows.rs"]
+mod task_rows;
+#[path = "live_surface_pty/tool_running.rs"]
+mod tool_running;
+#[cfg(unix)]
+#[path = "live_surface_pty/wake_question.rs"]
+mod wake_question;
+#[path = "live_surface_pty/window_recovery.rs"]
+mod window_recovery;
+#[path = "live_surface_pty/working_line.rs"]
+mod working_line;
+#[path = "live_surface_pty/working_repaint.rs"]
+mod working_repaint;
+#[path = "live_surface_pty/workspace_trust.rs"]
+mod workspace_trust;
+
+// Catches: the terminal keymap treats LF like CR and submits a partial draft.
+#[test]
+fn ego_composer_inserts_a_newline_on_lf() {
+    composer_newline_contract(b"first-probe\nsecond-probe");
+}
+
+// Catches: CSI-u Ctrl+Enter is ignored or submits instead of inserting a newline.
+#[test]
+fn ego_composer_inserts_a_newline_on_ctrl_enter() {
+    composer_newline_contract(b"first-probe\x1b[13;5usecond-probe");
+}
+
+// Catches: CSI-u Shift+Enter loses its newline binding at the terminal boundary.
+#[test]
+fn ego_composer_inserts_a_newline_on_shift_enter() {
+    composer_newline_contract(b"first-probe\x1b[13;2usecond-probe");
+}
+
+// Catches: LF inside bracketed paste submits a partial prompt or loses a line.
+#[test]
+fn ego_composer_keeps_bracketed_paste_with_lf_in_one_draft() {
+    composer_newline_contract(b"\x1b[200~first-probe\nsecond-probe\x1b[201~");
+}
+
+fn composer_newline_contract(draft: &[u8]) {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("NEWLINE-303-ANSWER")),
+            Reply::Sse(text("NEWLINE-303-ANSWER")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# composer newline fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--mode",
+        "yolo",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, start);
+    let start = output.len();
+    input.write_all(draft).expect("draft bytes");
+    input.flush().expect("draft flush");
+    until_normalized(&reader, &mut output, start, "first-probe");
+    drain_until_quiet(&reader, &mut output);
+    let requests_before_cr = stub.generations().len();
+    if requests_before_cr == 0 {
+        until_normalized(&reader, &mut output, start, "second-probe");
+        let start = output.len();
+        input.write_all(b"\r").expect("submit CR");
+        input.flush().expect("submit flush");
+        until_normalized(&reader, &mut output, start, "NEWLINE-303-ANSWER");
+        until_prompt_from(&reader, &mut output, start);
+    } else {
+        until_normalized(&reader, &mut output, start, "NEWLINE-303-ANSWER");
+        until_prompt_from(&reader, &mut output, start);
+        input.write_all(b"\x03").expect("discard partial draft");
+        input.flush().expect("discard flush");
+        drain_until_quiet(&reader, &mut output);
+    }
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "REPL exit: {status:?}");
+    assert_eq!(
+        requests_before_cr, 0,
+        "newline submitted the draft before CR"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "CR must submit exactly once");
+    assert_eq!(
+        count_exact_strings(&generations[0]["messages"], "first-probe\nsecond-probe"),
+        1,
+        "the provider must receive the complete multiline draft"
+    );
+}
+
+// Catches: dropping turn-local effects kills a detached command before the next REPL turn.
+#[test]
+fn critic_151_detached_exec_survives_the_launching_repl_turn() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "while [ ! -f release ]; do sleep 0.05; done; printf DETACHED-151-DONE > completed; printf DETACHED-151-DONE"],
+        "background": true,
+        "timeout_ms": 15000
+    });
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("detached-151", "exec", &arguments.to_string())),
+            Reply::Sse(text("DETACHED-151-LAUNCHED")),
+            Reply::Sse(text("DETACHED-151-NEXT-TURN")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# detached exec critic fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--mode",
+        "yolo",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"start the detached command\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "DETACHED-151-LAUNCHED");
+    until_mcp_composer_is_idle(&reader, &mut output);
+    places.file("release", "continue\n");
+    let completed = places.workspace_path().join("completed");
+    until_prompt_after_reply(&reader, &mut output, b"DETACHED-151-NEXT-TURN");
+    let completion = std::fs::read_to_string(&completed).ok();
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "REPL exit: {status:?}");
+    assert_eq!(
+        completion.as_deref(),
+        Some("DETACHED-151-DONE"),
+        "detached command was killed when its launching REPL turn ended"
+    );
+    let generations = stub.generations();
+    let history = generations.last().expect("next generation")["messages"].to_string();
+    assert!(
+        history.contains("exited code 0") && history.contains("DETACHED-151-DONE"),
+        "next turn lost detached settlement: {history}"
+    );
+}
+
+/// Parse the admitted process identity, not a later status or another task.
+fn background_exec_id(output: &[u8]) -> String {
+    let transcript = normalized(output);
+    let prefix = "background exec id: ";
+    let offset = transcript.rfind(prefix).expect("background handle") + prefix.len();
+    let id = &transcript[offset..offset + 36];
+    assert!(id.parse::<ego_core::event::id::DetachedExecId>().is_ok());
+    id.to_owned()
+}
+
+// Catches: Ctrl+B kills/restarts the child, loses its handle, or duplicates its settlement.
+#[test]
+fn ctrl_b_promotes_the_running_exec_and_delivers_one_settlement() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "printf STARTED-233 > started; while [ ! -f release ]; do sleep 0.05; done; printf DETACHED-151-DONE > completed; printf DETACHED-151-DONE"],
+        "background": false,
+        "timeout_ms": 15000
+    });
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("detached-151", "exec", &arguments.to_string())),
+            Reply::Sse(text("DETACHED-151-LAUNCHED")),
+            Reply::Sse(text("DETACHED-151-NEXT-TURN")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# detached exec critic fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--mode",
+        "yolo",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"start the detached command\r").unwrap();
+    input.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !places.workspace_path().join("started").exists() {
+        assert!(Instant::now() < deadline, "foreground child never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    input.write_all(b"\x02").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "background exec id:");
+    until_normalized(&reader, &mut output, start, "DETACHED-151-LAUNCHED");
+    until_mcp_composer_is_idle(&reader, &mut output);
+    let mark = output.len();
+    input.write_all(b"/tasks\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, mark, "running");
+    assert!(
+        !places.workspace_path().join("completed").exists(),
+        "Ctrl+B restarted or waited for the command"
+    );
+    until_local_action_completed(&reader, &mut output, mark, "tasks", PROGRESS_DEADLINE);
+    places.file("release", "continue\n");
+    let completed = places.workspace_path().join("completed");
+    until_prompt_after_reply(&reader, &mut output, b"DETACHED-151-NEXT-TURN");
+    let completion = std::fs::read_to_string(&completed).ok();
+    let visible = normalized(&output);
+    let receipt = "Background commands: 1 settled, 0 not successful.";
+    assert_eq!(
+        visible.matches(receipt).count(),
+        1,
+        "idle settlement must show one concise owner receipt: {visible}"
+    );
+    assert!(
+        !visible.contains("Output:") && !visible.contains("Error output:"),
+        "idle settlement replayed captured output: {visible}"
+    );
+    let mark = output.len();
+    input.write_all(b"/tasks details\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, mark, "exited code 0");
+    until_local_action_completed(
+        &reader,
+        &mut output,
+        mark,
+        "tasks details",
+        PROGRESS_DEADLINE,
+    );
+    let mark = output.len();
+    input.write_all(b"/help\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, mark, "/tasks");
+    until_normalized(&reader, &mut output, mark, "Ctrl+B");
+    until_local_action_completed(&reader, &mut output, mark, "help", PROGRESS_DEADLINE);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "REPL exit: {status:?}");
+    assert_eq!(
+        completion.as_deref(),
+        Some("DETACHED-151-DONE"),
+        "detached command was killed when its launching REPL turn ended"
+    );
+    let generations = stub.generations();
+    let history = generations.last().expect("next generation")["messages"].to_string();
+    assert_eq!(
+        history.matches("stdout tail (").count(),
+        1,
+        "settlement duplicated in model history: {history}"
+    );
+    assert!(
+        normalized(&output).contains("exited code 0"),
+        "settlement not announced"
+    );
+    assert!(
+        history.contains("exited code 0") && history.contains("DETACHED-151-DONE"),
+        "next turn lost detached settlement: {history}"
+    );
+}
+
+// Catches: settlement is lost/duplicated or the user notice leaks model-only output handles.
+#[test]
+fn ctrl_b_announces_settlement_inside_the_launching_turn_once_without_tasks() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "echo $$ > child-pid; printf STARTED > started; while [ ! -f release ]; do sleep 0.05; done; printf SETTLED-293"],
+        "background": false,
+        "timeout_ms": 15000
+    });
+    let wait = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "while kill -0 $(cat child-pid) 2>/dev/null; do sleep 0.05; done"],
+        "timeout_ms": 15000
+    });
+    let gate = support::ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("notice-293", "exec", &arguments.to_string())),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: tool_call("wait-293", "exec", &wait.to_string()),
+                gate: Arc::clone(&gate),
+            },
+            Reply::Sse(text("LAUNCH-TURN-293-DONE")),
+            Reply::Sse(text("NEXT-TURN-293-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# detached exec critic fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--mode",
+        "yolo",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"start the detached command\r").unwrap();
+    input.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !places.workspace_path().join("started").exists() {
+        assert!(Instant::now() < deadline, "foreground child never started");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    input.write_all(b"\x02").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "background exec id:");
+    places.file("release", "continue\n");
+    gate.release();
+    until_normalized(&reader, &mut output, start, "LAUNCH-TURN-293-DONE");
+    let answer_end = output.len();
+    until_prompt_from(&reader, &mut output, answer_end);
+    drain_until_quiet(&reader, &mut output);
+    let launch_output = normalized(&output[start..]);
+    let launch_history =
+        stub.generations().last().expect("launch generation")["messages"].to_string();
+    let next = output.len();
+    input.write_all(b"next turn\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, next, "NEXT-TURN-293-DONE");
+    until_prompt_from(&reader, &mut output, next);
+    drain_until_quiet(&reader, &mut output);
+    let next_output = normalized(&output[next..]);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "REPL exit: {status:?}");
+    assert!(
+        launch_history.contains("exited code 0") && launch_history.contains("SETTLED-293"),
+        "child did not settle inside launching turn: {launch_history}"
+    );
+    assert_eq!(
+        launch_output
+            .matches("Background commands: 1 settled, 0 not successful.")
+            .count(),
+        1,
+        "launching-turn automatic settlement notice missing or duplicated: {launch_output}"
+    );
+    assert!(
+        !next_output.contains("Background commands:"),
+        "settlement announced twice: {next_output}"
+    );
+    assert!(
+        launch_history.contains("[read_tool_result "),
+        "model continuation lost the full-output handle: {launch_history}"
+    );
+    assert!(
+        !launch_output.contains("[read_tool_result "),
+        "user notice leaked a model-only output handle: {launch_output}"
+    );
+    assert!(
+        !launch_output.contains("stdout tail (") && !launch_output.contains("stderr tail ("),
+        "user notice exposed model tail headings: {launch_output}"
+    );
+    // The 2026-11-08 outcome decision keeps completion notices to status rows.
+    assert!(
+        !launch_output.contains("SETTLED-293"),
+        "user notice must not repeat command output: {launch_output}"
+    );
+}
+
+// Catches: a second cross-root selection rebases a relative store under the selected project.
+#[test]
+fn repeated_cross_root_resume_preserves_relative_session_store() {
+    let stub = support::Stub::start(support::Plan {
+        completions: vec![
+            support::Reply::Sse(support::text("CRITIC-SEED-A")),
+            support::Reply::Sse(support::text("CRITIC-SEED-B")),
+            support::Reply::Sse(support::text("CRITIC-RETURNED-A")),
+        ],
+        ..support::Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# critic root A\n");
+    places.file("other/AGENTS.md", "# critic root B\n");
+    let root_b = places.workspace_path().join("other");
+    let store = places.workspace_path().join("critic-sessions");
+    let id_b = "0192a600-0000-7000-8000-000000000174";
+    for (root, id, prompt, title) in [
+        (
+            places.workspace_path(),
+            support::FIXTURE_SESSION_ID,
+            "critic original conversation",
+            "CriticAlpha",
+        ),
+        (
+            root_b.as_path(),
+            id_b,
+            "critic other conversation",
+            "CriticBeta",
+        ),
+    ] {
+        let seeded = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--session-id",
+                id,
+                "--session-dir",
+                store.to_str().unwrap(),
+                "-C",
+                root.to_str().unwrap(),
+            ])
+            .arg(prompt)
+            .run();
+        assert_eq!(seeded.code, Some(0), "{}", seeded.stderr);
+        let named = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([
+                id,
+                "--session-dir",
+                store.to_str().unwrap(),
+                "-C",
+                root.to_str().unwrap(),
+                "--name",
+            ])
+            .arg(&format!("set={title}"))
+            .run();
+        assert_eq!(named.code, Some(0), "{}", named.stderr);
+    }
+    let ego = places.ego(&stub).subcommand("resume").args([
+        support::FIXTURE_SESSION_ID,
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--session-dir",
+        "critic-sessions",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    for (title, id, needs_trust) in [
+        ("CriticBeta", id_b, true),
+        ("CriticAlpha", support::FIXTURE_SESSION_ID, false),
+    ] {
+        drain_until_quiet(&reader, &mut output);
+        let start = output.len();
+        input.write_all(b"/sessions\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, title);
+        input.write_all(format!("{title}\r").as_bytes()).unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            &format!("resumed session {id}"),
+        );
+        if needs_trust {
+            until_normalized(&reader, &mut output, start, "Trust project files");
+            input.write_all(b"yes\r").unwrap();
+            input.flush().unwrap();
+        }
+        drain_until_quiet(&reader, &mut output);
+    }
+    let start = output.len();
+    input
+        .write_all(b"continue original conversation\r")
+        .unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "CRITIC-RETURNED-A");
+    let generations = stub.generations();
+    let request = generations.last().unwrap().to_string();
+    assert!(
+        request.contains("critic original conversation"),
+        "{request}"
+    );
+    assert!(!request.contains("critic other conversation"), "{request}");
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "{}", normalized(&output));
+    assert!(
+        !root_b.join("critic-sessions").exists(),
+        "store was rebased into root B"
+    );
+}
+
+use ego_cli::repl::actions::ActionRegistry;
+use portable_pty::{ExitStatus, NativePtySystem, PtySize, PtySystem};
+use std::{
+    io::{self, Read, Write},
+    path::Path,
+    sync::{Arc, Mutex, mpsc},
+    thread,
+    time::{Duration, Instant},
+};
+use support::{
+    Ego, Plan, ReleaseGate, Reply, Stub, gated_paced_tool_call_line, paced, text, tool_call,
+};
+
+// Catches: the shared picker hides sessions from other roots or omits their synopsis/order.
+#[test]
+fn sessions_picker_lists_summaries_across_roots_newest_first() {
+    across_root_picker_contract("list");
+}
+
+// Catches: unnamed resume reintroduces sessions from another workspace.
+#[test]
+fn resume_picker_omits_other_workspaces() {
+    across_root_picker_contract("workspace");
+}
+
+// Catches: selecting history keeps the previous root's instructions or filesystem authority.
+#[test]
+fn history_picker_resumes_across_roots_with_new_root_instructions_and_tools() {
+    across_root_picker_contract("history");
+}
+
+// Catches: Enter resumes a session whose recorded workspace no longer exists.
+#[test]
+fn sessions_picker_marks_missing_roots_unavailable_and_cannot_resume() {
+    across_root_picker_contract("missing");
+}
+
+fn across_root_picker_contract(case: &str) {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+    use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "target-read",
+                "read",
+                r#"{"files":[{"path":"notes.md"}]}"#,
+            )),
+            Reply::Sse(text("ROOT-SWITCH-ANSWER-174")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "# ROOT-CURRENT-174\n");
+    ego.file("notes.md", "FILE-CURRENT-174\n");
+    let current = std::fs::canonicalize(ego.workspace_path()).unwrap();
+    let target = current.join("target");
+    let older = current.join("older");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&older).unwrap();
+    std::fs::write(target.join("AGENTS.md"), "# ROOT-TARGET-174\n").unwrap();
+    std::fs::write(target.join("notes.md"), "FILE-TARGET-174\n").unwrap();
+    let target = std::fs::canonicalize(target).unwrap();
+    let older = std::fs::canonicalize(older).unwrap();
+    let store = JsonlStore::new(ego.home_path().join("sessions"), current, Box::new(OsIo));
+    let selected = SessionId::new();
+    for (id, root, label, millis) in [
+        (SessionId::new(), &older, "Older record", 1000),
+        (selected, &target, "Orchid cross-root", 2000),
+    ] {
+        store
+            .publish_empty_session(id, root, Timestamp::from_millis(1))
+            .unwrap();
+        let turn = TurnId::new();
+        let mut seq = Seq::ZERO;
+        for (item, kind) in [
+            (
+                None,
+                EventKind::SessionTitleChanged {
+                    title: Some(label.into()),
+                },
+            ),
+            (
+                Some(ItemId::new()),
+                EventKind::UserPrompt {
+                    audio: Vec::new(),
+                    text: format!("CROSS-ROOT-174 {label}"),
+                    images: Vec::new(),
+                    queued_prompt: None,
+                },
+            ),
+            (
+                Some(ItemId::new()),
+                EventKind::AssistantMessage {
+                    text: format!("Saved synopsis for {label}"),
+                },
+            ),
+            (
+                None,
+                EventKind::TurnCompleted {
+                    ok: true,
+                    exit_reason: ExitReason::Completed,
+                },
+            ),
+        ] {
+            store
+                .append(
+                    &id,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq: seq.next(),
+                            id: EventId::new(),
+                            turn,
+                            item,
+                            parent: None,
+                            ts: Timestamp::from_millis(millis),
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    },
+                )
+                .unwrap();
+        }
+    }
+    if case == "missing" {
+        std::fs::remove_dir_all(&target).unwrap();
+    }
+    let ego = if case == "workspace" {
+        ego.subcommand("resume")
+    } else {
+        ego.conversing()
+    };
+    let ego = ego.env("TZ", "UTC").args([
+        "--model",
+        "ollama/qwen3",
+        "--sandbox",
+        "off",
+        "--allow",
+        "read(**)",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 30, 140, None);
+    let mut output = Vec::new();
+    let start = if case == "workspace" {
+        0
+    } else {
+        until(&reader, &mut output, b"Trust project files");
+        let start = output.len();
+        input.write_all(b"yes\r").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, start);
+        let start = output.len();
+        input
+            .write_all(if case == "history" {
+                b"/history CROSS-ROOT-174\r"
+            } else {
+                b"/sessions\r"
+            })
+            .unwrap();
+        input.flush().unwrap();
+        start
+    };
+    if case == "workspace" {
+        until_normalized(&reader, &mut output, start, "No other saved sessions");
+        assert!(!normalized(&output).contains("Orchid cross-root"));
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success(), "{}", normalized(&output));
+        return;
+    }
+    until_normalized(&reader, &mut output, start, "Orchid cross-root");
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        "Saved synopsis for Orchid cross-root",
+    );
+    if case == "list" {
+        until_normalized(&reader, &mut output, start, "Older record");
+        until_normalized(&reader, &mut output, start, "1970-01-01 00:00");
+        drain_until_quiet(&reader, &mut output);
+        let shown = normalized(&output[start..]);
+        assert!(
+            shown.find("Orchid cross-root").unwrap() < shown.find("Older record").unwrap(),
+            "{shown}"
+        );
+        // Wait for the picker to close: an Esc followed at once by `/quit` is
+        // one Alt-key chord, and the picker would stay open.
+        let canceled = output.len();
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, canceled);
+    } else if case == "missing" {
+        until_normalized(&reader, &mut output, start, "unavailable");
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        drain_until_quiet(&reader, &mut output);
+        assert!(!normalized(&output[start..]).contains(&format!("resumed session {selected}")));
+        let canceled = output.len();
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, canceled);
+        assert!(stub.generations().is_empty());
+    } else {
+        let start = output.len();
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "Trust project files");
+        input.write_all(b"yes\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "Saved synopsis for Orchid cross-root",
+        );
+        drain_until_quiet(&reader, &mut output);
+        let start = output.len();
+        input.write_all(b"read notes\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "ROOT-SWITCH-ANSWER-174");
+        let requests = stub.generations();
+        let instructions = requests[0]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "system")
+            .map(|message| message.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(instructions.contains("ROOT-TARGET-174"), "{instructions}");
+        assert!(!instructions.contains("ROOT-CURRENT-174"), "{instructions}");
+        let request = requests.last().unwrap().to_string();
+        assert!(
+            request.contains("FILE-TARGET-174") && !request.contains("FILE-CURRENT-174"),
+            "{request}"
+        );
+        assert!(request.contains("CROSS-ROOT-174 Orchid cross-root"));
+    }
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "{}", normalized(&output));
+}
+
+// Catches: resume shows an empty transcript, duplicate deltas, or drops compact tool rows.
+#[test]
+fn resume_replays_recent_turns_before_input_without_repeating_deltas() {
+    resume_replay_contract(3, false, None);
+}
+
+// Catches: replay is unbounded or one known unrenderable message prevents the composer.
+#[test]
+fn resume_replay_bounds_turns_and_survives_a_known_unrenderable_message() {
+    resume_replay_contract(12, true, None);
+}
+
+// Catches: slash resume activates history without printing it to the terminal.
+#[test]
+fn slash_resume_replays_recent_turns_without_a_generation() {
+    resume_replay_contract(3, false, Some(false));
+}
+
+// Catches: picker resume skips replay or drops the shared ten-turn bound.
+#[test]
+fn slash_resume_picker_replays_bounded_history_once() {
+    resume_replay_contract(12, true, Some(true));
+}
+
+fn resume_replay_contract(turns: usize, unrenderable: bool, picker: Option<bool>) {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, ExitReason};
+    use ego_core::event::id::{EventId, ItemId, Producer, Seq, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::permit::ToolResult;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "# transcript replay fixture\n");
+    let root = std::fs::canonicalize(ego.workspace_path()).unwrap();
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let id: SessionId = support::FIXTURE_SESSION_ID.parse().unwrap();
+    store
+        .publish_empty_session(id, &root, Timestamp::from_millis(1))
+        .unwrap();
+    let mut seq = Seq::ZERO;
+    let mut millis = 1;
+    for n in 0..turns {
+        let turn = TurnId::new();
+        let user = ItemId::new();
+        let call = ItemId::new();
+        let assistant = ItemId::new();
+        let mut append = |item, kind| {
+            let at = seq.next();
+            millis += 10;
+            store
+                .append(
+                    &id,
+                    &DomainEvent {
+                        env: Envelope {
+                            seq: at,
+                            id: EventId::new(),
+                            turn,
+                            item,
+                            parent: None,
+                            ts: Timestamp::from_millis(millis),
+                            producer: Producer::Main,
+                        },
+                        kind,
+                    },
+                )
+                .unwrap();
+        };
+        append(
+            Some(user),
+            EventKind::UserPrompt {
+                audio: Vec::new(),
+                text: format!("REPLAY-USER-{n:02}"),
+                images: Vec::new(),
+                queued_prompt: None,
+            },
+        );
+        append(
+            Some(call),
+            EventKind::ToolCallStarted {
+                name: "read".to_owned(),
+                args: format!("{{\"files\":[{{\"path\":\"replay-{n:02}.txt\"}}]}}"),
+                call_id: Some(format!("read-{n}")),
+            },
+        );
+        append(
+            Some(call),
+            EventKind::ToolCallCompleted {
+                ok: true,
+                result: ToolResult::builtin("saved content"),
+            },
+        );
+        append(
+            Some(assistant),
+            EventKind::AssistantDelta {
+                text: format!("REPLAY-ANSWER-{n:02}"),
+            },
+        );
+        append(
+            Some(assistant),
+            EventKind::AssistantMessage {
+                text: format!("REPLAY-ANSWER-{n:02}"),
+            },
+        );
+        if unrenderable && n + 1 == turns {
+            append(
+                None,
+                EventKind::AssistantMessage {
+                    text: "NOT-RENDERABLE".to_owned(),
+                },
+            );
+        }
+        append(
+            None,
+            EventKind::TurnCompleted {
+                ok: true,
+                exit_reason: ExitReason::Completed,
+            },
+        );
+    }
+    let ego = if picker.is_some() {
+        ego.conversing()
+    } else {
+        ego.subcommand("resume").arg(support::FIXTURE_SESSION_ID)
+    }
+    .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let mut start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    if let Some(picker) = picker {
+        until_prompt_from(&reader, &mut output, start);
+        drain_until_quiet(&reader, &mut output);
+        assert!(!normalized(&output[start..]).contains("REPLAY-ANSWER"));
+        start = output.len();
+        let command = if picker {
+            "/resume\r".to_owned()
+        } else {
+            format!("/resume {}\r", support::FIXTURE_SESSION_ID)
+        };
+        input.write_all(command.as_bytes()).unwrap();
+        input.flush().unwrap();
+        if picker {
+            until_normalized(&reader, &mut output, start, "REPLAY-USER");
+            // The list is search-backed; Enter selects its only saved session.
+            input.write_all(b"\r").unwrap();
+            input.flush().unwrap();
+            until_normalized(&reader, &mut output, start, "resumed session");
+        }
+    }
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        &format!("REPLAY-ANSWER-{:02}", turns - 1),
+    );
+    if unrenderable {
+        until_normalized(&reader, &mut output, start, "[transcript item unavailable]");
+    }
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let shown = normalized(&output[start..]);
+    let shown = if picker.is_some() {
+        shown.split_once("resumed session").unwrap().1
+    } else {
+        &shown
+    };
+    for n in turns.saturating_sub(10)..turns {
+        assert!(shown.contains(&format!("REPLAY-USER-{n:02}")), "{shown}");
+        assert_eq!(
+            shown.matches(&format!("REPLAY-ANSWER-{n:02}")).count(),
+            1,
+            "{shown}"
+        );
+        assert!(shown.contains(&format!("replay-{n:02}.txt")), "{shown}");
+    }
+    if turns > 10 {
+        assert!(shown.contains("2 earlier turns omitted"), "{shown}");
+        assert!(!shown.contains("REPLAY-USER-00"), "{shown}");
+    }
+    if unrenderable {
+        assert_eq!(
+            shown.matches("[transcript item unavailable]").count(),
+            1,
+            "{shown}"
+        );
+    }
+    assert!(
+        rendered_prompt_count(&output[start..]) > 0,
+        "composer missing: {shown}"
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "display replay generated a response"
+    );
+    if picker.is_some() {
+        let start = output.len();
+        input.write_all(b"/new\r").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, start);
+        drain_until_quiet(&reader, &mut output);
+        assert!(!normalized(&output[start..]).contains("REPLAY-ANSWER"));
+    }
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "{shown}");
+}
+
+// Catches: one Meta-o press printing the recorded tool block more than once.
+#[test]
+fn recorded_stdout_only_exec_expands_once_in_pty() {
+    use ego_core::event::domain::DomainEvent;
+    use ego_core::event::id::{Seq, SessionId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub);
+    ego.file("AGENTS.md", "# recorded expansion fixture\n");
+    let root = std::fs::canonicalize(ego.workspace_path()).unwrap();
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let id: SessionId = support::FIXTURE_SESSION_ID.parse().unwrap();
+    store
+        .publish_empty_session(id, &root, Timestamp::from_millis(1))
+        .unwrap();
+    let events: Vec<DomainEvent> =
+        serde_json::from_str(include_str!("fixtures/expand-664.json")).unwrap();
+    let evidence = store.probe_evidence_store(id, 1024).unwrap();
+    let mut seq = Seq::ZERO;
+    for mut event in events {
+        if let ego_core::event::domain::EventKind::ToolCallCompleted { result, .. } = &event.kind {
+            for block in &result.content {
+                // This receipt is not truncated: seed the exact recorded bytes
+                // and verify their original content-addressed references.
+                let mut writer =
+                    ego_core::store::evidence::EvidenceStore::begin(&evidence).unwrap();
+                writer.append(block.text.as_bytes()).unwrap();
+                assert_eq!(Some(writer.commit().unwrap()), block.full_output);
+            }
+        }
+        // The fixture is an unchanged item subsequence from the real session.
+        // Renumber only the envelope sequence for this isolated store.
+        event.env.seq = seq.next();
+        store.append(&id, &event).unwrap();
+    }
+    let ego = ego
+        .subcommand("resume")
+        .arg(support::FIXTURE_SESSION_ID)
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    let (session, mut input, reader) = PtySession::start(&ego, 30, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, 0, "tuic-bg: you will get BG DONE;");
+    until_prompt_from(&reader, &mut output, 0);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(b"\x1bo").unwrap();
+    input.flush().unwrap();
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        "  tuic-bg: you will get BG DONE; end your turn now",
+    );
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let expanded = normalized(&output[start..]);
+    for marker in [
+        "✓ $ bash",
+        "tuic bg: pid=62666",
+        "log=/Users/",
+        "wake=/Users/",
+        "tuic-bg:",
+    ] {
+        assert_eq!(expanded.matches(marker).count(), 1, "{expanded}");
+    }
+    assert!(
+        stub.generations().is_empty(),
+        "display-only expansion generated a response"
+    );
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success(), "{expanded}");
+}
+
+// Catches: /sessions remains a UTC table, loses search bursts, or activates the wrong writer.
+#[test]
+fn sessions_picker_filters_titles_and_resumes_selected_context_in_local_time() {
+    sessions_picker_contract(true);
+}
+
+// Catches: a workspace with no other sessions opens a blank or uncloseable picker.
+#[test]
+fn sessions_picker_empty_workspace_has_an_explicit_cancelable_state() {
+    sessions_picker_contract(false);
+}
+
+fn sessions_picker_contract(populated: bool) {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("SAVED-CONTEXT-239")),
+            Reply::Sse(text("OTHER-CONTEXT-239")),
+            Reply::Sse(text("PICKED-ANSWER-239")),
+        ],
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# session picker fixture\n");
+    let mut expected_stamp = String::new();
+    if populated {
+        let seeded = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+            ])
+            .arg("remember selected context 239")
+            .run();
+        assert_eq!(seeded.code, Some(0), "{}", seeded.stderr);
+        let named = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([support::FIXTURE_SESSION_ID, "--name", "set=Orchid project"])
+            .run();
+        assert_eq!(named.code, Some(0), "{}", named.stderr);
+        let other_id = "0192a600-0000-7000-8000-000000000239";
+        let other = places
+            .ego(&stub)
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                other_id,
+                "--sandbox",
+                "off",
+            ])
+            .arg("unrelated context 239")
+            .run();
+        assert_eq!(other.code, Some(0), "{}", other.stderr);
+        let other = places
+            .ego(&stub)
+            .without_fixture_thinking()
+            .subcommand("resume")
+            .args([other_id, "--name", "set=Zebra project"])
+            .run();
+        assert_eq!(other.code, Some(0), "{}", other.stderr);
+        let listing = places
+            .ego(&stub)
+            .subcommand("ls")
+            .args(["--output", "json"])
+            .run()
+            .report();
+        let millis = listing["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == support::FIXTURE_SESSION_ID)
+            .unwrap()["updated"]
+            .as_u64()
+            .unwrap();
+        let utc = jiff::Timestamp::from_millisecond(i64::try_from(millis).unwrap()).unwrap();
+        expected_stamp = utc
+            .to_zoned(jiff::tz::Offset::constant(-10).to_time_zone())
+            .strftime("%Y-%m-%d %H:%M")
+            .to_string();
+    }
+    let ego = places
+        .ego(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TZ", "Pacific/Honolulu");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    let start = output.len();
+    input.write_all(b"/sessions\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Select session");
+    if populated {
+        until_normalized(&reader, &mut output, start, &expected_stamp);
+        until_normalized(&reader, &mut output, start, "Orchid project");
+        let filtered = output.len();
+        input.write_all(b"orchid").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, filtered, "filter: orchid");
+        input.write_all(b"\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            filtered,
+            &format!("resumed session {}", support::FIXTURE_SESSION_ID),
+        );
+        drain_until_quiet(&reader, &mut output);
+        let answer = output.len();
+        input.write_all(b"recall selected context\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, answer, "PICKED-ANSWER-239");
+        assert!(
+            stub.generations()
+                .last()
+                .unwrap()
+                .to_string()
+                .contains("remember selected context 239"),
+            "selected session history missing"
+        );
+    } else {
+        until_normalized(&reader, &mut output, start, "No other saved sessions");
+        input.write_all(b"\x1b").unwrap();
+        input.flush().unwrap();
+    }
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "{}", normalized(&output));
+}
+
+// Catches: the replacement session has no evidence authority for its next turn.
+#[test]
+fn successor_fork_accepts_next_turn_and_resumes() {
+    successor_accepts_next_turn("fork");
+}
+
+// Catches: compact activation skips admission and kills the next prompt.
+#[test]
+fn successor_compact_accepts_next_turn_and_resumes() {
+    successor_accepts_next_turn("compact");
+}
+
+// Catches: the shared store-write failure path used by generation admission exits the REPL.
+#[test]
+fn failed_session_log_write_keeps_repl_alive() {
+    successor_accepts_next_turn("admission-failure");
+}
+
+fn successor_accepts_next_turn(action: &str) {
+    let failing = action == "admission-failure";
+    let gate = support::ReleaseGate::new();
+    let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
+    let mut replies = vec![Reply::Sse(text("SOURCE-250-ANSWER"))];
+    if action == "compact" {
+        replies.push(Reply::Sse(text(checkpoint)));
+    }
+    replies.extend([
+        Reply::Sse(text("TARGET-250-ANSWER")),
+        Reply::Sse(text("RESUMED-250-ANSWER")),
+    ]);
+    let stub = Stub::start(Plan {
+        completions: replies,
+        subsequent_resolution_gate: failing.then(|| gate.clone()),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# successor fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, Some((24, 100)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"first prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "SOURCE-250-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    if !failing {
+        let start = output.len();
+        input.write_all(format!("/{action}\r").as_bytes()).unwrap();
+        input.flush().unwrap();
+        // A redraw can precede publication; follow-up input would cancel compaction.
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            if action == "compact" {
+                "Compacting"
+            } else {
+                "forked session"
+            },
+        );
+        // The receipt can be printed while activation still interrupts the
+        // previous read. Wait for the successor's completed empty frame, not
+        // a quiet interval or the prompt token in an unfinished repaint.
+        until_successor_ready(&reader, &mut output, start, action, &stub);
+        drain_until_quiet(&reader, &mut output);
+    }
+    let requests_before = stub.requests().len();
+    let start = output.len();
+    input.write_all(b"second prompt\r").unwrap();
+    input.flush().unwrap();
+    if failing {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !stub.requests()[requests_before..]
+            .iter()
+            .any(|request| request.path == "/api/ps")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "second turn did not resolve its model"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let session = places
+            .home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID);
+        let log = session.join("events.jsonl");
+        let saved = session.join("events.saved");
+        std::fs::rename(&log, &saved).unwrap();
+        std::fs::create_dir(&log).unwrap();
+        gate.release();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "correct the error before trying again",
+        );
+        let start = output.len();
+        until_prompt_from(&reader, &mut output, start);
+        // Redraws may occur between wrapped notice rows; inspect the actual
+        // terminal, not the interleaved live-frame bytes in the write stream.
+        let shown = screen_rows(&output, 24, 100).join("\n");
+        assert!(
+            shown.contains("the session log could not be written")
+                && support::notice_prose(&shown).contains("Is a directory"),
+            "wrong failure: {shown}"
+        );
+        assert_eq!(
+            shown
+                .matches("correct the error before trying again")
+                .count(),
+            1
+        );
+        assert_eq!(
+            stub.generations().len(),
+            1,
+            "failed admission sent a generation"
+        );
+        std::fs::remove_dir(&log).unwrap();
+        std::fs::rename(&saved, &log).unwrap();
+    } else {
+        until_normalized(&reader, &mut output, start, "TARGET-250-ANSWER");
+        let start = output.len();
+        until_prompt_from(&reader, &mut output, start);
+    }
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    if !failing {
+        assert!(status.success(), "successor process failed: {status:?}");
+    }
+    if failing {
+        return;
+    }
+    let listing = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--output", "json"])
+        .run()
+        .report();
+    let target = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] != support::FIXTURE_SESSION_ID)
+        .unwrap_or_else(|| {
+            panic!(
+                "successor catalogue row missing: {listing}; PTY: {}",
+                normalized(&output)
+            )
+        });
+    assert_eq!(target["model"], "ollama/qwen3");
+    let resumed = places.ego(&stub).subcommand("resume").args([
+        target["id"].as_str().unwrap(),
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&resumed, 24, 100, None);
+    let mut output = Vec::new();
+    // Trust was remembered by the first process; resume must reach input
+    // without either a trust question or a model picker.
+    until_prompt_from(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"resume prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "RESUMED-250-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "resume failed: {status:?}");
+}
+
+// portable-pty transports bytes but does not emulate a terminal. Keep the
+// reported cursor inside both 80x24 and 12x8; painter geometry is proven by
+// the vendor unit test, while this test needs only a live DSR response.
+const DSR_QUERY: &[u8] = b"\x1b[6n";
+const DSR_RESPONSE: &[u8] = b"\x1b[4;1R";
+
+// Catches: cooked type-ahead becomes one Ctrl-J batch and drops the second line.
+#[cfg(not(windows))]
+#[test]
+fn two_lines_submitted_before_composer_readiness_reach_the_session_once() {
+    let discovery = ReleaseGate::new();
+    // TERM enables Markdown rendering, which publishes complete blocks.
+    let (first, first_reply) = gated_paced_line("EARLY-FIRST-ANSWER\n");
+    let stub = Stub::start(Plan {
+        discovery_gate: Some(Arc::clone(&discovery)),
+        completions: vec![first, Reply::Sse(text("EARLY-SECOND-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 90,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let mut writer = pair.master.take_writer().expect("writer");
+    // Discovery is a real startup effect. Holding its reply prevents activation,
+    // without a timing guess or a production-only test hook.
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !stub
+        .requests()
+        .iter()
+        .any(|request| request.path == "/api/tags")
+    {
+        assert!(Instant::now() < deadline, "startup did not reach discovery");
+        thread::sleep(Duration::from_millis(10));
+    }
+    writer
+        .write_all(b"early alpha\rearly beta\r")
+        .expect("type-ahead");
+    writer.flush().expect("type-ahead flush");
+    let (mut input, dsr_responder, writer_join) = writer_owner(writer);
+    let (reader, reader_join) = stream_with_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some((24, 90)),
+    );
+    let mut output = Vec::new();
+    drain(&reader, &mut output);
+    assert_eq!(rendered_prompt_count(&output), 0, "composer already opened");
+    discovery.release();
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !normalized(&output).contains("EARLY-FIRST-ANSWER") {
+        match reader.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(chunk) => output.extend(chunk),
+            Err(error) => panic!(
+                "first answer wait failed: {error}; requests: {:?}; journal: {}",
+                stub.requests(),
+                std::fs::read_to_string(
+                    ego.home_path()
+                        .join("sessions")
+                        .join(support::FIXTURE_SESSION_ID)
+                        .join("events.jsonl")
+                )
+                .unwrap_or_default(),
+            ),
+        }
+    }
+    // The native status omits the textual queue banner. The durable event is
+    // the queue acknowledgement, independent of the chosen presentation.
+    let journal = ego
+        .home_path()
+        .join("sessions")
+        .join(support::FIXTURE_SESSION_ID)
+        .join("events.jsonl");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    loop {
+        let queued_before_settlement = std::fs::read_to_string(&journal).expect("live journal");
+        if queued_before_settlement.lines().any(|line| {
+            // The writer may still be appending the last envelope.
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(line) else {
+                return false;
+            };
+            event["payload"]["event"]["kind"]["kind"] == "PromptQueued"
+                && event["payload"]["event"]["kind"]["text"] == "early beta"
+        }) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "second input was not durably queued before provider settlement: {queued_before_settlement}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    first_reply.release();
+    until_normalized(&reader, &mut output, 0, "EARLY-SECOND-ANSWER");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = bounded_exit(child);
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread");
+    writer_join.join().expect("writer thread");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    let events = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("durable session");
+    let events: Vec<serde_json::Value> = events
+        .lines()
+        .map(|line| serde_json::from_str(line).expect("event envelope"))
+        .collect();
+    let prompts: Vec<&str> = events
+        .iter()
+        .filter(|event| event["payload"]["event"]["kind"]["kind"] == "UserPrompt")
+        .map(|event| {
+            event["payload"]["event"]["kind"]["text"]
+                .as_str()
+                .expect("prompt text")
+        })
+        .collect();
+    assert_eq!(prompts, ["early alpha", "early beta"]);
+    let queued: Vec<&str> = events
+        .iter()
+        .filter(|event| event["payload"]["event"]["kind"]["kind"] == "PromptQueued")
+        .map(|event| {
+            event["payload"]["event"]["kind"]["text"]
+                .as_str()
+                .expect("queued text")
+        })
+        .collect();
+    assert_eq!(queued, ["early beta"]);
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2, "provider turns: {generations:?}");
+    assert_eq!(count_exact_strings(&generations[0], "early alpha"), 1);
+    assert_eq!(count_exact_strings(&generations[0], "early beta"), 0);
+    assert_eq!(count_exact_strings(&generations[1], "early beta"), 1);
+    let mut screen = vt100::Parser::new(24, 90, 100);
+    screen.process(&output);
+    screen.screen_mut().set_scrollback(100);
+    let transcript = screen.screen().contents();
+    assert_eq!(
+        transcript.matches("early alpha").count(),
+        1,
+        "duplicate type-ahead: {transcript}"
+    );
+    assert_eq!(
+        transcript.matches("early beta").count(),
+        1,
+        "duplicate type-ahead: {transcript}"
+    );
+}
+
+fn double_ctrl_c_exit(status: &ExitStatus) -> bool {
+    status.success() || cfg!(windows) && status.exit_code() == 0xC000_013A // STATUS_CONTROL_C_EXIT
+}
+
+#[cfg(not(windows))]
+#[test]
+fn image_paste_path_stages_a_chip_and_sends_image_with_next_turn() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("IMAGE-PASTE-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let image_path = ego.file("sample.png", "");
+    std::fs::write(&image_path, support::PNG_1X1).expect("write image fixture");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", image_path.display()).as_bytes())
+        .expect("bracketed image path");
+    input.flush().expect("paste flush");
+    until_normalized(&reader, &mut output, paste_start, "[image: sample.png]");
+    let staged = normalized(&output[paste_start..]);
+    input
+        .write_all(b"describe this image\r")
+        .expect("next turn");
+    input.flush().expect("next turn flush");
+    until_normalized(&reader, &mut output, paste_start, "IMAGE-PASTE-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        staged.contains("[image: sample.png]"),
+        "no removable image chip: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    let body = generations[0].to_string();
+    assert!(
+        body.contains(r#""media_type":"image/png""#),
+        "no image sent: {body}"
+    );
+    assert!(
+        !body.contains(&image_path.display().to_string()),
+        "image path leaked to model: {body}"
+    );
+}
+
+/// catches: the `Signalling` wrapper being dropped from `interactive_through`,
+/// which the `Announce::signal` unit tests cannot see — a real interactive
+/// turn in a TUIC pane must carry title, busy and idle without inventing an
+/// intent that overwrites an assistant-declared contextual title.
+#[cfg(not(windows))]
+#[test]
+fn a_turn_in_a_tuic_pane_signals_title_busy_and_idle_without_inventing_intent() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("SIGNAL-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color")
+        .env("TUIC_SOCKET", "/nonexistent/tuic.sock");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES)
+            .replace("max_tools = 16", "max_tools = 32"),
+    );
+    ego.file("AGENTS.md", "# signal fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let turn_start = output.len();
+    input.write_all(b"say hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(&reader, &mut output, turn_start, "SIGNAL-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    until_from(
+        &reader,
+        &mut output,
+        turn_start,
+        b"\x1b]7770;state=idle\x07",
+    );
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    let turn = String::from_utf8_lossy(&output[turn_start..]).into_owned();
+    for expected in [
+        "\x1b]0;ɛ । say hello\x07",
+        "\x1b]7770;state=busy\x07",
+        "\x1b]7770;state=idle\x07",
+    ] {
+        assert!(turn.contains(expected), "missing {expected:?} in {turn:?}");
+    }
+    assert!(
+        !turn.contains("\x1b]7770;intent="),
+        "turn-start metadata must not overwrite assistant intent: {turn:?}"
+    );
+}
+
+// Catches: removal readiness accepts a prompt before its editor frame completes.
+#[cfg(not(windows))]
+#[test]
+fn image_removal_wait_rejects_incomplete_repaint() {
+    // Completed empty frame captured from the real rb transcript in 429-055c.
+    let empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
+    // Captured from the native image-removal PTY run in 432-af55. The
+    // status row is part of the prompt, not text in the editor buffer.
+    let status_empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96mfixture-vision \xc2\xb7 off \xc2\xb7 auto \xc2\xb7 ctx ?\r\n> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
+    assert_eq!(
+        support::ready_prompt_count_with_status(status_empty),
+        1,
+        "completed empty editor with a status row was rejected"
+    );
+    let (sender, receiver) = mpsc::channel();
+    let mut output = empty.to_vec();
+    let start = output.len();
+    output.extend_from_slice(&empty[..empty.len() - 6]);
+    sender.send(empty.to_vec()).expect("completed empty frame");
+    until_draft_ready(&receiver, &mut output, start);
+    assert!(
+        support::ready_prompt_count(&output[start..]) > 0,
+        "image removal readiness accepted an incomplete editor frame"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn image_paste_chip_can_be_removed_before_submission() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("REMOVED-IMAGE-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let image_path = ego.file("remove.png", "");
+    std::fs::write(&image_path, support::PNG_1X1).expect("write image fixture");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", image_path.display()).as_bytes())
+        .expect("paste image path");
+    input.flush().expect("paste flush");
+    until_normalized(&reader, &mut output, paste_start, "[image: remove.png]");
+    // The label can arrive before Reedline completes its repaint. Finish that
+    // frame and exclude queued chip repaints from the removal observation.
+    let chip_start = paste_start + find(&output[paste_start..], b"[image: remove.png]");
+    until_from(&reader, &mut output, chip_start, b"\x1b[?25h");
+    drain_until_quiet(&reader, &mut output);
+    let removal_start = output.len();
+    input.write_all(b"\x1b").expect("remove chip");
+    input.flush().expect("remove flush");
+    until_draft_ready(&reader, &mut output, removal_start);
+    let after_removal = normalized(&output[removal_start..]);
+    input
+        .write_all(b"describe without attachment\r")
+        .expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, removal_start, "REMOVED-IMAGE-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !after_removal.contains("[image: remove.png]"),
+        "chip remained: {after_removal:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    assert!(
+        !generations[0]
+            .to_string()
+            .contains(r#""media_type":"image/png""#),
+        "removed image reached model: {}",
+        generations[0]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn image_paste_refuses_unsupported_model_before_reading_image() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let image_path = ego.file("unreadable.png", "");
+    std::fs::write(&image_path, support::PNG_1X1).expect("write image fixture");
+    std::fs::set_permissions(&image_path, std::fs::Permissions::from_mode(0o000))
+        .expect("make image unreadable");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", image_path.display()).as_bytes())
+        .expect("paste image path");
+    input.flush().expect("paste flush");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        let rendered = normalized(&output[paste_start..]);
+        if support::notice_prose(&rendered).contains("does not support image input")
+            || rendered.contains("[image: unreadable.png]")
+        {
+            break;
+        }
+        if let Ok(chunk) = reader.recv_timeout(Duration::from_millis(100)) {
+            output.extend(chunk);
+        }
+    }
+    let result = normalized(&output[paste_start..]);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    std::fs::set_permissions(&image_path, std::fs::Permissions::from_mode(0o600))
+        .expect("restore image permissions");
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        support::notice_prose(&result).contains("does not support image input"),
+        "no capability refusal: {result:?}"
+    );
+    assert!(
+        !result.contains("[image: unreadable.png]"),
+        "unsupported image staged: {result:?}"
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "paste must not submit a turn"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn image_paste_missing_or_non_image_path_stays_as_text() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("PATH-TEXT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let notes_path = ego.file("notes.txt", "plain notes, not an image");
+    let missing_path = notes_path.with_file_name("does-not-exist.png");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", missing_path.display()).as_bytes())
+        .expect("paste missing path");
+    input.flush().expect("paste flush");
+    input
+        .write_all(format!(" {}\r", notes_path.display()).as_bytes())
+        .expect("paste non-image path and submit");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, paste_start, "PATH-TEXT-ANSWER");
+    let staged = normalized(&output[paste_start..]);
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !staged.contains("[image:"),
+        "a missing or non-image path must never stage a chip: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    let body = generations[0].to_string();
+    assert!(
+        !body.contains(r#""media_type":"image/png""#),
+        "no image should have been sent: {body}"
+    );
+    assert!(
+        body.contains(&missing_path.display().to_string())
+            && body.contains(&notes_path.display().to_string()),
+        "both paths must reach the model as literal text: {body}"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn image_paste_disguised_extension_content_stays_as_text() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("DISGUISED-TEXT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let disguised_path = ego.file("disguised.png", "");
+    std::fs::write(&disguised_path, b"not an image, just bytes named .png")
+        .expect("write disguised fixture");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", disguised_path.display()).as_bytes())
+        .expect("paste disguised path");
+    input.flush().expect("paste flush");
+    input.write_all(b"\r").expect("submit");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, paste_start, "DISGUISED-TEXT-ANSWER");
+    let staged = normalized(&output[paste_start..]);
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !staged.contains("[image:"),
+        "content that fails to decode as an image must never stage a chip, whatever its \
+         extension: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    let body = generations[0].to_string();
+    assert!(
+        !body.contains(r#""media_type":"image/png""#),
+        "no image should have been sent: {body}"
+    );
+    assert!(
+        body.contains(&disguised_path.display().to_string()),
+        "the disguised path must reach the model as literal text: {body}"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn image_paste_oversize_path_is_refused_with_its_size() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    let image_path = ego.file("huge.png", "");
+    // The fixture model's cap is exactly 65536 bytes; one byte over it must
+    // be refused before the file is staged.
+    // The bracketed-paste handler sniffs the header before staging a path as
+    // an image, so the fixture must carry a real PNG signature; only the
+    // total size, not the rest of the content, needs to exceed the cap.
+    let mut oversize = support::PNG_1X1.to_vec();
+    oversize.resize(65536 + 1, 0_u8);
+    std::fs::write(&image_path, &oversize).expect("write oversize fixture");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", image_path.display()).as_bytes())
+        .expect("paste oversize path");
+    input.flush().expect("paste flush");
+    until_normalized(&reader, &mut output, paste_start, "65537");
+    let result = normalized(&output[paste_start..]);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        result.contains("65537") && result.contains("65536"),
+        "refusal must name the observed size and the limit: {result:?}"
+    );
+    assert!(
+        !result.contains("[image: huge.png]"),
+        "oversize image staged: {result:?}"
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "refused paste must not submit a turn"
+    );
+}
+
+/// Catches: aggregate staging refusal erases the existing image/text draft,
+/// submits a partial prompt, or ends the interactive session.
+#[cfg(not(windows))]
+#[test]
+fn image_paste_aggregate_over_cap_refuses_the_turn_and_keeps_the_session() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# image paste fixture\n");
+    // 40000 + 40000 > 65536 aggregate, while each is under the per-image cap.
+    let mut half = support::PNG_1X1.to_vec();
+    half.resize(40_000, 0_u8);
+    let first = ego.file("first.png", "");
+    let second = ego.file("second.png", "");
+    std::fs::write(&first, &half).expect("write first fixture");
+    std::fs::write(&second, &half).expect("write second fixture");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    input.write_all(b"describe these").expect("draft text");
+    input.flush().expect("draft flush");
+    let paste_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", first.display()).as_bytes())
+        .expect("first image path");
+    input.flush().expect("first paste flush");
+    until_normalized(&reader, &mut output, paste_start, "[image: first.png]");
+    let refusal_start = output.len();
+    input
+        .write_all(format!("\x1b[200~{}\x1b[201~", second.display()).as_bytes())
+        .expect("second image path");
+    input.flush().expect("second paste flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        refusal_start,
+        "65536-byte aggregate limit",
+    );
+    drain_until_quiet(&reader, &mut output);
+    let refused = normalized(&output[refusal_start..]);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let retained = screen.screen().contents();
+    assert!(retained.contains("describe these"), "{retained:?}");
+    assert!(retained.contains("[image: first.png]"), "{retained:?}");
+    assert!(!refused.contains("[image: second.png]"), "{refused:?}");
+    assert!(
+        stub.generations().is_empty(),
+        "staging must not submit a partial turn"
+    );
+    input
+        .write_all(b"\x15/quit\r")
+        .expect("clear text and quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(
+        status.success(),
+        "the refusal ended the session instead of the turn: {status:?}"
+    );
+    assert!(
+        stub.generations().is_empty(),
+        "a refused turn must not reach the provider"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "uses the real general pasteboard only when it is empty"]
+fn image_paste_clipboard_png_stages_and_reaches_next_turn() {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::{NSData, NSString};
+
+    struct RestorePasteboard(Option<String>);
+    impl Drop for RestorePasteboard {
+        fn drop(&mut self) {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            if let Some(text) = &self.0 {
+                board.setString_forType(
+                    &NSString::from_str(text),
+                    &NSString::from_str("public.utf8-plain-text"),
+                );
+            }
+        }
+    }
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let original_types = pasteboard
+        .types()
+        .map(|types| {
+            types
+                .iter()
+                .map(|kind| kind.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        original_types
+            .iter()
+            .all(|kind| kind.contains("plain-text") || kind == "NSStringPboardType"),
+        "live clipboard canary requires empty or plain-text pasteboard; types: {original_types:?}"
+    );
+    let original_text = pasteboard
+        .stringForType(&NSString::from_str("public.utf8-plain-text"))
+        .map(|text| text.to_string());
+    pasteboard.clearContents();
+    let _restore = RestorePasteboard(original_text);
+    let png = NSData::with_bytes(support::PNG_1X1);
+    assert!(pasteboard.setData_forType(Some(&png), &NSString::from_str("public.png")));
+
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("CLIPBOARD-IMAGE-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# clipboard fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input.write_all(b"\x16").expect("Ctrl+V");
+    input.flush().expect("paste flush");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let rendered = normalized(&output[paste_start..]);
+        if rendered.contains("[image: clipboard 1]") || rendered.contains("non-text content block")
+        {
+            break;
+        }
+        if let Ok(chunk) = reader.recv_timeout(Duration::from_millis(100)) {
+            output.extend(chunk);
+        }
+    }
+    let staged = normalized(&output[paste_start..]);
+    input
+        .write_all(b"describe this clipboard image\r")
+        .expect("next turn");
+    input.flush().expect("next turn flush");
+    until_normalized(&reader, &mut output, paste_start, "CLIPBOARD-IMAGE-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        staged.contains("[image: clipboard 1]"),
+        "no clipboard image chip: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    assert!(
+        generations[0]
+            .to_string()
+            .contains(r#""media_type":"image/png""#),
+        "clipboard image missing: {}",
+        generations[0]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "uses the real general pasteboard only when it is empty"]
+fn image_paste_clipboard_tiff_stages_and_reaches_next_turn() {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::{NSData, NSString};
+
+    struct RestorePasteboard(Option<String>);
+    impl Drop for RestorePasteboard {
+        fn drop(&mut self) {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            if let Some(text) = &self.0 {
+                board.setString_forType(
+                    &NSString::from_str(text),
+                    &NSString::from_str("public.utf8-plain-text"),
+                );
+            }
+        }
+    }
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let original_types = pasteboard
+        .types()
+        .map(|types| {
+            types
+                .iter()
+                .map(|kind| kind.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        original_types
+            .iter()
+            .all(|kind| kind.contains("plain-text") || kind == "NSStringPboardType"),
+        "live clipboard canary requires empty or plain-text pasteboard; types: {original_types:?}"
+    );
+    let original_text = pasteboard
+        .stringForType(&NSString::from_str("public.utf8-plain-text"))
+        .map(|text| text.to_string());
+    pasteboard.clearContents();
+    let _restore = RestorePasteboard(original_text);
+    let mut tiff_bytes = Vec::new();
+    {
+        let mut cursor = std::io::Cursor::new(&mut tiff_bytes);
+        let mut encoder = tiff::encoder::TiffEncoder::new(&mut cursor).expect("tiff encoder");
+        encoder
+            .write_image::<tiff::encoder::colortype::RGB8>(1, 1, &[255_u8, 0, 0])
+            .expect("write 1x1 tiff");
+    }
+    let tiff = NSData::with_bytes(&tiff_bytes);
+    assert!(pasteboard.setData_forType(Some(&tiff), &NSString::from_str("public.tiff")));
+
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("CLIPBOARD-TIFF-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# clipboard tiff fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input.write_all(b"\x16").expect("Ctrl+V");
+    input.flush().expect("paste flush");
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while Instant::now() < deadline {
+        let rendered = normalized(&output[paste_start..]);
+        if rendered.contains("[image: clipboard 1]") || rendered.contains("non-text content block")
+        {
+            break;
+        }
+        if let Ok(chunk) = reader.recv_timeout(Duration::from_millis(100)) {
+            output.extend(chunk);
+        }
+    }
+    let staged = normalized(&output[paste_start..]);
+    input
+        .write_all(b"describe this clipboard image\r")
+        .expect("next turn");
+    input.flush().expect("next turn flush");
+    until_normalized(&reader, &mut output, paste_start, "CLIPBOARD-TIFF-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        staged.contains("[image: clipboard 1]"),
+        "no clipboard image chip: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    assert!(
+        generations[0]
+            .to_string()
+            .contains(r#""media_type":"image/png""#),
+        "clipboard TIFF must reach the model re-encoded as PNG: {}",
+        generations[0]
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "uses the real general pasteboard only when it is empty"]
+fn image_paste_clipboard_text_only_leaves_ordinary_paste_unchanged() {
+    use objc2_app_kit::NSPasteboard;
+    use objc2_foundation::NSString;
+
+    struct RestorePasteboard(Option<String>);
+    impl Drop for RestorePasteboard {
+        fn drop(&mut self) {
+            let board = NSPasteboard::generalPasteboard();
+            board.clearContents();
+            if let Some(text) = &self.0 {
+                board.setString_forType(
+                    &NSString::from_str(text),
+                    &NSString::from_str("public.utf8-plain-text"),
+                );
+            }
+        }
+    }
+
+    let pasteboard = NSPasteboard::generalPasteboard();
+    let original_types = pasteboard
+        .types()
+        .map(|types| {
+            types
+                .iter()
+                .map(|kind| kind.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    assert!(
+        original_types
+            .iter()
+            .all(|kind| kind.contains("plain-text") || kind == "NSStringPboardType"),
+        "live clipboard canary requires empty or plain-text pasteboard; types: {original_types:?}"
+    );
+    let original_text = pasteboard
+        .stringForType(&NSString::from_str("public.utf8-plain-text"))
+        .map(|text| text.to_string());
+    pasteboard.clearContents();
+    let _restore = RestorePasteboard(original_text);
+    pasteboard.setString_forType(
+        &NSString::from_str("CLIPBOARD-TEXT-PAYLOAD"),
+        &NSString::from_str("public.utf8-plain-text"),
+    );
+
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("CLIPBOARD-TEXT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES),
+    );
+    ego.file("AGENTS.md", "# clipboard text fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    let prompt_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, prompt_start);
+    let paste_start = output.len();
+    input.write_all(b"\x16").expect("Ctrl+V");
+    input.flush().expect("paste flush");
+    until_normalized(&reader, &mut output, paste_start, "CLIPBOARD-TEXT-PAYLOAD");
+    let staged = normalized(&output[paste_start..]);
+    input.write_all(b"\r").expect("submit");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, paste_start, "CLIPBOARD-TEXT-ANSWER");
+    let quit_start = output.len();
+    until_prompt_from(&reader, &mut output, quit_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !staged.contains("[image:"),
+        "text-only pasteboard must never stage an image chip: {staged:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 1, "unexpected turns: {generations:?}");
+    let body = generations[0].to_string();
+    assert!(
+        !body.contains(r#""media_type":"image/png""#),
+        "no image should have been sent for a text-only pasteboard: {body}"
+    );
+    assert!(
+        body.contains("CLIPBOARD-TEXT-PAYLOAD"),
+        "the pasted text must reach the model as ordinary prompt text: {body}"
+    );
+}
+
+/// How long every wait below gives the child to make progress.
+///
+/// One name for what was ten copies of the same eight seconds. Each use is a
+/// liveness bailout and none is a pass condition: a wait that expires panics,
+/// and the one deadline that does not — the post-EOF exit wait — kills the
+/// child and then asserts on a status a killed child cannot have. So the value
+/// only decides how long a genuine hang takes to become legible, and raising
+/// it cannot turn a failing run green.
+///
+/// The gap it must clear is the child's, measured while the whole workspace's
+/// test binaries run at once rather than on an idle machine. Eight seconds was
+/// the idle figure: `live_surface_esc_expedites_sampling_once_and_reports_interrupt_state`
+/// passes alone and failed under `cargo test --workspace` having seen only the
+/// two idle prompt renders, on a startup gap rather than on anything it
+/// asserts.
+const PROGRESS_DEADLINE: Duration = Duration::from_secs(60);
+/// The full slash catalogue previously exceeded 60 seconds under host load.
+/// Its first unresponsive step still fails after at most 180 seconds.
+const SLASH_ACTION_DEADLINE: Duration = Duration::from_secs(180);
+const HELP_END: &str = "────────────────";
+
+enum WriteRequest {
+    Bytes(Vec<u8>),
+    Flush,
+}
+
+struct PtyWriter {
+    sender: mpsc::SyncSender<WriteRequest>,
+}
+
+impl Write for PtyWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.sender
+            .send(WriteRequest::Bytes(bytes.to_vec()))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY writer stopped"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.sender
+            .send(WriteRequest::Flush)
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "PTY writer stopped"))
+    }
+}
+
+/// Own the process and terminal threads while each test drives its scenario.
+struct PtySession {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    pair: portable_pty::PtyPair,
+    reader_join: thread::JoinHandle<()>,
+    writer_join: thread::JoinHandle<()>,
+}
+
+impl PtySession {
+    fn start(
+        ego: &Ego,
+        rows: u16,
+        cols: u16,
+        screen: Option<(u16, u16)>,
+    ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
+        Self::start_command(ego.pty_command(), rows, cols, screen)
+    }
+
+    fn start_command(
+        command: portable_pty::CommandBuilder,
+        rows: u16,
+        cols: u16,
+        screen: Option<(u16, u16)>,
+    ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
+        Self::start_command_with_cursor_replies(command, rows, cols, screen, None)
+    }
+
+    fn start_command_with_cursor_replies(
+        command: portable_pty::CommandBuilder,
+        rows: u16,
+        cols: u16,
+        screen: Option<(u16, u16)>,
+        cursor_replies: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> (Self, PtyWriter, mpsc::Receiver<Vec<u8>>) {
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let child = pair.slave.spawn_command(command).expect("spawn");
+        let (input, responder, writer_join) = writer_owner_with_cursor_replies(
+            pair.master.take_writer().expect("writer"),
+            cursor_replies,
+        );
+        let (reader, reader_join) = stream_with_screen(
+            pair.master.try_clone_reader().expect("reader"),
+            responder,
+            screen,
+        );
+        (
+            Self {
+                child,
+                pair,
+                reader_join,
+                writer_join,
+            },
+            input,
+            reader,
+        )
+    }
+
+    /// Reap after the scenario sends its exit key, preserving the exit status.
+    fn quit(self, input: PtyWriter) -> ExitStatus {
+        let status = bounded_exit(self.child);
+        drop(input);
+        drop(self.pair);
+        self.reader_join.join().expect("reader thread");
+        self.writer_join.join().expect("writer thread");
+        status
+    }
+}
+
+fn writer_owner(
+    writer: Box<dyn Write + Send>,
+) -> (
+    PtyWriter,
+    mpsc::SyncSender<WriteRequest>,
+    thread::JoinHandle<()>,
+) {
+    writer_owner_with_cursor_replies(writer, None)
+}
+
+fn writer_owner_with_cursor_replies(
+    mut writer: Box<dyn Write + Send>,
+    cursor_replies: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> (
+    PtyWriter,
+    mpsc::SyncSender<WriteRequest>,
+    thread::JoinHandle<()>,
+) {
+    let (sender, requests) = mpsc::sync_channel(32);
+    let responder = sender.clone();
+    let join = thread::spawn(move || {
+        for request in requests {
+            let result = match request {
+                WriteRequest::Bytes(bytes) => {
+                    if bytes.starts_with(b"\x1b[")
+                        && bytes.ends_with(b"R")
+                        && cursor_replies.as_ref().is_some_and(|enabled| {
+                            !enabled.load(std::sync::atomic::Ordering::SeqCst)
+                        })
+                    {
+                        continue;
+                    }
+                    writer.write_all(&bytes)
+                }
+                WriteRequest::Flush => writer.flush(),
+            };
+            if result.is_err() {
+                break;
+            }
+        }
+    });
+    (PtyWriter { sender }, responder, join)
+}
+
+fn stream(
+    reader: Box<dyn Read + Send>,
+    dsr_responder: mpsc::SyncSender<WriteRequest>,
+) -> (mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+    stream_with_screen(reader, dsr_responder, None)
+}
+
+fn stream_with_screen(
+    reader: Box<dyn Read + Send>,
+    dsr_responder: mpsc::SyncSender<WriteRequest>,
+    screen_size: Option<(u16, u16)>,
+) -> (mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+    stream_with_resizable_screen(
+        reader,
+        dsr_responder,
+        screen_size.map(|size| Arc::new(Mutex::new(size))),
+    )
+}
+
+/// [`stream_with_screen`] whose emulated screen follows `screen_size`, so the
+/// cursor reports stay true after the test resizes the PTY.
+fn stream_with_resizable_screen(
+    reader: Box<dyn Read + Send>,
+    dsr_responder: mpsc::SyncSender<WriteRequest>,
+    screen_size: Option<Arc<Mutex<(u16, u16)>>>,
+) -> (mpsc::Receiver<Vec<u8>>, thread::JoinHandle<()>) {
+    let (sender, receiver) = mpsc::channel();
+    let join = thread::spawn(move || {
+        let mut reader = reader;
+        let mut chunk = [0; 1024];
+        let mut pending = Vec::new();
+        let mut screen = screen_size.map(|size| {
+            let (rows, cols) = *size.lock().expect("screen size lock");
+            (vt100::Parser::new(rows, cols, 0), size)
+        });
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(length) => {
+                    if let Some((screen, size)) = &mut screen {
+                        let (rows, cols) = *size.lock().expect("screen size lock");
+                        if screen.screen().size() != (rows, cols) {
+                            screen.screen_mut().set_size(rows, cols);
+                        }
+                        screen.process(&chunk[..length]);
+                    }
+                    pending.extend_from_slice(&chunk[..length]);
+                    while let Some(index) = pending
+                        .windows(DSR_QUERY.len())
+                        .position(|window| window == DSR_QUERY)
+                    {
+                        pending.drain(..index + DSR_QUERY.len());
+                        let response = screen.as_ref().map_or_else(
+                            || DSR_RESPONSE.to_vec(),
+                            |(screen, _)| {
+                                let (row, col) = screen.screen().cursor_position();
+                                support::cursor_report(row, col).into_bytes()
+                            },
+                        );
+                        if dsr_responder.send(WriteRequest::Bytes(response)).is_err()
+                            || dsr_responder.send(WriteRequest::Flush).is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if pending.len() > DSR_QUERY.len() - 1 {
+                        let keep = DSR_QUERY.len() - 1;
+                        pending.drain(..pending.len() - keep);
+                    }
+                    if sender.send(chunk[..length].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    (receiver, join)
+}
+
+fn until(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, needle: &[u8]) {
+    until_with_context(receiver, output, needle, String::new);
+}
+
+fn until_from(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &[u8],
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !output[start..]
+        .windows(needle.len())
+        .any(|window| window == needle)
+    {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "raw PTY wait timed out for needle {:?}; output: {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&output[start..]),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "raw PTY wait failed for needle {:?}: {error}; output: {:?}",
+                String::from_utf8_lossy(needle),
+                String::from_utf8_lossy(&output[start..]),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+#[cfg(not(windows))]
+fn rendered_prompt_count(output: &[u8]) -> usize {
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+    output
+        .windows(HIDE_CURSOR.len())
+        .enumerate()
+        .filter(|(_, window)| *window == HIDE_CURSOR)
+        .filter(|(start, _)| {
+            let frame = &output[*start..];
+            let Some(end) = frame
+                .windows(SHOW_CURSOR.len())
+                .position(|window| window == SHOW_CURSOR)
+            else {
+                return false;
+            };
+            let frame = &frame[..end + SHOW_CURSOR.len()];
+            let mut terminal = vt100::Parser::new(24, 120, 0);
+            terminal.process(frame);
+            let contents = terminal.screen().contents();
+            let last_row = contents.trim_end().lines().last().unwrap_or_default();
+            !contents.contains("Esc to interrupt")
+                && (last_row.trim() == ">"
+                    || last_row.trim_start().starts_with("> ")
+                    || last_row.trim_end().ends_with(" | >"))
+        })
+        .count()
+}
+
+#[cfg(windows)]
+fn rendered_prompt_count(output: &[u8]) -> usize {
+    const WORKING: &[u8] = b"working \xe2\x80\x94 Esc cancels";
+    const CANCELLING: &[u8] = b"cancelling active work";
+    let is_busy = |position: usize| {
+        let line_start = output[..position]
+            .iter()
+            .rposition(|byte| matches!(byte, b'\r' | b'\n'))
+            .map_or(0, |position| position + 1);
+        let prefix = &output[line_start..position];
+        prefix
+            .windows(WORKING.len())
+            .any(|window| window == WORKING)
+            || prefix
+                .windows(CANCELLING.len())
+                .any(|window| window == CANCELLING)
+    };
+    output
+        .iter()
+        .enumerate()
+        .filter(|(position, byte)| {
+            if **byte != b'>' || is_busy(*position) {
+                return false;
+            }
+            let is_status_prompt = output
+                .get(position.saturating_sub(2)..*position)
+                .is_some_and(|prefix| prefix == b"| ");
+            // ConPTY may pad the empty composer row with spaces instead of
+            // erasing it, and then reset the status colour the row was drawn in.
+            let tail = &output[position + 1..];
+            let tail = &tail[tail.iter().take_while(|byte| **byte == b' ').count()..];
+            let tail = tail.strip_prefix(b"\x1b[m").unwrap_or(tail);
+            is_status_prompt
+                || tail.is_empty()
+                || tail.starts_with(b"\x1b[K")
+                || tail.starts_with(b"\x1b[1C")
+                || tail.starts_with(b"\r")
+                || tail.starts_with(b"\n")
+        })
+        .count()
+}
+
+fn until_successor_ready(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    action: &str,
+    stub: &Stub,
+) {
+    // Compaction has no scrollback receipt. Its live busy frame separates
+    // source redraws from the successor's completed idle composer.
+    let receipt = if action == "compact" {
+        "Compacting".to_owned()
+    } else {
+        format!("{action}ed session")
+    };
+    let receipt_end = start
+        + output[start..]
+            .windows(receipt.len())
+            .position(|window| window == receipt.as_bytes())
+            .expect("successor receipt was observed")
+        + receipt.len();
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while support::ready_prompt_count(&output[receipt_end..]) == 0 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "{action} successor composer wait failed: {error}; requests: {:?}; PTY: {:?}",
+                stub.requests(),
+                String::from_utf8_lossy(output),
+            );
+        });
+        output.extend(chunk);
+    }
+}
+
+fn until_prompt_from(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    until_prompt_from_with_context(receiver, output, start, PROGRESS_DEADLINE, "PTY prompt");
+}
+
+fn until_prompt_after_reply(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    reply: &[u8],
+) {
+    until(receiver, output, reply);
+    // The same read can contain both the reply and its successor composer.
+    let reply_end = output
+        .windows(reply.len())
+        .rposition(|window| window == reply)
+        .expect("reply received")
+        + reply.len();
+    until_prompt_from(receiver, output, reply_end);
+}
+
+// Catches: an accepted-line redraw authorizing quit before the post-reply idle
+// composer, or discarding that composer when it shares the reply's PTY read.
+#[cfg(not(windows))]
+#[test]
+fn post_reply_prompt_wait_ignores_accepted_line_redraws() {
+    // Accepted-line frames and the answer marker captured from the failing rb PTY.
+    let prior = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> original queued text\x1b7\x1b8\x1b[?25h\x1b[J\r\n\x1b[6n\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> edited queued text\x1b7\x1b8\x1b[?25h\x1b[J\r\nSTEER-RECEIVED";
+    let idle = b"\x1b[6n\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J> \x1b7\x1b8\x1b[?25h";
+    assert!(rendered_prompt_count(prior) > 0);
+    for coalesced in [false, true] {
+        let (sender, receiver) = mpsc::channel();
+        let mut output = prior.to_vec();
+        if coalesced {
+            output.extend_from_slice(idle);
+        } else {
+            sender.send(idle.to_vec()).expect("successor idle frame");
+        }
+        drop(sender);
+        until_prompt_after_reply(&receiver, &mut output, b"STEER-RECEIVED");
+        assert_eq!(&output[prior.len()..], idle);
+    }
+}
+
+fn until_prompt_from_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    budget: Duration,
+    context: &str,
+) {
+    let deadline = Instant::now() + budget;
+    while rendered_prompt_count(&output[start..]) == 0 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "{context} wait timed out; raw output: {:?}; normalized output: {:?}",
+                String::from_utf8_lossy(&output[start..]),
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "{context} wait failed: {error}; raw output: {:?}; normalized output: {:?}",
+                String::from_utf8_lossy(&output[start..]),
+                normalized(&output[start..]),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+fn until_local_action_completed(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    command: &str,
+    budget: Duration,
+) {
+    let marker = format!("/{command}");
+    // A fresh editor cycle must follow acceptance; an earlier redraw is not
+    // command completion. A host-intercepted Enter suspends the editor before
+    // accept_buffer echoes the line, while native acceptance echoes it first.
+    let completed = |bytes: &[u8]| {
+        let find_after = |bytes: &[u8], marker: &[u8]| {
+            bytes
+                .windows(marker.len())
+                .position(|window| window == marker)
+                .map(|position| position + marker.len())
+        };
+        let echoed = find_after(bytes, marker.as_bytes())?;
+        let stopped = find_after(bytes, b"\x1b[?2004l")?;
+        let accepted = echoed.max(stopped);
+        let resumed = accepted + find_after(&bytes[accepted..], b"\x1b[?2004h")?;
+        (rendered_prompt_count(&bytes[resumed..]) > 0).then_some(resumed)
+    };
+    let deadline = Instant::now() + budget;
+    while completed(&output[start..]).is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "/{command} terminal completion timed out; output: {:?}",
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "/{command} terminal completion wait failed: {error}; output: {:?}",
+                normalized(&output[start..]),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+fn until_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    needle: &[u8],
+    context: impl Fn() -> String,
+) {
+    until_with_context_and_budget(receiver, output, needle, context, PROGRESS_DEADLINE);
+}
+
+fn until_with_context_and_budget(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    needle: &[u8],
+    context: impl Fn() -> String,
+    budget: Duration,
+) {
+    let deadline = Instant::now() + budget;
+    while !output.windows(needle.len()).any(|window| window == needle) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let received = if remaining.is_zero() {
+            Err(mpsc::RecvTimeoutError::Timeout)
+        } else {
+            receiver.recv_timeout(remaining)
+        };
+        let chunk = match received {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                drain(receiver, output);
+                panic!(
+                    "semantic PTY wait failed for needle {:?}: {error}; context: {}; raw output: {:?}; normalized output: {:?}",
+                    String::from_utf8_lossy(needle),
+                    context(),
+                    String::from_utf8_lossy(output),
+                    normalized(output),
+                );
+            }
+        };
+        output.extend(chunk);
+    }
+}
+
+// Catches: busy redraws resetting the semantic wait's budget forever while
+// the expected event never arrives. A late marker must not make that pass.
+#[test]
+#[should_panic(expected = "semantic PTY wait failed for needle")]
+fn semantic_pty_wait_deadline_is_not_extended_by_redraws() {
+    let (sender, receiver) = mpsc::channel();
+    thread::scope(|scope| {
+        scope.spawn(move || {
+            for _ in 0..25 {
+                if sender.send(b"Working redraw".to_vec()).is_err() {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            let _ = sender.send(b"expected event".to_vec());
+        });
+        until_with_context_and_budget(
+            &receiver,
+            &mut Vec::new(),
+            b"expected event",
+            || "busy redraw regression".to_owned(),
+            Duration::from_millis(50),
+        );
+    });
+}
+
+fn strip_csi(bytes: &[u8]) -> Vec<u8> {
+    let mut plain = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if index + 1 < bytes.len()
+            && bytes[index] == b'\x1b'
+            && matches!(bytes[index + 1], b'7' | b'8')
+        {
+            index += 2;
+            continue;
+        }
+        if index + 1 < bytes.len() && bytes[index] == b'\x1b' && bytes[index + 1] == b'[' {
+            index += 2;
+            while index < bytes.len() {
+                let byte = bytes[index];
+                index += 1;
+                if (0x40..=0x7e).contains(&byte) {
+                    break;
+                }
+            }
+            continue;
+        }
+        plain.push(bytes[index]);
+        index += 1;
+    }
+    plain
+}
+
+fn normalized(bytes: &[u8]) -> String {
+    let plain = strip_csi(bytes);
+    let text = String::from_utf8_lossy(&plain).replace("\r\n", "\n");
+    text.split('\n')
+        .map(|line| {
+            line.strip_prefix("> ")
+                .or_else(|| line.strip_prefix("… "))
+                .unwrap_or(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+// Read the complete semantic notice, independent of physical terminal wraps.
+fn until_notice_prose(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !support::notice_prose(&normalized(&output[start..])).contains(needle) {
+        output.extend(
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "notice wait failed for {needle:?}: {error}; {}",
+                        normalized(&output[start..])
+                    )
+                }),
+        );
+    }
+}
+
+// Observe retained terminal prose, not live redraws between wrapped rows.
+fn until_screen_prose(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    rows: u16,
+    cols: u16,
+    needle: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !support::notice_prose(&screen_rows(output, rows, cols).join("\n"))
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .contains(needle)
+    {
+        output.extend(
+            receiver
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|error| {
+                    let tail = &output[output.len().saturating_sub(32 * 1024)..];
+                    panic!(
+                        "screen wait failed for {needle:?}: {error}; {:?}; raw PTY byte tail: {tail:?}; normalized tail: {:?}",
+                        screen_rows(output, rows, cols),
+                        normalized(tail)
+                    )
+                }),
+        );
+    }
+}
+
+fn until_normalized(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !normalized(&output[start..]).contains(needle) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "normalized PTY wait timed out for needle {:?}; raw output: {:?}; normalized output: {:?}",
+                needle,
+                String::from_utf8_lossy(&output[start..]),
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = match receiver.recv_timeout(remaining) {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                drain(receiver, output);
+                panic!(
+                    "normalized PTY wait failed for needle {:?}: {error}; raw output: {:?}; normalized output: {:?}",
+                    needle,
+                    String::from_utf8_lossy(&output[start..]),
+                    normalized(&output[start..]),
+                );
+            }
+        };
+        output.extend(chunk);
+    }
+}
+
+fn until_normalized_or_generation(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+    stub: &Stub,
+) {
+    while !normalized(&output[start..]).contains(needle) {
+        let generations = stub.generations();
+        if !generations.is_empty() {
+            drain(receiver, output);
+            panic!(
+                "PTY input fell through to provider while waiting for {needle:?}; generations: {generations:?}; output: {:?}",
+                normalized(&output[start..]),
+            );
+        }
+        let chunk = receiver
+            .recv_timeout(PROGRESS_DEADLINE)
+            .unwrap_or_else(|error| {
+                drain(receiver, output);
+                panic!(
+                    "PTY wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
+                    stub.generations(),
+                    normalized(&output[start..]),
+                )
+            });
+        output.extend(chunk);
+    }
+}
+
+fn until_normalized_without_new_generation(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+    stub: &Stub,
+    generation_count: usize,
+) {
+    until_normalized_without_new_generation_with_context(
+        receiver,
+        output,
+        start,
+        needle,
+        stub,
+        generation_count,
+        (PROGRESS_DEADLINE, "PTY output"),
+    );
+}
+
+fn until_normalized_without_new_generation_with_context(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    needle: &str,
+    stub: &Stub,
+    generation_count: usize,
+    (budget, context): (Duration, &str),
+) {
+    // Terminal ticks must not restart the overall progress deadline: a missing
+    // native reply otherwise waits forever while an activity row keeps redrawing.
+    let deadline = Instant::now() + budget;
+    while !normalized(&output[start..]).contains(needle) {
+        let generations = stub.generations();
+        if generations.len() != generation_count {
+            drain(receiver, output);
+            panic!(
+                "{context} changed provider generation count while waiting for {needle:?}; expected {generation_count}, generations: {generations:?}; output: {:?}",
+                normalized(&output[start..]),
+            );
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let received = if remaining.is_zero() {
+            Err(mpsc::RecvTimeoutError::Timeout)
+        } else {
+            receiver.recv_timeout(remaining)
+        };
+        let chunk = received.unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "{context} wait failed for {needle:?}: {error}; generations: {:?}; output: {:?}",
+                stub.generations(),
+                normalized(&output[start..]),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+fn until_post_trust_prompt(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    until_prompt_from(receiver, output, start);
+}
+
+fn submit_local_action(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    input: &mut impl Write,
+    stub: &Stub,
+    command: &str,
+    expected: Option<&str>,
+) {
+    let generation_count = stub.generations().len();
+    let start = output.len();
+    input
+        .write_all(format!("/{command}\r").as_bytes())
+        .unwrap_or_else(|error| panic!("write /{command}: {error}"));
+    input
+        .flush()
+        .unwrap_or_else(|error| panic!("flush /{command}: {error}"));
+    if let Some(expected) = expected {
+        until_normalized_without_new_generation_with_context(
+            receiver,
+            output,
+            start,
+            expected,
+            stub,
+            generation_count,
+            (SLASH_ACTION_DEADLINE, &format!("/{command} action output")),
+        );
+    }
+    if expected.is_none() {
+        until_local_action_completed(receiver, output, start, command, SLASH_ACTION_DEADLINE);
+    }
+    assert_eq!(
+        stub.generations().len(),
+        generation_count,
+        "/{command} leaked into a provider generation"
+    );
+    if expected.is_none() {
+        // A terminal repaint confirms Reedline accepted the command, but the
+        // coordinator may still be consuming an earlier line. /help is a
+        // visible driver round trip before the next action is submitted.
+        submit_local_action(receiver, output, input, stub, "help", Some(HELP_END));
+    }
+}
+
+#[test]
+fn slash_action_stall_reports_command_and_waiting_step() {
+    let stub = Stub::start(Plan::default());
+    for (command, expected, step) in [
+        ("help", Some("εgo commands"), "action output"),
+        ("plan", None, "terminal completion"),
+    ] {
+        let (sender, receiver) = mpsc::channel();
+        drop(sender);
+        let mut output = Vec::new();
+        let mut input = Vec::new();
+        let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            submit_local_action(&receiver, &mut output, &mut input, &stub, command, expected);
+        }))
+        .expect_err("a closed PTY output channel must stop the slash-action wait");
+        let message = failure
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| failure.downcast_ref::<&str>().copied())
+            .expect("panic with a diagnostic message");
+        assert!(
+            message.contains(&format!("/{command}")),
+            "action missing: {message}"
+        );
+        assert!(message.contains(step), "waiting step missing: {message}");
+    }
+}
+
+fn until_prompt_after(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, previous: usize) {
+    until_ready_prompt_after(receiver, output, previous, support::ready_prompt_count);
+}
+
+fn until_ready_prompt_after(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    previous: usize,
+    count: fn(&[u8]) -> usize,
+) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while count(output) <= previous {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            drain(receiver, output);
+            panic!(
+                "prompt count did not advance beyond {previous}; output: {:?}",
+                normalized(output),
+            );
+        }
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            drain(receiver, output);
+            panic!(
+                "prompt count did not advance beyond {previous}: {error}; output: {:?}",
+                normalized(output),
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+fn drain(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
+    let deadline = Instant::now() + Duration::from_millis(100);
+    while Instant::now() < deadline {
+        match receiver.try_recv() {
+            Ok(chunk) => output.extend(chunk),
+            Err(_) => break,
+        }
+    }
+}
+
+/// A raw PTY read may have already received a complete redraw while its reader
+/// thread still holds the chunk. A key assertion begins only after that queue
+/// is quiet, so an old marker cannot satisfy a later-key expectation.
+/// Read frames until the parsed screen is `settled`, or the deadline passes.
+/// A repaint that comes after a short pause still counts; the caller's
+/// assertion reports the last screen when the frame never arrives.
+fn until_screen(
+    receiver: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    (rows, cols): (u16, u16),
+    settled: impl Fn(&str) -> bool,
+) -> String {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    let mut screen = vt100::Parser::new(rows, cols, 0);
+    screen.process(output);
+    loop {
+        let visible = screen.screen().contents();
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if settled(&visible) || remaining.is_zero() {
+            return visible;
+        }
+        match receiver.recv_timeout(remaining) {
+            Ok(chunk) => {
+                screen.process(&chunk);
+                output.extend(chunk);
+            }
+            Err(_) => return visible,
+        }
+    }
+}
+
+// Catches: the Esc receipt assertion runs on a screen read after a 100 ms
+// quiet gap, before the late frame that erases the Working row.
+#[test]
+fn esc_receipt_waits_for_settled_frame_before_asserting() {
+    let (sender, receiver) = mpsc::channel();
+    let mut output = b"\x1b[1;1HInterrupted by user\x1b[2;1HWorking 0s".to_vec();
+    let late = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(400));
+        sender
+            .send(b"\x1b[2;1H\x1b[2K".to_vec())
+            .expect("late frame");
+    });
+    let visible = until_screen(&receiver, &mut output, (4, 40), |visible| {
+        !visible.contains("Working")
+    });
+    late.join().expect("frame sender");
+    assert!(visible.contains("Interrupted by user"), "{visible:?}");
+    assert!(!visible.contains("Working"), "{visible:?}");
+}
+
+fn drain_until_quiet(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while let Ok(chunk) = receiver.recv_timeout(Duration::from_millis(100)) {
+        output.extend(chunk);
+        assert!(Instant::now() < deadline, "PTY redraw never became quiet");
+    }
+}
+
+fn count_exact_strings(value: &serde_json::Value, target: &str) -> usize {
+    match value {
+        serde_json::Value::String(value) => usize::from(value == target),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(|value| count_exact_strings(value, target))
+            .sum(),
+        serde_json::Value::Object(values) => values
+            .values()
+            .map(|value| count_exact_strings(value, target))
+            .sum(),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => 0,
+    }
+}
+
+fn count_notes_write_results(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Array(values) => values.iter().map(count_notes_write_results).sum(),
+        serde_json::Value::Object(values)
+            if values.get("role").and_then(|v| v.as_str()) == Some("tool") =>
+        {
+            usize::from(
+                values
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+                    .and_then(|result| result.get("files").and_then(|v| v.as_array()).cloned())
+                    .is_some_and(|files| {
+                        files.len() == 1
+                            && files[0].get("index").and_then(|v| v.as_u64()) == Some(0)
+                            && files[0].get("status").and_then(|v| v.as_str()) == Some("completed")
+                            && files[0].get("bytes").and_then(|v| v.as_u64()) == Some(10)
+                            && files[0]
+                                .get("path")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|path| {
+                                    Path::new(path)
+                                        .file_name()
+                                        .is_some_and(|name| name == "notes.md")
+                                })
+                    }),
+            )
+        }
+        serde_json::Value::Object(values) => values.values().map(count_notes_write_results).sum(),
+        _ => 0,
+    }
+}
+
+fn line_framed(reply: Reply, content: &str) -> Reply {
+    let Reply::Paced {
+        mut head,
+        tail,
+        pause,
+    } = reply
+    else {
+        return reply;
+    };
+    let encoded = serde_json::to_string(content).expect("the marker is serialisable");
+    let framed = serde_json::to_string(&format!("{content}\n"))
+        .expect("the line-framed marker is serialisable");
+    head = head.replace(
+        &format!("\"content\":{encoded}"),
+        &format!("\"content\":{framed}"),
+    );
+    Reply::Paced { head, tail, pause }
+}
+
+fn paced_line(content: &str, pause: Duration) -> Reply {
+    line_framed(paced(content, pause), content)
+}
+
+fn gated_paced_line(content: &str) -> (Reply, Arc<ReleaseGate>) {
+    let Reply::Paced { head, tail, .. } = paced_line(content, Duration::ZERO) else {
+        unreachable!("paced_line always returns a paced reply");
+    };
+    let gate = ReleaseGate::new();
+    (
+        Reply::GatedPaced {
+            head,
+            tail,
+            gate: Arc::clone(&gate),
+        },
+        gate,
+    )
+}
+
+fn find(output: &[u8], needle: &[u8]) -> usize {
+    output
+        .windows(needle.len())
+        .position(|window| window == needle)
+        .unwrap_or_else(|| panic!("missing PTY marker {:?}", String::from_utf8_lossy(needle)))
+}
+
+// Cancellation receipts precede the driver's idle transition. Require the
+// completed status frame before follow-up input can enter a cursor query.
+fn until_idle_status_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    // Narrow status layouts can drop the separator with an omitted segment.
+    until_normalized(receiver, output, start, "qwen3 ");
+    let idle_row = start + find(&output[start..], "qwen3 ".as_bytes());
+    let idle_frame = output[..idle_row]
+        .windows(b"\x1b[?25l".len())
+        .rposition(|bytes| bytes == b"\x1b[?25l")
+        .expect("idle status belongs to a painter frame");
+    until_draft_ready(receiver, output, idle_frame);
+}
+
+fn until_draft_ready(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>, start: usize) {
+    let mut pending = output.split_off(start);
+    #[cfg(not(windows))]
+    until_ready_prompt_after(
+        receiver,
+        &mut pending,
+        0,
+        support::ready_prompt_count_with_status,
+    );
+    #[cfg(windows)]
+    until_prompt_after(receiver, &mut pending, 0);
+    output.extend(pending);
+}
+
+#[test]
+fn draft_ready_wait_rejects_typed_and_incomplete_repaints() {
+    // Captured from the failing real rb PTY transcript in story 429-055c.
+    let empty = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b7\x1b[37m\x1b[0m\x1b8\x1b[?25h";
+    let typed = b"\x1b[0m\x1b[?25l\x1b[4;1H\x1b[J\x1b[92m\x1b[96m> \x1b[35m\x1b[0m\x1b[0m\x1b[37munsent draft\x1b[0m\x1b7\x1b8\x1b[?25h";
+    for transient in [typed.as_slice(), &empty[..empty.len() - 6]] {
+        let (sender, receiver) = mpsc::channel();
+        let mut output = empty.to_vec();
+        let start = output.len();
+        output.extend_from_slice(transient);
+        sender.send(empty.to_vec()).expect("completed empty frame");
+        until_draft_ready(&receiver, &mut output, start);
+        assert!(
+            support::ready_prompt_count(&output[start..]) > 0,
+            "draft readiness accepted a typed or incomplete frame"
+        );
+    }
+}
+
+#[test]
+fn live_surface_preserves_draft_through_busy_permission_and_resize() {
+    #[cfg(not(windows))]
+    let older_draft = "fn older_draft() {\n    println!(\"older e\\u{301} 👩‍💻\");\n}\n";
+    #[cfg(windows)]
+    let older_draft = "fn older_draft() { println!(\"older e\\u{301} 👩💻\"); }";
+    #[cfg(not(windows))]
+    let draft = "fn newest_draft() {\n    println!(\"newest e\\u{301} 👩‍💻\");\n}\n";
+    #[cfg(windows)]
+    let draft = "fn newest_draft() { println!(\"newest e\\u{301} 👩💻\"); }";
+    let write_arguments = serde_json::json!({"files": [{
+        "path": "notes.md",
+        "contents": "permission",
+    }]})
+    .to_string();
+    let (paced_tool_call, provider_gate) =
+        gated_paced_tool_call_line("write-1", "write", &write_arguments);
+    let stub = Stub::start(Plan {
+        completions: vec![
+            paced_tool_call,
+            Reply::Sse(text("NEWEST-DRAFT-RECEIVED")),
+            Reply::Sse(text("OLDER-DRAFT-RECEIVED")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "default",
+        "--sandbox",
+        "off",
+    ]);
+    // These cases all begin by answering the trust question, so the workspace
+    // has to hold something worth asking about. An empty checkout is asked
+    // nothing at all.
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    #[cfg(unix)]
+    {
+        let tty = pair.master.tty_name().expect("slave PTY name");
+        let option = if cfg!(target_os = "macos") {
+            "-f"
+        } else {
+            "-F"
+        };
+        let setup = std::process::Command::new("stty")
+            .arg(option)
+            .arg(tty)
+            .arg("ixon")
+            .output()
+            .expect("enable XOFF on the real slave PTY");
+        assert!(
+            setup.status.success(),
+            "stty could not enable IXON: {}",
+            String::from_utf8_lossy(&setup.stderr)
+        );
+    }
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let idle_start = output.len();
+    until_prompt_from(&reader, &mut output, idle_start);
+
+    #[cfg(not(windows))]
+    input.write_all(b"\x1b[200~").expect("paste prefix");
+    input
+        .write_all(older_draft.as_bytes())
+        .expect("paste older draft");
+    #[cfg(not(windows))]
+    input.write_all(b"\x1b[201~").expect("paste suffix");
+    input.write_all(b"\x13").expect("stash older draft");
+    input.flush().expect("stash older draft flush");
+    let older_stash_start = output.len();
+    until_prompt_from(&reader, &mut output, older_stash_start);
+    #[cfg(not(windows))]
+    input.write_all(b"\x1b[200~").expect("paste prefix");
+    input
+        .write_all(draft.as_bytes())
+        .expect("paste newest draft");
+    #[cfg(not(windows))]
+    input.write_all(b"\x1b[201~").expect("paste suffix");
+    input.write_all(b"\x13").expect("stash newest draft");
+    input.flush().expect("stash newest draft flush");
+    let newest_stash_start = output.len();
+    // This next repaint follows XOFF without an XON byte. The real PTY must
+    // deliver Ctrl+S to ego rather than freeze terminal output.
+    until_prompt_from(&reader, &mut output, newest_stash_start);
+    drain_until_quiet(&reader, &mut output);
+    let local_action_start = output.len();
+    input
+        .write_all(b"/version\r")
+        .expect("local version action");
+    input.flush().expect("local version action flush");
+    until_prompt_from(&reader, &mut output, local_action_start);
+    drain_until_quiet(&reader, &mut output);
+    assert!(
+        !output[local_action_start..]
+            .windows(b"newest_draft".len())
+            .any(|window| window == b"newest_draft"),
+        "a local action must leave parked input in the stash"
+    );
+    let newest_restore_start = output.len();
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
+    until_from(&reader, &mut output, newest_restore_start, b"newest_draft");
+    let older_restore_start = output.len();
+    input.write_all(b"\r").expect("busy steer submit");
+    input.flush().expect("busy steer flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        0,
+        "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+    );
+    until_from(&reader, &mut output, older_restore_start, b"older_draft");
+    provider_gate.release();
+    until(&reader, &mut output, b"STREAMED-BEFORE-TOOL");
+    until_with_context(&reader, &mut output, b"[d] details", || {
+        let requests = stub.requests();
+        let paths: Vec<_> = requests
+            .iter()
+            .map(|request| request.path.clone())
+            .collect();
+        format!("stub request paths: {paths:?}")
+    });
+    // The banner this wait is about to look for again is on screen already,
+    // so a render the reader thread is still holding would satisfy the
+    // post-resize wait with a pre-resize frame and prove nothing. The queue is
+    // emptied before the marker is taken, for the reason `drain_until_quiet`
+    // exists.
+    drain_until_quiet(&reader, &mut output);
+    let resize_start = output.len();
+    pair.master
+        .resize(PtySize {
+            rows: 8,
+            cols: 12,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("resize");
+    until_from(&reader, &mut output, resize_start, b"[d] details");
+    input.write_all(b"y").expect("immediate permission answer");
+    input.flush().expect("permission answer flush");
+    until(&reader, &mut output, b"NEWEST-DRAFT-RECEIVED");
+    input.write_all(b"\r").expect("submit restored older draft");
+    input.flush().expect("older draft submit flush");
+    until(&reader, &mut output, b"OLDER-DRAFT-RECEIVED");
+    let unsent_draft_start = output.len();
+    input.write_all(b"unsent draft").expect("type unsent draft");
+    input.flush().expect("unsent draft flush");
+    until_from(&reader, &mut output, unsent_draft_start, b"unsent draft");
+    // Exclude queued typed repaints before waiting for the completed empty
+    // frame produced by stashing, rather than accepting any "> " substring.
+    drain_until_quiet(&reader, &mut output);
+    let unsent_stash_start = output.len();
+    input.write_all(b"\x13").expect("stash unsent draft");
+    input.flush().expect("stash unsent draft flush");
+    until_draft_ready(&reader, &mut output, unsent_stash_start);
+    let manual_restore_start = output.len();
+    input
+        .write_all(b"\x13")
+        .expect("restore from empty composer");
+    input.flush().expect("manual restore flush");
+    until_from(&reader, &mut output, manual_restore_start, b"unsent draft");
+    let manual_restash_start = output.len();
+    input.write_all(b"\x13").expect("park restored draft again");
+    input.flush().expect("manual restash flush");
+    until_draft_ready(&reader, &mut output, manual_restash_start);
+    drain_until_quiet(&reader, &mut output);
+    let width_restore_start = output.len();
+    pair.master
+        .resize(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("restore terminal width");
+    // Resize starts another cursor query; EOF must follow its ready frame.
+    until_draft_ready(&reader, &mut output, width_restore_start);
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    until_normalized(&reader, &mut output, 0, "1 unsent draft");
+
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+    drain(&reader, &mut output);
+
+    assert!(!output.windows(8).any(|window| window == b"\x1b[?1049h"));
+    assert!(!output.windows(8).any(|window| window == b"\x1b[?1000h"));
+    assert!(!output.windows(8).any(|window| window == b"\x1b[?1006h"));
+    assert!(output.windows(8).any(|window| window == b"\x1b[?2004h"));
+    assert!(output.windows(8).any(|window| window == b"\x1b[?2004l"));
+
+    let rendered = normalized(&output);
+    for fact in ["Allow write ", "✓ write notes.md", "Risk: limited"] {
+        assert!(
+            rendered.contains(fact),
+            "permission presentation omitted {fact:?}: {rendered}"
+        );
+    }
+
+    let streamed = find(&output, b"STREAMED-BEFORE-TOOL");
+    let permission = find(&output, b"[d] details");
+    let draft_received = find(&output, b"NEWEST-DRAFT-RECEIVED");
+    let older_draft_received = find(&output, b"OLDER-DRAFT-RECEIVED");
+    assert!(streamed < permission);
+    assert!(permission < draft_received);
+    assert!(draft_received < older_draft_received);
+
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 3);
+    let write_result_counts: Vec<_> = generations.iter().map(count_notes_write_results).collect();
+    assert_eq!(
+        write_result_counts,
+        vec![0, 1, 1],
+        "the tool result must reach each subsequent model request exactly once: {generations:#?}"
+    );
+    let draft_counts: Vec<_> = generations
+        .iter()
+        .map(|generation| count_exact_strings(generation, draft))
+        .collect();
+    assert_eq!(draft_counts, vec![0, 1, 1]);
+    let older_draft_counts: Vec<_> = generations
+        .iter()
+        .map(|generation| count_exact_strings(generation, older_draft))
+        .collect();
+    assert_eq!(older_draft_counts, vec![0, 0, 1]);
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, "unsent draft"))
+            .sum::<usize>(),
+        0,
+        "an unsent draft must never enter model history"
+    );
+    assert!(
+        normalized(&output)
+            .to_ascii_lowercase()
+            .contains("1 unsent draft"),
+        "exit must report the exact unsent-draft count rather than silently discarding it"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn interactive_exec_resolves_real_home_local_bin_from_effective_path() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "local-path-exec",
+                "exec",
+                // The first exec of a freshly written script can exceed 1s under suite
+                // load; this test asserts PATH resolution, not exec latency.
+                r#"{"argv":["local-tool","tasks.js","list"],"cwd":null,"timeout_ms":30000}"#,
+            )),
+            Reply::Sse(text("LOCAL-PATH-EXEC-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "yolo",
+        "--sandbox",
+        "off",
+    ]);
+    let executable = ego.home_file(
+        ".local/bin/local-tool",
+        "#!/bin/sh\nprintf '%s\\n' LOCAL-TOOL-FROM-LOCAL-PATH\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("local executable metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make local fixture executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+
+    let finished = ego
+        .env("PATH", &path)
+        .run_pty("run the local story command");
+
+    assert_eq!(finished.code, Some(0), "{}", finished.stdout);
+    assert!(finished.stdout.contains("LOCAL-PATH-EXEC-DONE"));
+    assert!(
+        !finished.stdout.contains("[y] yes"),
+        "yolo must not stop for a second confirmation: {}",
+        finished.stdout
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    assert!(
+        generations[1]
+            .to_string()
+            .contains("LOCAL-TOOL-FROM-LOCAL-PATH"),
+        "the executable found on effective PATH did not run: {}",
+        generations[1]
+    );
+}
+
+// Catches: Meta-o being queued as composer input or refused while a turn runs.
+#[test]
+fn busy_expand_shortcut_shows_hidden_output_without_submitting_draft() {
+    busy_expand_shortcut_transcript(false);
+}
+
+// Catches: a truncated row advertising only /expand, hiding the live shortcut.
+#[test]
+fn busy_expand_hint_names_the_live_shortcut() {
+    busy_expand_shortcut_transcript(true);
+}
+
+fn busy_expand_shortcut_transcript(check_hint: bool) {
+    // Screen markdown emits complete paragraphs, not a single trailing newline.
+    // Finish this paragraph before gating the response tail.
+    let (sampling, gate) = gated_paced_line("EXPAND-TURN-STILL-RUNNING\n");
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "expand-exec",
+                "exec",
+                r#"{"argv":["printf","HIDDEN-FIRST\nHIDDEN-SECOND\nTAIL-ONE\nTAIL-TWO\nTAIL-THREE\n"],"cwd":null,"timeout_ms":1000}"#,
+            )),
+            sampling,
+        ],
+        ..Plan::default()
+    });
+    // Release the fixture worker even when an assertion fails.
+    struct ReleaseOnDrop(Arc<ReleaseGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "yolo",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input
+        .write_all(b"show five output lines\r")
+        .expect("submit turn");
+    input.flush().expect("submit turn flush");
+    until_normalized(&reader, &mut output, 0, "EXPAND-TURN-STILL-RUNNING");
+    let collapsed = normalized(&output);
+    assert!(collapsed.contains("2 more lines"), "{collapsed}");
+    if check_hint {
+        // Assert before exercising the shortcut so each regression has its own oracle.
+        assert!(
+            collapsed.contains("2 more lines · Option+O or /expand"),
+            "the truncated row must advertise the running-turn shortcut: {collapsed}"
+        );
+    }
+    // Only match a standalone output line: the exec header also names its argv.
+    assert!(!collapsed.contains("  HIDDEN-FIRST\n"), "{collapsed}");
+
+    let draft_start = output.len();
+    input.write_all(b"unsent expand draft").expect("busy draft");
+    input.flush().expect("busy draft flush");
+    until_from(&reader, &mut output, draft_start, b"unsent expand draft");
+    // Text appears before the repaint finishes its cursor query. Sending Meta-o
+    // during that query lets the terminal-position reader consume the key.
+    until_from(&reader, &mut output, draft_start, b"\x1b[?25h");
+    drain_until_quiet(&reader, &mut output);
+    let expand_start = output.len();
+    input.write_all(b"\x1bo").expect("Meta-o");
+    input.flush().expect("Meta-o flush");
+    until_normalized(&reader, &mut output, expand_start, "  HIDDEN-FIRST\n");
+    until_normalized(&reader, &mut output, expand_start, "  HIDDEN-SECOND\n");
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "shortcut must not submit a turn"
+    );
+
+    gate.release();
+    until_normalized(&reader, &mut output, expand_start, "qwen3 · ");
+    let clear_start = output.len();
+    input.write_all(b"\x03").expect("clear preserved draft");
+    input.flush().expect("clear draft flush");
+    until_prompt_from(&reader, &mut output, clear_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert_eq!(stub.generations().len(), 2, "draft must not queue a turn");
+    assert!(
+        !stub
+            .generations()
+            .iter()
+            .any(|request| request.to_string().contains("unsent expand draft")),
+        "the unsent draft must never reach the provider"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn busy_composer_stays_editable_and_reports_elapsed_tool_work() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "slow-exec",
+                "exec",
+                r#"{"argv":["slow-work"],"cwd":null,"timeout_ms":15000}"#,
+            )),
+            Reply::Sse(text("SLOW-TOOL-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "yolo",
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let executable = ego.home_file(
+        ".local/bin/slow-work",
+        "#!/bin/sh\nprintf started > \"$EGO_HOME/tool-started\"\ni=0\nwhile [ ! -f \"$EGO_HOME/tool-release\" ]; do\n  /bin/sleep 0.05\n  i=$((i + 1))\n  if [ \"$i\" -ge 300 ]; then exit 124; fi\ndone\nprintf 'TOOL-FINISHED\\n'\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("slow tool metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make slow tool executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+    let started = ego.home_path().join("tool-started");
+    let release = ego.home_path().join("tool-release");
+    let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
+
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"run slow tool\r").expect("first turn");
+    input.flush().expect("first turn flush");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "tool did not start: {:?}",
+            normalized(&output)
+        );
+        drain(&reader, &mut output);
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    let draft_start = output.len();
+    input
+        .write_all(b"draft while tool runs")
+        .expect("busy draft");
+    input.flush().expect("busy draft flush");
+    until_from(&reader, &mut output, draft_start, b"draft while tool runs");
+    drain_until_quiet(&reader, &mut output);
+    let progress_start = output.len();
+    thread::sleep(Duration::from_millis(2200));
+    drain(&reader, &mut output);
+    let progress = normalized(&output[progress_start..]);
+
+    let finish_start = output.len();
+    std::fs::write(&release, b"go").expect("release tool");
+    until(&reader, &mut output, b"SLOW-TOOL-DONE");
+    until_normalized(&reader, &mut output, finish_start, "qwen3 · ");
+    let clear_start = output.len();
+    input.write_all(b"\x03").expect("clear draft");
+    input.flush().expect("clear draft flush");
+    until_prompt_from(&reader, &mut output, clear_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        progress.contains("Working "),
+        "no elapsed progress while the tool ran: {progress:?}"
+    );
+    assert!(
+        !stub
+            .generations()
+            .iter()
+            .any(|generation| generation.to_string().contains("draft while tool runs")),
+        "unsent busy draft reached the provider"
+    );
+}
+
+#[test]
+fn live_surface_esc_expedites_sampling_once_and_reports_interrupt_state() {
+    let queued = "steer while sampling";
+    let extension = "tail extension while expedited";
+    let (initial, initial_gate) = gated_paced_line("STREAMED-BEFORE-ESC");
+    let (expedited, expedited_gate) = gated_paced_line("EXPEDITED-RECEIVED");
+    let stub = Stub::start(Plan {
+        completions: vec![initial, expedited, Reply::Sse(text("EXTENSION-RECEIVED"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    // These cases all begin by answering the trust question, so the workspace
+    // has to hold something worth asking about. An empty checkout is asked
+    // nothing at all.
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"STREAMED-BEFORE-ESC");
+
+    input.write_all(queued.as_bytes()).expect("queue steer");
+    input.write_all(b"\r").expect("queue steer submit");
+    input.flush().expect("queue steer flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        0,
+        "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+    );
+
+    let esc_start = output.len();
+    input.write_all(b"\x1b").expect("Esc");
+    input.flush().expect("Esc flush");
+    until_normalized(&reader, &mut output, esc_start, "interrupt pending");
+    initial_gate.release();
+    until(&reader, &mut output, b"EXPEDITED-RECEIVED");
+    // The queue banner this second steer will raise was already rendered once,
+    // by the first steer, and that earlier render sits after `esc_start`.
+    // Searching from there would match it and let the gate below open while
+    // the extension was still being typed — a pass that depends on how much
+    // output the reader thread happened to be holding, which is exactly how
+    // this case failed under a loaded suite and passed alone. The marker is
+    // taken once the queue is quiet, so nothing before the extension can
+    // satisfy the wait for it.
+    drain_until_quiet(&reader, &mut output);
+    let extension_start = output.len();
+    input
+        .write_all(extension.as_bytes())
+        .expect("extend expedited tail");
+    input
+        .write_all(b"\r")
+        .expect("extend expedited tail submit");
+    input.flush().expect("extend expedited tail flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        extension_start,
+        "Messages to be submitted after next tool call (press esc to interrupt and send immediately)",
+    );
+    let second_esc_start = output.len();
+    input.write_all(b"\x1b").expect("Esc extension");
+    input.flush().expect("Esc extension flush");
+    until_normalized(&reader, &mut output, second_esc_start, "interrupt pending");
+    expedited_gate.release();
+    until(&reader, &mut output, b"EXTENSION-RECEIVED");
+    until_prompt_from(&reader, &mut output, second_esc_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        3,
+        "repeated Esc must not duplicate delivery"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, queued))
+            .collect::<Vec<_>>(),
+        vec![0, 1, 1],
+        "the expedited tail is delivered once and then retained in history"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, extension))
+            .collect::<Vec<_>>(),
+        vec![0, 0, 1],
+        "a tail extension is delivered once after the first marker"
+    );
+    assert!(!output.windows(8).any(|window| window == b"\x1b[?1049h"));
+    assert!(!output.windows(8).any(|window| window == b"\x1b[?1000h"));
+    assert!(!output.windows(8).any(|window| window == b"\x1b[?1006h"));
+}
+
+// Catches: Ctrl+Enter on a busy composer inserting a newline or queueing behind
+// the turn, instead of the one durable expedite Esc uses, and a second delivery.
+#[test]
+fn live_surface_ctrl_enter_steers_a_busy_turn_once() {
+    let steer = "steer now with ctrl enter";
+    let (initial, initial_gate) = gated_paced_line("STREAMED-BEFORE-STEER");
+    let stub = Stub::start(Plan {
+        completions: vec![initial, Reply::Sse(text("STEER-RECEIVED"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"STREAMED-BEFORE-STEER");
+
+    let steer_start = output.len();
+    input.write_all(steer.as_bytes()).expect("steer text");
+    input.write_all(b"\x1b[13;5u").expect("Ctrl+Enter");
+    input.flush().expect("Ctrl+Enter flush");
+    until_normalized(&reader, &mut output, steer_start, "interrupt pending");
+    initial_gate.release();
+    until(&reader, &mut output, b"STEER-RECEIVED");
+    until_prompt_from(&reader, &mut output, steer_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+
+    let steered = normalized(&output[steer_start..]);
+    assert!(
+        steered.contains("Queued message continues the work"),
+        "an accepted steer is shown as a queued continuation: {steered:?}"
+    );
+    assert!(
+        !steered.contains("Interrupted by user"),
+        "an accepted steer is not a manual interruption: {steered:?}"
+    );
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        2,
+        "one interrupted turn, one steered turn"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, steer))
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+        "the steer reaches the provider once, in the next request"
+    );
+}
+
+// Catches: Up on a busy composer leaving the old text queued, or delivering the
+// original and the edited text both.
+#[test]
+fn live_surface_up_recalls_queued_text_and_delivers_only_the_edit() {
+    let steer = "original queued text";
+    let edited = "edited queued text";
+    let (initial, initial_gate) = gated_paced_line("STREAMED-BEFORE-STEER");
+    let stub = Stub::start(Plan {
+        completions: vec![initial, Reply::Sse(text("STEER-RECEIVED"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"STREAMED-BEFORE-STEER");
+
+    let steer_start = output.len();
+    input.write_all(steer.as_bytes()).expect("steer text");
+    input.write_all(b"\r").expect("queue Enter");
+    input.flush().expect("queue Enter flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        steer_start,
+        "Messages to be submitted after next tool call",
+    );
+    let recall_start = output.len();
+    input.write_all(b"\x1b[A").expect("recall Up");
+    input.flush().expect("recall flush");
+    until_normalized(&reader, &mut output, recall_start, steer);
+    let events_path = ego
+        .home_path()
+        .join("sessions")
+        .join(support::FIXTURE_SESSION_ID)
+        .join("events.jsonl");
+    let recalled_events = std::fs::read_to_string(&events_path)
+        .expect("queue recall persisted before restoring text");
+    let mut state = ego_core::state::SessionState::default();
+    for line in recalled_events.lines() {
+        let envelope: serde_json::Value = serde_json::from_str(line).expect("event envelope");
+        if envelope["payload"]["event"].is_null() {
+            continue;
+        }
+        let event: ego_core::event::domain::DomainEvent =
+            serde_json::from_value(envelope["payload"]["event"].clone()).expect("domain event");
+        state.apply(&event);
+    }
+    assert_eq!(
+        state.queue_status(),
+        ego_core::state::QueueStatus::default(),
+        "recall removes the pending prompt before Enter"
+    );
+    input.write_all(b"\x15").expect("clear recalled draft");
+    input.write_all(edited.as_bytes()).expect("edit draft");
+    input.write_all(b"\r").expect("requeue Enter");
+    input.flush().expect("requeue flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        recall_start,
+        "Messages to be submitted after next tool call",
+    );
+    initial_gate.release();
+    until_prompt_after_reply(&reader, &mut output, b"STEER-RECEIVED");
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2, "the initial turn and one queued turn");
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, steer))
+            .collect::<Vec<_>>(),
+        vec![0, 0],
+        "withdrawn text never reaches the provider"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, edited))
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+    let events = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("durable session");
+    assert_eq!(
+        events.matches("PromptRetracted").count(),
+        1,
+        "withdrawal is durable"
+    );
+}
+
+// Catches: recalling pasted slash text turns the next Enter into a local action,
+// withdrawing the user prompt instead of delivering it once to the provider.
+#[test]
+fn live_surface_recalled_pasted_slash_text_is_not_reinterpreted_as_a_command() {
+    let steer = "/help recalled prompt";
+    let edited = steer;
+    let (initial, initial_gate) = gated_paced_line("STREAMED-BEFORE-STEER");
+    let stub = Stub::start(Plan {
+        completions: vec![initial, Reply::Sse(text("STEER-RECEIVED"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"STREAMED-BEFORE-STEER");
+
+    let steer_start = output.len();
+    input.write_all(b"\x1b[200~").expect("paste start");
+    input
+        .write_all(steer.as_bytes())
+        .expect("pasted prompt text");
+    input.write_all(b"\x1b[201~").expect("paste end");
+    input.write_all(b"\r").expect("queue Enter");
+    input.flush().expect("queue flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        steer_start,
+        "Messages to be submitted after next tool call",
+    );
+    let recall_start = output.len();
+    input.write_all(b"\x1b[A").expect("recall Up");
+    input.flush().expect("recall flush");
+    until_normalized(&reader, &mut output, recall_start, steer);
+    input.write_all(b"\r").expect("requeue Enter");
+    input.flush().expect("requeue flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        recall_start,
+        "Messages to be submitted after next tool call",
+    );
+    initial_gate.release();
+    until_prompt_after_reply(&reader, &mut output, b"STEER-RECEIVED");
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        2,
+        "initial generation and one recalled prompt delivery"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, edited))
+            .collect::<Vec<_>>(),
+        vec![0, 1]
+    );
+}
+
+#[test]
+fn live_surface_meta_p_and_model_slash_share_one_modal_and_paste_stays_prompt() {
+    // A real Ollama /api/tags response includes embedding-only rows. The
+    // picker must project only chat models from that response.
+    let tags = r#"{"models":[{"name":"qwen3","capabilities":["completion","tools"]},{"name":"embeddinggemma:300m-qat-q8_0","capabilities":["embedding"]}]}"#;
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((200, tags.to_string())),
+        completions: vec![Reply::Sse(text("PASTED-SLASH-PROMPT"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    // These cases all begin by answering the trust question, so the workspace
+    // has to hold something worth asking about. An empty checkout is asked
+    // nothing at all.
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    drain(&reader, &mut output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let startup_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, startup_start);
+    assert!(
+        !String::from_utf8_lossy(&output[startup_start..])
+            .contains("the local action handler is not installed"),
+        "activation must complete before the first live prompt"
+    );
+    until(&reader, &mut output, "qwen3 · ".as_bytes());
+    drain_until_quiet(&reader, &mut output);
+
+    let typing_start = output.len();
+    input.write_all(b"immagini").expect("type a draft");
+    input.flush().expect("draft flush");
+    until_from(&reader, &mut output, typing_start, b"immagini");
+    drain_until_quiet(&reader, &mut output);
+    let typed_frame =
+        String::from_utf8_lossy(&strip_csi(&output[typing_start..])).replace("\r\n", "\n");
+    assert!(
+        typed_frame.contains("\n> immagini"),
+        "the native status must occupy a row above the composer; raw PTY: {:?}",
+        String::from_utf8_lossy(&output[typing_start..])
+    );
+    let clear_start = output.len();
+    input.write_all(b"\x03").expect("clear draft");
+    input.flush().expect("clear draft flush");
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        clear_start,
+        PROGRESS_DEADLINE,
+        "clear initial draft",
+    );
+
+    let resize_start = output.len();
+    pair.master
+        .resize(PtySize {
+            rows: 8,
+            cols: 40,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("narrow resize");
+    until_from(&reader, &mut output, resize_start, "qwen3 · ".as_bytes());
+    drain_until_quiet(&reader, &mut output);
+    let narrow_start = output.len();
+    input.write_all(b"short").expect("type in narrow PTY");
+    input.flush().expect("narrow draft flush");
+    until_from(&reader, &mut output, narrow_start, b"short");
+    drain_until_quiet(&reader, &mut output);
+    let narrow_frame =
+        String::from_utf8_lossy(&strip_csi(&output[narrow_start..])).replace("\r\n", "\n");
+    assert!(
+        narrow_frame.contains("\n> short"),
+        "resizing must keep status above the composer: {narrow_frame:?}"
+    );
+    let narrow_clear = output.len();
+    input.write_all(b"\x15").expect("clear narrow draft");
+    input.flush().expect("clear narrow draft flush");
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        narrow_clear,
+        PROGRESS_DEADLINE,
+        "clear narrow draft",
+    );
+    let restore_start = output.len();
+    pair.master
+        .resize(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("restore size");
+    until_from(&reader, &mut output, restore_start, "qwen3 · ".as_bytes());
+    drain_until_quiet(&reader, &mut output);
+    let slash_start = output.len();
+    input.write_all(b"/model\r").expect("model slash action");
+    input.flush().expect("model slash action flush");
+    until_normalized_or_generation(&reader, &mut output, slash_start, "Select model", &stub);
+    drain_until_quiet(&reader, &mut output);
+    let slash_modal = normalized(&output[slash_start..]);
+    assert!(slash_modal.contains("Select model"));
+    assert!(
+        !slash_modal.contains("embeddinggemma"),
+        "embedding-only models cannot appear in the chat picker: {slash_modal}"
+    );
+    let enter_start = output.len();
+    input.write_all(b"\r").expect("model picker enter");
+    input.flush().expect("model picker enter flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        enter_start,
+        "Select reasoning for ollama/qwen3",
+    );
+    drain_until_quiet(&reader, &mut output);
+    // This test compares the two model entry points; it does not change the
+    // persisted reasoning default, so close the follow-up picker explicitly.
+    let slash_accept_start = output.len();
+    input
+        .write_all(b"\x1b")
+        .expect("close model reasoning picker");
+    input.flush().expect("close model reasoning picker flush");
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        slash_accept_start,
+        PROGRESS_DEADLINE,
+        "close slash reasoning picker",
+    );
+
+    let meta_start = output.len();
+    // ConPTY translates the standard ESC-prefixed terminal spelling into a
+    // Windows console Alt-P event; writing both bytes together keeps the PTY
+    // observation atomic.
+    input.write_all(b"\x1bp").expect("Meta-P");
+    input.flush().expect("Meta-P flush");
+    until_normalized(&reader, &mut output, meta_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    let meta_modal = normalized(&output[meta_start..]);
+    // Compare the complete latest menu, not the number of painter redraws.
+    assert_eq!(
+        meta_modal.rsplit_once("Select model").unwrap().1,
+        slash_modal.rsplit_once("Select model").unwrap().1,
+        "Meta-P and /model must present the same complete picker"
+    );
+    let meta_close_start = output.len();
+    input.write_all(b"\x1b").expect("close Meta-P modal");
+    input.flush().expect("close Meta-P modal flush");
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        meta_close_start,
+        PROGRESS_DEADLINE,
+        "close Meta-P picker",
+    );
+
+    let composed_start = output.len();
+    input.write_all("π".as_bytes()).expect("composed Option-P");
+    input.flush().expect("composed Option-P flush");
+    until_normalized(&reader, &mut output, composed_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    let composed_modal = normalized(&output[composed_start..]);
+    assert_eq!(
+        composed_modal.rsplit_once("Select model").unwrap().1,
+        slash_modal.rsplit_once("Select model").unwrap().1,
+        "composed Option-P and /model must present the same complete picker"
+    );
+    let composed_close_start = output.len();
+    input.write_all(b"\x1b").expect("close composed modal");
+    input.flush().expect("close composed modal flush");
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        composed_close_start,
+        PROGRESS_DEADLINE,
+        "close composed picker",
+    );
+
+    #[cfg(not(windows))]
+    {
+        let pasted_start = output.len();
+        input
+            .write_all(b"\x1b[200~/model\x1b[201~\r")
+            .expect("pasted slash");
+        input.flush().expect("pasted slash flush");
+        until_normalized(&reader, &mut output, pasted_start, "PASTED-SLASH-PROMPT");
+        until_prompt_from_with_context(
+            &reader,
+            &mut output,
+            pasted_start,
+            PROGRESS_DEADLINE,
+            "submit pasted slash",
+        );
+        drain_until_quiet(&reader, &mut output);
+        assert!(
+            rendered_prompt_count(&output[pasted_start..]) > 0,
+            "the composer must remain available after the pasted prompt"
+        );
+        assert!(
+            !normalized(&output[pasted_start..]).contains("Select model"),
+            "pasted slash text stays a prompt instead of opening the picker"
+        );
+        assert_eq!(stub.generations().len(), 1);
+        assert!(stub.generations()[0].to_string().contains("/model"));
+    }
+
+    let draft_start = output.len();
+    input
+        .write_all(b"draft restored after picker")
+        .expect("type modal draft");
+    input.flush().expect("type modal draft flush");
+    until_from(
+        &reader,
+        &mut output,
+        draft_start,
+        b"draft restored after picker",
+    );
+    let draft_modal_start = output.len();
+    input.write_all(b"\x1bp").expect("Meta-P with draft");
+    input.flush().expect("Meta-P with draft flush");
+    until_normalized(&reader, &mut output, draft_modal_start, "Select model");
+    let draft_close_start = output.len();
+    input.write_all(b"\x1b").expect("close draft modal");
+    input.flush().expect("close draft modal flush");
+    until_from(
+        &reader,
+        &mut output,
+        draft_close_start,
+        b"draft restored after picker",
+    );
+    assert!(
+        normalized(&output[draft_close_start..]).contains("draft restored after picker"),
+        "the modal restores the exact composer text"
+    );
+
+    let cleanup_start = output.len();
+    input.write_all(b"\x03").expect("clear restored draft");
+    input.flush().expect("clear restored draft flush");
+    until_prompt_from_with_context(
+        &reader,
+        &mut output,
+        cleanup_start,
+        PROGRESS_DEADLINE,
+        "clear restored draft",
+    );
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+}
+
+// Catches: the live picker loses unavailable-provider context after navigation.
+#[test]
+fn model_picker_unavailable_groups_read_without_a_legend_at_80_columns() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# picker grouping fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(b"/model\r").expect("open picker");
+    input.flush().expect("picker flush");
+    until_normalized(&reader, &mut output, start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    // Filtering still runs through the production selector and snapshot.
+    let filtered = output.len();
+    input.write_all(b"anthropic").expect("filter picker");
+    input.flush().expect("filter flush");
+    until_normalized(&reader, &mut output, filtered, "filter: anthropic");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    assert!(
+        visible.contains("anthropic — unavailable: not signed in"),
+        "{visible}"
+    );
+    assert!(visible.contains("ego auth login anthropic"), "{visible}");
+    assert!(!visible.contains("| !"), "{visible}");
+    assert!(!visible.contains("✓ available"), "{visible}");
+    let start = output.len();
+    input.write_all(b"\x1b").expect("close picker");
+    input.flush().expect("close flush");
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+}
+
+#[test]
+fn model_picker_title_remains_visible_in_a_short_terminal() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 8, 40, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let activation_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, activation_start);
+    drain_until_quiet(&reader, &mut output);
+    let picker_start = output.len();
+    input.write_all(b"/model\r").expect("model action");
+    input.flush().expect("model action flush");
+    until_normalized(&reader, &mut output, picker_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+
+    let mut screen = vt100::Parser::new(8, 40, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    assert!(
+        visible.contains("Select model") && visible.contains("  3. "),
+        "picker heading and three useful choices must fit the terminal: {visible:?}; raw: {:?}",
+        String::from_utf8_lossy(&output[picker_start..])
+    );
+
+    let navigation_start = output.len();
+    for index in 2..=8 {
+        let move_start = output.len();
+        input.write_all(b"\x1b[B").expect("navigate down");
+        input.flush().expect("navigate down flush");
+        until_from(
+            &reader,
+            &mut output,
+            move_start,
+            format!("> {index}.").as_bytes(),
+        );
+        drain_until_quiet(&reader, &mut output);
+    }
+    screen.process(&output[navigation_start..]);
+    let visible = screen.screen().contents();
+    assert!(
+        visible.contains("Select model") && visible.contains("> 8."),
+        "selection and heading must stay visible after scrolling: {visible:?}"
+    );
+
+    input.write_all(b"\x1b").expect("close picker");
+    input.flush().expect("close picker flush");
+    let prompt_start = output.len();
+    until_prompt_from(&reader, &mut output, prompt_start);
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    assert!(session.quit(input).success());
+    assert!(
+        normalized(&output).contains("Option+P model"),
+        "startup banner must advertise the model picker key: {:?}",
+        normalized(&output[activation_start..])
+    );
+}
+
+#[test]
+fn delayed_reply_uses_its_own_row_for_thinking_then_replaces_it_with_text() {
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::GatedPaced {
+            head: String::new(),
+            tail: text("ANSWER-ON-REPLY-ROW"),
+            gate: Arc::clone(&gate),
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"layout check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, 0, "Esc to interrupt");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let user = lines
+        .iter()
+        .position(|line| line.contains("> layout check"))
+        .unwrap_or_else(|| {
+            panic!(
+                "user line absent: {visible:?}; raw: {:?}",
+                String::from_utf8_lossy(&output)
+            )
+        });
+    assert!(
+        lines[user + 1].contains("Esc to interrupt"),
+        "the working line must occupy the reply row: {visible:?}"
+    );
+    assert!(
+        !lines[user + 1].contains('>'),
+        "working row must have no input prompt: {visible:?}"
+    );
+    assert_eq!(
+        visible.matches("qwen3 · ").count(),
+        0,
+        "the submitted status must not remain above the user turn: {visible:?}"
+    );
+
+    gate.release();
+    until_normalized(&reader, &mut output, 0, "ANSWER-ON-REPLY-ROW");
+    // A composer may be drawn before a queued working-row repaint. Observe
+    // the complete idle screen after draining, not a transient prompt frame.
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    loop {
+        drain_until_quiet(&reader, &mut output);
+        let lines = screen_rows(&output, 24, 80);
+        if lines.iter().any(|line| line.trim_end() == ">")
+            && !lines.iter().any(|line| line.contains("Esc to interrupt"))
+            && lines
+                .iter()
+                .any(|line| line.contains("ANSWER-ON-REPLY-ROW"))
+        {
+            break;
+        }
+        output.extend(
+            reader
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("delayed reply never reached the idle screen"),
+        );
+    }
+    let mut final_screen = vt100::Parser::new(24, 80, 0);
+    final_screen.process(&output);
+    let visible = final_screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let user = lines
+        .iter()
+        .position(|line| line.contains("> layout check"))
+        .expect("user line");
+    assert!(
+        lines[user + 1].trim().is_empty(),
+        "prompt boundary: {visible:?}"
+    );
+    assert!(
+        lines[user + 2].contains("ANSWER-ON-REPLY-ROW"),
+        "reply replaces thinking at the same row: {visible:?}"
+    );
+    assert!(
+        !visible.contains("Esc to interrupt"),
+        "the working line must disappear when the turn ends: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+}
+
+#[test]
+fn wrapped_user_prompt_keeps_thinking_and_answer_on_the_next_row() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Paced {
+            head: String::new(),
+            tail: text("WRAPPED-ANSWER"),
+            pause: Duration::from_secs(2),
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 40, Some((24, 40)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input
+        .write_all(b"a very long prompt that spans terminal rows and ends in tailmarker\r")
+        .expect("wrapped turn");
+    input.flush().expect("wrapped turn flush");
+    until_normalized(&reader, &mut output, 0, "Esc to interrupt");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 40, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let tail = lines
+        .iter()
+        .position(|line| line.contains("tailmarker"))
+        .unwrap_or_else(|| panic!("wrapped prompt tail absent: {visible:?}"));
+    assert!(
+        lines[tail + 1].contains("Working") && !lines[tail + 1].contains('>'),
+        "the working line must follow the final wrapped prompt row: {visible:?}"
+    );
+
+    until_normalized(&reader, &mut output, 0, "WRAPPED-ANSWER");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 40, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let tail = lines
+        .iter()
+        .position(|line| line.contains("tailmarker"))
+        .expect("wrapped prompt tail");
+    assert!(
+        lines[tail + 1].trim().is_empty(),
+        "wrapped prompt boundary: {visible:?}"
+    );
+    assert!(
+        lines[tail + 2].contains("WRAPPED-ANSWER"),
+        "answer must replace thinking after wrapped prompt: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+}
+
+#[test]
+fn streamed_reply_keeps_one_working_line_below_the_partial_text() {
+    let (reply, gate) = gated_paced_line("PARTIAL-ANSWER\n");
+    let stub = Stub::start(Plan {
+        completions: vec![reply],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"stream check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, 0, "PARTIAL-ANSWER");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    gate.release();
+    let lines: Vec<_> = visible.lines().collect();
+    let user = lines
+        .iter()
+        .position(|line| line.contains("> stream check"))
+        .expect("user line");
+    assert!(
+        lines[user + 1].trim().is_empty(),
+        "prompt boundary: {visible:?}"
+    );
+    assert!(
+        lines[user + 2].contains("PARTIAL-ANSWER"),
+        "partial text must occupy the reply row: {visible:?}"
+    );
+    assert!(
+        lines[user + 3].contains("Working") && lines[user + 3].contains("Esc to interrupt"),
+        "the working line must stay on its own row below the partial text: {visible:?}"
+    );
+    assert_eq!(
+        visible.matches("Working").count(),
+        1,
+        "exactly one working line while streaming: {visible:?}"
+    );
+
+    let finish_start = output.len();
+    until_prompt_from(&reader, &mut output, finish_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+}
+
+#[test]
+fn cancelling_before_reply_clears_the_thinking_row() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Paced {
+            head: String::new(),
+            tail: text("TOO-LATE"),
+            pause: Duration::from_secs(5),
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, Some((24, 80)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"cancel check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, 0, "Esc to interrupt");
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(24, 80, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    let lines: Vec<_> = visible.lines().collect();
+    let user = lines
+        .iter()
+        .position(|line| line.contains("> cancel check"))
+        .expect("user line");
+    assert!(
+        !lines[user + 1].contains("Working"),
+        "cancelled work must not leave a stale working row: {visible:?}"
+    );
+    assert!(
+        !visible.contains("TOO-LATE"),
+        "a cancelled reply must not arrive: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert_eq!(
+        status.exit_code(),
+        130,
+        "cancel exit: {status:?}; screen: {visible:?}"
+    );
+}
+
+/// catches: an Esc that stops a turn without a word in the transcript, and a
+/// `Working` row left behind in the scrollback.
+#[test]
+fn esc_during_a_turn_leaves_one_interrupted_receipt_and_no_working_row() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Paced {
+            head: String::new(),
+            tail: text("TOO-LATE"),
+            pause: Duration::from_secs(5),
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"cancel check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, 0, "Esc to interrupt");
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
+    let visible = until_screen(&reader, &mut output, (40, 100), |visible| {
+        visible.matches("Interrupted by user").count() == 1 && !visible.contains("Working")
+    });
+
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "one receipt: {visible:?}"
+    );
+    assert!(
+        !visible.contains("Working"),
+        "no activity row stays behind: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    session.quit(input);
+}
+
+/// Catches: cancelling an unmetered stream loses token usage or its noncurrency cost status.
+#[test]
+fn cancelled_stream_usage_keeps_known_cost_and_tokens() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("KNOWN-USAGE")),
+            paced_line("PARTIAL-REPLY\n", Duration::from_secs(5)),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input
+        .write_all(b"first turn\r")
+        .expect("submit completed turn");
+    input.flush().expect("completed turn flush");
+    until_prompt_after_reply(&reader, &mut output, b"KNOWN-USAGE");
+    let turn_start = output.len();
+    input.write_all(b"cancel check\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until_normalized(&reader, &mut output, turn_start, "PARTIAL-REPLY");
+    drain_until_quiet(&reader, &mut output);
+    let mut streaming_screen = vt100::Parser::new(40, 100, 0);
+    streaming_screen.process(&output);
+    assert!(
+        streaming_screen
+            .screen()
+            .contents()
+            .contains("Esc to interrupt"),
+        "reply must still be streaming when Esc is sent: {:?}",
+        streaming_screen.screen().contents()
+    );
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    until_prompt_from(&reader, &mut output, cancel_start);
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(40, 100, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+
+    let log = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("session log");
+    assert!(
+        log.contains(r#""exit_reason":{"Cancelled":"User"}"#),
+        "Esc must cancel the streamed turn: {log}"
+    );
+    let status = visible
+        .lines()
+        .rev()
+        .find(|line| line.contains("qwen3 · "))
+        .expect("idle status row");
+    assert!(
+        !status.contains("unpriced") && !status.contains('$'),
+        "cancel must not show unknown pricing or a false monetary zero: {visible:?}"
+    );
+    let usage_start = output.len();
+    input.write_all(b"/usage\r").expect("usage command");
+    input.flush().expect("usage flush");
+    until_normalized(&reader, &mut output, usage_start, "workspace");
+    until_local_action_completed(
+        &reader,
+        &mut output,
+        usage_start,
+        "usage",
+        SLASH_ACTION_DEADLINE,
+    );
+    drain_until_quiet(&reader, &mut output);
+    let usage = normalized(&output[usage_start..]);
+    assert!(
+        usage.contains("unpriced nonmonetary usage"),
+        "nonmonetary usage cost: {usage:?}"
+    );
+    assert!(
+        !usage.contains("0.0000 USD"),
+        "policy zero is not monetary spend: {usage:?}"
+    );
+    assert!(
+        usage
+            .lines()
+            .filter(|line| line.contains("unpriced nonmonetary usage"))
+            .all(|line| !line.contains("unknown")),
+        "cancelled local turn keeps its nonmonetary cost status: {usage:?}"
+    );
+    assert!(
+        usage.lines().any(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            fields.last() == Some(&"main") && fields.windows(2).any(|values| values == ["10", "4"])
+        }),
+        "completed token counts survive: {usage:?}"
+    );
+
+    let quit_start = output.len();
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    until_normalized(&reader, &mut output, quit_start, "unsent drafts discarded;");
+    session.quit(input);
+    drain(&reader, &mut output);
+    assert!(
+        normalized(&output[quit_start..]).contains("unsent drafts discarded;"),
+        "/quit must be accepted before the process exits: {:?}",
+        normalized(&output[quit_start..]),
+    );
+}
+
+/// catches: Esc on a running tool leaving no tool row and no receipt, and its
+/// `Working` row staying in the scrollback.
+#[cfg(unix)]
+#[test]
+fn esc_on_a_running_tool_leaves_its_row_one_receipt_and_no_working_row() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(tool_call(
+            "slow-exec",
+            "exec",
+            r#"{"argv":["slow-work"],"cwd":null,"timeout_ms":15000}"#,
+        ))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "yolo",
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let executable = ego.home_file(
+        ".local/bin/slow-work",
+        "#!/bin/sh\nprintf started > \"$EGO_HOME/tool-started\"\nprintf 'live-%s\\n' one two three four\nwhile [ ! -f \"$EGO_HOME/tool-continue\" ]; do /bin/sleep 0.05; done\nprintf 'live-%s\\n' five\n/bin/sleep 30\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("slow tool metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make slow tool executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+    let started = ego.home_path().join("tool-started");
+    let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
+
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"run slow tool\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "tool did not start: {:?}",
+            normalized(&output)
+        );
+        drain(&reader, &mut output);
+        thread::sleep(Duration::from_millis(20));
+    }
+    // Catches: live output stays inline or accumulates instead of rolling in place.
+    let preview_is = |visible: &str, expected: [&str; 3], evicted: &str| {
+        let rows: Vec<_> = visible.lines().map(str::trim).collect();
+        rows.windows(4).any(|rows| {
+            rows[0].contains("Working") && rows[0].contains("slow-work") && rows[1..] == expected
+        }) && !visible.contains(evicted)
+    };
+    until_screen(&reader, &mut output, (40, 100), |visible| {
+        preview_is(visible, ["live-two", "live-three", "live-four"], "live-one")
+    });
+    std::fs::write(ego.home_path().join("tool-continue"), "").expect("continue slow tool");
+    until_screen(&reader, &mut output, (40, 100), |visible| {
+        preview_is(
+            visible,
+            ["live-three", "live-four", "live-five"],
+            "live-two",
+        )
+    });
+    let cancel_start = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, cancel_start, "Interrupted by user");
+    until_idle_status_ready(&reader, &mut output, cancel_start);
+    let visible = until_screen(&reader, &mut output, (40, 100), |visible| {
+        visible.matches("Interrupted by user").count() == 1 && !visible.contains("Working")
+    });
+
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "one receipt: {visible:?}"
+    );
+    assert!(
+        visible.contains("slow-work"),
+        "the cancelled tool keeps its row: {visible:?}"
+    );
+    assert!(
+        !visible.contains("Working"),
+        "no activity row stays behind: {visible:?}"
+    );
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    session.quit(input);
+    let log = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("session log");
+    assert!(
+        log.contains(r#""kind":"ToolCallCompleted","ok":false"#)
+            && !log.contains(r#""kind":"ToolCallCompleted","ok":true"#),
+        "the cancelled call is settled as a failure in the durable record: {log}"
+    );
+    assert!(
+        log.contains(r#""exit_reason":{"Cancelled":"User"}"#),
+        "the turn is recorded as cancelled by the user: {log}"
+    );
+}
+
+/// catches: the elapsed counter counting the time a person spent on the
+/// permission modal.
+#[cfg(unix)]
+#[test]
+fn the_working_counter_leaves_out_the_wait_on_a_permission_modal() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "slow-exec",
+                "exec",
+                r#"{"argv":["slow-work"],"cwd":null,"timeout_ms":15000}"#,
+            )),
+            Reply::Sse(text("SLOW-TOOL-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let executable = ego.home_file(
+        ".local/bin/slow-work",
+        "#!/bin/sh\nprintf started > \"$EGO_HOME/tool-started\"\ni=0\nwhile [ ! -f \"$EGO_HOME/tool-release\" ]; do\n  /bin/sleep 0.05\n  i=$((i + 1))\n  if [ \"$i\" -ge 300 ]; then exit 124; fi\ndone\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("slow tool metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make slow tool executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+    let started = ego.home_path().join("tool-started");
+    let release = ego.home_path().join("tool-release");
+    let ego = ego.env("PATH", &path).env("TERM", "xterm-256color");
+
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    let turn_started = Instant::now();
+    input.write_all(b"run slow tool\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until(&reader, &mut output, b"[d] details");
+    let held_since = Instant::now();
+    thread::sleep(Duration::from_secs(5));
+    let held = held_since.elapsed();
+    let allowed = output.len();
+    input.write_all(b"y").expect("allow");
+    input.flush().expect("allow flush");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "tool did not start: {:?}",
+            normalized(&output)
+        );
+        drain(&reader, &mut output);
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::sleep(Duration::from_millis(2200));
+    drain(&reader, &mut output);
+    let after_allow = normalized(&output[allowed..]);
+    // Startup and scheduler delay are active work, not modal wait. Bound the
+    // counter by observed wall time minus the hold, with one second for the
+    // display's whole-second boundary rather than assuming a fast launch.
+    let active_seconds = turn_started.elapsed().saturating_sub(held).as_secs() + 1;
+    std::fs::write(&release, b"go").expect("release tool");
+    until_prompt_after_reply(&reader, &mut output, b"SLOW-TOOL-DONE");
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    session.quit(input);
+
+    let counted: Vec<u64> = after_allow
+        .split("Working ")
+        .skip(1)
+        .filter_map(|rest| rest.split('s').next()?.parse().ok())
+        .collect();
+    assert!(
+        !counted.is_empty() && counted.iter().all(|seconds| *seconds <= active_seconds),
+        "modal hold {held:?} was counted: {counted:?}, active wall-time bound {active_seconds}s in {after_allow:?}"
+    );
+}
+
+/// catches: Esc on the permission modal leaving no receipt, or two.
+#[test]
+fn esc_on_the_permission_modal_denies_the_call_and_leaves_one_receipt() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "slow-exec",
+                "exec",
+                r#"{"argv":["/bin/sh","-c","echo RAN-$((6*7))"],"cwd":null,"timeout_ms":15000}"#,
+            )),
+            Reply::Sse(text("AFTER-DENIAL")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"run a tool\r").expect("submit turn");
+    input.flush().expect("submit flush");
+    until(&reader, &mut output, b"[d] details");
+    drain_until_quiet(&reader, &mut output);
+    let escaped = output.len();
+    input.write_all(b"\x1b").expect("escape");
+    input.flush().expect("escape flush");
+    until_normalized(&reader, &mut output, escaped, "Interrupted by user");
+    drain_until_quiet(&reader, &mut output);
+    let mut screen = vt100::Parser::new(40, 100, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "one receipt: {visible:?}"
+    );
+    assert!(!visible.contains("RAN-42"), "the call ran: {visible:?}");
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    session.quit(input);
+}
+
+#[test]
+fn current_hosted_models_are_visible_through_the_real_pty_catalogue() {
+    let finished = Ego::nowhere()
+        .subcommand("models")
+        .arg("--json")
+        .run_pty_to_exit();
+    assert_eq!(finished.code, Some(0), "PTY output: {}", finished.stdout);
+    let output = finished.report();
+    let slugs: Vec<&str> = output["models"]
+        .as_array()
+        .expect("catalogue rows")
+        .iter()
+        .filter_map(|entry| entry["slug"].as_str())
+        .collect();
+    for current in [
+        "openai/gpt-6-astra",
+        "openai/gpt-6.1-sol",
+        "openai/gpt-6-sol",
+        "openai/gpt-6-luna",
+        "openai-codex/gpt-6.1-sol",
+        "openai-codex/gpt-6-sol",
+        "anthropic/claude-fable-5-1",
+        "anthropic/claude-fable-5-2",
+        "anthropic/claude-opus-5-5",
+        "anthropic/claude-sonnet-5-5",
+        "anthropic/claude-haiku-5-5",
+        "gemini/gemini-3.8-flash",
+        "github-copilot/gpt-6.1-sol",
+        "xai-oauth/grok-4.7",
+    ] {
+        assert!(slugs.contains(&current), "missing {current} in {slugs:?}");
+    }
+    for superseded in [
+        "openai/gpt-5.6-sol",
+        "openai/gpt-5.6-terra",
+        "openai/gpt-5.6-luna",
+        "openai-codex/gpt-5.6-sol",
+        "anthropic/claude-opus-5",
+        "anthropic/claude-sonnet-5",
+        "anthropic/claude-haiku-4-5",
+        "openai/gpt-5.5",
+    ] {
+        assert!(
+            !slugs.contains(&superseded),
+            "stale {superseded} in {slugs:?}"
+        );
+    }
+}
+
+// Catches: a later busy steer overtakes or duplicates a follow-up waiting in normal input.
+#[test]
+fn rapid_follow_ups_after_a_reply_are_durable_once_in_typed_order() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("CRITIC-FIRST-REPLY")),
+            Reply::Sse(text("CRITIC-SECOND-REPLY")),
+            Reply::Sse(text("CRITIC-THIRD-REPLY")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "critic first",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, trust_start);
+    until_normalized(&reader, &mut output, 0, "CRITIC-FIRST-REPLY");
+
+    // The user types both lines in a single burst, without waiting for the
+    // coordinator to change admission between them.
+    let follow_up_start = output.len();
+    input
+        .write_all(b"critic second\rcritic third\r")
+        .expect("rapid follow-ups");
+    input.flush().expect("follow-up flush");
+    until_normalized(&reader, &mut output, follow_up_start, "CRITIC-THIRD-REPLY");
+    until_post_trust_prompt(&reader, &mut output, follow_up_start);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    assert!(
+        !normalized(&output).contains("the interactive turn coordinator is closed"),
+        "a follow-up was refused: {:?}",
+        normalized(&output)
+    );
+
+    let events = std::fs::read_to_string(
+        ego.home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .expect("durable session");
+    let prompts: Vec<String> = events
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("event envelope"))
+        .filter(|event| event["payload"]["event"]["kind"]["kind"] == "UserPrompt")
+        .map(|event| {
+            event["payload"]["event"]["kind"]["text"]
+                .as_str()
+                .expect("prompt text")
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(prompts, ["critic first", "critic second", "critic third"]);
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        3,
+        "unexpected provider turns: {generations:?}"
+    );
+    assert_eq!(count_exact_strings(&generations[2], "critic second"), 1);
+    assert_eq!(count_exact_strings(&generations[2], "critic third"), 1);
+}
+
+// Catches: closing busy admission before the UI becomes idle rejects the second typed follow-up.
+#[test]
+fn argv_seed_and_two_typed_follow_ups_are_distinct_provider_turns() {
+    let seed = "argv seed";
+    let first = "typed follow-up one";
+    let second = "typed follow-up two";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("ARGV-SEED-FIRST\nARGV-SEED-SECOND")),
+            Reply::Sse(text("FOLLOW-UP-ONE-REPLY")),
+            Reply::Sse(text("FOLLOW-UP-TWO-REPLY")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        seed,
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let post_trust_start = output.len();
+    // An argv seed can complete before Reedline finishes its cursor-position
+    // handshake. Sending the first typed line merely because provider output
+    // arrived races that handshake and the terminal consumes the input as its
+    // cursor response. The first post-trust DSR followed by a prompt is the
+    // observable boundary at which typed input is safe.
+    until_post_trust_prompt(&reader, &mut output, post_trust_start);
+    until_normalized(&reader, &mut output, 0, "ARGV-SEED-SECOND");
+    drain_until_quiet(&reader, &mut output);
+    let visible =
+        String::from_utf8_lossy(&strip_csi(&output[post_trust_start..])).replace("\r\n", "\n");
+    let first_at = visible.find("ARGV-SEED-FIRST").expect("first streamed row");
+    let second_at = visible
+        .find("ARGV-SEED-SECOND")
+        .expect("final streamed row");
+    assert!(
+        first_at < second_at,
+        "streamed rows changed order: {visible:?}"
+    );
+    assert!(
+        !visible[first_at..second_at].contains("qwen3 · "),
+        "the idle composer (status row over the prompt) appeared before the final streamed row: {visible:?}"
+    );
+
+    let help_start = output.len();
+    input.write_all(b"/help\r").expect("local help command");
+    input.flush().expect("local help flush");
+    until_normalized_without_new_generation(
+        &reader,
+        &mut output,
+        help_start,
+        "Exit the interactive session",
+        &stub,
+        1,
+    );
+    until_post_trust_prompt(&reader, &mut output, help_start);
+
+    let refusal_start = output.len();
+    input
+        .write_all(b"/mcp add\r")
+        .expect("unsupported MCP command");
+    input.flush().expect("unsupported MCP command flush");
+    until_normalized_without_new_generation(
+        &reader,
+        &mut output,
+        refusal_start,
+        "MCP control failed:",
+        &stub,
+        1,
+    );
+    until_post_trust_prompt(&reader, &mut output, refusal_start);
+
+    let first_follow_up_start = output.len();
+    input.write_all(first.as_bytes()).expect("first follow-up");
+    input.write_all(b"\r").expect("first follow-up submit");
+    input.flush().expect("first follow-up flush");
+    until_normalized(&reader, &mut output, refusal_start, "FOLLOW-UP-ONE-REPLY");
+    until_post_trust_prompt(&reader, &mut output, first_follow_up_start);
+
+    let second_follow_up_start = output.len();
+    input
+        .write_all(second.as_bytes())
+        .expect("second follow-up");
+    input.write_all(b"\r").expect("second follow-up submit");
+    input.flush().expect("second follow-up flush");
+    until_normalized(&reader, &mut output, refusal_start, "FOLLOW-UP-TWO-REPLY");
+    until_post_trust_prompt(&reader, &mut output, second_follow_up_start);
+
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let mut killer = child.clone_killer();
+    let (status_sender, status_receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let status = child.wait();
+        status_sender.send(status).expect("status receiver dropped");
+    });
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    let status = loop {
+        drain(&reader, &mut output);
+        match status_receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(Ok(status)) => break status,
+            Ok(Err(error)) => panic!("wait failed: {error}"),
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("child waiter disconnected"),
+            Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                drain(&reader, &mut output);
+                killer.kill().expect("kill timed out child");
+                match status_receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("killed child did not exit")
+                {
+                    Ok(status) => break status,
+                    Err(error) => panic!("wait after kill failed: {error}"),
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+    };
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    waiter.join().expect("waiter thread panicked");
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 3);
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, seed))
+            .collect::<Vec<_>>(),
+        vec![1, 1, 1],
+        "the argv seed is retained once in context and never replayed"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, first))
+            .collect::<Vec<_>>(),
+        vec![0, 1, 1],
+        "the first typed follow-up is delivered once and retained"
+    );
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, second))
+            .collect::<Vec<_>>(),
+        vec![0, 0, 1],
+        "the second typed follow-up is delivered once"
+    );
+}
+
+#[test]
+fn busy_ctrl_c_cancels_work_and_idle_double_ctrl_c_exits() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            paced_line("ACTIVE-WORK", Duration::from_secs(2)),
+            Reply::Sse(text("AFTER-CANCEL")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "cancel this turn",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let mut child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_normalized(&reader, &mut output, 0, "ACTIVE-WORK");
+    let cancel_start = output.len();
+    input.write_all(b"\x03").expect("busy Ctrl-C");
+    input.flush().expect("busy Ctrl-C flush");
+    until_normalized(&reader, &mut output, cancel_start, "cancelling active work");
+
+    input
+        .write_all(b"after cancel\r")
+        .expect("post-cancel prompt");
+    input.flush().expect("post-cancel prompt flush");
+    until_normalized(&reader, &mut output, cancel_start, "AFTER-CANCEL");
+    let answer_end = output.len();
+    until_prompt_from(&reader, &mut output, answer_end);
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"\x03").expect("first idle Ctrl-C");
+    input.flush().expect("first idle Ctrl-C flush");
+    thread::sleep(Duration::from_millis(50));
+    input.write_all(b"\x03").expect("second idle Ctrl-C");
+    input.flush().expect("second idle Ctrl-C flush");
+
+    drop(input);
+    drop(pair);
+    let mut killer = child.clone_killer();
+    let (status_sender, status_receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let status = child.wait();
+        status_sender.send(status).expect("status receiver dropped");
+    });
+    let status = match status_receiver.recv_timeout(PROGRESS_DEADLINE) {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => panic!("wait failed: {error}"),
+        Err(error) => {
+            killer.kill().expect("kill timed out child");
+            panic!("idle double Ctrl-C did not exit: {error}")
+        }
+    };
+    assert!(
+        double_ctrl_c_exit(&status),
+        "interactive process failed: {status:?}"
+    );
+    waiter.join().expect("waiter thread panicked");
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    assert_eq!(
+        generations
+            .iter()
+            .map(|generation| count_exact_strings(generation, "after cancel"))
+            .collect::<Vec<_>>(),
+        vec![0, 1],
+    );
+}
+
+fn bounded_exit(mut child: Box<dyn portable_pty::Child + Send + Sync>) -> portable_pty::ExitStatus {
+    let mut killer = child.clone_killer();
+    let (sender, receiver) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let _ = sender.send(child.wait());
+    });
+    let status = match receiver.recv_timeout(PROGRESS_DEADLINE) {
+        Ok(status) => status.expect("child wait"),
+        Err(error) => {
+            killer.kill().expect("kill stalled child");
+            panic!("child did not exit within deadline: {error}");
+        }
+    };
+    waiter.join().expect("child waiter panicked");
+    status
+}
+
+// Catches: a missing model default terminating interactive startup before the
+// existing reasoning picker can obtain a real operator choice.
+#[test]
+fn story_255_missing_default_opens_effort_picker_and_generates_with_choice() {
+    story_255_terminal(false);
+}
+
+// Catches: a displayed provider refusal surviving idle EOF as a second error
+// after the resume hint, and incorrectly making an ordinary exit fail.
+#[test]
+fn story_255_provider_refusal_is_not_repeated_after_idle_eof() {
+    story_255_terminal(true);
+}
+
+fn story_255_terminal(provider_refuses: bool) {
+    let stub = Stub::start(Plan {
+        completions: vec![if provider_refuses {
+            Reply::Status(400)
+        } else {
+            Reply::Sse(text("EFFORT-CHOICE-ANSWER"))
+        }],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--mode",
+            "default",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    ego.file("AGENTS.md", "# effort picker fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 120, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("trust flush");
+    until_normalized(&reader, &mut output, 0, "Select reasoning for");
+    assert!(!normalized(&output).contains("Select model"));
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"1\r").expect("choose off explicitly");
+    input.flush().expect("choice flush");
+    let choice_start = output.len();
+    until_prompt_from(&reader, &mut output, choice_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        turn_start,
+        if provider_refuses {
+            "the provider returned HTTP 400"
+        } else {
+            "EFFORT-CHOICE-ANSWER"
+        },
+    );
+    until_prompt_from(&reader, &mut output, turn_start);
+    let quit_start = output.len();
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    let status = session.quit(input);
+    drain(&reader, &mut output);
+    assert!(status.success(), "interactive exit: {status:?}");
+    let after_quit = normalized(&output[quit_start..]);
+    assert!(
+        after_quit.contains("To resume: 'ego resume"),
+        "{after_quit}"
+    );
+    assert!(
+        !after_quit.contains("the provider returned HTTP 400"),
+        "{after_quit}"
+    );
+    assert!(
+        !after_quit.contains("the model does not accept"),
+        "{after_quit}"
+    );
+    let config =
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("saved choice");
+    assert!(config.contains("thinking = \"off\""), "{config}");
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["thinking"]["type"], "disabled");
+}
+
+// Catches: headless startup reaching a human picker or silently inventing Off
+// when the selected row states accepted efforts but no default.
+#[test]
+fn story_255_headless_missing_default_keeps_thinking_remedy() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .args([
+            "--model",
+            "anthropic/fixture-vision",
+            "--sandbox",
+            "off",
+            "hello",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    let finished = ego.run();
+    assert_eq!(finished.code, Some(2), "{}", finished.stderr);
+    assert!(
+        finished
+            .stderr
+            .contains("does not state a default reasoning effort"),
+        "{}",
+        finished.stderr
+    );
+    assert!(
+        finished.stderr.contains("--thinking"),
+        "{}",
+        finished.stderr
+    );
+    assert!(stub.generations().is_empty());
+}
+
+#[test]
+fn startup_picker_escape_exits_without_saving_a_model() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args(["--sandbox", "off"])
+        .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 40, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_normalized(&reader, &mut output, 0, "Select model");
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"\x1b").expect("startup Escape");
+    input.flush().expect("startup Escape flush");
+    let status = session.quit(input);
+    assert_eq!(status.exit_code(), 130, "Escape must cancel startup");
+    assert!(stub.generations().is_empty());
+    assert!(!ego.home_path().join("config.toml").exists());
+}
+
+#[test]
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice_at_80x24() {
+    startup_picker_routes_raw_keys_and_persists_the_explicit_choice(24, 80);
+}
+
+#[test]
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice_at_120x40() {
+    startup_picker_routes_raw_keys_and_persists_the_explicit_choice(40, 120);
+}
+
+fn startup_picker_routes_raw_keys_and_persists_the_explicit_choice(rows: u16, cols: u16) {
+    let stub = Stub::start(Plan::default());
+    let home = tempfile::tempdir().expect("home");
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(
+        workspace.path().join("AGENTS.md"),
+        "# live surface fixture\n",
+    )
+    .expect("workspace fixture");
+    let first = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .conversing()
+        .args(["--sandbox", "off"])
+        .env("OPENAI_API_KEY", "fixture-openai-key")
+        .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
+    let (session, mut input, reader) = PtySession::start(&first, rows, cols, None);
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let picker_start = output.len();
+    until_normalized(&reader, &mut output, picker_start, "Select model");
+    drain_until_quiet(&reader, &mut output);
+
+    let down_start = output.len();
+    input.write_all(b"\x1b[B").expect("startup picker down");
+    input.flush().expect("startup picker down flush");
+    until_from(
+        &reader,
+        &mut output,
+        down_start,
+        b"> 2. anthropic/claude-fable-5-2",
+    );
+    drain_until_quiet(&reader, &mut output);
+
+    let up_start = output.len();
+    input.write_all(b"\x1b[A").expect("startup picker up");
+    input.flush().expect("startup picker up flush");
+    until_from(
+        &reader,
+        &mut output,
+        up_start,
+        b"> 1. anthropic/claude-fable-5-1",
+    );
+    drain_until_quiet(&reader, &mut output);
+
+    let chosen_start = output.len();
+    input.write_all(b"4").expect("startup picker number four");
+    input.flush().expect("startup picker number four flush");
+    until_from(
+        &reader,
+        &mut output,
+        chosen_start,
+        b"> 4. anthropic/claude-opus-5-5",
+    );
+    drain_until_quiet(&reader, &mut output);
+    input.write_all(b"\r").expect("startup model accept");
+    input.flush().expect("startup model accept flush");
+    until_normalized(&reader, &mut output, chosen_start, "Select reasoning for");
+    drain_until_quiet(&reader, &mut output);
+    let reasoning_start = output.len();
+    input.write_all(b"\r").expect("startup reasoning accept");
+    input.flush().expect("startup reasoning accept flush");
+    until_prompt_from(&reader, &mut output, reasoning_start);
+    drain_until_quiet(&reader, &mut output);
+    let after_pickers = normalized(&output[reasoning_start..]);
+    let banner = after_pickers
+        .find("  model ")
+        .unwrap_or_else(|| panic!("no banner after the pickers: {after_pickers:?}"));
+    assert!(
+        after_pickers[..banner].ends_with('\n') || banner == 0,
+        "the banner shares a row with the picker: {after_pickers:?}"
+    );
+
+    let config = std::fs::read_to_string(home.path().join("config.toml"))
+        .expect("startup selection persisted atomically");
+    assert!(config.contains("model = \"anthropic/claude-opus-5-5\""));
+    assert!(config.contains("thinking = \"medium\""));
+
+    input.write_all(b"\x04").expect("first EOF");
+    input.flush().expect("first EOF flush");
+    let status = session.quit(input);
+    assert!(
+        status.success(),
+        "first interactive process failed: {status:?}"
+    );
+
+    let second = Ego::at(home.path(), workspace.path(), Some(&stub))
+        .conversing()
+        .args(["--sandbox", "off"])
+        .env("OPENAI_API_KEY", "fixture-openai-key")
+        .env("ANTHROPIC_API_KEY", "fixture-anthropic-key");
+    let (session, mut input, reader) = PtySession::start(&second, rows, cols, None);
+    let mut output = Vec::new();
+
+    let restart_start = 0;
+    until_post_trust_prompt(&reader, &mut output, restart_start);
+    assert!(
+        !normalized(&output[restart_start..]).contains("Select model"),
+        "persisted selection must bypass the startup picker: {}",
+        normalized(&output[restart_start..]),
+    );
+
+    input.write_all(b"\x04").expect("second EOF");
+    input.flush().expect("second EOF flush");
+    let status = session.quit(input);
+    assert!(
+        status.success(),
+        "second interactive process failed: {status:?}"
+    );
+}
+
+#[test]
+fn slash_action_wait_ignores_a_redraw_prompt_before_command_completion() {
+    // These frames preserve the observed /clear ordering from the live PTY:
+    // the first prompt was painted before the command echo and Enter cycle.
+    let redraw = b"\x1b[6n\x1b[4;1H\x1b[J\x1b[96m> \x1b[0m";
+    let completion = b"\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[4;1H\x1b[J\x1b[96m> \x1b[?25h";
+    // Host acceptance suspends before echoing the accepted buffer; both
+    // orderings still require a fresh resumed editor after acceptance.
+    let host_completion = b"\x1b[?2004l\x1b[4;1H\x1b[J\x1b[96m> \x1b[37m/clear\x1b[0m\x1b[J\r\n\x1b[?2004h\x1b[?25l\x1b[4;1H\x1b[J\x1b[96m> \x1b[?25h";
+    for completion in [completion.as_slice(), host_completion.as_slice()] {
+        let (sender, receiver) = mpsc::channel();
+        let (done, result) = mpsc::channel();
+        sender.send(redraw.to_vec()).expect("first PTY frame");
+        let waiter = thread::spawn(move || {
+            let mut output = Vec::new();
+            until_local_action_completed(
+                &receiver,
+                &mut output,
+                0,
+                "clear",
+                Duration::from_secs(2),
+            );
+            done.send(output).expect("completion result");
+        });
+        assert!(
+            result.recv_timeout(Duration::from_millis(100)).is_err(),
+            "a redraw prompt was mistaken for /clear completion"
+        );
+        sender
+            .send(completion.to_vec())
+            .expect("completion PTY frame");
+        let output = result
+            .recv_timeout(Duration::from_secs(2))
+            .expect("real command completion");
+        assert!(output.ends_with(completion));
+        waiter.join().expect("waiter thread");
+    }
+}
+
+#[test]
+fn silent_slash_action_waits_for_a_driver_reply() {
+    let (writes, requests) = mpsc::sync_channel(4);
+    let (frames, receiver) = mpsc::channel();
+    let (done, result) = mpsc::channel();
+    let waiter = thread::spawn(move || {
+        let stub = Stub::start(Plan::default());
+        let mut input = PtyWriter { sender: writes };
+        let mut output = Vec::new();
+        submit_local_action(&receiver, &mut output, &mut input, &stub, "clear", None);
+        done.send(output).expect("completed action");
+    });
+    let next_write = || loop {
+        match requests
+            .recv_timeout(Duration::from_secs(2))
+            .expect("PTY write")
+        {
+            WriteRequest::Bytes(bytes) => break bytes,
+            WriteRequest::Flush => {}
+        }
+    };
+    assert_eq!(next_write(), b"/clear\r");
+    frames
+        .send(
+            b"\x1b[96m> /clear\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[?25l\x1b[96m> \x1b[?25h"
+                .to_vec(),
+        )
+        .expect("clear terminal frame");
+    assert_eq!(next_write(), b"/help\r");
+    assert!(
+        result.recv_timeout(Duration::from_millis(100)).is_err(),
+        "the terminal frame alone must not finish a silent action"
+    );
+    frames
+        .send(
+            "\x1b[96m> /help\x1b[J\r\n\x1b[?2004l\x1b[?2004h\x1b[96m> \r\nεgo commands\r\n────────────────\r\n"
+                .as_bytes()
+                .to_vec(),
+        )
+        .expect("driver reply");
+    let output = result
+        .recv_timeout(Duration::from_secs(2))
+        .expect("silent action and driver reply");
+    assert!(normalized(&output).contains(HELP_END));
+    waiter.join().expect("waiter thread");
+}
+
+// Catches: registered slash actions abort startup, fall through to chat, or leave input stuck after failed compact.
+#[test]
+fn every_registered_slash_action_is_local_and_has_intentional_terminal_behavior() {
+    const COMMANDS: [&str; 37] = [
+        "help",
+        "model",
+        "thinking",
+        "fast",
+        "mode",
+        "plan",
+        "yolo",
+        "permissions",
+        "mcp",
+        "login",
+        "sessions",
+        "fork",
+        "compact",
+        "pin",
+        "unpin",
+        "clear",
+        "usage",
+        "context",
+        "statusline",
+        "export",
+        "config",
+        "setup",
+        "doctor",
+        "quit",
+        "refresh",
+        "new",
+        "name",
+        "goal",
+        "tasks",
+        "side",
+        "tools",
+        "expand",
+        "skills",
+        "hooks",
+        "init",
+        "retry",
+        "version",
+    ];
+    assert_eq!(ActionRegistry::final_surface().names(), COMMANDS);
+
+    // A window large enough for the in-window /compact path: with the recorded
+    // 32,768-token Ollama window, the output reserve sends this request through
+    // the conservative transcript path (covered by compaction_skill.rs).
+    let stub = Stub::start(Plan {
+        context_length: Some(131_072),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# registered action PTY fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 80, None);
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+
+    submit_local_action(
+        &reader,
+        &mut output,
+        &mut input,
+        &stub,
+        "help",
+        Some(HELP_END),
+    );
+
+    for (command, prompt) in [
+        ("model", "Select model"),
+        ("sessions", "Select session"),
+        ("thinking", "Select reasoning for"),
+        ("mode", "Choose permission mode"),
+        ("permissions", "Choose permission operation"),
+        ("statusline", "Choose status-line setup"),
+        ("setup", "Setup · Choose where to save"),
+        ("mcp", "Choose MCP server or action"),
+        ("skills", "Choose skill action or skill to invoke"),
+    ] {
+        let start = output.len();
+        input
+            .write_all(format!("/{command}\r").as_bytes())
+            .unwrap_or_else(|error| panic!("write /{command}: {error}"));
+        input.flush().expect("modal action flush");
+        until_normalized_without_new_generation(&reader, &mut output, start, prompt, &stub, 0);
+        let cancel_start = output.len();
+        input.write_all(b"\x1b").expect("cancel modal action");
+        input.flush().expect("cancel modal action flush");
+        until_prompt_from(&reader, &mut output, cancel_start);
+        drain_until_quiet(&reader, &mut output);
+    }
+
+    submit_local_action(&reader, &mut output, &mut input, &stub, "plan", None);
+    submit_local_action(&reader, &mut output, &mut input, &stub, "yolo", None);
+
+    for (command, expected) in [
+        ("login", Some("Built-in OAuth providers")),
+        ("fast off", Some("standard (this session only)")),
+        ("fork", None),
+        // The inherited model permits a checkpoint request; its empty reply must fail.
+        ("compact", Some("compaction failed")),
+        (
+            "pin REPORT-NAME-LOCK: keep for subsequent tasks",
+            Some("1: REPORT-NAME-LOCK: keep for subsequent tasks"),
+        ),
+        (
+            "pin",
+            Some("1: REPORT-NAME-LOCK: keep for subsequent tasks"),
+        ),
+        ("unpin 1", Some("No pinned user constraints.")),
+        ("unpin", Some("usage: /unpin")),
+        ("clear", None),
+        ("usage", Some("usage as of")),
+        ("export", None),
+        ("config perimeter", Some("capabilities")),
+        ("doctor", Some("acp")),
+        ("doctor details", Some("acp.extension:hold")),
+        ("new", None),
+        ("name", None),
+        ("goal", None),
+        ("tasks", Some("background tasks: none")),
+        ("side", Some("usage: /side QUESTION")),
+        ("tools", Some("tools:")),
+        ("expand", Some("no tool call to expand yet")),
+        ("hooks", Some("no hooks are configured and enabled")),
+        ("retry", Some("no provider retry wait is active")),
+        ("version", Some(concat!("ego ", env!("CARGO_PKG_VERSION")))),
+    ] {
+        if command == "compact" {
+            let start = output.len();
+            input.write_all(b"/compact\r").expect("compact command");
+            input.flush().expect("compact command flush");
+            until_notice_prose(
+                &reader,
+                &mut output,
+                start,
+                "compaction failed: compaction preparation failed: checkpoint must start with # Objective",
+            );
+            until_local_action_completed(
+                &reader,
+                &mut output,
+                start,
+                command,
+                SLASH_ACTION_DEADLINE,
+            );
+            assert_eq!(
+                stub.generations().len(),
+                2,
+                "compact must send one checkpoint and one malformed-output correction"
+            );
+        } else {
+            let start = output.len();
+            submit_local_action(&reader, &mut output, &mut input, &stub, command, expected);
+            if command == "doctor" {
+                assert_doctor_summary(&output[start..]);
+            }
+        }
+    }
+
+    let quit_start = output.len();
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drain(&reader, &mut output);
+    assert!(
+        normalized(&output[quit_start..]).contains("unsent drafts discarded;"),
+        "/quit did not render its explicit exit accounting"
+    );
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        2,
+        "local actions must only generate the checkpoint and its one correction"
+    );
+    let messages = generations[0]["messages"]
+        .as_array()
+        .expect("checkpoint messages");
+    assert!(
+        messages.iter().any(|message| {
+            message["role"] == "user" && message["content"] == ego_core::compact::COMPACTION_PROMPT
+        }),
+        "compact must request a checkpoint"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .count(),
+        1,
+        "the ego-owned checkpoint instruction is the only user-role content"
+    );
+    let correction = generations[1]["messages"]
+        .as_array()
+        .expect("checkpoint correction messages");
+    assert_eq!(&correction[..messages.len()], messages.as_slice());
+    assert_eq!(correction.len(), messages.len() + 2);
+    assert_eq!(correction[messages.len()]["role"], "assistant");
+    let instruction = correction.last().expect("correction instruction");
+    assert_eq!(instruction["role"], "user");
+    assert!(instruction["content"].as_str().expect("correction text").starts_with(
+        "The checkpoint parser refused your previous output: checkpoint must start with # Objective"
+    ));
+}
+
+/// Drive one interactive session, optionally through one answered turn, quit it
+/// with `/quit` and return everything printed from the quit onwards.
+fn output_after_quit(turn: Option<&str>) -> String {
+    quit_session(turn).0
+}
+
+/// [`output_after_quit`], keeping the quit session's home and workspace.
+fn quit_session(turn: Option<&str>) -> (String, Ego) {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("RESUME-HINT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# resume hint fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    if let Some(prompt) = turn {
+        let turn_start = output.len();
+        input
+            .write_all(format!("{prompt}\r").as_bytes())
+            .expect("turn");
+        input.flush().expect("turn flush");
+        until_normalized(&reader, &mut output, turn_start, "RESUME-HINT-ANSWER");
+        until_prompt_from(&reader, &mut output, turn_start);
+    }
+    let quit_start = output.len();
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    drain(&reader, &mut output);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    (normalized(&output[quit_start..]), ego)
+}
+
+#[test]
+fn a_clean_quit_leaves_a_session_that_opens_without_a_repair() {
+    let (_, ego) = quit_session(Some("hello"));
+    let workspace = std::fs::canonicalize(ego.workspace_path()).expect("canonical workspace");
+    let store = ego_tools::store::JsonlStore::new(
+        ego.home_path().join("sessions"),
+        workspace,
+        Box::new(ego_tools::store::OsIo),
+    );
+    let id = support::FIXTURE_SESSION_ID
+        .parse()
+        .expect("the fixture id is a session id");
+    let repair = store.recover(&id).expect("recover");
+    assert!(
+        repair.is_clean(),
+        "a clean /quit must not leave anything for the next open to repair: {repair:?}"
+    );
+}
+
+/// One answered turn, then `/fork`: the text printed from the fork onwards.
+fn fork_after_a_turn() -> String {
+    const ROWS: u16 = 24;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        installed: vec![support::MODEL.to_owned()],
+        context_length: Some(32_768),
+        completions: vec![Reply::Sse(text("FORK-RECEIPT-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# fork receipt fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, ROWS, COLS, Some((ROWS, COLS)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(&reader, &mut output, turn_start, "FORK-RECEIPT-ANSWER");
+    until_prompt_from(&reader, &mut output, turn_start);
+    drain_until_quiet(&reader, &mut output);
+    let fork_start = output.len();
+    input.write_all(b"/fork\r").expect("fork");
+    input.flush().expect("fork flush");
+    until_normalized(&reader, &mut output, fork_start, "forked session");
+    until_screen_prose(
+        &reader,
+        &mut output,
+        ROWS,
+        COLS,
+        &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+    );
+    drain_until_quiet(&reader, &mut output);
+    // Read the terminal's retained receipt, excluding transient status redraws
+    // interleaved between its explicitly wrapped rows in the byte stream.
+    let receipt = support::notice_prose(&screen_rows(&output, ROWS, COLS).join("\n"));
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+    receipt
+}
+
+// Catches: a successful fork switches sessions silently or names the wrong parent.
+#[test]
+fn fork_prints_a_receipt_naming_the_source_session() {
+    let receipt = fork_after_a_turn();
+    assert!(
+        receipt.contains(&format!("forked session {}", support::FIXTURE_SESSION_ID))
+            && receipt.contains("ego resume"),
+        "no fork receipt naming the parent: {receipt:?}"
+    );
+    assert_eq!(receipt.matches("forked session").count(), 1, "{receipt}");
+    let successor = receipt
+        .split(" into ")
+        .nth(1)
+        .expect("successor id")
+        .split(';')
+        .next()
+        .unwrap();
+    let successor: ego_core::event::id::SessionId = successor.parse().expect("receipt session id");
+    assert_ne!(successor.to_string(), support::FIXTURE_SESSION_ID);
+    assert!(
+        receipt.contains(&format!("this is now session {successor}")),
+        "{receipt}"
+    );
+}
+
+/// Resume a stored session that already holds a context reading, `/fork` it,
+/// and return the status row left on screen.
+fn status_row_after_forking_a_session_with_a_context_reading() -> String {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, OccupancyProvenance};
+    use ego_core::event::id::{EventId, Producer, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    const ROWS: u16 = 24;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        installed: vec![support::MODEL.to_owned()],
+        context_length: Some(32_768),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing();
+    let root = std::fs::canonicalize(ego.workspace_path()).expect("canonical workspace");
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let source: SessionId = support::FIXTURE_SESSION_ID.parse().expect("a session id");
+    store
+        .publish_empty_session(source, &root, Timestamp::from_millis(1))
+        .expect("seed session");
+    let mut seq = ego_core::state::SessionState::replay(std::iter::empty()).last_seq;
+    seq.next();
+    store
+        .append(
+            &source,
+            &DomainEvent {
+                env: Envelope {
+                    seq,
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::from_millis(2),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::ContextWindowUpdated {
+                    used_tokens: 3_000,
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                    window: Some(32_768),
+                },
+            },
+        )
+        .expect("seed context reading");
+    let ego = ego
+        .subcommand("resume")
+        .arg(support::FIXTURE_SESSION_ID)
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# fork status fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, ROWS, COLS, Some((ROWS, COLS)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    drain_until_quiet(&reader, &mut output);
+    let before = screen_rows(&output, ROWS, COLS);
+    let fork_start = output.len();
+    input.write_all(b"/fork\r").expect("fork");
+    input.flush().expect("fork flush");
+    until_normalized(&reader, &mut output, fork_start, "forked session");
+    until_screen_prose(
+        &reader,
+        &mut output,
+        ROWS,
+        COLS,
+        &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+    );
+    drain_until_quiet(&reader, &mut output);
+    let after = screen_rows(&output, ROWS, COLS);
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+    let status = |rows: &[String]| {
+        rows.iter()
+            .find(|row| row.contains("▱") || row.contains("▰"))
+            .cloned()
+            .unwrap_or_else(|| panic!("no status row on screen: {rows:?}"))
+    };
+    assert!(
+        !status(&before).contains(" ?/"),
+        "precondition: the resumed source shows its context reading: {before:?}"
+    );
+    status(&after)
+}
+
+fn status_row_after_clearing_a_session_with_a_context_reading() -> String {
+    use ego_core::event::domain::{DomainEvent, Envelope, EventKind, OccupancyProvenance};
+    use ego_core::event::id::{EventId, Producer, SessionId, TurnId};
+    use ego_core::event::time::Timestamp;
+    use ego_core::session_lifecycle::SessionLifecycleStore;
+    use ego_core::store::session_store::SessionStore;
+    use ego_tools::store::{JsonlStore, OsIo};
+    const ROWS: u16 = 24;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        installed: vec![support::MODEL.to_owned()],
+        context_length: Some(32_768),
+        completions: vec![
+            Reply::Sse(text("FIRST-REPLY")),
+            Reply::Sse(text("SECOND-REPLY")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing();
+    let root = std::fs::canonicalize(ego.workspace_path()).expect("canonical workspace");
+    let store = JsonlStore::new(
+        ego.home_path().join("sessions"),
+        root.clone(),
+        Box::new(OsIo),
+    );
+    let source: SessionId = support::FIXTURE_SESSION_ID.parse().expect("a session id");
+    store
+        .publish_empty_session(source, &root, Timestamp::from_millis(1))
+        .expect("seed session");
+    let mut seq = ego_core::state::SessionState::replay(std::iter::empty()).last_seq;
+    seq.next();
+    store
+        .append(
+            &source,
+            &DomainEvent {
+                env: Envelope {
+                    seq,
+                    id: EventId::new(),
+                    turn: TurnId::new(),
+                    item: None,
+                    parent: None,
+                    ts: Timestamp::from_millis(2),
+                    producer: Producer::Main,
+                },
+                kind: EventKind::ContextWindowUpdated {
+                    used_tokens: 3_000,
+                    provenance: OccupancyProvenance::GenerationBoundary,
+                    window: Some(32_768),
+                },
+            },
+        )
+        .expect("seed context reading");
+    let ego = ego
+        .subcommand("resume")
+        .arg(support::FIXTURE_SESSION_ID)
+        .args(["--model", "ollama/qwen3", "--sandbox", "off"])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# fork status fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, ROWS, COLS, Some((ROWS, COLS)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let trust_start = output.len();
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_prompt_from(&reader, &mut output, trust_start);
+    drain_until_quiet(&reader, &mut output);
+    let before = screen_rows(&output, ROWS, COLS);
+    input
+        .write_all(b"OLD-CONTEXT-MARKER\r")
+        .expect("first prompt");
+    input.flush().expect("first prompt flush");
+    // The idle-looking frame drawn before Working is not the post-turn prompt.
+    until_prompt_after_reply(&reader, &mut output, b"FIRST-REPLY");
+    input.write_all(b"/clear\r").expect("clear");
+    input.flush().expect("clear flush");
+    until_screen_prose(&reader, &mut output, ROWS, COLS, "0/");
+    drain_until_quiet(&reader, &mut output);
+    let after = screen_rows(&output, ROWS, COLS);
+    input.write_all(b"fresh prompt\r").expect("second prompt");
+    input.flush().expect("second prompt flush");
+    until_prompt_after_reply(&reader, &mut output, b"SECOND-REPLY");
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    assert!(generations[0].to_string().contains("OLD-CONTEXT-MARKER"));
+    assert!(
+        !generations[1].to_string().contains("OLD-CONTEXT-MARKER"),
+        "old conversation leaked into the fresh request: {:?}",
+        generations[1]
+    );
+    let status = |rows: &[String]| {
+        rows.iter()
+            .find(|row| row.contains("▱") || row.contains("▰"))
+            .cloned()
+            .unwrap_or_else(|| panic!("no status row on screen: {rows:?}"))
+    };
+    assert!(
+        !status(&before).contains(" ?/"),
+        "precondition: the resumed source shows its context reading: {before:?}"
+    );
+    status(&after)
+}
+
+// Catches: /clear leaves the previous conversation occupancy on the status row.
+#[test]
+fn clear_starts_a_fresh_context_and_resets_the_status_row() {
+    let status = status_row_after_clearing_a_session_with_a_context_reading();
+    assert!(
+        status.contains("0/"),
+        "clear retained the old context: {status:?}"
+    );
+}
+
+// Catches: a tip fork discards the measured occupancy and renders ctx ?.
+#[test]
+fn the_forked_session_keeps_the_context_reading_in_its_status_row() {
+    let status = status_row_after_forking_a_session_with_a_context_reading();
+    assert!(
+        status.contains("3k/32.8k"),
+        "the fork lost or changed the measured context reading: {status:?}"
+    );
+}
+
+#[test]
+fn quitting_after_a_turn_prints_the_resume_hint_for_that_session() {
+    let after_quit = output_after_quit(Some("hello"));
+    assert!(
+        after_quit.contains(&format!(
+            "To resume: 'ego resume {}'",
+            support::FIXTURE_SESSION_ID
+        )),
+        "no resume hint at exit: {after_quit:?}"
+    );
+}
+
+#[test]
+fn quitting_without_any_turn_prints_no_resume_hint() {
+    let after_quit = output_after_quit(None);
+    assert!(
+        after_quit.contains("unsent drafts discarded;"),
+        "exit accounting missing, the run did not reach its exit: {after_quit:?}"
+    );
+    assert!(
+        !after_quit.contains("ego resume"),
+        "hint for a session that cannot be resumed: {after_quit:?}"
+    );
+}
+
+// Catches: the concise doctor view omits section health or leaks detailed evidence.
+fn assert_doctor_summary(output: &[u8]) {
+    let prose = support::notice_prose(&normalized(output));
+    for marker in [
+        "doctor: not_checked",
+        "inspect the results with '/doctor details'",
+    ] {
+        assert!(prose.contains(marker), "missing {marker}: {prose}");
+    }
+    let compact = prose.split_whitespace().collect::<String>();
+    for (section, state) in [
+        ("configuration", "ok"),
+        ("credentials", "not_checked"),
+        ("session_store", "ok"),
+        ("sandbox", "not_checked"),
+        ("catalogue", "not_checked"),
+        ("mcp", "ok"),
+        ("skills", "not_checked"),
+        ("hooks", "ok"),
+        ("acp", "ok"),
+    ] {
+        assert!(
+            compact.contains(&format!("{section}{state}")),
+            "missing {section} {state}: {prose}"
+        );
+    }
+    assert!(!prose.contains("acp.extension:hold"), "{prose}");
+}
+
+#[test]
+fn help_and_doctor_remain_local_after_80_60_and_40_column_resizes() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: 40,
+            cols: 90,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let (reader, reader_join) = stream(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+    );
+    let mut input = input;
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    let prompt_count = support::ready_prompt_count(&output);
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    until_prompt_after(&reader, &mut output, prompt_count);
+
+    for width in [80, 60, 40] {
+        let prompt_count = support::ready_prompt_count(&output);
+        pair.master
+            .resize(PtySize {
+                rows: 40,
+                cols: width,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize");
+        until_prompt_after(&reader, &mut output, prompt_count);
+
+        let help_start = output.len();
+        let prompt_count = support::ready_prompt_count(&output);
+        input.write_all(b"/help\r").expect("help command");
+        input.flush().expect("help command flush");
+        until_normalized_without_new_generation(
+            &reader,
+            &mut output,
+            help_start,
+            "Surface",
+            &stub,
+            0,
+        );
+        until_prompt_after(&reader, &mut output, prompt_count);
+
+        let doctor_start = output.len();
+        let prompt_count = support::ready_prompt_count(&output);
+        input.write_all(b"/doctor\r").expect("doctor command");
+        input.flush().expect("doctor command flush");
+        until_normalized_without_new_generation(
+            &reader,
+            &mut output,
+            doctor_start,
+            "acp",
+            &stub,
+            0,
+        );
+        until_prompt_after(&reader, &mut output, prompt_count);
+        assert_doctor_summary(&output[doctor_start..]);
+
+        let details_start = output.len();
+        let prompt_count = support::ready_prompt_count(&output);
+        input
+            .write_all(b"/doctor details\r")
+            .expect("doctor details");
+        input.flush().expect("doctor details flush");
+        until_normalized_without_new_generation(
+            &reader,
+            &mut output,
+            details_start,
+            "acp.extension:hold",
+            &stub,
+            0,
+        );
+        until_prompt_after(&reader, &mut output, prompt_count);
+    }
+
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = bounded_exit(child);
+    assert!(status.success(), "interactive process failed: {status:?}");
+    drop(input);
+    drop(pair);
+    reader_join.join().expect("reader thread panicked");
+    writer_join.join().expect("writer thread panicked");
+    assert!(stub.generations().is_empty());
+}
+
+#[test]
+fn live_surface_native_questions_cover_single_multiple_and_free_text() {
+    let single = serde_json::json!({
+        "prompt": "Single question",
+        "mode": "single",
+        "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}],
+        "free_text": false,
+    })
+    .to_string();
+    let multiple = serde_json::json!({
+        "prompt": "Multiple question",
+        "mode": "multiple",
+        "options": [{"id": "red", "label": "Red"}, {"id": "blue", "label": "Blue"}],
+        "free_text": false,
+    })
+    .to_string();
+    let free_text = serde_json::json!({
+        "prompt": "Free question",
+        "mode": "free_text",
+        "options": [],
+        "free_text": true,
+    })
+    .to_string();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("question-single", "ask_question", &single)),
+            Reply::Sse(tool_call("question-multiple", "ask_question", &multiple)),
+            Reply::Sse(tool_call("question-free", "ask_question", &free_text)),
+            Reply::Sse(text("QUESTIONS-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    // These cases all begin by answering the trust question, so the workspace
+    // has to hold something worth asking about. An empty checkout is asked
+    // nothing at all.
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let idle_start = output.len();
+    until_prompt_from(&reader, &mut output, idle_start);
+
+    input
+        .write_all(b"ask questions\r")
+        .expect("question prompt");
+    input.flush().expect("question prompt flush");
+    until_normalized(&reader, &mut output, idle_start, "Single question");
+    // The selector is the first frame that names the question, so its option
+    // rows may already be in `output` when the question text is matched.
+    let single_choice_start = idle_start;
+    until_from(&reader, &mut output, single_choice_start, b"> 1. Yes");
+    // Catches: invalid digits submit the focused option, or a valid digit
+    // merely moves focus and still waits for Enter.
+    input.write_all(b"092").expect("single numeric answer");
+    input.flush().expect("single answer flush");
+    let single_submit_start = single_choice_start;
+    until_from(
+        &reader,
+        &mut output,
+        single_submit_start,
+        b"Multiple question",
+    );
+    let multiple_first_start = single_submit_start;
+    until_from(&reader, &mut output, multiple_first_start, b"> [ ] 1. Red");
+    input.write_all(b"1").expect("multiple first selection");
+    input.flush().expect("multiple first selection flush");
+    until_from(&reader, &mut output, multiple_first_start, b"> [x] 1. Red");
+    let multiple_second_start = output.len();
+    input.write_all(b"2").expect("multiple second selection");
+    input.flush().expect("multiple second selection flush");
+    until_from(
+        &reader,
+        &mut output,
+        multiple_second_start,
+        b"> [x] 2. Blue",
+    );
+    let multiple_submit_start = output.len();
+    input.write_all(b"\r").expect("multiple answer");
+    input.flush().expect("multiple answer flush");
+    // The question widget puts the prompt on its own line before the editor's
+    // `> ` indicator. Wait for that newline: the tool argument announcement
+    // contains `{"prompt":"Free question"}`, with a quote after the text.
+    // Matching only the text can submit the answer at the REPL before the
+    // widget opens, turning it into a steer message. The single and multiple
+    // cases avoid that race by waiting for option rows; free text has none.
+    until_normalized(
+        &reader,
+        &mut output,
+        multiple_submit_start,
+        "Free question\n",
+    );
+    input.write_all(b"free answer\r").expect("free-text answer");
+    input.flush().expect("free-text answer flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        multiple_submit_start,
+        "QUESTIONS-DONE",
+    );
+    until_prompt_from(&reader, &mut output, multiple_submit_start);
+
+    let generations = stub.generations();
+    assert_eq!(
+        generations.len(),
+        4,
+        "each answer resumes the same live turn"
+    );
+    assert!(
+        count_exact_strings(&generations[1], "no") > 0,
+        "the numeric single-choice answer reaches the model"
+    );
+    assert!(
+        count_exact_strings(&generations[2], "[\"red\",\"blue\"]") > 0,
+        "both numeric multiple-choice answers reach the model: {}",
+        generations[2]
+    );
+    assert!(
+        generations
+            .iter()
+            .any(|generation| generation.to_string().contains("free answer")),
+        "the free-text answer reaches the model using the canonical answer value"
+    );
+
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit command flush");
+    let status = session.quit(input);
+    assert!(status.success(), "interactive process failed: {status:?}");
+}
+
+/// The terminal rows, read back through an emulator `cols` wide.
+fn screen_rows(output: &[u8], rows: u16, cols: u16) -> Vec<String> {
+    let mut screen = vt100::Parser::new(rows, cols, 0);
+    screen.process(output);
+    screen
+        .screen()
+        .contents()
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// One `ask_question` turn on a 120-column terminal. `drive` answers the
+/// question; the run returns what the model was sent and what the terminal
+/// showed once the turn was over.
+///
+/// The oracle is the emulated screen and never the bytes ego wrote: a stray
+/// fragment overwritten onto a wrapped row is visible there and nowhere else.
+fn question_session(
+    call: &str,
+    drive: impl FnOnce(&mut PtyWriter, &mpsc::Receiver<Vec<u8>>, &mut Vec<u8>),
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    question_session_with_home(call, |input, reader, output, _home| {
+        drive(input, reader, output);
+    })
+}
+
+fn question_session_with_home(
+    call: &str,
+    drive: impl FnOnce(&mut PtyWriter, &mpsc::Receiver<Vec<u8>>, &mut Vec<u8>, &std::path::Path),
+) -> (Vec<serde_json::Value>, Vec<String>) {
+    const ROWS: u16 = 70;
+    const COLS: u16 = 120;
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("question", "ask_question", call)),
+            Reply::Sse(text("QUESTION-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color")
+        .env("TUIC_SOCKET", "/nonexistent/tuic.sock");
+    ego.file("AGENTS.md", "# question fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, ROWS, COLS, Some((ROWS, COLS)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+
+    let asked = output.len();
+    input.write_all(b"ask\r").expect("turn");
+    input.flush().expect("turn flush");
+    drive(&mut input, &reader, &mut output, ego.home_path());
+    until_normalized(&reader, &mut output, asked, "QUESTION-DONE");
+    until_prompt_from(&reader, &mut output, asked);
+    drain_until_quiet(&reader, &mut output);
+    let after_turn = screen_rows(&output, ROWS, COLS);
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+    (stub.generations(), after_turn)
+}
+
+// Catches: modal input bypassing slash parsing and consuming a command as an answer.
+#[test]
+fn slash_config_during_a_question_is_not_sent_as_the_answer() {
+    for mode in ["free_text", "single", "multiple"] {
+        let call = serde_json::json!({
+            "prompt": "Keep this question open",
+            "mode": mode,
+            "options": if mode == "free_text" { serde_json::json!([]) } else {
+                serde_json::json!([{"id": "choice", "label": "Keep going"}])
+            },
+            "free_text": mode == "free_text",
+        })
+        .to_string();
+        let (generations, _) = question_session_with_home(&call, |input, reader, output, home| {
+            if mode == "free_text" {
+                until_normalized(reader, output, 0, "Keep this question open\n");
+            } else {
+                until_normalized(
+                    reader,
+                    output,
+                    0,
+                    if mode == "multiple" {
+                        "Space or number toggles"
+                    } else {
+                        "Number answers immediately"
+                    },
+                );
+            }
+            // Catches: bare MCP inventory takes a different admission path in
+            // the modal and is refused or consumed as the question's answer.
+            let start = output.len();
+            input.write_all(b"/mcp\r").unwrap();
+            input.flush().unwrap();
+            until_normalized(reader, output, start, "mcp: no configured servers");
+            let start = output.len();
+            input.write_all(b"/config perimeter\r").unwrap();
+            input.flush().unwrap();
+            until_normalized(reader, output, start, "capabilities");
+            let start = output.len();
+            input.write_all(b"/config missing-section\r").unwrap();
+            input.flush().unwrap();
+            until_normalized(reader, output, start, "usage: /config");
+            let start = output.len();
+            input.write_all(b"/config set mode 'plan'\r").unwrap();
+            input.flush().unwrap();
+            until_normalized(reader, output, start, "Saved mode =");
+            let saved: toml::Value =
+                toml::from_str(&std::fs::read_to_string(home.join("config.toml")).unwrap())
+                    .unwrap();
+            assert_eq!(saved["mode"].as_str(), Some("plan"), "{mode}");
+            let answer: &[u8] = match mode {
+                "free_text" => b"actual answer\r",
+                "multiple" => b" \r",
+                _ => b"\r",
+            };
+            input.write_all(answer).unwrap();
+            input.flush().unwrap();
+        });
+        assert_eq!(generations.len(), 2, "{mode}");
+        let answer = match mode {
+            "free_text" => "actual answer",
+            "multiple" => "[\"choice\"]",
+            _ => "choice",
+        };
+        let reply = generations[1]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == "question")
+            .expect("the question reply reaches the model");
+        assert_eq!(reply["content"], answer, "{mode}");
+        for command in [
+            "/mcp",
+            "/config perimeter",
+            "/config missing-section",
+            "/config set mode 'plan'",
+        ] {
+            assert_eq!(count_exact_strings(&generations[1], command), 0, "{mode}");
+        }
+    }
+}
+
+/// Waits for the selector to be fully drawn and returns the screen.
+fn selector_screen(reader: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) -> Vec<String> {
+    until_from(reader, output, 0, b"Number answers immediately");
+    drain_until_quiet(reader, output);
+    screen_rows(output, 70, 120)
+}
+
+// Catches: model questions entering the modal without telling TUIC that human input is required.
+#[test]
+fn questions_in_a_tuic_pane_signal_awaiting_until_answered() {
+    for mode in ["single", "multiple", "free_text"] {
+        let free_text = mode == "free_text";
+        let call = serde_json::json!({
+            "prompt": "Host question",
+            "mode": mode,
+            "options": if free_text { serde_json::json!([]) } else {
+                serde_json::json!([{"id":"yes","label":"Yes"},{"id":"no","label":"No"}])
+            },
+            "free_text": free_text,
+        })
+        .to_string();
+        question_session(&call, |input, reader, output| {
+            until_normalized(reader, output, 0, "Host question");
+            drain_until_quiet(reader, output);
+            let before_answer = String::from_utf8_lossy(output);
+            assert!(
+                before_answer.contains("\x1b]7770;state=awaiting\x07"),
+                "{mode} question is visible but TUIC was never told it awaits input"
+            );
+            let answered = output.len();
+            input
+                .write_all(if free_text { b"answer\r" } else { b"1\r" })
+                .unwrap();
+            input.flush().unwrap();
+            until_from(reader, output, answered, b"\x1b]7770;state=busy\x07");
+        });
+    }
+}
+
+#[test]
+fn a_question_whose_call_json_wraps_shows_its_prompt_and_options_once_and_no_raw_json() {
+    // The prompt alone is longer than a row, and so is the call JSON around it.
+    let prompt = format!(
+        "Which function would you like to add to calc.py? {}",
+        "Pick exactly one of the candidates below. ".repeat(3)
+    );
+    let call = serde_json::json!({
+        "prompt": prompt,
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract", "description": "Return the difference of two numbers"},
+            {"id": "divide", "label": "divide", "description": "Return the quotient of two numbers"},
+            {"id": "power", "label": "power"},
+        ],
+        "free_text": false,
+    })
+    .to_string();
+    assert!(call.len() > 120, "the call must exceed one row");
+    let (generations, after_turn) = question_session(&call, |input, reader, output| {
+        let screen = selector_screen(reader, output);
+        let joined = screen.join("\n");
+        // Catches: a selector origin computed without soft wrap, which left a
+        // fragment of the first option ("ubtract") after the wrapped call line.
+        assert!(
+            !joined.contains("ask_question") && !joined.contains(r#"{""#),
+            "the raw call reached the screen: {joined}"
+        );
+        let with_fragment: Vec<&String> = screen
+            .iter()
+            .filter(|row| row.contains("ubtract"))
+            .collect();
+        assert_eq!(with_fragment.len(), 1, "stray option text: {joined}");
+        assert_eq!(with_fragment[0].trim_end(), "> 1. subtract", "{joined}");
+        assert_eq!(
+            screen
+                .iter()
+                .filter(|row| row.contains("Which function would you like"))
+                .count(),
+            1,
+            "the question is shown once: {joined}"
+        );
+        // Catches: the description dropped from the rendering.
+        let option_row = |label: &str| {
+            screen
+                .iter()
+                .position(|row| row.trim_end().ends_with(label))
+                .unwrap_or_else(|| panic!("no {label:?} row: {joined}"))
+        };
+        assert_eq!(
+            screen[option_row("1. subtract") + 1].trim(),
+            "Return the difference of two numbers"
+        );
+        assert_eq!(
+            screen[option_row("2. divide") + 1].trim(),
+            "Return the quotient of two numbers"
+        );
+        assert!(
+            screen[option_row("3. power") + 1].starts_with("Number answers immediately"),
+            "an option without a description takes no extra row: {joined}"
+        );
+        // Catches: `Other` offered although the schema forbids free text.
+        assert!(!joined.contains("Other"), "{joined}");
+        input.write_all(b"\r").expect("answer");
+        input.flush().expect("answer flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "subtract") > 0,
+        "the highlighted option reaches the model: {}",
+        generations[1]
+    );
+    let joined = after_turn.join("\n");
+    assert!(
+        !joined.contains("ask_question") && !joined.contains(r#"{""#),
+        "a row repeated the raw call after the answer: {joined}"
+    );
+}
+
+/// catches: the editor parsing a burst (`2` then Enter in one write) and running
+/// only its first command, so the selector moved to option 2 and the Enter was
+/// dropped, leaving the question unanswered.
+#[test]
+fn a_selector_applies_keys_typed_in_one_burst_in_order() {
+    let call = serde_json::json!({
+        "prompt": "Burst question",
+        "mode": "single",
+        "options": [{"id": "yes", "label": "Yes"}, {"id": "no", "label": "No"}],
+        "free_text": false,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        input.write_all(b"2\r").expect("burst answer");
+        input.flush().expect("burst answer flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "no") > 0,
+        "option 2 chosen by the burst reaches the model: {}",
+        generations[1]
+    );
+    assert_eq!(
+        count_exact_strings(&generations[1], "yes"),
+        0,
+        "the burst must not answer with the default option: {}",
+        generations[1]
+    );
+}
+
+#[test]
+fn the_other_row_opens_a_text_entry_and_its_text_is_the_answer() {
+    let call = serde_json::json!({
+        "prompt": "Which function would you like to add?",
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract"},
+            {"id": "divide", "label": "divide", "description": "Return the quotient of two numbers"},
+        ],
+        "free_text": true,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        let screen = selector_screen(reader, output);
+        let joined = screen.join("\n");
+        let other = screen
+            .iter()
+            .position(|row| row.trim_end().ends_with("3. Other"))
+            .unwrap_or_else(|| panic!("no Other row: {joined}"));
+        assert_eq!(
+            screen[other + 1].trim(),
+            "Press Enter to type your own answer",
+            "{joined}"
+        );
+        let from = output.len();
+        input.write_all(b"3").expect("select Other");
+        input.flush().expect("select flush");
+        until_from(reader, output, from, b"> 3. Other");
+        input.write_all(b"\r").expect("open text entry");
+        input.flush().expect("open flush");
+        until_normalized(reader, output, from, "Other: ");
+        // Catches: free_text unreachable from the selector.
+        input.write_all(b"modulo\r").expect("typed answer");
+        input.flush().expect("typed flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "modulo") > 0,
+        "the typed text reaches the model as the answer: {}",
+        generations[1]
+    );
+}
+
+/// catches: typed-ahead keys of one burst being dropped when the `Other`
+/// entry opens, so the free text never reaches the entry.
+#[test]
+fn a_burst_that_opens_the_other_row_and_types_its_text_answers_with_it() {
+    let call = serde_json::json!({
+        "prompt": "Which function would you like to add?",
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract"},
+            {"id": "divide", "label": "divide"},
+        ],
+        "free_text": true,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        input.write_all(b"3\rhello\r").expect("one burst");
+        input.flush().expect("burst flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "hello") > 0,
+        "the typed-ahead text answers the Other row: {}",
+        generations[1]
+    );
+}
+
+/// catches: keys of a burst that follow the Enter opening the `Other` entry
+/// staying in the shared selector queue, so backing out of the entry replays
+/// them on the selector (a stale Enter reopens `Other` and swallows the next
+/// answer as free text instead of choosing the option typed).
+#[test]
+fn keys_queued_behind_the_other_row_are_not_replayed_after_backing_out() {
+    let call = serde_json::json!({
+        "prompt": "Which function would you like to add?",
+        "mode": "single",
+        "options": [
+            {"id": "subtract", "label": "subtract"},
+            {"id": "divide", "label": "divide"},
+        ],
+        "free_text": true,
+    })
+    .to_string();
+    let (generations, _) = question_session(&call, |input, reader, output| {
+        selector_screen(reader, output);
+        let from = output.len();
+        input.write_all(b"\x1b[F\r\r").expect("burst into Other");
+        input.flush().expect("burst flush");
+        until_normalized(reader, output, from, "Other: ");
+        drain_until_quiet(reader, output);
+        // The burst's second Enter is a blank submit when the entry has read
+        // it; otherwise this one is. Either way the selector is back, once.
+        let screen = normalized(&output[from..]);
+        let backed_out = screen
+            .rfind("Number answers immediately")
+            .zip(screen.rfind("Other: "))
+            .is_some_and(|(selector, entry)| selector > entry);
+        if !backed_out {
+            let backed = output.len();
+            input.write_all(b"\r").expect("blank line backs out");
+            input.flush().expect("back flush");
+            until_from(reader, output, backed, b"Number answers immediately");
+            drain_until_quiet(reader, output);
+        }
+        input.write_all(b"1\r").expect("answer on the selector");
+        input.flush().expect("answer flush");
+    });
+    assert!(
+        count_exact_strings(&generations[1], "subtract") > 0,
+        "after backing out, `1` Enter chooses option 1: {}",
+        generations[1]
+    );
+}
+
+/// What one scripted tool turn left on a real terminal screen.
+struct ToolTurnScreens {
+    /// The screen once the turn has ended and the composer is back.
+    after_turn: Vec<String>,
+    /// The screen after the expand key, when one was pressed.
+    after_expand: Vec<String>,
+}
+
+const TOOL_TURN_DONE: &str = "TOOLS-DONE";
+
+/// Run one interactive turn whose model calls the given tools, on a screen
+/// `cols` wide, and read the terminal back through an emulator.
+///
+/// The oracle is the emulated screen and never the bytes ego wrote: a row that
+/// wrapped, overwrote the composer or arrived as raw JSON is visible there and
+/// nowhere else.
+fn tool_turn(
+    cols: u16,
+    files: &[(&str, &str)],
+    calls: &[(&str, &str)],
+    expand: bool,
+) -> ToolTurnScreens {
+    let mut completions: Vec<Reply> = calls
+        .iter()
+        .enumerate()
+        .map(|(index, (name, arguments))| {
+            Reply::Sse(tool_call(&format!("call-{index}"), name, arguments))
+        })
+        .collect();
+    completions.push(Reply::Sse(text(TOOL_TURN_DONE)));
+    tool_turn_with_completions(cols, files, completions, expand, None)
+}
+
+fn tool_turn_with_completions(
+    cols: u16,
+    files: &[(&str, &str)],
+    completions: Vec<Reply>,
+    expand: bool,
+    children_gate: Option<(Arc<ReleaseGate>, bool)>,
+) -> ToolTurnScreens {
+    let plan = Plan {
+        completions,
+        ..Plan::default()
+    };
+    let stub = if children_gate.is_some() {
+        Stub::start_concurrent(plan)
+    } else {
+        Stub::start(plan)
+    };
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "yolo",
+            "--sandbox",
+            if children_gate.is_some() {
+                support::PLATFORM_SANDBOX
+            } else {
+                "off"
+            },
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# tool row fixture\n");
+    for (name, contents) in files {
+        ego.file(name, contents);
+    }
+    let rows = 70;
+    let (session, mut input, reader) = PtySession::start(&ego, rows, cols, Some((rows, cols)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+
+    let start = output.len();
+    input.write_all(b"use the tools\r").expect("turn");
+    input.flush().expect("turn flush");
+    let cancel_children = children_gate.as_ref().is_some_and(|(_, cancel)| *cancel);
+    if let Some((gate, cancel)) = children_gate {
+        let deadline = Instant::now() + PROGRESS_DEADLINE;
+        loop {
+            let requests = stub.requests();
+            if requests
+                .iter()
+                .filter(|request| request.path.ends_with("/chat/completions"))
+                .count()
+                >= 3
+            {
+                break;
+            }
+            if Instant::now() >= deadline {
+                gate.release();
+                panic!("both task children must reach the provider concurrently: {requests:?}");
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        if cancel {
+            input.write_all(b"\x1b").expect("cancel task children");
+            input.flush().expect("cancel task children flush");
+            until_normalized(&reader, &mut output, start, "Interrupted by user");
+        }
+        gate.release();
+        let generations = stub.generations();
+        let live_context = |generation: &serde_json::Value| {
+            generation["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|message| message["content"].as_str())
+                .find(|content| content.contains("- Posture:"))
+                .expect("the real CLI supplies authoritative live posture")
+                .to_owned()
+        };
+        let parent_system = live_context(&generations[0]);
+        assert!(
+            parent_system.contains("sandbox: workspace; network: online"),
+            "{parent_system}"
+        );
+        for child in &generations[1..3] {
+            let child_system = live_context(child);
+            for fact in parent_system.lines().filter(|line| {
+                line.starts_with("- Posture:") || line.starts_with("- Workspace root:")
+            }) {
+                assert!(
+                    child_system.contains(fact),
+                    "child widened parent posture: {child_system}"
+                );
+            }
+        }
+    }
+    if !cancel_children {
+        until_normalized(&reader, &mut output, start, TOOL_TURN_DONE);
+    }
+    let screen_lines = |output: &[u8]| {
+        let mut screen = vt100::Parser::new(rows, cols, 0);
+        screen.process(output);
+        screen
+            .screen()
+            .contents()
+            .lines()
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // The answer arrives before the composer is idle again: the screen is
+    // read only once its last nonblank row is the idle composer. The final
+    // physical row is deliberately reserved for terminal-host overlays.
+    let idle_by = Instant::now() + PROGRESS_DEADLINE;
+    let after_turn = loop {
+        drain_until_quiet(&reader, &mut output);
+        let lines = screen_lines(&output);
+        if lines
+            .iter()
+            .rfind(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.starts_with('>'))
+        {
+            break lines;
+        }
+        assert!(Instant::now() < idle_by, "composer never idle: {lines:?}");
+    };
+
+    let mut after_expand = Vec::new();
+    if expand {
+        // A busy composer also ends in `>`: wait for a completed idle frame
+        // after the answer, not just the transient screen shape above.
+        let answer_end = start
+            + output[start..]
+                .windows(TOOL_TURN_DONE.len())
+                .position(|window| window == TOOL_TURN_DONE.as_bytes())
+                .expect("the completed answer was observed")
+            + TOOL_TURN_DONE.len();
+        until_prompt_from(&reader, &mut output, answer_end);
+        let start = output.len();
+        input.write_all(b"\x1bo").expect("Meta-o");
+        input.flush().expect("expand flush");
+        // The last line of the whole result, indented under its row.
+        until_normalized(&reader, &mut output, start, "  20");
+        drain_until_quiet(&reader, &mut output);
+        after_expand = screen_lines(&output);
+    }
+
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    if cancel_children {
+        assert_eq!(
+            status.exit_code(),
+            130,
+            "the cancelled turn owns the final exit"
+        );
+    } else {
+        assert!(status.success());
+    }
+    ToolTurnScreens {
+        after_turn,
+        after_expand,
+    }
+}
+
+/// A row is a tool row when its first cell is an outcome mark.
+fn tool_rows(screen: &[String]) -> Vec<&str> {
+    screen
+        .iter()
+        .map(String::as_str)
+        .filter(|line| line.starts_with('✓') || line.starts_with('✗'))
+        .collect()
+}
+
+/// The row ends with a duration such as `12ms`, `0.4s` or `1m05s`.
+fn ends_with_duration(row: &str) -> bool {
+    let last = row.split_whitespace().last().unwrap_or("");
+    last.starts_with(|c: char| c.is_ascii_digit())
+        && last.ends_with('s')
+        && last
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, '.' | 'm' | 's'))
+}
+
+const READ_CALL: (&str, &str) = ("read", r#"{"files":[{"path":"calc.py"}]}"#);
+const EDIT_CALL: (&str, &str) = (
+    "edit",
+    r#"{"files":[{"path":"calc.py","chunks":[{"old_string":"a = 1","new_string":"a = 1\nc = 3\nd = 4"}]}]}"#,
+);
+const SEQ_CALL: (&str, &str) = ("exec", r#"{"argv":["seq","1","20"]}"#);
+
+#[test]
+fn read_edit_and_exec_each_leave_one_compact_row_and_no_raw_call_json() {
+    let screens = tool_turn(
+        120,
+        &[("calc.py", "a = 1\nb = 2\n")],
+        &[READ_CALL, EDIT_CALL, SEQ_CALL],
+        false,
+    );
+    let rows = tool_rows(&screens.after_turn);
+    let joined = screens.after_turn.join("\n");
+    assert_eq!(rows.len(), 3, "one row per call: {joined}");
+    assert!(
+        rows[0].starts_with("✓ read calc.py"),
+        "read row: {:?}",
+        rows[0]
+    );
+    assert!(
+        rows[1].starts_with("✓ edit calc.py +2 -0"),
+        "edit row: {:?}",
+        rows[1]
+    );
+    assert!(
+        rows[2].starts_with("✓ $ seq 1 20"),
+        "exec row: {:?}",
+        rows[2]
+    );
+    for row in &rows {
+        assert!(ends_with_duration(row), "no duration on {row:?}");
+    }
+    assert!(
+        !joined.contains(r#"{"path""#) && !joined.contains(r#""argv""#),
+        "raw call JSON reached the transcript: {joined}"
+    );
+}
+
+#[test]
+fn exec_row_shows_exit_status_and_a_bounded_tail_and_the_expand_key_shows_all() {
+    let screens = tool_turn(120, &[], &[SEQ_CALL], true);
+    let trimmed = |screen: &[String]| {
+        screen
+            .iter()
+            .map(|l| l.trim().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let before = trimmed(&screens.after_turn);
+    assert!(
+        tool_rows(&screens.after_turn)
+            .first()
+            .is_some_and(|row| row.contains("exit 0")),
+        "exit status missing: {before:?}"
+    );
+    for shown in ["18", "19", "20"] {
+        assert!(
+            before.iter().any(|l| l == shown),
+            "tail {shown} missing: {before:?}"
+        );
+    }
+    assert!(
+        !before.iter().any(|l| l == "10"),
+        "the tail is unbounded: {before:?}"
+    );
+    assert!(
+        before.iter().any(|l| l.contains("more lines")),
+        "no hint that lines were cut: {before:?}"
+    );
+    let after = trimmed(&screens.after_expand);
+    for line in 1..=20 {
+        assert!(
+            after.iter().any(|l| *l == line.to_string()),
+            "line {line} missing after expand: {after:?}"
+        );
+    }
+}
+
+#[test]
+fn a_failing_call_shows_the_failure_and_never_a_success_mark() {
+    let screens = tool_turn(
+        120,
+        &[],
+        &[
+            ("exec", r#"{"argv":["sh","-c","echo boom >&2; exit 3"]}"#),
+            ("read", r#"{"files":[{"path":"missing.py"}]}"#),
+        ],
+        false,
+    );
+    let rows = tool_rows(&screens.after_turn);
+    let joined = screens.after_turn.join("\n");
+    assert_eq!(rows.len(), 2, "one row per call: {joined}");
+    assert!(
+        rows[0].starts_with('✗') && rows[0].contains("exit 3"),
+        "failed exec row: {:?}",
+        rows[0]
+    );
+    assert!(
+        rows[1].starts_with("✗ read missing.py"),
+        "failed read row: {:?}",
+        rows[1]
+    );
+    assert!(
+        !rows.iter().any(|row| row.contains('✓')),
+        "a failed call carries a success mark: {rows:?}"
+    );
+    assert!(joined.contains("boom"), "stderr tail missing: {joined}");
+}
+
+#[test]
+fn rows_fit_the_terminal_at_120_80_60_and_40_columns() {
+    let long_arg = "a".repeat(130);
+    let exec = format!(r#"{{"argv":["echo","{long_arg}"]}}"#);
+    let long_missing = format!(
+        r#"{{"files":[{{"path":"no-such-directory/{}.txt"}}]}}"#,
+        "b".repeat(90)
+    );
+    for cols in [120u16, 80, 60, 40] {
+        let screens = tool_turn(
+            cols,
+            &[("calc.py", "a = 1\n")],
+            &[READ_CALL, ("exec", &exec), ("read", &long_missing)],
+            false,
+        );
+        let joined = screens.after_turn.join("\n");
+        let rows = tool_rows(&screens.after_turn);
+        assert_eq!(rows.len(), 3, "{cols} cols, one row per call: {joined}");
+        for row in rows {
+            assert!(
+                ends_with_duration(row),
+                "{cols} cols: row lost its outcome to a soft wrap: {row:?}\n{joined}"
+            );
+        }
+        let done = screens
+            .after_turn
+            .iter()
+            .position(|line| line.contains(TOOL_TURN_DONE))
+            .unwrap_or_else(|| panic!("{cols} cols: answer missing: {joined}"));
+        assert!(
+            screens.after_turn[done + 1..]
+                .iter()
+                .any(|line| line.starts_with('>')),
+            "{cols} cols: the composer is not below the answer: {joined}"
+        );
+    }
+}
+
+const PICKER_ROWS: u16 = 40;
+/// Three chat models around the session's `qwen3`, so the current model is
+/// neither the first nor the last row.
+const PICKER_TAGS: &str = r#"{"models":[{"name":"aaa-first","capabilities":["completion","tools"]},{"name":"qwen3","capabilities":["completion","tools"]},{"name":"zzz-last","capabilities":["completion","tools"]}]}"#;
+
+/// A live terminal whose oracle is the emulated screen, never the bytes ego
+/// wrote.
+struct Term<'a> {
+    input: &'a mut PtyWriter,
+    reader: &'a mpsc::Receiver<Vec<u8>>,
+    output: &'a mut Vec<u8>,
+    cols: u16,
+}
+
+impl Term<'_> {
+    fn send(&mut self, bytes: &[u8]) {
+        self.input.write_all(bytes).expect("terminal input");
+        self.input.flush().expect("terminal input flush");
+    }
+
+    fn screen(&self) -> Vec<String> {
+        screen_rows(self.output, PICKER_ROWS, self.cols)
+    }
+
+    /// Reads until the emulated screen satisfies `ready`, lets the redraw
+    /// settle, and returns the screen.
+    fn until(&mut self, what: &str, ready: impl Fn(&[String]) -> bool) -> Vec<String> {
+        let deadline = Instant::now() + PROGRESS_DEADLINE;
+        while !ready(&self.screen()) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match self.reader.recv_timeout(remaining) {
+                Ok(chunk) => self.output.extend(chunk),
+                Err(_) => panic!("never saw {what}; screen:\n{}", self.screen().join("\n")),
+            }
+        }
+        drain_until_quiet(self.reader, self.output);
+        self.screen()
+    }
+
+    fn close_picker(&mut self) {
+        self.send(b"\x1b");
+        self.until("the picker to close", |screen| {
+            !screen.iter().any(|row| row.starts_with("Select "))
+        });
+    }
+}
+
+/// One session at `cols` columns, past the trust question, with the picker
+/// catalogue above. `drive` leaves the composer idle.
+fn picker_session(cols: u16, drive: impl FnOnce(&mut Term<'_>, &Stub)) {
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((200, PICKER_TAGS.to_string())),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# picker fixture\n");
+    let (session, mut input, reader) =
+        PtySession::start(&ego, PICKER_ROWS, cols, Some((PICKER_ROWS, cols)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    drain_until_quiet(&reader, &mut output);
+    drive(
+        &mut Term {
+            input: &mut input,
+            reader: &reader,
+            output: &mut output,
+            cols,
+        },
+        &stub,
+    );
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+}
+
+/// The picker's own rows: everything below its heading.
+fn picker_rows(screen: &[String]) -> &[String] {
+    let heading = screen
+        .iter()
+        .rposition(|row| row.starts_with("Select "))
+        .expect("a picker heading is on screen");
+    &screen[heading..]
+}
+
+#[test]
+fn the_pickers_open_on_the_current_value_name_it_and_hint_the_session_key_at_step_one() {
+    picker_session(120, |term, _stub| {
+        term.send(b"/model\r");
+        let screen = term.until("the model picker", |screen| {
+            screen.iter().any(|row| row.contains("Esc cancels"))
+        });
+        let rows = picker_rows(&screen);
+        let row = |needle: &str| {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?} row:\n{}", screen.join("\n")))
+        };
+        // Catches: the cursor fixed on row 1 and no marker on the current model.
+        assert_eq!(row("2. ollama/qwen3"), "> 2. ollama/qwen3 current");
+        assert!(row("1. ollama/aaa-first").starts_with("  "), "{screen:#?}");
+        assert!(
+            !row("1. ollama/aaa-first").contains("current"),
+            "{screen:#?}"
+        );
+        // Catches: the session-only key explained only at the reasoning step.
+        assert!(
+            rows.join("\n").contains("s = this session only"),
+            "{screen:#?}"
+        );
+
+        term.send(b"\r");
+        let screen = term.until("the reasoning step", |screen| {
+            screen
+                .iter()
+                .any(|row| row.starts_with("Select reasoning for ollama/qwen3"))
+        });
+        // Catches: no current effort marked after choosing the current model.
+        assert_eq!(
+            picker_rows(&screen)
+                .iter()
+                .filter(|row| row.contains("✓ current"))
+                .count(),
+            1,
+            "{screen:#?}"
+        );
+        term.close_picker();
+
+        term.send(b"/thinking\r");
+        let screen = term.until("the effort picker", |screen| {
+            screen
+                .iter()
+                .any(|row| row.starts_with("Select reasoning for ollama/qwen3"))
+        });
+        // Catches: the effort picker's cursor and marker on different rows.
+        let marked = picker_rows(&screen)
+            .iter()
+            .find(|row| row.contains("✓ current"))
+            .unwrap_or_else(|| panic!("no current effort:\n{}", screen.join("\n")));
+        assert!(marked.starts_with("> "), "{screen:#?}");
+        term.close_picker();
+    });
+}
+
+#[test]
+fn typing_filters_the_model_list_while_digits_select_only_before_the_filter_starts() {
+    picker_session(120, |term, _stub| {
+        term.send(b"/model\r");
+        term.until("the model picker", |screen| {
+            screen.iter().any(|row| row.contains("Esc cancels"))
+        });
+        // Catches: type-to-search that takes digits before any filter exists.
+        term.send(b"1");
+        term.until("row 1 selected by number", |screen| {
+            screen
+                .iter()
+                .any(|row| row.starts_with("> 1. ollama/aaa-first"))
+        });
+
+        for key in [b"z", b"z", b"z"] {
+            term.send(key);
+        }
+        let screen = term.until("the zzz filter", |screen| {
+            screen.iter().any(|row| row.contains("filter: zzz"))
+        });
+        let rows = picker_rows(&screen).join("\n");
+        assert!(rows.contains("ollama/zzz-last"), "{screen:#?}");
+        assert!(!rows.contains("ollama/aaa-first"), "{screen:#?}");
+        assert!(!rows.contains("ollama/qwen3"), "{screen:#?}");
+
+        // Catches: digits still selecting rows once a filter has started, which
+        // makes `qwen3` impossible to type.
+        for _ in 0..3 {
+            term.send(b"\x7f");
+        }
+        for key in [b"q", b"w", b"e", b"n", b"3"] {
+            term.send(key);
+        }
+        let screen = term.until("the qwen3 filter", |screen| {
+            screen.iter().any(|row| row.contains("filter: qwen3"))
+        });
+        assert!(
+            picker_rows(&screen)
+                .iter()
+                .any(|row| row.starts_with("> 1. ollama/qwen3")),
+            "{screen:#?}"
+        );
+        term.close_picker();
+    });
+}
+
+#[test]
+fn a_filter_with_no_match_shows_an_empty_state_and_enter_does_nothing() {
+    picker_session(120, |term, _stub| {
+        term.send(b"/model\r");
+        term.until("the model picker", |screen| {
+            screen.iter().any(|row| row.contains("Esc cancels"))
+        });
+        // A row selected before the filter emptied the list must not survive it.
+        term.send(b"2");
+        term.until("row 2 selected", |screen| {
+            screen
+                .iter()
+                .any(|row| row.starts_with("> 2. ollama/qwen3"))
+        });
+        term.send(b"k");
+        term.send(b"k");
+        let screen = term.until("the empty state", |screen| {
+            screen.iter().any(|row| row.contains("No model matches"))
+        });
+        assert!(
+            !picker_rows(&screen)
+                .iter()
+                .any(|row| row.contains(". ollama/")),
+            "{screen:#?}"
+        );
+        // Catches: Enter continuing with the stale row.
+        term.send(b"\r");
+        std::thread::sleep(Duration::from_millis(500));
+        drain_until_quiet(term.reader, term.output);
+        let screen = term.screen();
+        assert!(
+            screen.iter().any(|row| row.contains("No model matches")),
+            "{screen:#?}"
+        );
+        assert!(
+            !screen.iter().any(|row| row.starts_with("Select reasoning")),
+            "{screen:#?}"
+        );
+        term.close_picker();
+    });
+}
+
+// Catches: startup pins the provider before the first prompt, or the successor
+// incorrectly restores the launch model instead of the explicit picker choice.
+#[test]
+fn provider_fork_activates_target_model_before_first_prompt() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/claude-opus-5-5",
+            "--thinking",
+            "low",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("OPENAI_API_KEY", "fixture-openai-key")
+        .env("FIXTURE_WORK_KEY", "fixture-anthropic-key");
+    ego.home_file("config.toml", "connection = 'work'\n[connections.work]\nname = 'Work'\nvendor = 'anthropic'\naccess = 'key'\nkey_env = 'FIXTURE_WORK_KEY'\n");
+    ego.file("AGENTS.md", "# provider switch fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 28, 120, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_post_trust_prompt(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"/model openai/gpt-6-luna\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "Model: openai/gpt-6-luna");
+    until_post_trust_prompt(&reader, &mut output, start);
+    assert!(normalized(&output[start..]).contains("openai/gpt-6-luna"));
+    assert!(stub.generations().is_empty(), "switching sent a prompt");
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert!(!normalized(&output[start..]).contains("ego resume"));
+    assert!(
+        std::fs::read_dir(ego.home_path().join("sessions"))
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .all(|entry| entry.file_name().to_str().is_none_or(|name| name
+                .parse::<ego_core::event::id::SessionId>()
+                .is_err()
+                || name == support::FIXTURE_SESSION_ID)),
+        "switching an empty session must not create a successor journal"
+    );
+    let store = ego_tools::store::JsonlStore::new(
+        ego.home_path().join("sessions"),
+        ego.workspace_path().to_path_buf(),
+        Box::new(ego_tools::store::OsIo),
+    );
+    let source = support::FIXTURE_SESSION_ID.parse().unwrap();
+    assert_eq!(
+        store.selected_model(&source).unwrap().unwrap().0,
+        "openai/gpt-6-luna"
+    );
+}
+
+// Catches: the terminal exits or rebinds the source when the selected target
+// loses its declared credential between catalogue projection and readmission.
+#[test]
+fn provider_fork_rejected_admission_restores_source_account() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "anthropic/claude-opus-5-5",
+            "--thinking",
+            "low",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("FIXTURE_WORK_KEY", "fixture-anthropic-key")
+        .env("FIXTURE_TARGET_KEY", "fixture-openai-key");
+    let config = "connection = 'work'\n[connections.work]\nname = 'Work'\nvendor = 'anthropic'\naccess = 'key'\nkey_env = 'FIXTURE_WORK_KEY'\n[connections.target]\nname = 'Target'\nvendor = 'openai'\naccess = 'key'\nkey_env = 'FIXTURE_TARGET_KEY'\n";
+    ego.home_file("config.toml", config);
+    ego.file("AGENTS.md", "# provider readmission fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 28, 120, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_post_trust_prompt(&reader, &mut output, 0);
+    ego.home_file(
+        "config.toml",
+        &config.replace("FIXTURE_TARGET_KEY", "MISSING_FIXTURE_TARGET_KEY"),
+    );
+    let start = output.len();
+    input.write_all(b"/model openai/gpt-6-luna\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "returning to original session");
+    until_normalized(&reader, &mut output, start, "FIXTURE_WORK_KEY");
+    let account_marker = b"FIXTURE_WORK_KEY";
+    let recovered = output
+        .windows(account_marker.len())
+        .rposition(|window| window == account_marker)
+        .unwrap()
+        + account_marker.len();
+    until_post_trust_prompt(&reader, &mut output, recovered);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    output.extend(reader.try_iter().flatten());
+    assert!(
+        status.success(),
+        "{status:?}: {}",
+        normalized(&output[start..])
+    );
+    let store = ego_tools::store::JsonlStore::new(
+        ego.home_path().join("sessions"),
+        ego.workspace_path().to_path_buf(),
+        Box::new(ego_tools::store::OsIo),
+    );
+    let origin = support::FIXTURE_SESSION_ID.parse().unwrap();
+    assert_eq!(
+        store.selected_connection(&origin).unwrap().as_deref(),
+        Some("work")
+    );
+    assert_eq!(
+        store.selected_model(&origin).unwrap().unwrap().0,
+        "anthropic/claude-opus-5-5"
+    );
+    assert!(stub.generations().is_empty());
+}
+
+// Catches: consent hides the configured endpoint or a changed endpoint
+// publishes a fork against the earlier approval.
+#[test]
+fn provider_fork_discloses_configured_endpoint_and_refuses_drift() {
+    provider_fork_consent_fixture(false, true);
+}
+
+// Catches: cross-provider activation skips the post-switch observer.
+#[test]
+fn provider_fork_emits_post_model_switch() {
+    provider_fork_consent_fixture(true, false);
+}
+
+fn provider_fork_consent_fixture(observe_hook: bool, use_instance: bool) {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Sse(text("PROVIDER-FORK-SOURCE-ANSWER"))],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--allow",
+            "exec(bash *)",
+        ])
+        .env("OPENAI_API_KEY", "fixture-openai-key");
+    let post = ego.workspace_path().join("post-switch");
+    let hook = format!("cat >/dev/null; : > '{}'", post.display());
+    let hooks = if observe_hook {
+        format!(
+            "[[hooks]]\nevent = 'PostModelSwitch'\n[hooks.handler]\ntype = 'command'\nshell = 'bash'\ncommand = {hook:?}\n"
+        )
+    } else {
+        String::new()
+    };
+    let endpoint = format!("http://{}/approved/v1/", stub.address);
+    let target = if use_instance {
+        "office/assistant"
+    } else {
+        "openai/gpt-6-luna"
+    };
+    let mut config = format!(
+        "{hooks}\n[connections.target]\nname = 'Destination account'\nvendor = 'openai'\naccess = 'key'\nkey_env = 'OPENAI_API_KEY'\n"
+    );
+    if use_instance {
+        config.push_str(&toml::to_string(&serde_json::json!({
+            "providers": {"instances": {"office": {
+                "profile": "openai-compatible", "base_url": endpoint,
+                "credential_ref": "target", "models": {"assistant": {
+                    "upstream_id": "fixture-chat", "contract": "chat-standard",
+                    "metering": {"kind": "currency", "settlement": {"kind": "quote"}},
+                    "facts": {
+                        "schema_version": ego_core::generator::capabilities::ModelCapabilities::SCHEMA_VERSION,
+                        "max_context_tokens": 32000, "max_output_tokens": 2048,
+                        "supports_parallel_tool_calls": false, "reasoning_carryover": "unsupported",
+                        "reasoning_efforts": {"only": ["off"]}, "default_reasoning_effort": "off",
+                        "cancel": "cooperative", "cache": "none", "transport": "sse"
+                    }
+                }}
+            }}}
+        })).unwrap());
+    }
+    ego.home_file("config.toml", &config);
+    ego.file("AGENTS.md", "# provider fork consent fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 28, 120, Some((28, 120)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_post_trust_prompt(&reader, &mut output, 0);
+    let turn = output.len();
+    input.write_all(b"portable history marker\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, turn, "PROVIDER-FORK-SOURCE-ANSWER");
+    until_prompt_from(&reader, &mut output, turn);
+    drain_until_quiet(&reader, &mut output);
+    let mut outcomes = vec![("no", "provider switch cancelled", false)];
+    if use_instance {
+        outcomes.push(("yes", "returning to original session", true));
+    }
+    outcomes.push(("yes", "resumed session", false));
+    let mut expected_endpoint = endpoint;
+    for (answer, receipt, replace_endpoint) in outcomes {
+        let start = output.len();
+        write!(input, "/model {target}\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "Your next prompt will share");
+        let confirmation = normalized(&output[start..]);
+        assert!(
+            confirmation.contains("Destination account"),
+            "{confirmation}"
+        );
+        if use_instance {
+            assert!(confirmation.contains(&expected_endpoint), "{confirmation}");
+        }
+        if replace_endpoint {
+            ego.home_file(
+                "config.toml",
+                &config.replace("/approved/v1/", "/different/v1/"),
+            );
+        }
+        assert!(!post.exists(), "post-switch hook ran before consent");
+        write!(input, "{answer}\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, receipt);
+        if replace_endpoint {
+            let refusal = normalized(&output[start..]);
+            assert!(
+                refusal.contains("credential configuration changed"),
+                "{refusal}"
+            );
+            until_post_trust_prompt(&reader, &mut output, start);
+            let sessions = ego.home_path().join("sessions");
+            assert!(
+                std::fs::read_dir(sessions)
+                    .unwrap()
+                    .filter_map(Result::ok)
+                    .all(|entry| entry
+                        .file_name()
+                        .to_str()
+                        .is_none_or(|name| name == support::FIXTURE_SESSION_ID
+                            || !entry.path().join("events.jsonl").exists())),
+                "the unadmitted endpoint must not publish a journal"
+            );
+            expected_endpoint = expected_endpoint.replace("/approved/v1/", "/different/v1/");
+        }
+        drain_until_quiet(&reader, &mut output);
+    }
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert_eq!(
+        post.exists(),
+        observe_hook,
+        "post-switch observer execution"
+    );
+    let store = ego_tools::store::JsonlStore::new(
+        ego.home_path().join("sessions"),
+        ego.workspace_path().to_path_buf(),
+        Box::new(ego_tools::store::OsIo),
+    );
+    let origin = support::FIXTURE_SESSION_ID.parse().unwrap();
+    assert_eq!(
+        store.selected_model(&origin).unwrap().unwrap().0,
+        "ollama/qwen3"
+    );
+    let targets: Vec<_> = std::fs::read_dir(ego.home_path().join("sessions"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+        .filter(|id| *id != origin)
+        .collect();
+    assert_eq!(targets.len(), 1, "declining consent must not save a fork");
+    let fork_id = targets[0];
+    assert_eq!(store.selected_model(&fork_id).unwrap().unwrap().0, target);
+    assert_eq!(
+        store.selected_connection(&fork_id).unwrap().as_deref(),
+        Some("target")
+    );
+    let replay = ego_core::session::ReplayContext::new(&store, &store)
+        .replay(&fork_id)
+        .unwrap();
+    let history = format!("{:?}", replay.conversation().messages());
+    assert!(history.contains("portable history marker"), "{history}");
+    assert!(history.contains("PROVIDER-FORK-SOURCE-ANSWER"), "{history}");
+    assert_eq!(
+        stub.generations().len(),
+        1,
+        "switching sent provider requests"
+    );
+}
+
+// Catches: switching away while a native background task still owns a live request.
+#[test]
+fn provider_fork_refuses_live_background_task() {
+    struct ReleaseOnDrop(Arc<ReleaseGate>);
+    impl Drop for ReleaseOnDrop {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    const CHILD: &str = "Run the held background task";
+    let gate = ReleaseGate::new();
+    let task = |id| {
+        Reply::Sse(tool_call(
+            id,
+            "task",
+            &serde_json::json!({
+                "name": "Held task", "prompt": CHILD, "background": true
+            })
+            .to_string(),
+        ))
+    };
+    let stub = Stub::start_concurrent(Plan {
+        completions: vec![
+            task("held-task"),
+            Reply::Sse(text("SOURCE-TURN-SETTLED")),
+            Reply::Sse(text("SOURCE-RECEIVED-TASK")),
+        ],
+        prompt_completions: vec![(
+            CHILD.into(),
+            vec![Reply::GatedPaced {
+                head: String::new(),
+                tail: text("HELD-TASK-RESULT"),
+                gate: Arc::clone(&gate),
+            }],
+        )],
+        ..Plan::default()
+    });
+    let _release = ReleaseOnDrop(Arc::clone(&gate));
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--mode",
+            "yolo",
+            "--trust-workspace",
+            "--sandbox",
+            "off",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+        ])
+        .env("OPENAI_API_KEY", "fixture-openai-key");
+    let (session, mut input, reader) = PtySession::start(&ego, 30, 140, Some((30, 140)));
+    let mut output = Vec::new();
+    until_post_trust_prompt(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"delegate a background task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "SOURCE-TURN-SETTLED");
+    until_post_trust_prompt(&reader, &mut output, start);
+    let start = output.len();
+    input.write_all(b"/model openai/gpt-6-luna\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        "wait for queued prompts or pending work",
+    );
+    assert!(!normalized(&output[start..]).contains("Your next prompt will share"));
+    gate.release();
+    until_normalized(&reader, &mut output, start, "SOURCE-RECEIVED-TASK");
+    until_post_trust_prompt(&reader, &mut output, start);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert!(stub.generations().iter().any(|generation| {
+        generation["messages"]
+            .to_string()
+            .contains("HELD-TASK-RESULT")
+    }));
+}
+
+// Catches: /model terra routes to a picker or a provider turn instead of changing the live session.
+#[test]
+fn unique_model_fragment_switches_the_live_session_without_a_generation() {
+    let tags = r#"{"models":[{"name":"qwen3","capabilities":["completion","tools"]},{"name":"terra","capabilities":["completion","tools"]}]}"#;
+    let stub = Stub::start(Plan {
+        tags_refusal: Some((200, tags.to_owned())),
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# model shortcut fixture\n");
+    ego.home_file(
+        "models.toml",
+        r#"
+[model."ollama/terra".capabilities]
+schema_version = 6
+max_context_tokens = 8192
+max_output_tokens = 2048
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_efforts = "any"
+default_reasoning_effort = "off"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+"#,
+    );
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_post_trust_prompt(&reader, &mut output, 0);
+    let start = output.len();
+    input.write_all(b"/model terra\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(
+        &reader,
+        &mut output,
+        start,
+        "Model: ollama/terra (this session only)",
+    );
+    assert!(!normalized(&output[start..]).contains("Select model"));
+    assert!(
+        stub.generations().is_empty(),
+        "slash shortcut started a provider turn"
+    );
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+}
+
+#[test]
+fn choosing_a_model_writes_a_receipt_into_the_transcript() {
+    picker_session(120, |term, stub| {
+        term.send(b"/model\r");
+        term.until("the model picker", |screen| {
+            screen.iter().any(|row| row.contains("Esc cancels"))
+        });
+        for key in [b"a", b"a", b"a"] {
+            term.send(key);
+        }
+        term.until("the aaa filter", |screen| {
+            screen.iter().any(|row| row.contains("filter: aaa"))
+        });
+        term.send(b"\r");
+        term.until("the reasoning step", |screen| {
+            screen
+                .iter()
+                .any(|row| row.starts_with("Select reasoning for ollama/aaa-first"))
+        });
+        term.send(b"1");
+        term.until("a highlighted effort", |screen| {
+            screen.iter().any(|row| row.starts_with("> 1."))
+        });
+        term.send(b"s");
+        // Catches: a silent model change.
+        let screen = term.until("the receipt", |screen| {
+            screen
+                .iter()
+                .any(|row| row.contains("Model: ollama/aaa-first (this session only)"))
+        });
+        assert!(
+            !screen.iter().any(|row| row.starts_with("Select ")),
+            "{screen:#?}"
+        );
+        assert!(stub.generations().is_empty());
+    });
+}
+
+#[test]
+fn the_banner_lists_startup_keys_at_120_80_60_and_40_columns() {
+    for cols in [120u16, 80, 60, 40] {
+        picker_session(cols, |term, _stub| {
+            let screen = term.screen();
+            let rows = screen.iter().map(|row| row.trim()).collect::<Vec<_>>();
+            // Catches: the real startup uses full busy hints instead of the compact renderer.
+            for item in ["Esc interrupt", "/help keys"] {
+                assert!(
+                    rows.iter()
+                        .any(|row| row.split(" · ").any(|part| part == item)),
+                    "{cols} cols: {item:?} missing from the banner:\n{}",
+                    screen.join("\n")
+                );
+            }
+            assert!(
+                !rows
+                    .iter()
+                    .any(|row| row.contains("Enter queues") || row.contains("Ctrl+Enter steers")),
+                "{}",
+                screen.join("\n")
+            );
+        });
+    }
+}
+
+/// catches: Esc in the permission edit form denying the call without the
+/// `Interrupted by user` receipt the plain modal leaves.
+#[test]
+fn esc_in_the_permission_edit_form_denies_the_call_and_leaves_one_receipt() {
+    let write_arguments = serde_json::json!({"files": [{
+        "path": "notes.md",
+        "contents": "permission",
+    }]})
+    .to_string();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("write-1", "write", &write_arguments)),
+            Reply::Sse(text("AFTER-EDIT-ESC")),
+        ],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--mode",
+        "default",
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let notes = ego.file("notes.md", "original");
+    let (session, mut input, reader) = PtySession::start(&ego, 40, 100, Some((40, 100)));
+    let mut output = Vec::new();
+
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust answer flush");
+    let idle_start = output.len();
+    until_prompt_from(&reader, &mut output, idle_start);
+    input.write_all(b"initial\r").expect("initial prompt");
+    input.flush().expect("initial prompt flush");
+    until(&reader, &mut output, b"[d] details");
+    drain_until_quiet(&reader, &mut output);
+    let edit_start = output.len();
+    input.write_all(b"e").expect("open the edit form");
+    input.flush().expect("edit flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        edit_start,
+        "Nested or additional parameters (JSON): ",
+    );
+    drain_until_quiet(&reader, &mut output);
+    let esc_start = output.len();
+    input.write_all(b"\x1b").expect("Esc in the form");
+    input.flush().expect("Esc flush");
+    until_normalized(&reader, &mut output, esc_start, "permission was refused");
+    until_prompt_from(&reader, &mut output, esc_start);
+    drain_until_quiet(&reader, &mut output);
+    // The raw stream repeats the receipt on every repaint; the screen shows
+    // what the person sees.
+    let mut screen = vt100::Parser::new(40, 100, 0);
+    screen.process(&output);
+    let visible = screen.screen().contents();
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "Esc in the edit form must leave exactly one receipt: {visible:?}"
+    );
+    assert_eq!(std::fs::read_to_string(notes).unwrap(), "original");
+    input.write_all(b"/quit\r").expect("quit command");
+    input.flush().expect("quit flush");
+    let status = session.quit(input);
+    // A refused permission ends the session with exit 3 by design.
+    assert_eq!(status.exit_code(), 3, "unexpected exit: {status:?}");
+}
+
+const MODAL_ROWS: u16 = 40;
+const MODAL_COLS: u16 = 120;
+
+/// One conversational session in default mode whose model asks for a single
+/// tool call and then says `TOOLS-DONE`, read back through an emulated screen.
+///
+/// The oracle is the screen and never the bytes ego wrote, for the reason
+/// `tool_turn` gives: wrapped rows and overwritten rows are visible only there.
+struct ModalSession {
+    ego: Ego,
+    stub: Stub,
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    pair: portable_pty::PtyPair,
+    input: PtyWriter,
+    reader: mpsc::Receiver<Vec<u8>>,
+    output: Vec<u8>,
+    /// Where the last key was sent: waits look only after it, so a row drawn
+    /// before the key cannot satisfy them.
+    mark: usize,
+    /// The terminal size, shared with the reader's emulated screen.
+    size: Arc<Mutex<(u16, u16)>>,
+    /// Each resize: the output offset it took effect at, and the new size.
+    resizes: Vec<(usize, (u16, u16))>,
+    joins: [thread::JoinHandle<()>; 2],
+}
+
+fn modal_session(call: (&str, &str)) -> ModalSession {
+    modal_session_with(vec![
+        Reply::Sse(tool_call("call-0", call.0, call.1)),
+        Reply::Sse(text(TOOL_TURN_DONE)),
+    ])
+}
+
+/// [`modal_session`] for a model that answers with `completions` in order.
+fn modal_session_with(completions: Vec<Reply>) -> ModalSession {
+    let stub = Stub::start(Plan {
+        completions,
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            "default",
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    modal_session_on(ego, stub)
+}
+
+/// [`modal_session_with`] for an `ego` the caller configured against `stub`.
+fn modal_session_on(ego: Ego, stub: Stub) -> ModalSession {
+    ego.file("AGENTS.md", "# permission modal fixture\n");
+    let pair = NativePtySystem::default()
+        .openpty(PtySize {
+            rows: MODAL_ROWS,
+            cols: MODAL_COLS,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .expect("pty");
+    let child = pair.slave.spawn_command(ego.pty_command()).expect("spawn");
+    let (mut input, dsr_responder, writer_join) =
+        writer_owner(pair.master.take_writer().expect("writer"));
+    let size = Arc::new(Mutex::new((MODAL_ROWS, MODAL_COLS)));
+    let (reader, reader_join) = stream_with_resizable_screen(
+        pair.master.try_clone_reader().expect("reader"),
+        dsr_responder,
+        Some(Arc::clone(&size)),
+    );
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    ModalSession {
+        ego,
+        stub,
+        child,
+        pair,
+        input,
+        reader,
+        output,
+        mark: 0,
+        size,
+        resizes: Vec::new(),
+        joins: [reader_join, writer_join],
+    }
+}
+
+/// How a [`ModalSession`] ended: its exit status, what the model was sent,
+/// and what the user config holds.
+type Quit = (portable_pty::ExitStatus, Vec<serde_json::Value>, String);
+
+impl ModalSession {
+    fn press(&mut self, keys: &[u8]) {
+        drain_until_quiet(&self.reader, &mut self.output);
+        self.mark = self.output.len();
+        self.input.write_all(keys).expect("keys");
+        self.input.flush().expect("keys flush");
+    }
+
+    fn wait(&mut self, needle: &str) {
+        until_normalized(&self.reader, &mut self.output, self.mark, needle);
+    }
+
+    /// Resize the terminal; waits that follow look only at what it repaints.
+    fn resize(&mut self, rows: u16, cols: u16) {
+        drain_until_quiet(&self.reader, &mut self.output);
+        self.mark = self.output.len();
+        self.resize_now(rows, cols);
+    }
+
+    /// [`ModalSession::resize`] without settling first, so it can race a
+    /// key press written just before it.
+    fn resize_now(&mut self, rows: u16, cols: u16) {
+        let _ = self.mark;
+        self.resizes.push((self.mark, (rows, cols)));
+        *self.size.lock().expect("screen size lock") = (rows, cols);
+        self.pair
+            .master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("resize");
+    }
+
+    fn screen(&mut self) -> Vec<String> {
+        drain_until_quiet(&self.reader, &mut self.output);
+        let mut screen = vt100::Parser::new(MODAL_ROWS, MODAL_COLS, 0);
+        let mut from = 0;
+        for &(at, (rows, cols)) in &self.resizes {
+            screen.process(&self.output[from..at]);
+            screen.screen_mut().set_size(rows, cols);
+            from = at;
+        }
+        screen.process(&self.output[from..]);
+        screen
+            .screen()
+            .contents()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// Quit, and return what the model was sent and what the user config holds.
+    fn finish(self) -> (Vec<serde_json::Value>, String) {
+        let (status, generations, config) = self.quit();
+        assert!(status.success(), "{status:?}");
+        (generations, config)
+    }
+
+    /// [`ModalSession::finish`] that leaves the exit status to the caller.
+    fn quit(mut self) -> Quit {
+        self.input.write_all(b"/quit\r").expect("quit");
+        self.input.flush().expect("quit flush");
+        let status =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| bounded_exit(self.child)))
+                .unwrap_or_else(|error| {
+                    for chunk in self.reader.try_iter() {
+                        self.output.extend(chunk);
+                    }
+                    eprintln!("quit transcript: {}", normalized(&self.output));
+                    std::panic::resume_unwind(error)
+                });
+        drop(self.input);
+        drop(self.pair);
+        for join in self.joins {
+            join.join().expect("terminal thread");
+        }
+        let config =
+            std::fs::read_to_string(self.ego.home_path().join("config.toml")).unwrap_or_default();
+        (status, self.stub.generations(), config)
+    }
+}
+
+const SEQ_ASK: (&str, &str) = ("exec", r#"{"argv":["seq","1","3"],"timeout_ms":5000}"#);
+
+#[test]
+fn exec_permission_is_a_compact_modal_and_the_detail_sits_behind_d() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+
+    let compact = session.screen();
+    let first = compact
+        .iter()
+        .position(|line| line.starts_with("Allow "))
+        .unwrap_or_else(|| panic!("no headline row: {compact:?}"));
+    let last = compact
+        .iter()
+        .rposition(|line| line.contains("[d] details"))
+        .expect("the key row");
+    let modal = compact[first..=last].join("\n");
+    assert!(last - first < 4, "the modal is more than 4 rows:\n{modal}");
+    assert!(modal.contains("Allow run seq 1 3?"), "{modal}");
+    assert!(modal.contains("Risk: unknown - "), "{modal}");
+    // Catches: a read-only refusal reason shown for a command the proof has
+    // no known reason to refuse.
+    assert!(!modal.contains("not read-only"), "{modal}");
+    assert!(modal.contains("[y] yes"), "{modal}");
+    assert!(
+        modal.contains("[a] yes, do not ask again for exec(seq 1 3)"),
+        "{modal}"
+    );
+    assert!(modal.contains("[n] no, say what to do instead"), "{modal}");
+    assert!(modal.contains("[e] edit"), "{modal}");
+    for developer_text in [
+        "ProcessEffectsUnknown",
+        "DynamicCode",
+        "IdentityIncomplete",
+        "Parameters:",
+        "Operations:",
+        "widening",
+        "\"argv\"",
+    ] {
+        assert!(
+            !modal.contains(developer_text),
+            "{developer_text:?} is on the compact modal:\n{modal}"
+        );
+    }
+
+    session.press(b"d");
+    session.wait("Parameters:");
+    let details = session.screen().join("\n");
+    for fact in [
+        "Operations:",
+        "- spawn",
+        "Remembering would add:",
+        "exec(seq 1 3)",
+        "widening for operation 0: omits Cwd",
+        "Parameters:",
+        "\"argv\"",
+    ] {
+        assert!(
+            details.contains(fact),
+            "{fact:?} missing after d:\n{details}"
+        );
+    }
+
+    session.press(b"y");
+    session.wait(TOOL_TURN_DONE);
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 2, "allowing once runs the call");
+}
+
+#[test]
+fn n_asks_what_to_do_instead_and_the_words_reach_the_model_as_the_tool_result() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"n");
+    session.wait("What should it do instead?");
+    session.press(b"count with a loop instead\r");
+    session.wait(TOOL_TURN_DONE);
+
+    let screen = session.screen().join("\n");
+    assert!(
+        !screen.contains("✓ $ seq"),
+        "a declined call must not run:\n{screen}"
+    );
+    let (generations, config) = session.finish();
+    assert_eq!(generations.len(), 2, "the run continues after the words");
+    assert!(
+        generations[1]
+            .to_string()
+            .contains("declined it and said: count with a loop instead"),
+        "the instruction never reached the model: {}",
+        generations[1]
+    );
+    assert!(!config.contains("exec("), "a decline stores nothing");
+}
+
+#[test]
+fn a_stores_the_prefix_rule_and_commits_one_plain_receipt_to_the_transcript() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"a");
+    session.wait(TOOL_TURN_DONE);
+
+    let screen = session.screen();
+    let joined = screen.join("\n");
+    assert!(
+        screen.iter().any(|line| {
+            line.trim_end()
+                == "Allowed run seq 1 3 · Remembered: you will not be asked again for exec(seq 1 3)."
+        }),
+        "the receipt is not a transcript row of its own:\n{joined}"
+    );
+    assert!(
+        !joined.contains("RESULT") && !joined.contains("stored_changed"),
+        "the machine receipt reached the screen:\n{joined}"
+    );
+    assert!(
+        screen.iter().any(|line| line.starts_with("✓ $ seq 1 3")),
+        "remembering still allows the call:\n{joined}"
+    );
+    let (_, config) = session.finish();
+    assert!(
+        config.contains("exec(seq 1 3)"),
+        "the prefix rule was not stored:\n{config}"
+    );
+}
+
+// Catches: blind Enter retries consuming the reclassified modal before its
+// observation mark, and an edit that executes the original argv instead.
+#[test]
+fn e_edits_the_call_and_the_amended_call_is_asked_again() {
+    let mut session = modal_session(SEQ_ASK);
+    session.press(b"use the tools\r");
+    session.wait("[d] details");
+    session.press(b"e");
+    session.wait("argv: ");
+    session.press(b"\x15seq 1 4\r");
+    session.wait("cwd: ");
+    session.press(b"\r");
+    session.wait("timeout_ms: ");
+    session.press(b"\r");
+    session.wait("background: ");
+    session.press(b"false\r");
+    session.wait("[d] details");
+    let amended = session.screen().join("\n");
+    assert!(amended.contains("Allow run seq 1 4?"), "{amended}");
+    assert_eq!(session.stub.generations().len(), 1, "edit must ask again");
+    session.press(b"y");
+    session.wait(TOOL_TURN_DONE);
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 2);
+    let result = generations[1]["messages"]
+        .as_array()
+        .expect("provider messages")
+        .iter()
+        .find(|message| message["role"] == "tool")
+        .and_then(|message| message["content"].as_str())
+        .expect("the amended call's tool result");
+    assert!(result.contains("1\n2\n3\n4\n"), "{result}");
+}
+
+/// The parent a job-control test needs. `ego` is spawned as a session leader
+/// by the PTY, and a session leader's group is orphaned: the kernel discards
+/// `SIGTSTP` for it, so nothing could ever stop. This process is ego's parent
+/// in a group of its own, which makes ego a real shell job. It gives ego the
+/// terminal and then reports what `waitpid` sees, so the oracle for "stopped"
+/// is the kernel's own and no shell's tty bookkeeping sits between the test
+/// and the terminal modes it reads.
+#[cfg(unix)]
+const JOB_PARENT: &str = r#"
+import os, signal, sys
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+pid = os.fork()
+if pid == 0:
+    os.setpgid(0, 0)
+    os.tcsetpgrp(0, os.getpgrp())
+    signal.signal(signal.SIGTTOU, signal.SIG_DFL)
+    os.execv(sys.argv[1], sys.argv[1:])
+try:
+    os.setpgid(pid, pid)
+except OSError:
+    pass
+os.write(1, ("JOB-PID:%d\n" % pid).encode())
+while True:
+    _, status = os.waitpid(pid, os.WUNTRACED)
+    if os.WIFSTOPPED(status):
+        os.write(1, b"JOB-STOPPED\n")
+        continue
+    code = os.waitstatus_to_exitcode(status)
+    os.write(1, ("JOB-EXITED:%d\n" % code).encode())
+    sys.exit(0 if code == 0 else 1)
+"#;
+
+/// An interactive ego running as a job under [`JOB_PARENT`].
+#[cfg(unix)]
+struct Job {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    pair: portable_pty::PtyPair,
+    input: PtyWriter,
+    reader: mpsc::Receiver<Vec<u8>>,
+    reader_join: thread::JoinHandle<()>,
+    writer_join: thread::JoinHandle<()>,
+    output: Vec<u8>,
+    pid: u32,
+    rows: u16,
+    cols: u16,
+}
+
+#[cfg(unix)]
+impl Job {
+    /// Start ego under the job parent and answer the trust question.
+    fn start(ego: &Ego, rows: u16, cols: u16) -> Self {
+        Self::start_with_keyboard(ego, rows, cols, false)
+    }
+
+    fn start_with_keyboard(ego: &Ego, rows: u16, cols: u16, keyboard: bool) -> Self {
+        let ego_command = ego.pty_command();
+        let mut command = portable_pty::CommandBuilder::new("/usr/bin/python3");
+        command.env_clear();
+        for (key, value) in ego_command.iter_full_env_as_str() {
+            command.env(key, value);
+        }
+        command.arg("-c");
+        command.arg(JOB_PARENT);
+        command.args(ego_command.get_argv());
+        if let Some(cwd) = ego_command.get_cwd() {
+            command.cwd(cwd);
+        }
+        let pair = NativePtySystem::default()
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("pty");
+        let child = pair
+            .slave
+            .spawn_command(command)
+            .expect("spawn the job parent");
+        let (input, dsr_responder, writer_join) =
+            writer_owner(pair.master.take_writer().expect("writer"));
+        let reader = pair.master.try_clone_reader().expect("reader");
+        let reader = if keyboard {
+            kitty_keyboard::terminal(reader, dsr_responder.clone())
+        } else {
+            reader
+        };
+        let (reader, reader_join) = stream_with_screen(reader, dsr_responder, Some((rows, cols)));
+        let mut job = Self {
+            child,
+            pair,
+            input,
+            reader,
+            reader_join,
+            writer_join,
+            output: Vec::new(),
+            pid: 0,
+            rows,
+            cols,
+        };
+        job.pid = loop {
+            let text = String::from_utf8_lossy(&job.output).into_owned();
+            if let Some(tail) = text.split("JOB-PID:").nth(1)
+                && let Some(digits) = tail.split(['\r', '\n']).next()
+                && tail.len() > digits.len()
+            {
+                break digits.parse().expect("the job parent prints ego's pid");
+            }
+            let chunk = job
+                .reader
+                .recv_timeout(PROGRESS_DEADLINE)
+                .expect("the job parent never reported ego's pid");
+            job.output.extend(chunk);
+        };
+        until(&job.reader, &mut job.output, b"Trust project files");
+        job.send(b"yes\r");
+        until_post_trust_prompt(&job.reader, &mut job.output, 0);
+        job
+    }
+
+    fn send(&mut self, bytes: &[u8]) {
+        self.input.write_all(bytes).expect("write to ego");
+        self.input.flush().expect("flush to ego");
+    }
+
+    /// `Ctrl+Z`, then wait for the kernel to report ego stopped.
+    fn suspend(&mut self) -> usize {
+        let mark = self.output.len();
+        self.send(b"\x1a");
+        until_from(&self.reader, &mut self.output, mark, b"JOB-STOPPED");
+        mark
+    }
+
+    /// `SIGCONT`, as `fg` sends it; the terminal already belongs to ego's group.
+    fn resume(&self) {
+        let status = std::process::Command::new("kill")
+            .args(["-CONT", &self.pid.to_string()])
+            .status()
+            .expect("run kill");
+        assert!(status.success(), "SIGCONT was not delivered");
+    }
+
+    /// The process state letters `ps` reports for ego: `T` is stopped.
+    fn state(&self) -> String {
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", &self.pid.to_string()])
+            .output()
+            .expect("run ps");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Canonical mode is on: the line discipline is the cooked one a shell
+    /// expects. Read from the terminal device by `stty`, not from ego.
+    fn cooked(&self) -> bool {
+        let tty = self.pair.master.tty_name().expect("slave PTY name");
+        let option = if cfg!(target_os = "macos") {
+            "-f"
+        } else {
+            "-F"
+        };
+        let out = std::process::Command::new("stty")
+            .arg(option)
+            .arg(tty)
+            .arg("-a")
+            .output()
+            .expect("run stty");
+        let flags = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(
+            flags
+                .split_whitespace()
+                .any(|flag| flag.trim_end_matches(';') == "icanon")
+                || flags.split_whitespace().any(|flag| flag == "-icanon"),
+            "stty did not report the canonical flag: {flags}"
+        );
+        flags
+            .split_whitespace()
+            .any(|flag| flag.trim_end_matches(';') == "icanon")
+    }
+
+    fn rows(&self) -> Vec<String> {
+        screen_rows(&self.output, self.rows, self.cols)
+    }
+
+    /// Quit and reap, clearing a draft left in the composer first if asked.
+    fn quit(mut self, clear_draft: bool) {
+        if clear_draft {
+            let mark = self.output.len();
+            self.send(b"\x03");
+            until_prompt_from(&self.reader, &mut self.output, mark);
+            drain_until_quiet(&self.reader, &mut self.output);
+        }
+        self.send(b"/quit\r");
+        until(&self.reader, &mut self.output, b"JOB-EXITED:0");
+        let status = bounded_exit(self.child);
+        assert!(status.success(), "job parent failed: {status:?}");
+        drop(self.input);
+        drop(self.pair);
+        self.reader_join.join().expect("reader thread panicked");
+        self.writer_join.join().expect("writer thread panicked");
+    }
+}
+
+fn job_ego(stub: &Stub, mode: &str) -> Ego {
+    let ego = Ego::against(stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--mode",
+            mode,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color");
+    ego.file("AGENTS.md", "# suspend fixture\n");
+    ego
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_z_stops_ego_with_a_cooked_terminal_and_sigcont_restores_raw_mode_and_the_composer() {
+    // Catches: ego stopping with the terminal still raw, which leaves the
+    // shell without echo or line editing; and ego resuming without raw mode or
+    // without its composer, which leaves a dead prompt.
+    let stub = Stub::start(Plan::default());
+    let ego = job_ego(&stub, "default");
+    let mut job = Job::start(&ego, 24, 80);
+    let draft_start = job.output.len();
+    job.send(b"keep this draft");
+    until_from(
+        &job.reader,
+        &mut job.output,
+        draft_start,
+        b"keep this draft",
+    );
+    drain_until_quiet(&job.reader, &mut job.output);
+    assert!(
+        !job.cooked(),
+        "the composer must read in raw mode, or the cooked check below proves nothing"
+    );
+
+    let stop_mark = job.suspend();
+    assert!(
+        job.state().contains('T'),
+        "ego is not stopped: {:?}",
+        job.state()
+    );
+    assert!(
+        job.cooked(),
+        "ego stopped with the terminal still in raw mode"
+    );
+    assert!(
+        job.output[stop_mark..]
+            .windows(8)
+            .any(|window| window == b"\x1b[?2004l"),
+        "bracketed paste was left on for the shell"
+    );
+
+    let resume_mark = job.output.len();
+    job.resume();
+    until_from(
+        &job.reader,
+        &mut job.output,
+        resume_mark,
+        b"keep this draft",
+    );
+    drain_until_quiet(&job.reader, &mut job.output);
+    assert!(!job.cooked(), "raw mode was not restored after SIGCONT");
+    assert!(
+        job.output[resume_mark..]
+            .windows(8)
+            .any(|window| window == b"\x1b[?2004h"),
+        "bracketed paste was not restored after SIGCONT"
+    );
+    let rows = job.rows();
+    let last = rows
+        .iter()
+        .rev()
+        .find(|row| !row.trim().is_empty())
+        .expect("a screen with content");
+    assert!(
+        last.starts_with('>') && last.contains("keep this draft"),
+        "the composer with its draft is not the last row after resume: {rows:?}"
+    );
+    // The restored composer takes input, not just paint.
+    job.send(b"!");
+    let typed_by = Instant::now() + PROGRESS_DEADLINE;
+    while !job
+        .rows()
+        .iter()
+        .any(|row| row.starts_with('>') && row.contains("keep this draft!"))
+    {
+        assert!(
+            Instant::now() < typed_by,
+            "the resumed composer ignored a key: {:?}",
+            job.rows()
+        );
+        let chunk = job
+            .reader
+            .recv_timeout(PROGRESS_DEADLINE)
+            .expect("ego stopped answering after resume");
+        job.output.extend(chunk);
+    }
+    job.quit(true);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_running_exec_is_not_charged_the_time_ego_spent_suspended() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    // Catches the defect pi has: the suspended wall time counts against the
+    // tool timeout, so a command that finished is reported as timed out.
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call(
+                "suspended-exec",
+                "exec",
+                r#"{"argv":["slow-work"],"cwd":null,"timeout_ms":3000}"#,
+            )),
+            Reply::Sse(text("SUSPEND-EXEC-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = job_ego(&stub, "yolo");
+    let executable = ego.home_file(
+        ".local/bin/slow-work",
+        "#!/bin/sh\nprintf started > \"$EGO_HOME/tool-started\"\n/bin/sleep 2\nprintf 'EXEC-FINISHED-AFTER-STOP\\n'\n",
+    );
+    let mut permissions = std::fs::metadata(&executable)
+        .expect("slow tool metadata")
+        .permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(&executable, permissions).expect("make slow tool executable");
+    let path = format!("{}:/usr/bin:/bin", executable.parent().unwrap().display());
+    let started = ego.home_path().join("tool-started");
+    let ego = ego.env("PATH", &path);
+    let mut job = Job::start(&ego, 24, 80);
+    job.send(b"run the slow tool\r");
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the tool never started");
+        drain(&job.reader, &mut job.output);
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    job.suspend();
+    // Longer than the 3 s timeout, so a clock that keeps running while ego is
+    // stopped has expired when ego continues; the tool itself needs only 2 s.
+    thread::sleep(Duration::from_millis(4500));
+    job.resume();
+    until(&job.reader, &mut job.output, b"SUSPEND-EXEC-DONE");
+
+    let generations = stub.generations();
+    let result = generations[1].to_string();
+    assert!(
+        result.contains("EXEC-FINISHED-AFTER-STOP"),
+        "the finished command's output did not reach the model: {result}"
+    );
+    assert!(
+        !result.contains("timed out"),
+        "suspended time was charged to the exec timeout: {result}"
+    );
+    drain_until_quiet(&job.reader, &mut job.output);
+    job.quit(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn ctrl_z_at_a_permission_modal_leaves_it_unresolved_after_resume() {
+    // Catches a suspend that answers the prompt: the key falling through to
+    // the modal's decision handling, or the repaint dismissing the modal.
+    let write_arguments = r#"{"files":[{"path":"notes.md","contents":"permission"}]}"#;
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(tool_call("suspended-write", "write", write_arguments)),
+            Reply::Sse(text("SUSPEND-MODAL-DONE")),
+        ],
+        ..Plan::default()
+    });
+    let ego = job_ego(&stub, "default");
+    let notes = ego.workspace_path().join("notes.md");
+    let mut job = Job::start(&ego, 40, 100);
+    job.send(b"write the notes\r");
+    until(&job.reader, &mut job.output, b"[d] details");
+    drain_until_quiet(&job.reader, &mut job.output);
+    let requests_before = stub.requests().len();
+
+    job.suspend();
+    assert!(job.cooked(), "ego stopped at the modal with a raw terminal");
+    let resume_mark = job.output.len();
+    job.resume();
+    until_from(&job.reader, &mut job.output, resume_mark, b"[d] details");
+    thread::sleep(Duration::from_millis(500));
+    drain_until_quiet(&job.reader, &mut job.output);
+    assert_eq!(
+        stub.requests().len(),
+        requests_before,
+        "the suspend answered the permission: the run went on to the provider"
+    );
+    assert!(!notes.exists(), "the write ran without an answer");
+
+    job.send(b"y");
+    until(&job.reader, &mut job.output, b"SUSPEND-MODAL-DONE");
+    assert!(notes.exists(), "the answer given after resume was lost");
+    job.quit(false);
+}
+
+#[cfg(windows)]
+#[test]
+fn ctrl_z_reports_that_windows_cannot_suspend_it() {
+    // Catches a silently ignored key: the user presses Ctrl+Z and nothing
+    // says why ego did not stop.
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    ego.file("AGENTS.md", "# suspend fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_post_trust_prompt(&reader, &mut output, 0);
+    input.write_all(b"\x1a").expect("Ctrl+Z");
+    input.flush().expect("Ctrl+Z flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        0,
+        "Ctrl+Z is not supported on Windows",
+    );
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("quit flush");
+    assert!(session.quit(input).success());
+}
+
+// Catches: startup effort navigation or session-only selection publishes defaults before Enter.
+#[test]
+fn critic_255_startup_effort_navigation_and_escape_preserve_existing_config() {
+    let stub = Stub::start(Plan::default());
+    let ego = Ego::against(&stub)
+        .without_fixture_thinking()
+        .conversing()
+        .args(["--model", "anthropic/fixture-vision", "--sandbox", "off"])
+        .env("ANTHROPIC_API_KEY", "test-key")
+        .env("TERM", "xterm-256color");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    let original = "# Keep operator settings intact until confirmation.\nmode = \"default\"\n";
+    ego.home_file("config.toml", original);
+    ego.file("AGENTS.md", "# live surface fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 80, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust answer");
+    input.flush().expect("trust flush");
+    until_normalized(&reader, &mut output, 0, "Select reasoning");
+    drain_until_quiet(&reader, &mut output);
+    input
+        .write_all(b"1s")
+        .expect("select without persistent confirmation");
+    input.flush().expect("selection flush");
+    drain_until_quiet(&reader, &mut output);
+    assert_eq!(
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("existing config"),
+        original
+    );
+    assert!(stub.generations().is_empty());
+    input.write_all(b"\x1b").expect("cancel reasoning");
+    input.flush().expect("cancel flush");
+    assert_eq!(session.quit(input).exit_code(), 130);
+    assert_eq!(
+        std::fs::read_to_string(ego.home_path().join("config.toml")).expect("preserved config"),
+        original
+    );
+    assert!(stub.generations().is_empty());
+}
+
+// Catches: EOF repeats a provider refusal even when startup already has an explicit effort.
+#[test]
+fn critic_255_explicit_effort_provider_refusal_is_not_repeated_after_eof() {
+    let stub = Stub::start(Plan {
+        completions: vec![Reply::Status(400)],
+        ..Plan::default()
+    });
+    let ego = Ego::against(&stub)
+        .conversing()
+        .args([
+            "--thinking",
+            "off",
+            "--model",
+            "anthropic/fixture-vision",
+            "--mode",
+            "default",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("ANTHROPIC_API_KEY", "test-key");
+    ego.home_file(
+        "models.toml",
+        &support::vision_model_facts(support::READS_NO_PICTURES)
+            .replace("default_reasoning_effort = \"off\"\n", ""),
+    );
+    ego.file("AGENTS.md", "# effort picker fixture\n");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 120, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("trust flush");
+    let trust_start = output.len();
+    until_post_trust_prompt(&reader, &mut output, trust_start);
+    let turn_start = output.len();
+    input.write_all(b"hello\r").expect("turn");
+    input.flush().expect("turn flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        turn_start,
+        "the provider returned HTTP 400",
+    );
+    until_prompt_from(&reader, &mut output, turn_start);
+    let quit_start = output.len();
+    input.write_all(b"\x04").expect("EOF");
+    input.flush().expect("EOF flush");
+    let status = session.quit(input);
+    drain(&reader, &mut output);
+    assert!(status.success(), "interactive exit: {status:?}");
+    let after_quit = normalized(&output[quit_start..]);
+    assert!(
+        after_quit.contains("To resume: 'ego resume"),
+        "{after_quit}"
+    );
+    assert!(
+        !after_quit.contains("the provider returned HTTP 400"),
+        "{after_quit}"
+    );
+    assert!(
+        !after_quit.contains("the model does not accept"),
+        "{after_quit}"
+    );
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0]["thinking"]["type"], "disabled");
+}
+
+// Catches: a fork only acquires its catalogue model after its first generation.
+#[test]
+fn critic_fork_model_is_present_before_first_successor_prompt() {
+    critic_successor_model_before_generation("fork");
+}
+
+// Catches: successful compaction flooding scrollback with internal session details.
+#[test]
+fn successful_compaction_keeps_internal_receipts_out_of_scrollback() {
+    let (shown, _) = critic_successor_model_before_generation("compact");
+    for notice in [
+        "compacted session",
+        "Compacting the session now",
+        "published generation",
+        "Resuming the task automatically",
+        "Before: context",
+        "after: known",
+    ] {
+        assert!(!shown.contains(notice), "unexpected {notice}: {shown}");
+    }
+}
+
+// Catches: the receipt helper permits /quit during a quiet activation gap, or
+// mistakes a source prompt or an unfinished successor repaint for readiness.
+#[test]
+fn successor_receipt_waits_for_delayed_complete_prompt_before_quit() {
+    let stub = Stub::start(Plan::default());
+    for action in ["compact", "fork"] {
+        let (sender, receiver) = mpsc::channel();
+        let (finished, completion) = mpsc::channel();
+        let mut output = b"\x1b[?25l> \x1b[?25h\r\n".to_vec();
+        if action == "compact" {
+            output.extend(b"Compacting 0s\r\n");
+        } else {
+            output.extend(format!("{action}ed session source into target\r\n").as_bytes());
+        }
+        output.extend(b"\x1b[?25l> ");
+        thread::scope(|scope| {
+            let stub = &stub;
+            let worker = scope.spawn(move || {
+                until_successor_receipt_ready(&receiver, &mut output, 0, action, stub);
+                finished.send(()).unwrap();
+            });
+            // Withhold the final cursor-show byte sequence: quiet output is
+            // not evidence that the successor accepts input.
+            let premature = completion.recv_timeout(Duration::from_secs(1)).is_ok();
+            let _ = sender.send(b"\x1b[?25h".to_vec());
+            worker.join().unwrap();
+            assert!(
+                !premature,
+                "{action}: /quit allowed before the successor prompt completed"
+            );
+        });
+    }
+}
+
+fn until_successor_receipt_ready(
+    reader: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    start: usize,
+    action: &str,
+    stub: &Stub,
+) {
+    // A prompt redraw can occur while the checkpoint generation is still running.
+    // Wait for the actual publication receipt before quitting the successor.
+    until_normalized(
+        reader,
+        output,
+        start,
+        if action == "compact" {
+            "Compacting"
+        } else {
+            "forked session"
+        },
+    );
+    // Publication precedes successor activation. A quiet PTY can still be
+    // between sessions, so require its completed empty composer frame.
+    until_successor_ready(reader, output, start, action, stub);
+    drain_until_quiet(reader, output);
+}
+
+fn critic_successor_model_before_generation(action: &str) -> (String, String) {
+    let checkpoint = "# Objective\nContinue the conversation.\n# Binding constraints and preferences\nKeep the model.\n# Completed work and evidence\nFirst answer received.\n# Work in progress\nNext prompt.\n# Decisions and rationale\nPreserve context.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nAnswer next prompt.\n# Critical references\nNone.";
+    let mut replies = vec![Reply::Sse(text("CRITIC-SOURCE-ANSWER"))];
+    if action == "compact" {
+        replies.push(Reply::Sse(text(checkpoint)));
+    }
+    let stub = Stub::start(Plan {
+        completions: replies,
+        context_length: Some(32_768),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# critic successor fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, Some((24, 100)));
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"first prompt\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "CRITIC-SOURCE-ANSWER");
+    let start = output.len();
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    let start = output.len();
+    input.write_all(format!("/{action}\r").as_bytes()).unwrap();
+    input.flush().unwrap();
+    until_successor_receipt_ready(&reader, &mut output, start, action, &stub);
+    if action == "fork" {
+        until_screen_prose(
+            &reader,
+            &mut output,
+            24,
+            100,
+            &format!("ego resume {}", support::FIXTURE_SESSION_ID),
+        );
+    }
+    drain_until_quiet(&reader, &mut output);
+    let receipt = support::notice_prose(&normalized(&output[start..]));
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let status = session.quit(input);
+    assert!(status.success(), "successor process failed: {status:?}");
+    let listing = places
+        .ego(&stub)
+        .subcommand("ls")
+        .args(["--output", "json"])
+        .run()
+        .report();
+    let target = listing["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] != support::FIXTURE_SESSION_ID)
+        .expect("successor catalogue row");
+    assert_eq!(
+        target["model"], "ollama/qwen3",
+        "{action} successor lost its model before its first prompt: {listing}"
+    );
+    (
+        receipt,
+        target["id"].as_str().expect("successor id").to_owned(),
+    )
+}
+
+fn two_task_calls() -> String {
+    let (first_id, second_id) = ("one", "two");
+    let first = tool_call(
+        first_id,
+        "task",
+        r#"{"name":"one","prompt":"read calc.py"}"#,
+    );
+    let second = tool_call(
+        second_id,
+        "task",
+        r#"{"name":"two","prompt":"read calc.py"}"#,
+    );
+    let (head, tail) = first.split_once("\n\n").unwrap();
+    let mut frame: serde_json::Value =
+        serde_json::from_str(head.strip_prefix("data: ").unwrap()).unwrap();
+    let other: serde_json::Value = serde_json::from_str(
+        second
+            .split_once("\n\n")
+            .unwrap()
+            .0
+            .strip_prefix("data: ")
+            .unwrap(),
+    )
+    .unwrap();
+    let mut second_call = other["choices"][0]["delta"]["tool_calls"][0].clone();
+    second_call["index"] = serde_json::json!(1);
+    frame["choices"][0]["delta"]["tool_calls"]
+        .as_array_mut()
+        .unwrap()
+        .push(second_call);
+    format!("data: {frame}\n\n{tail}")
+}
+
+// Catches: concurrent task rows interleaving their labels or overwriting the composer.
+#[test]
+fn concurrent_task_children_keep_nested_rows_and_the_idle_composer_intact() {
+    let tasks = two_task_calls();
+    let gate = ReleaseGate::new();
+    let child = || Reply::GatedPaced {
+        head: String::new(),
+        tail: tool_call("read1", "read", r#"{"files":[{"path":"calc.py"}]}"#),
+        gate: gate.clone(),
+    };
+    let screens = tool_turn_with_completions(
+        120,
+        &[("calc.py", "hello\n")],
+        vec![
+            Reply::Sse(tasks),
+            child(),
+            child(),
+            Reply::Sse(text("child final")),
+            Reply::Sse(text("child final")),
+            Reply::Sse(text(TOOL_TURN_DONE)),
+        ],
+        false,
+        Some((gate.clone(), false)),
+    );
+    let lines = &screens.after_turn;
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.trim() == "↳ task one")
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.trim() == "↳ task two")
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.trim_start().starts_with("✓ task one"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line.trim_start().starts_with("✓ task two"))
+            .count(),
+        1,
+        "{lines:?}"
+    );
+    for task in ["one", "two"] {
+        let header = lines
+            .iter()
+            .position(|line| line.trim() == format!("↳ task {task}"))
+            .unwrap();
+        assert!(
+            lines[header + 1].trim_start().starts_with("✓ read calc.py"),
+            "{lines:?}"
+        );
+    }
+    assert!(
+        lines
+            .iter()
+            .rfind(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.starts_with('>')),
+        "{lines:?}"
+    );
+}
+
+// Catches: Esc returning to the composer while a child still owns a live attempt.
+#[test]
+fn esc_cancels_both_task_children_and_restores_one_idle_composer() {
+    let gate = ReleaseGate::new();
+    let held = || Reply::GatedPaced {
+        head: String::new(),
+        tail: text("must not finish"),
+        gate: gate.clone(),
+    };
+    let screens = tool_turn_with_completions(
+        120,
+        &[],
+        vec![Reply::Sse(two_task_calls()), held(), held()],
+        false,
+        Some((gate.clone(), true)),
+    );
+    let visible = screens.after_turn.join("\n");
+    assert_eq!(
+        visible.matches("Interrupted by user").count(),
+        1,
+        "{visible}"
+    );
+    assert_eq!(
+        screens
+            .after_turn
+            .iter()
+            .filter(|line| line.contains("✗ task") && line.contains("Cancelled"))
+            .count(),
+        2,
+        "{visible}"
+    );
+    assert!(
+        screens
+            .after_turn
+            .iter()
+            .rfind(|line| !line.trim().is_empty())
+            .is_some_and(|line| line.starts_with('>')),
+        "{visible}"
+    );
+    assert!(!visible.contains("must not finish"), "{visible}");
+}
+
+// Catches: a detached exec settling after Escape buys a fresh model turn,
+// instead of retaining its output until the next explicit prompt.
+#[test]
+fn escape_keeps_late_background_results_from_resuming_the_model() {
+    let gate = ReleaseGate::new();
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "printf ready > ready; while [ ! -f release ]; do sleep 0.05; done; printf LATE-RESULT; printf done > done"],
+        "background": true,
+        "timeout_ms": 15000
+    });
+    let mut session = modal_session_with(vec![
+        Reply::Sse(tool_call(
+            "late-after-escape",
+            "exec",
+            &arguments.to_string(),
+        )),
+        Reply::GatedPaced {
+            head: String::new(),
+            tail: text("must not finish"),
+            gate: gate.clone(),
+        },
+        Reply::Sse(text("EXPLICIT-AFTER-ESCAPE")),
+        Reply::Sse(text("EXPLICIT-WITH-RESULT")),
+    ]);
+    session.press(b"start background work\r");
+    session.wait("[d] details");
+    session.press(b"y");
+    let setup_deadline = Instant::now() + PROGRESS_DEADLINE;
+    while session.stub.generations().len() < 2 {
+        assert!(
+            Instant::now() < setup_deadline,
+            "background tool never reached its follow-up generation"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.press(b"\x1b");
+    session.wait("Interrupted by user");
+    until_idle_status_ready(&session.reader, &mut session.output, session.mark);
+    gate.release();
+    // A newer explicit turn must not restore the old process's wake authority.
+    session.press(b"complete a different explicit request\r");
+    session.wait("EXPLICIT-AFTER-ESCAPE");
+    until_idle_status_ready(&session.reader, &mut session.output, session.mark);
+    session.ego.file("release", "");
+    let settlement_deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !session.ego.workspace_path().join("done").exists() {
+        assert!(
+            Instant::now() < settlement_deadline,
+            "background child never produced its late result"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // A local inspection must remain usable without clearing the stop state.
+    session.press(b"/tasks details\r");
+    until_local_action_completed(
+        &session.reader,
+        &mut session.output,
+        session.mark,
+        "tasks",
+        PROGRESS_DEADLINE,
+    );
+    drain_until_quiet(&session.reader, &mut session.output);
+    assert_eq!(
+        session.stub.generations().len(),
+        3,
+        "a late result restarted stopped work after a newer explicit turn"
+    );
+    session.press(b"now answer the explicit request\r");
+    session.wait("EXPLICIT-WITH-RESULT");
+    until_idle_status_ready(&session.reader, &mut session.output, session.mark);
+    let (generations, _) = session.finish();
+    assert_eq!(
+        generations.len(),
+        4,
+        "only explicit requests may resume the model"
+    );
+    let history = generations[3]["messages"].to_string();
+    assert!(
+        history.contains("now answer the explicit request"),
+        "the resumed turn lost its explicit request: {history}"
+    );
+    assert!(
+        history.contains("LATE-RESULT"),
+        "the stopped background result was discarded: {history}"
+    );
+}
+
+// Catches: /tasks cancel targets a different process, cannot inspect bounded output, or leaves the child running.
+#[test]
+fn ctrl_b_tasks_inspects_and_cancels_the_promoted_exec() {
+    let arguments = serde_json::json!({
+        "argv": ["/bin/sh", "-c", "printf ready > ready; printf TASK-233-OUTPUT; while [ ! -f release ]; do sleep 0.05; done; printf survived > survived"],
+        "timeout_ms": 15000
+    });
+    let mut session = modal_session_with(vec![
+        Reply::Sse(tool_call("call-0", "exec", &arguments.to_string())),
+        Reply::Sse(text(TOOL_TURN_DONE)),
+        Reply::Sse(text("CANCELLED-233-SETTLED")),
+    ]);
+    session.press(b"start a long exec\r");
+    session.wait("[d] details");
+    session.press(b"y");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !session.ego.workspace_path().join("ready").exists() {
+        assert!(Instant::now() < deadline, "foreground child did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    session.press(b"\x02");
+    session.wait(TOOL_TURN_DONE);
+    until_mcp_composer_is_idle(&session.reader, &mut session.output);
+    let id = background_exec_id(&session.output);
+    session.press(b"/tasks details\r");
+    session.wait("running");
+    session.wait("TASK-233-OUTPUT");
+    until_local_action_completed(
+        &session.reader,
+        &mut session.output,
+        session.mark,
+        "tasks",
+        PROGRESS_DEADLINE,
+    );
+    session.press(format!("/tasks cancel {id}\r").as_bytes());
+    session.wait("background exec ");
+    until_prompt_after_reply(
+        &session.reader,
+        &mut session.output,
+        b"CANCELLED-233-SETTLED",
+    );
+    assert!(!session.ego.workspace_path().join("survived").exists());
+    let (generations, _) = session.finish();
+    assert_eq!(generations.len(), 3, "unexpected settlement continuation");
+    let history = generations.last().expect("settlement generation")["messages"].to_string();
+    assert!(
+        history.contains("cancelled") && history.contains("TASK-233-OUTPUT"),
+        "cancellation lost its outcome or output: {history}"
+    );
+    assert_eq!(
+        history.matches("stdout tail (").count(),
+        1,
+        "settlement duplicated in model history: {history}"
+    );
+}
+
+const SESSION_MCP_SERVER: &str = r#"
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if "id" not in request:
+        continue
+    if request["method"] == "server/discover":
+        result = {
+            "resultType": "complete",
+            "supportedVersions": ["2026-07-28"],
+            "capabilities": {"tools": {"listChanged": False}},
+            "ttlMs": 0,
+            "cacheScope": "private",
+            "_meta": {"io.modelcontextprotocol/serverInfo": {"name": "auto", "version": "1"}},
+        }
+    else:
+        result = {
+            "resultType": "complete",
+            "tools": [
+                {
+                    "name": "search_tools",
+                    "description": "Find a tool",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                        "additionalProperties": False,
+                    },
+                }
+            ],
+            "nextCursor": None,
+            "ttlMs": 0,
+            "cacheScope": "private",
+        }
+    print(json.dumps({"jsonrpc": "2.0", "id": request["id"], "result": result}), flush=True)
+"#;
+
+// Catches: the MCP test accepts a real busy-composer repaint as turn completion.
+#[test]
+fn mcp_idle_wait_rejects_a_busy_composer_repaint() {
+    // Captured in high-parallelism run 6 of fix-438-load.log on rb.
+    let busy = b"\x1b[?25l\x1b[4;1H\x1b[JWorking 0s \xc2\xb7 Esc to interrupt\r\n> \x1b[?25h";
+    assert!(
+        !mcp_composer_is_idle(busy),
+        "busy composer was accepted as idle"
+    );
+    let mut idle = busy.to_vec();
+    idle.extend_from_slice(b"\x1b[?25l\x1b[4;1H\x1b[J> \x1b[?25h");
+    let mut incomplete = busy.to_vec();
+    incomplete.extend_from_slice(b"\x1b[?25l\x1b[4;1H\x1b[J");
+    assert!(
+        !mcp_composer_is_idle(&incomplete),
+        "incomplete repaint was accepted before its busy status arrived"
+    );
+    assert!(mcp_composer_is_idle(&idle), "idle repaint was not accepted");
+    assert!(
+        mcp_composer_is_idle(b"\x1b[?25l\x1b[4;1H\x1b[J> retained draft\x1b[?25h"),
+        "completed idle composer with retained draft was rejected"
+    );
+    assert!(!mcp_composer_is_idle(b""), "empty output was accepted");
+    assert!(
+        !mcp_composer_is_idle(b"\x1b[4;1H\x1b[J> second with mcp on"),
+        "submitted draft was accepted before the idle repaint"
+    );
+}
+
+fn mcp_composer_is_idle(output: &[u8]) -> bool {
+    const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+    let Some(start) = output
+        .windows(HIDE_CURSOR.len())
+        .rposition(|window| window == HIDE_CURSOR)
+    else {
+        return false;
+    };
+    rendered_prompt_count(&output[start..]) > 0
+}
+
+fn until_mcp_composer_is_idle(receiver: &mpsc::Receiver<Vec<u8>>, output: &mut Vec<u8>) {
+    let deadline = Instant::now() + PROGRESS_DEADLINE;
+    while !mcp_composer_is_idle(output) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "idle MCP composer timed out: {:?}",
+            normalized(output)
+        );
+        let chunk = receiver.recv_timeout(remaining).unwrap_or_else(|error| {
+            panic!(
+                "idle MCP composer wait failed: {error}; output: {:?}",
+                normalized(output)
+            )
+        });
+        output.extend(chunk);
+    }
+}
+
+// Catches: toggling persisting configuration or leaving the provider tool catalogue unchanged.
+#[test]
+fn live_surface_mcp_lists_toggles_and_adds_through_the_cli_config_path() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(text("MCP-OFF-REQUEST")),
+            Reply::Sse(text("MCP-ON-REQUEST")),
+        ],
+        ..Plan::default()
+    });
+    let ego =
+        Ego::against(&stub)
+            .conversing()
+            .args(["--model", "ollama/qwen3", "--sandbox", "off"]);
+    let server = ego.file("session-server.py", SESSION_MCP_SERVER);
+    ego.file("AGENTS.md", "# session MCP fixture\n");
+    let original = format!(
+        "[mcp.servers.auto]\ntransport='stdio'\ncommand='/usr/bin/python3'\nargs=[{:?}]\n",
+        server.display().to_string()
+    );
+    let config_path = ego.home_file("config.toml", &original);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 120, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    input.write_all(b"yes\r").expect("trust");
+    input.flush().expect("flush");
+    until(&reader, &mut output, b"/help");
+    let list_start = output.len();
+    input.write_all(b"/mcp\r").expect("list");
+    input.flush().expect("flush");
+    until_normalized(
+        &reader,
+        &mut output,
+        list_start,
+        "Choose MCP server or action",
+    );
+    input.write_all(b"\r").expect("show server status");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, list_start, "admitted");
+    let off_start = output.len();
+    input.write_all(b"/mcp toggle auto\r").expect("toggle off");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, off_start, "auto off (session)");
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config"),
+        original
+    );
+    input.write_all(b"first with mcp off\r").expect("prompt");
+    input.flush().expect("flush");
+    until(&reader, &mut output, b"MCP-OFF-REQUEST");
+    until_mcp_composer_is_idle(&reader, &mut output);
+    let on_start = output.len();
+    input.write_all(b"/mcp toggle auto\r").expect("toggle on");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, on_start, "auto admitted");
+    assert_eq!(
+        std::fs::read_to_string(&config_path).expect("config"),
+        original
+    );
+    input.write_all(b"second with mcp on\r").expect("prompt");
+    input.flush().expect("flush");
+    until(&reader, &mut output, b"MCP-ON-REQUEST");
+    until_mcp_composer_is_idle(&reader, &mut output);
+    let add_start = output.len();
+    let added_server = ego.file(
+        "added-server.py",
+        &SESSION_MCP_SERVER.replace("search_tools", "added_search"),
+    );
+    let add = format!(
+        "add added --stdio -- /usr/bin/python3 {}",
+        shell_words::quote(added_server.to_str().expect("path"))
+    );
+    input
+        .write_all(format!("/mcp {add}\r").as_bytes())
+        .expect("add");
+    input.flush().expect("flush");
+    until_normalized(&reader, &mut output, add_start, "added admitted");
+    input.write_all(b"/quit\r").expect("quit");
+    input.flush().expect("flush");
+    assert!(session.quit(input).success());
+    let published: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("config")).expect("TOML");
+    let cli = shell_words::split(&add)
+        .expect("argv")
+        .iter()
+        .fold(Ego::against(&stub).subcommand("mcp"), |cli, arg| {
+            cli.arg(arg)
+        });
+    let cli_config = cli.home_path().join("config.toml");
+    let finished = cli.run();
+    assert_eq!(finished.code, Some(0), "{finished:?}");
+    let cli_published: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&cli_config).expect("CLI config")).expect("TOML");
+    assert_eq!(
+        published["mcp"]["servers"]["added"],
+        cli_published["mcp"]["servers"]["added"]
+    );
+    let generations = stub.generations();
+    assert_eq!(generations.len(), 2);
+    let offers = |generation: &serde_json::Value| {
+        generation["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool["function"]["name"] == "search_tools")
+        })
+    };
+    assert!(!offers(&generations[0]), "off server still offered tools");
+    assert!(offers(&generations[1]), "enabled server tools are absent");
+}
+
+/// Catches question completion rendering before the call receives timing.
+#[test]
+fn human_input_real_turn_does_not_render_duration_unavailable() {
+    let call = r#"{"prompt":"Pick a channel","mode":"single","options":[{"id":"yes","label":"Yes"}],"free_text":false}"#;
+    let (_, after_turn) = question_session(call, |input, reader, output| {
+        selector_screen(reader, output);
+        input.write_all(b"\r").expect("answer");
+        input.flush().expect("answer flush");
+    });
+    let shown = after_turn.join("\n");
+    assert!(!shown.contains("duration unavailable"), "{shown}");
+}
+
+// Catches: automatic recovery prints routine notices or fails to continue in the successor.
+#[test]
+fn context_pressure_compacts_and_continues_without_operator_input() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("PRESSURE", 244796, 4)),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: text(checkpoint),
+                gate: gate.clone(),
+            },
+            Reply::Sse(text("RECOVERED")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# context recovery fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.generations().len() < 2 {
+        assert!(Instant::now() < deadline, "checkpoint did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    gate.release();
+    until_normalized(&reader, &mut output, start, "RECOVERED");
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let shown = support::notice_prose(&normalized(&output[start..]));
+    for notice in [
+        "Compacting the session now",
+        "saving a summary",
+        "compacted session",
+        "published generation",
+        "Resuming the task automatically",
+        "nearly full",
+    ] {
+        assert!(!shown.contains(notice), "unexpected {notice}: {shown}");
+    }
+    let requests = stub.generations();
+    assert_eq!(requests.len(), 3);
+    let resumed = requests[2].to_string();
+    assert!(resumed.contains("Continue the task."), "{resumed}");
+    assert!(
+        !resumed.contains("PRESSURE"),
+        "old conversation leaked: {resumed}"
+    );
+    // Catches: the continuation generation lacks the no-recap guidance, so the
+    // model opens the resumed work with a context-restored recap.
+    assert!(
+        resumed.contains(
+            "resume unfinished work directly without a context-restored acknowledgement, recap"
+        ),
+        "{resumed}"
+    );
+    // Catches: the host injects a resume prompt, or drops the durable lifecycle
+    // facts that hosts read instead of terminal prose.
+    let sessions = places.home_path().join("sessions");
+    let successor = std::fs::read_dir(&sessions)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| {
+            !path.ends_with(support::FIXTURE_SESSION_ID) && path.join("events.jsonl").is_file()
+        })
+        .expect("compaction successor session");
+    let journal = std::fs::read_to_string(successor.join("events.jsonl")).unwrap();
+    for kind in ["\"CompactionSeeded\"", "\"CheckpointContinued\""] {
+        assert_eq!(journal.matches(kind).count(), 1, "{kind}: {journal}");
+    }
+    assert!(!journal.contains("\"UserPrompt\""), "{journal}");
+}
+
+// Catches: private checkpoint generation bypasses the normal transient backoff.
+#[cfg(not(windows))]
+#[test]
+fn recorded_compaction_failure_retries_with_backoff() {
+    replay_recorded_compaction_failure(false);
+}
+
+// Catches: an exhausted checkpoint latches pressure recovery off for later prompts.
+#[cfg(not(windows))]
+#[test]
+fn recorded_compaction_failure_new_prompt_rearms() {
+    replay_recorded_compaction_failure(true);
+}
+
+#[cfg(not(windows))]
+fn replay_recorded_compaction_failure(new_prompt: bool) {
+    let recording: serde_json::Value = serde_json::from_str(include_str!(
+        "fixtures/compaction/590-recorded-failure.json"
+    ))
+    .unwrap();
+    let pressure = &recording["events"][0]["kind"];
+    let recorded_error = recording["events"][5]["kind"]["message"].as_str().unwrap();
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing(
+                "PRESSURE-635",
+                pressure["used_tokens"].as_u64().unwrap() - 4,
+                4,
+            )),
+            // Replay the recorded HTTP-body failure through the real adapter.
+            Reply::TruncatedSse,
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(text("RECOVERED-635")),
+        ],
+        context_length: Some(pressure["window"].as_u64().unwrap()),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# recorded checkpoint recovery fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--retry",
+        if new_prompt { "0" } else { "1" },
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    if new_prompt {
+        until_notice_prose(&reader, &mut output, start, "Retry with '/compact'");
+        until_prompt_from(&reader, &mut output, start);
+        assert_eq!(stub.generations().len(), 2, "finite retries exhausted");
+        input.write_all(b"NEW-PROMPT-635\r").unwrap();
+        input.flush().unwrap();
+    }
+    let recovered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        until_normalized(&reader, &mut output, start, "RECOVERED-635");
+    }));
+    if let Err(failure) = recovered {
+        let _ = input.write_all(b"/quit\r");
+        let _ = input.flush();
+        let _ = session.quit(input);
+        std::panic::resume_unwind(failure);
+    }
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let requests = stub.generations();
+    assert_eq!(
+        requests.len(),
+        4,
+        "one failed checkpoint, one successful checkpoint"
+    );
+    assert!(requests[2].to_string().contains("PRESSURE-635"));
+    assert!(requests[3].to_string().contains("Continue the task."));
+    if new_prompt {
+        assert_eq!(
+            requests[2].to_string().matches("NEW-PROMPT-635").count(),
+            1,
+            "fresh work must reach checkpoint history exactly once"
+        );
+    }
+    let journal = std::fs::read_to_string(
+        places
+            .home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        journal.contains(recorded_error),
+        "recorded failure must reach the journal"
+    );
+    let shown = support::notice_prose(&normalized(&output));
+    assert_eq!(
+        shown.contains("connection problem, retrying in"),
+        !new_prompt
+    );
+    if !new_prompt {
+        assert!(
+            shown.contains("attempt 1/1"),
+            "finite shared retry notice: {shown}"
+        );
+    }
+}
+
+/// A read call whose reported usage reaches the 90% threshold of a 272000 window,
+/// so the turn yields before its next generation.
+#[cfg(not(windows))]
+fn read_at_context_limit(id: &str) -> Reply {
+    Reply::Sse(
+        tool_call(id, "read", r#"{"files":[{"path":"AGENTS.md"}]}"#).replace(
+            "\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14",
+            "\"prompt_tokens\":244796,\"completion_tokens\":4,\"total_tokens\":244800",
+        ),
+    )
+}
+
+// Catches: a checkpoint continuation cut at the context limit again waits idle
+// for input instead of compacting a second time (seen live, 1076-c308).
+#[cfg(not(windows))]
+#[test]
+fn a_successor_cut_at_the_limit_compacts_again_without_input() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst read.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            read_at_context_limit("read1"),
+            Reply::Sse(text(checkpoint)),
+            read_at_context_limit("read2"),
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(text("SECOND-RECOVERY")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# repeated recovery fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "SECOND-RECOVERY");
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert_eq!(stub.generations().len(), 5, "two cuts, two checkpoints");
+}
+
+// Catches: a turn cut at the context limit whose recovery fails leaves the host
+// reading idle, so a managed child waits silently instead of reporting why.
+#[cfg(not(windows))]
+#[test]
+fn failed_pressure_recovery_reports_context_overflow_to_the_host() {
+    let stub = Stub::start(Plan {
+        completions: vec![read_at_context_limit("read1"), Reply::TruncatedSse],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# overflow report fixture\n");
+    let ego = places
+        .ego(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--retry",
+            "0",
+        ])
+        .env("TERM", "xterm-256color")
+        .env("TUIC_SOCKET", "/nonexistent/tuic.sock");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    let turn = output.len();
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_notice_prose(&reader, &mut output, turn, "Retry with '/compact'");
+    let report = b"\x1b]7770;error=context_overflow\x07\x1b]7770;state=error\x07";
+    until_from(&reader, &mut output, turn, report);
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "one cut turn, one failed checkpoint"
+    );
+}
+
+// Catches: a transient checkpoint failure exits the session instead of keeping
+// the source usable for an explicit retry, or silently starts a retry storm.
+#[cfg(not(windows))]
+#[test]
+fn transient_compaction_failure_keeps_source_open_for_explicit_retry() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("PRESSURE-607", 245352, 4)),
+            Reply::TruncatedSse,
+            Reply::TruncatedSse,
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(text("RETRIED-607")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# transient checkpoint fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+        "--retry",
+        "0",
+    ]);
+    let (mut session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    let turn_start = output.len();
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    let mut retry_start = turn_start;
+    for failed_checkpoints in 1..=2 {
+        until_normalized(
+            &reader,
+            &mut output,
+            retry_start,
+            "compaction preparation failed",
+        );
+        let failed_at =
+            retry_start + find(&output[retry_start..], b"compaction preparation failed");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while support::ready_prompt_count_with_status(&output[failed_at..]) == 0 {
+            if let Some(status) = session.child.try_wait().expect("child status") {
+                let _ = session.quit(input);
+                panic!(
+                    "transient compaction must leave the source session open, exited {status:?}: {}",
+                    normalized(&output)
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "source did not return to idle: {}",
+                normalized(&output)
+            );
+            if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(20)) {
+                output.extend(bytes);
+            }
+        }
+        assert!(
+            session
+                .child
+                .try_wait()
+                .expect("source process status")
+                .is_none(),
+            "source must remain alive for the explicit retry"
+        );
+        // An empty composer can repaint between rows of the failure notice.
+        // Wait for its complete actionable text before inspecting it.
+        until_notice_prose(&reader, &mut output, failed_at, "Retry with '/compact'");
+        let shown = support::notice_prose(&normalized(&output));
+        assert!(shown.contains("HTTP response body failed"), "{shown}");
+        assert!(shown.contains("Retry with '/compact'"), "{shown}");
+        assert!(!shown.contains("session stopped"), "{shown}");
+        assert_eq!(
+            stub.generations().len(),
+            failed_checkpoints + 1,
+            "no automatic retry storm"
+        );
+        assert_eq!(
+            std::fs::read_dir(places.home_path().join("sessions"))
+                .unwrap()
+                .filter_map(Result::ok)
+                .filter(|entry| entry
+                    .file_name()
+                    .to_string_lossy()
+                    .parse::<uuid::Uuid>()
+                    .is_ok())
+                .count(),
+            1,
+            "source remains selected before retry"
+        );
+        retry_start = output.len();
+        input.write_all(b"/compact\r").unwrap();
+        input.flush().unwrap();
+    }
+    until_successor_receipt_ready(&reader, &mut output, retry_start, "compact", &stub);
+    input.write_all(b"continue the task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, retry_start, "RETRIED-607");
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let requests = stub.generations();
+    assert_eq!(
+        requests.len(),
+        5,
+        "two failed checkpoints and one successful explicit retry"
+    );
+    assert!(
+        requests[3].to_string().contains("PRESSURE-607"),
+        "retry preserves source history"
+    );
+    assert!(
+        requests[4].to_string().contains("Continue the task."),
+        "successor contains checkpoint"
+    );
+}
+
+// Catches: a permanent checkpoint failure retries without input or kills the session.
+#[test]
+fn failed_compaction_preparation_does_not_loop_refusals() {
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("PRESSURE-590", 245352, 4)),
+            Reply::Status(400),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# failed checkpoint fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (mut session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "compaction preparation failed");
+    until_notice_prose(&reader, &mut output, start, "Retry with '/compact'");
+    until_prompt_from(&reader, &mut output, start);
+    assert!(session.child.try_wait().unwrap().is_none());
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "failed recovery must wait for input"
+    );
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let shown = normalized(&output);
+    assert!(
+        support::notice_prose(&shown).contains(
+            "Compaction paused; the session is still open: compaction failed: compaction preparation failed: compaction generation failed: the provider returned HTTP 400"
+        ),
+        "the recovery notice must name the permanent provider cause: {shown}"
+    );
+    assert!(!shown.contains("Compacting the session now"), "{shown}");
+    assert!(
+        !shown.contains("Resuming the task automatically"),
+        "{shown}"
+    );
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "no retry storm or ordinary generation"
+    );
+    let journal = std::fs::read_to_string(
+        places
+            .home_path()
+            .join("sessions")
+            .join(support::FIXTURE_SESSION_ID)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        journal.contains("the provider returned HTTP 400"),
+        "the fixture must retain the non-transient provider failure"
+    );
+}
+
+/// Collect PTY output for `window` and return the stub generation count.
+#[cfg(not(windows))]
+fn generations_after_quiet_window(
+    reader: &mpsc::Receiver<Vec<u8>>,
+    output: &mut Vec<u8>,
+    stub: &Stub,
+    window: Duration,
+) -> usize {
+    let deadline = Instant::now() + window;
+    while Instant::now() < deadline {
+        if let Ok(bytes) = reader.recv_timeout(Duration::from_millis(20)) {
+            output.extend(bytes);
+        }
+    }
+    stub.generations().len()
+}
+
+// Catches: after a cut turn whose compaction failed, /clear opens a fresh
+// session that inherits the stale overflow, so ego compacts the empty session
+// without input or reports error=context_overflow on it.
+#[cfg(not(windows))]
+#[test]
+fn clear_after_a_failed_overflow_recovery_starts_a_quiet_session() {
+    let cut = tool_call("cut-1076", "read", r#"{"files":[{"path":"AGENTS.md"}]}"#).replace(
+        "\"prompt_tokens\":10,\"completion_tokens\":4,\"total_tokens\":14",
+        "\"prompt_tokens\":244796,\"completion_tokens\":4,\"total_tokens\":244800",
+    );
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(cut),
+            Reply::Status(400),
+            Reply::Sse(text("FRESH-1076")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# stale overflow fixture\n");
+    let ego = places
+        .ego(&stub)
+        .conversing()
+        .args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+        ])
+        .env("TERM", "xterm-256color")
+        .env("TUIC_SOCKET", "/nonexistent/tuic.sock");
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_notice_prose(&reader, &mut output, start, "Retry with '/compact'");
+    until_prompt_from(&reader, &mut output, start);
+    drain_until_quiet(&reader, &mut output);
+    assert_eq!(
+        stub.generations().len(),
+        2,
+        "cut turn and failed checkpoint"
+    );
+    let clear_start = output.len();
+    input.write_all(b"/clear\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, clear_start, "Conversation cleared");
+    until_prompt_from(&reader, &mut output, clear_start);
+    let after_clear =
+        generations_after_quiet_window(&reader, &mut output, &stub, Duration::from_secs(2));
+    let fresh = String::from_utf8_lossy(&output[clear_start..]).into_owned();
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert_eq!(
+        after_clear,
+        2,
+        "the fresh session compacted without input: {}",
+        normalized(fresh.as_bytes())
+    );
+    assert!(
+        !fresh.contains("error=context_overflow"),
+        "the fresh session reports the old overflow: {fresh:?}"
+    );
+}
+
+// Catches: a checkpoint continuation that finishes above the threshold (its
+// fresh context is already that full) compacts and re-runs the checkpoint
+// again and again without input, each cycle billing two generations.
+#[cfg(not(windows))]
+#[test]
+fn a_successor_that_finishes_above_the_threshold_does_not_compact_again() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("PRESSURE-1076", 244796, 4)),
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(support::costing("DONE-ABOVE-1076", 244796, 4)),
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(support::costing("LOOPED-1076", 244796, 4)),
+            Reply::Sse(text(checkpoint)),
+            Reply::Sse(support::costing("LOOPED-1076", 244796, 4)),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# successor floor fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "DONE-ABOVE-1076");
+    let done = output.len();
+    until_prompt_from(&reader, &mut output, done);
+    let settled =
+        generations_after_quiet_window(&reader, &mut output, &stub, Duration::from_secs(2));
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    let _ = session.quit(input);
+    assert_eq!(
+        settled,
+        3,
+        "the finished successor compacted again without input: {}",
+        normalized(&output[start..])
+    );
+}
+
+// Catches: a wake accepted during checkpoint generation leaves source work
+// pending forever instead of being delivered after automatic compaction.
+#[test]
+fn context_pressure_delivers_prompt_arriving_during_compaction_to_successor() {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("PRESSURE-412", 244796, 4)),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: text(checkpoint),
+                gate: gate.clone(),
+            },
+            Reply::Sse(text("RECOVERED-412")),
+            Reply::Sse(text("WAKE-DELIVERED-412")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# queued compaction fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "PRESSURE-412");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.generations().len() < 2 {
+        assert!(Instant::now() < deadline, "checkpoint did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let wake_start = output.len();
+    input.write_all(b"WAKE-SOURCE-WORK-412").unwrap();
+    input.flush().unwrap();
+    // Observe the buffer before Enter: closed busy admission clears it when
+    // handing the submitted line back to the driver for the successor.
+    until_normalized(&reader, &mut output, wake_start, "WAKE-SOURCE-WORK-412");
+    input.write_all(b"\r").unwrap();
+    input.flush().unwrap();
+    drain_until_quiet(&reader, &mut output);
+    gate.release();
+    until_normalized(&reader, &mut output, wake_start, "RECOVERED-412");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !stub
+        .generations()
+        .iter()
+        .skip(2)
+        .any(|request| request.to_string().contains("WAKE-SOURCE-WORK-412"))
+    {
+        assert!(
+            Instant::now() < deadline,
+            "wake was not delivered to successor"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    let requests = stub.generations();
+    let delivered: Vec<_> = requests
+        .iter()
+        .skip(2)
+        .filter(|request| request.to_string().contains("WAKE-SOURCE-WORK-412"))
+        .collect();
+    assert_eq!(delivered.len(), 1, "wake must be delivered exactly once");
+    assert!(!delivered[0].to_string().contains("PRESSURE-412"));
+    assert!(!normalized(&output).contains("more work arrived"));
+}
+
+// Catches: closing prompt admission also rejects Ctrl-C for an active checkpoint.
+#[test]
+fn context_pressure_compaction_still_accepts_operator_cancellation() {
+    context_pressure_compaction_cancellation(b"\x03");
+}
+
+// Catches: the checkpoint prompt barrier rejects Esc instead of cancelling.
+#[test]
+fn context_pressure_compaction_still_accepts_escape_cancellation() {
+    context_pressure_compaction_cancellation(b"\x1b");
+}
+
+fn context_pressure_compaction_cancellation(interrupt: &[u8]) {
+    let checkpoint = "# Objective\nContinue the task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nFirst answer.\n# Work in progress\nFinish task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish task.\n# Critical references\nNone.";
+    let gate = ReleaseGate::new();
+    let stub = Stub::start(Plan {
+        completions: vec![
+            Reply::Sse(support::costing("PRESSURE-CANCEL-412", 244796, 4)),
+            Reply::GatedPaced {
+                head: String::new(),
+                tail: text(checkpoint),
+                gate: gate.clone(),
+            },
+            Reply::Sse(text("UNWANTED-SUCCESSOR-412")),
+        ],
+        context_length: Some(272000),
+        ..Plan::default()
+    });
+    let places = support::Places::new();
+    places.file("AGENTS.md", "# compaction cancellation fixture\n");
+    let ego = places.ego(&stub).conversing().args([
+        "--model",
+        "ollama/qwen3",
+        "--session-id",
+        support::FIXTURE_SESSION_ID,
+        "--sandbox",
+        "off",
+    ]);
+    let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+    let mut output = Vec::new();
+    until(&reader, &mut output, b"Trust project files");
+    let start = output.len();
+    input.write_all(b"yes\r").unwrap();
+    input.flush().unwrap();
+    until_prompt_from(&reader, &mut output, start);
+    input.write_all(b"finish this task\r").unwrap();
+    input.flush().unwrap();
+    until_normalized(&reader, &mut output, start, "PRESSURE-CANCEL-412");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while stub.generations().len() < 2 {
+        assert!(Instant::now() < deadline, "checkpoint did not start");
+        thread::sleep(Duration::from_millis(10));
+    }
+    drain_until_quiet(&reader, &mut output);
+    let cancel_start = output.len();
+    input.write_all(interrupt).unwrap();
+    input.flush().unwrap();
+    // Wait for settlement, not a quiet repaint interval: Esc has no notice
+    // and the checkpoint task can settle after the terminal becomes quiet.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !normalized(&output[cancel_start..]).contains("compaction was cancelled by User") {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match reader.recv_timeout(remaining) {
+            Ok(bytes) => output.extend(bytes),
+            Err(_) => break,
+        }
+    }
+    let cancellation_output = normalized(&output[cancel_start..]);
+    // Release the HTTP fixture even on a regression so teardown cannot hang.
+    gate.release();
+    input.write_all(b"/quit\r").unwrap();
+    input.flush().unwrap();
+    assert!(session.quit(input).success());
+    assert!(
+        cancellation_output.contains("compaction was cancelled by User"),
+        "operator interrupt must cancel checkpoint preparation, not reject it: {cancellation_output}"
+    );
+}
+
+// Catches: a model request reaches idle but never publishes or continues in a successor.
+#[test]
+fn model_context_compact_and_clear_continue_without_operator_prompt() {
+    for clear in [false, true] {
+        let checkpoint = "# Objective\nContinue the next sub-task.\n# Binding constraints and preferences\nNone.\n# Completed work and evidence\nVerified first sub-task.\n# Work in progress\nFinish next sub-task.\n# Decisions and rationale\nNone.\n# Blockers and uncertainty\nNone.\n# Ordered next steps\nFinish.\n# Critical references\nNone.";
+        let action = if clear { "clear" } else { "compact" };
+        let mut completions = vec![Reply::Sse(support::tool_call(
+            "context-transition", "context",
+            &serde_json::json!({"action":action,"reason":"verified first sub-task","handoff":"NEXT-SUBTASK-417"}).to_string(),
+        ))];
+        if !clear {
+            completions.push(Reply::Sse(text(checkpoint)));
+        }
+        completions.push(Reply::Sse(text("SUCCESSOR-417-CONTINUED")));
+        // The successor keeps the independent goal check; success must still be verified.
+        completions.push(Reply::Sse(text(
+            r#"{"verdict":"achieved","reason":"next sub-task verified"}"#,
+        )));
+        let stub = Stub::start(Plan {
+            completions,
+            context_length: Some(272000),
+            ..Plan::default()
+        });
+        let places = support::Places::new();
+        places.file("AGENTS.md", "# context tool fixture\n");
+        let mut ego = places.ego(&stub).conversing().args([
+            "--model",
+            "ollama/qwen3",
+            "--session-id",
+            support::FIXTURE_SESSION_ID,
+            "--sandbox",
+            "off",
+            "--goal",
+            "Finish both sub-tasks",
+        ]);
+        if clear {
+            ego = ego.args(["--context-clear"]);
+        }
+        let (session, mut input, reader) = PtySession::start(&ego, 24, 100, None);
+        let mut output = Vec::new();
+        until(&reader, &mut output, b"Trust project files");
+        let start = output.len();
+        input.write_all(b"yes\r").unwrap();
+        input.flush().unwrap();
+        until_prompt_from(&reader, &mut output, start);
+        input.write_all(b"SOURCE-TRANSCRIPT-417\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(&reader, &mut output, start, "SUCCESSOR-417-CONTINUED");
+        // Require a fresh idle frame after the successor answer, not startup's frame.
+        let completed = output.len();
+        until_prompt_from(&reader, &mut output, completed);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        let requests = stub.generations();
+        assert_eq!(requests.len(), if clear { 3 } else { 4 }, "{action}");
+        let successor_request = &requests[if clear { 1 } else { 2 }];
+        let successor = successor_request.to_string();
+        let messages = successor_request["messages"].as_array().unwrap();
+        let checkpoints: Vec<serde_json::Value> = messages
+            .iter()
+            .filter_map(|message| serde_json::from_str(message["content"].as_str()?).ok())
+            .filter(|frame: &serde_json::Value| frame["kind"] == "context_checkpoint")
+            .collect();
+        assert_eq!(checkpoints.len(), 1, "{successor}");
+        assert!(
+            messages
+                .iter()
+                .all(|message| message["content"] != "SOURCE-TRANSCRIPT-417"),
+            "source prompt must not be replayed as a new request: {successor}"
+        );
+        if clear {
+            assert!(!successor.contains("SOURCE-TRANSCRIPT-417"), "{successor}");
+            assert!(checkpoints[0].get("latest_user_request").is_none());
+        } else {
+            assert_eq!(
+                checkpoints[0]["latest_user_request"], "SOURCE-TRANSCRIPT-417",
+                "{successor}"
+            );
+        }
+        assert!(
+            successor.contains(if clear {
+                "NEXT-SUBTASK-417"
+            } else {
+                "Continue the next sub-task."
+            }),
+            "{successor}"
+        );
+        assert!(successor.contains("Finish both sub-tasks"), "{successor}");
+    }
+}
+
+fn record_slash_capture(output: &[u8], rows: u16, cols: u16) {
+    if let Some(directory) = std::env::var_os("EGO_SLASH_RECORD_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory).expect("record directory");
+        std::fs::write(directory.join(format!("{cols}x{rows}.ansi")), output).expect("raw capture");
+        std::fs::write(
+            directory.join(format!("{cols}x{rows}.json")),
+            format!("{{\"cols\":{cols},\"rows\":{rows}}}\n"),
+        )
+        .expect("geometry");
+    }
+}
+
+/// Catches: a UUID-width usage table wraps cost onto detached continuation rows.
+#[test]
+fn interactive_usage_keeps_cost_with_its_session_row_at_80_columns() {
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+            ])
+            .env("TERM", "xterm-256color");
+        ego.file("AGENTS.md", "# usage layout fixture\n");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until(&reader, &mut output, b"Trust project files");
+        input.write_all(b"yes\r").expect("trust");
+        input.flush().expect("trust flush");
+        until_post_trust_prompt(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/usage\r").expect("usage");
+        input.flush().expect("usage flush");
+        until_normalized(&reader, &mut output, start, "workspace");
+        until_local_action_completed(&reader, &mut output, start, "usage", SLASH_ACTION_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+        let visible = normalized(&output[start..]);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).expect("capture directory");
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).expect("raw capture");
+            std::fs::write(format!("{root}/{columns}x{rows}.txt"), &visible)
+                .expect("screen capture");
+        }
+        input.write_all(b"/quit\r").expect("quit");
+        input.flush().expect("quit flush");
+        session.quit(input);
+        let header = visible
+            .lines()
+            .find(|line| line.contains("cache_hit") && line.contains("cost"))
+            .expect("accounting header");
+        assert!(
+            header.rsplit('\r').next().unwrap_or(header).chars().count() <= usize::from(columns),
+            "accounting labels must fit without terminal wrapping: {header:?}"
+        );
+        assert!(
+            visible
+                .lines()
+                .any(|line| line.contains("total") && line.contains("unknown")),
+            "cost must stay beside its role and tokens: {visible:?}"
+        );
+    }
+}
+
+/// Catches: typed clear silently leaves the transcript and export omits format/destination receipts.
+#[test]
+fn typed_clear_reports_its_scope() {
+    let mut captures = Vec::new();
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let ego = Ego::against(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--session-id",
+                support::FIXTURE_SESSION_ID,
+                "--sandbox",
+                "off",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/clear\r").unwrap();
+        input.flush().unwrap();
+        until_local_action_completed(&reader, &mut output, start, "clear", SLASH_ACTION_DEADLINE);
+        submit_local_action(
+            &reader,
+            &mut output,
+            &mut input,
+            &stub,
+            "help",
+            Some(HELP_END),
+        );
+        submit_local_action(&reader, &mut output, &mut input, &stub, "export", None);
+        drain_until_quiet(&reader, &mut output);
+        if let Ok(root) = std::env::var("EGO_UX_CAPTURE_DIR") {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(format!("{root}/{columns}x{rows}.ansi"), &output).unwrap();
+        }
+        captures.push(normalized(&output[start..]));
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        assert!(stub.generations().is_empty());
+    }
+    for capture in captures {
+        assert!(
+            capture.contains("Conversation cleared; previous session remains available"),
+            "{capture}"
+        );
+        assert!(
+            capture.contains("Exported sanitized evidence bundle as md to this transcript"),
+            "{capture}"
+        );
+        assert!(
+            capture.contains("# ego sanitized export"),
+            "export bytes unchanged: {capture}"
+        );
+    }
+}
+
+/// Catches: the default tools summary is followed by per-tool diagnostic notices.
+#[test]
+fn followup_tools_default_has_no_per_tool_notices() {
+    for (rows, columns) in [(24, 80), (40, 120)] {
+        let stub = Stub::start(Plan::default());
+        let places = support::Places::new();
+        places.file("AGENTS.md", "# tools fixture\n");
+        let ego = places
+            .ego(&stub)
+            .conversing()
+            .args([
+                "--model",
+                "ollama/qwen3",
+                "--sandbox",
+                "off",
+                "--yolo",
+                "--trust-workspace",
+            ])
+            .env("TERM", "xterm-256color");
+        let (session, mut input, reader) = PtySession::start(&ego, rows, columns, None);
+        let mut output = Vec::new();
+        until_prompt_from(&reader, &mut output, 0);
+        let start = output.len();
+        input.write_all(b"/tools\r").unwrap();
+        input.flush().unwrap();
+        until_normalized(
+            &reader,
+            &mut output,
+            start,
+            "inspect the full list with '/tools details'",
+        );
+        until_local_action_completed(&reader, &mut output, start, "tools", SLASH_ACTION_DEADLINE);
+        drain_until_quiet(&reader, &mut output);
+        let visible = normalized(&output[start..]);
+        input.write_all(b"/quit\r").unwrap();
+        input.flush().unwrap();
+        assert!(session.quit(input).success());
+        let notices = visible
+            .lines()
+            .filter(|line| line.contains("εgo: "))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            notices.len(),
+            1,
+            "only the summary notice is allowed: {visible}"
+        );
+        assert!(
+            notices[0].contains("inspect the full list with '/tools details'"),
+            "{visible}"
+        );
+        assert!(stub.generations().is_empty());
+    }
+}
+
+#[path = "it/acp_model_load/instance_fixture.rs"]
+mod catalogue_instance_fixture;
+#[path = "live_surface_pty/catalogue_publication.rs"]
+mod catalogue_publication;

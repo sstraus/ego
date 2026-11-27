@@ -24,6 +24,9 @@ pub(super) struct ProfileInput<'a> {
     /// Paths a human allowed after the run started. Never a parent directory
     /// of the path that was refused.
     pub(super) grants: &'a [SandboxGrant],
+    /// Runtime capabilities, with configured roots excluded. Only eligible
+    /// exact owner files lift controls; the judge recheck never grants those.
+    pub(super) maintenance: &'a [SandboxGrant],
 }
 
 #[derive(Debug)]
@@ -256,6 +259,45 @@ pub(super) fn deny_exec(paths: &[CanonPath]) -> Result<String, ProfileError> {
     Ok(rule)
 }
 
+/// Owner exec approvals lift only their explicit scope from judge/read-root
+/// no-exec rules. Write and read approvals never enter these exceptions.
+pub(super) fn deny_exec_with_owner(
+    paths: &[CanonPath],
+    grants: &[SandboxGrant],
+) -> Result<String, ProfileError> {
+    let exec = grants
+        .iter()
+        .filter(|grant| grant.access == SandboxAccess::Exec)
+        .collect::<Vec<_>>();
+    if exec.is_empty() {
+        return deny_exec(paths);
+    }
+    let mut rule = String::new();
+    for path in paths {
+        let except = exec
+            .iter()
+            .filter(|grant| grant.path.is_or_under(path))
+            .collect::<Vec<_>>();
+        if exec.iter().any(|grant| path.is_or_under(&grant.path)) {
+            continue;
+        }
+        if except.is_empty() {
+            rule.push_str(&deny_exec(std::slice::from_ref(path))?);
+            continue;
+        }
+        rule.push_str("(deny process-exec* (require-all (subpath ");
+        rule.push_str(&path_literal(path.as_path())?);
+        rule.push(')');
+        for grant in except {
+            rule.push_str(" (require-not (subpath ");
+            rule.push_str(&path_literal(grant.path.as_path())?);
+            rule.push_str("))");
+        }
+        rule.push_str("))\n");
+    }
+    Ok(rule)
+}
+
 /// Whether [`render`] can express `path`; the one place that rule lives.
 pub(super) fn renderable(path: &Path) -> bool {
     path_literal(path).is_ok()
@@ -284,6 +326,7 @@ mod tests {
             runtime_roots: RUNTIME,
             exec_paths: RUNTIME,
             grants: &[],
+            maintenance: &[],
         }
     }
 

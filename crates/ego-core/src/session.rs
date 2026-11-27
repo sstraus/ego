@@ -23,6 +23,8 @@ pub enum SessionLineage {
     Fork {
         source: SessionId,
         at_seq: Seq,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        neutral: bool,
     },
     Compaction {
         source: SessionId,
@@ -256,6 +258,11 @@ pub struct PromptSnapshot {
     pub epoch: EventId,
     pub identity: Option<String>,
     pub system: Option<crate::config::SystemPrompt>,
+    /// The skill announcement in the `skill` tool description of this epoch.
+    /// A resume or fork sends these entries again, so a later change of the
+    /// skill catalogue does not change the cached tool block.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skills: Option<Vec<serde_json::Value>>,
 }
 
 /// The ancestor-only result of a lineage replay.
@@ -368,10 +375,16 @@ impl<'a> ReplayContext<'a> {
         .source;
         let steps = walk_lineage(self.source, lineage, visited, LineageEdges::Forks)?;
         let session_pins = steps.iter().map(|step| step.source).collect();
+        let mut strip_opaque = false;
         let frames: Vec<_> = steps
             .into_iter()
             .filter_map(|step| match step.edge {
-                SessionLineage::Fork { at_seq, .. } => Some((step.source, at_seq)),
+                SessionLineage::Fork {
+                    at_seq, neutral, ..
+                } => {
+                    strip_opaque |= neutral;
+                    Some((step.source, at_seq, strip_opaque))
+                }
                 SessionLineage::Compaction { .. } => None,
             })
             .collect();
@@ -380,7 +393,7 @@ impl<'a> ReplayContext<'a> {
         let mut events = Vec::new();
         let mut blob_pins = Vec::new();
         let mut verified_blobs: HashMap<BlobRef, Vec<u8>> = HashMap::new();
-        for (session, cutoff) in frames.into_iter().rev() {
+        for (session, cutoff, strip_opaque) in frames.into_iter().rev() {
             let entries = self
                 .source
                 .entries(&session)
@@ -391,6 +404,17 @@ impl<'a> ReplayContext<'a> {
                     continue;
                 };
                 if event.env.seq > cutoff {
+                    continue;
+                }
+
+                if strip_opaque
+                    && matches!(
+                        event.kind,
+                        EventKind::ReasoningDelta { .. }
+                            | EventKind::ReasoningState { .. }
+                            | EventKind::ProviderContent { .. }
+                    )
+                {
                     continue;
                 }
 
@@ -457,7 +481,9 @@ impl<'a> ReplayContext<'a> {
         }
         Ok(ReplayedContext {
             lineage_root,
-            prompt_snapshot: state.prompt_snapshot.clone(),
+            prompt_snapshot: (!strip_opaque)
+                .then(|| state.prompt_snapshot.clone())
+                .flatten(),
             conversation,
             session_pins,
             blob_pins,
@@ -494,10 +520,15 @@ impl TargetSeed {
                     source,
                     at_seq,
                     snapshot: None,
+                    neutral: false,
                 },
             },
             trailing_events: Vec::new(),
-            lineage: SessionLineage::Fork { source, at_seq },
+            lineage: SessionLineage::Fork {
+                source,
+                at_seq,
+                neutral: false,
+            },
         }
     }
 
@@ -541,6 +572,39 @@ impl TargetSeed {
                 prompt_revision,
             },
         }
+    }
+
+    /// Pin only account continuity; source policy is not target authority.
+    pub(crate) fn with_connection(mut self, connection: Option<&str>) -> Self {
+        if let Some(id) = connection {
+            self.push_trailing(EventKind::SessionSelectionsSelected {
+                selections: crate::run::RunSelections::empty().with_connection(Some(id.to_owned())),
+            });
+        }
+        self
+    }
+
+    pub(crate) fn with_owner_sandbox_grants(
+        mut self,
+        grants: &[crate::permit::SandboxGrant],
+    ) -> Self {
+        for grant in grants {
+            self.push_trailing(EventKind::SandboxOwnerGranted {
+                grant: grant.clone(),
+            });
+        }
+        self
+    }
+
+    /// Carry the source's live session roots as durable owner-approval receipts.
+    /// The caller passes the replayed source roots (revocations already applied),
+    /// so a revoked root is never re-granted. They are pushed as trailing events of
+    /// the same atomic target-log image as the lineage seed.
+    pub(crate) fn with_session_roots(mut self, roots: &[crate::permit::ProfileRoot]) -> Self {
+        for root in roots {
+            self.push_trailing(EventKind::SessionRootGranted { root: root.clone() });
+        }
+        self
     }
 
     pub(crate) fn with_latest_user_request(mut self, text: Option<String>) -> Self {
@@ -598,11 +662,18 @@ impl TargetSeed {
     }
 
     pub(crate) fn with_plan(mut self, plan: &crate::plan::Plan) -> Self {
-        if !plan.steps.is_empty() {
+        if !plan.steps.is_empty() || !plan.started.is_empty() {
             self.push_trailing(EventKind::PlanUpdated {
-                update: crate::plan::PlanUpdate::Replace {
+                update: crate::plan::PlanUpdate::Restore {
                     steps: plan.steps.clone(),
+                    started: plan.started.clone(),
                 },
+            });
+        }
+        if let Some(completed) = &plan.continuation_completed {
+            self.push_trailing(EventKind::WorklistContinuation {
+                completed: completed.clone(),
+                text: String::new(),
             });
         }
         self
@@ -745,6 +816,39 @@ impl std::error::Error for ForkError {}
 
 impl PreparedFork {
     pub fn new(source: SessionId, state: &SessionState, at: Timestamp) -> Result<Self, ForkError> {
+        Self::prepare(source, state, at, false)
+    }
+
+    pub(crate) fn for_prompt(
+        source: SessionId,
+        state: &SessionState,
+        at: Timestamp,
+    ) -> Result<Self, ForkError> {
+        Self::prepare(source, state, at, true)
+    }
+
+    fn prepare(
+        source: SessionId,
+        state: &SessionState,
+        at: Timestamp,
+        pin_generation: bool,
+    ) -> Result<Self, ForkError> {
+        Self::check_tip(state)?;
+        let mut seed = TargetSeed::fork(source, state.last_seq, at);
+        if let Some(selections) = state.session_selections.as_ref() {
+            if pin_generation {
+                seed.push_trailing(EventKind::SessionSelectionsSelected {
+                    selections: selections.for_fork_prompt(),
+                });
+            } else {
+                seed = seed.with_connection(selections.connection());
+            }
+        }
+        let seed = seed.with_prompt_snapshot(state.prompt_snapshot.clone());
+        Ok(Self::with_tip_metadata(seed, state))
+    }
+
+    fn check_tip(state: &SessionState) -> Result<(), ForkError> {
         if !state.unacknowledged_prompts().is_empty() {
             return Err(ForkError::AcceptedPrompt);
         }
@@ -761,14 +865,40 @@ impl PreparedFork {
         {
             return Err(ForkError::UnansweredToolCall);
         }
-        Ok(Self {
-            seed: TargetSeed::fork(source, state.last_seq, at)
-                .with_prompt_snapshot(state.prompt_snapshot.clone())
+        Ok(())
+    }
+
+    fn with_tip_metadata(seed: TargetSeed, state: &SessionState) -> Self {
+        Self {
+            seed: seed
+                .with_session_roots(&state.session_roots)
                 .with_title(state.title.clone())
                 .with_goal(state.goal.as_ref())
                 .with_plan(&state.plan)
                 .with_constraints(state.constraints.clone()),
-        })
+        }
+    }
+
+    /// Keep portable history but pin the target selection, not the source account or prompt.
+    pub fn neutral(
+        source: SessionId,
+        state: &SessionState,
+        at: Timestamp,
+        selections: crate::run::RunSelections,
+    ) -> Result<Self, ForkError> {
+        Self::check_tip(state)?;
+        if state.turns.values().any(|turn| !turn.completed) {
+            return Err(ForkError::UnsettledTurn);
+        }
+        let mut seed = TargetSeed::fork(source, state.last_seq, at);
+        if let EventKind::Forked { neutral, .. } = &mut seed.event.kind {
+            *neutral = true;
+        }
+        if let SessionLineage::Fork { neutral, .. } = &mut seed.lineage {
+            *neutral = true;
+        }
+        seed.push_trailing(EventKind::SessionSelectionsSelected { selections });
+        Ok(Self::with_tip_metadata(seed, state))
     }
 
     /// Prepare the completed turn containing a message in this session's visible prefix.
@@ -802,7 +932,15 @@ impl PreparedFork {
         let prefix = SessionState::replay(events[..=boundary].iter().cloned());
         Ok(Self {
             seed: TargetSeed::fork(source, prefix.last_seq, at)
+                .with_connection(
+                    prefix
+                        .session_selections
+                        .as_ref()
+                        .and_then(|selections| selections.connection()),
+                )
                 .with_prompt_snapshot(prefix.prompt_snapshot.clone())
+                // Authority is the source's current grants, not the prefix's.
+                .with_session_roots(&state.session_roots)
                 .with_title(prefix.title.clone())
                 .with_goal(prefix.goal.as_ref())
                 .with_plan(&prefix.plan)

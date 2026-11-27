@@ -1,7 +1,8 @@
 //! Builtin tools and execution backends — the OS lives here.
 //!
-//! Real I/O lives in this crate: filesystem tools, process spawning, sandbox backends,
-//! session storage.
+//! See `ARCHITECTURE.md` §3.2 (tools), §3.3 (environment seam) and §3.4
+//! (sandbox enforcement). Real I/O lives in this crate: filesystem tools,
+//! process spawning, sandbox backends, session storage.
 
 pub mod checkpoint;
 pub mod clock;
@@ -12,6 +13,7 @@ pub mod fs;
 pub mod hook;
 pub mod http;
 pub mod instructions;
+pub mod lsp;
 pub mod mcp;
 pub mod mcp_continuation;
 mod mcp_oauth;
@@ -28,3 +30,10 @@ pub mod tools;
 pub mod secrets;
 
 pub mod setup;
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+#[test]
+#[ignore = "hosts the offline probe child"]
+fn __ego_internal_network_probe_v1() {
+    assert!(exec::dispatch_network_probe(std::env::args_os()).expect("probe envelope"));
+}

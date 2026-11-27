@@ -7,6 +7,7 @@
 //! is reported `not_checked` with the reason and the command that would get it
 //! — which is the whole difference between a diagnosis and a guess.
 //!
+//! See `docs/internals/decisions/2026-09-03-doctor-observes-one-redacted-health-snapshot.md`.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -25,6 +26,8 @@ use crate::auth::AuthStore;
 use crate::cli::DoctorArgs;
 use crate::config;
 use crate::output::Stdout;
+
+mod network;
 
 /// The text rendering, for the surface that has nowhere to put a `--json`.
 ///
@@ -53,7 +56,16 @@ pub fn observed_with_width(workspace: PathBuf, width: usize) -> String {
 /// the process working directory to reach this would be a test that cannot run
 /// beside another one.
 pub fn snapshot(workspace: PathBuf, home: Option<PathBuf>, roots: &VisibleRoots) -> HealthSnapshot {
-    snapshot_with_perimeter(workspace, home, roots, None)
+    snapshot_with_perimeter(workspace, home, roots, None, network::Probe::Configured)
+}
+
+/// [`snapshot`] with the offline posture forced on, as `ego doctor --offline` does.
+pub fn snapshot_offline(
+    workspace: PathBuf,
+    home: Option<PathBuf>,
+    roots: &VisibleRoots,
+) -> HealthSnapshot {
+    snapshot_with_perimeter(workspace, home, roots, None, network::Probe::Offline)
 }
 
 /// Inspect an existing session without re-resolving its admitted perimeter.
@@ -73,7 +85,13 @@ pub(crate) fn observed_session_view(
 ) -> String {
     let home = config::ego_home();
     let roots = visible_roots(&workspace, home.as_ref());
-    let snapshot = snapshot_with_perimeter(workspace, home, &roots, Some(perimeter));
+    let snapshot = snapshot_with_perimeter(
+        workspace,
+        home,
+        &roots,
+        Some(perimeter),
+        network::Probe::Configured,
+    );
     if details {
         text_with_width(&snapshot, width)
     } else {
@@ -81,24 +99,14 @@ pub(crate) fn observed_session_view(
             "doctor: {} — inspect the results with '/doctor details'",
             status_word(snapshot.status())
         )];
-        for report in &snapshot.sections {
-            rows.push(format!(
-                "{}: {}",
-                report.section.label(),
-                status_word(report.status())
-            ));
-            for item in report
-                .items
-                .iter()
-                .filter(|item| matches!(item.status, HealthStatus::Warning | HealthStatus::Error))
-            {
-                rows.push(format!(
-                    "  {}: {} — /doctor details",
-                    item.id,
-                    status_word(item.status)
-                ));
-            }
-        }
+        let mut table = vec![vec!["Section".into(), "State".into()]];
+        table.extend(snapshot.sections.iter().map(|report| {
+            vec![
+                report.section.label().into(),
+                status_word(report.status()).into(),
+            ]
+        }));
+        rows.extend(crate::render::table::plain_table_with_width(table, width));
         rows.join("\n")
     }
 }
@@ -108,7 +116,25 @@ fn snapshot_with_perimeter(
     home: Option<PathBuf>,
     roots: &VisibleRoots,
     perimeter: Option<&crate::perimeter::Perimeter>,
+    probe: network::Probe,
 ) -> HealthSnapshot {
+    // Network probes run beside the local ones on their own bounded budget, so
+    // a slow provider cannot spend the two seconds the local reads share.
+    let (network_send, network_receive) = mpsc::sync_channel(1);
+    {
+        let network = network::Network {
+            workspace: workspace.clone(),
+            home: home.clone(),
+            perimeter: perimeter.cloned(),
+            probe,
+        };
+        let roots = roots.clone();
+        let _ = std::thread::Builder::new()
+            .name("ego-doctor-network".into())
+            .spawn(move || {
+                let _ = network_send.send(network.observe(&roots));
+            });
+    }
     let probes: Vec<Box<dyn HealthProbe + Send>> = vec![
         Box::new(Configuration),
         Box::new(Credentials { home: home.clone() }),
@@ -127,7 +153,20 @@ fn snapshot_with_perimeter(
         Box::new(Hooks),
         Box::new(Acp),
     ];
-    observe_bounded(probes, roots, Duration::from_secs(2))
+    let local = observe_bounded(probes, roots, Duration::from_secs(2));
+    let network = match network_receive.recv_timeout(network::PROBE_BUDGET + Duration::from_secs(2))
+    {
+        Ok(Ok(items)) => HealthSectionReport::new(HealthSection::Catalogue, items),
+        Ok(Err(refusal)) => HealthSectionReport::new(
+            HealthSection::Catalogue,
+            vec![HealthItem::refused(HealthSection::Catalogue, &refusal)],
+        ),
+        Err(_) => probe_error(
+            HealthSection::Catalogue,
+            "network probe failed: it timed out or stopped without a result",
+        ),
+    };
+    HealthSnapshot::new(local.sections.into_iter().chain([network]))
 }
 
 // A blocked filesystem read cannot safely be killed in-process. Partition the
@@ -227,7 +266,15 @@ pub fn execute(args: &DoctorArgs, out: &Stdout) -> RunTermination {
     let workspace = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = config::ego_home();
     let roots = visible_roots(&workspace, home.as_ref());
-    let snapshot = snapshot(workspace, home, &roots);
+    // `--offline` wins over `--probe-network`: the offline posture skips every probe.
+    let probe = if args.offline {
+        network::Probe::Offline
+    } else if args.probe_network {
+        network::Probe::Requested
+    } else {
+        network::Probe::Configured
+    };
+    let snapshot = snapshot_with_perimeter(workspace, home, &roots, None, probe);
     let rendered = match render(&snapshot, args.json) {
         Ok(rendered) => rendered,
         Err(error) => {
@@ -418,6 +465,10 @@ impl HealthProbe for Credentials {
                 ]);
             }
         };
+        let entries = entries
+            .into_iter()
+            .filter(|(key, _)| crate::auth::connection_id_from_storage_key(key).is_some())
+            .collect::<Vec<_>>();
         if entries.is_empty() {
             return Ok(vec![
                 HealthItem::new(
@@ -712,7 +763,16 @@ impl HealthProbe for Skills {
                 HealthDetail::fixed("the skill catalogue"),
             )]);
         };
-        let catalogue = match crate::skill::SkillCatalogue::discover(discovery, &[]) {
+        // The owner's `[skills]` lists live in the system and user layers, the same
+        // two `ego hooks ls` reads. A configuration that does not parse is reported
+        // by the configuration section; here the catalogue is still shown.
+        let discovered = match config::hook_listing_layers() {
+            Ok(layers) => {
+                crate::skill::SkillCatalogue::discover_with_profile_layers(discovery, &[], &layers)
+            }
+            Err(_) => crate::skill::SkillCatalogue::discover(discovery, &[]),
+        };
+        let catalogue = match discovered {
             Ok(catalogue) => catalogue,
             Err(error) => {
                 return Ok(vec![fact(
@@ -845,7 +905,7 @@ impl HealthProbe for Acp {
         // The exact `_meta.ego` object a host reads out of `initialize`, taken
         // from the composer rather than restated. A host that cannot find
         // `_ego/pause` can now be told what this side actually publishes,
-        // which is the fact had to discover by connecting.
+        // which is the fact story 092 had to discover by connecting.
         let advertised = ego_acp::serve::durable_advertisement();
         let extensions = advertised
             .meta

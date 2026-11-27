@@ -1,9 +1,44 @@
 //! OpenAI's public Responses API: `POST /v1/responses`, streamed, unstored.
-//! The public Responses mapping is separate from Codex and xAI mappings.
-//! Published-schema fixtures are offline evidence, not live acceptance.
-//! Every request sets `store: false` to avoid implicit server retention.
-//! Per-model reasoning effort support belongs in `ModelCapabilities`; this
-//! mapping projects spellings only after capability checks admit them.
+//!
+//! Deliberately a third Responses mapping rather than a branch in either
+//! existing one, because
+//! `docs/internals/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`
+//! says so and gives the reason: "Private Codex Responses differs in endpoint,
+//! identity, headers, and request/stream behavior; it is not evidence for
+//! public OpenAI." [`openai_codex_responses`](super::openai_codex_responses)
+//! speaks ChatGPT's private backend and carries its identity;
+//! [`xai_responses`](super::xai_responses) speaks xAI's. All three decode
+//! overlapping slices of the same *event vocabulary*, which is a shared shape
+//! and not a shared contract — the distinction
+//! `2026-08-21-a-shared-shape-is-not-a-shared-contract.md` exists to keep.
+//!
+//! # What the evidence for this file actually is
+//!
+//! Derived field by field from OpenAI's published Responses reference, the
+//! reasoning guide and the streaming guide, read **2026-09-07**. It is vendor
+//! schema evidence and **not a live server recording**, which is why the
+//! `openai` row is not promoted (`ProviderRow::openai_at`): this repository
+//! holds no OpenAI key, so conformance check five has never been made for
+//! these bytes. `crates/ego-cli/tests/it/smoke.rs` is where that closes, on a
+//! machine that has a key and names the provider.
+//!
+//! # Two facts worth stating because they look like omissions
+//!
+//! **`store: false` on every request.** The Responses API defaults `store` to
+//! `true`, which would leave a copy of every prompt and completion in
+//! OpenAI's retention. A harness that governs what leaves a machine does not
+//! opt into that silently, and the ADR names retention as part of the contract
+//! this mapping follows.
+//!
+//! **No per-model effort list here.** The vendor's accepted `reasoning.effort`
+//! values differ per model — gpt-6-astra rejects `none` with a 400 while
+//! gpt-5.6 accepts six levels — so a list written into this file would be
+//! wrong for some model the day it was written. Every [`ThinkingLevel`] has an
+//! OpenAI spelling, so this mapping projects all seven and lets
+//! `ModelCapabilities::reasoning_efforts` refuse the wrong one *before* a
+//! request is built, naming both sides. That is where per-model facts belong
+//! and it is already checked; duplicating a guess here would be the second
+//! answer to a question the catalogue answers.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -29,6 +64,29 @@ use super::{RequestRefused, RequestTarget, WireFormat};
 pub struct OpenAiResponses;
 
 impl WireFormat for OpenAiResponses {
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn supports_default_web_search(
+        &self,
+        _model: &str,
+        base: &url::Url,
+        _credential: &crate::provider::ResolvedCredential,
+        _strategy: &crate::provider::CredentialStrategy,
+    ) -> bool {
+        base.as_str() == crate::provider::OPENAI_BASE
+    }
+
+    fn prompt_cache_policy(&self, req: &GenRequest) -> ego_core::usage::PromptCachePolicy {
+        ego_core::usage::PromptCachePolicy {
+            ttl_seconds: cache_retention(req).and_then(|_| std::num::NonZeroU64::new(86_400)),
+            // The older-model guide states a maximum retention, not renewal on read.
+            refresh_on_read: false,
+            lock_ttl: false,
+        }
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -142,6 +200,11 @@ enum WireTool<'a> {
         name: &'a str,
         description: &'a str,
         parameters: &'a Value,
+        /// Always `false`. Omitting it makes the Responses endpoint normalise
+        /// the schema to strict mode, which moves every optional property
+        /// into `required`; the model then sends fields the tool forbids.
+        /// https://developers.openai.com/api/docs/guides/migrate-to-responses
+        strict: bool,
     },
 }
 
@@ -222,7 +285,7 @@ fn input_items(req: &GenRequest) -> Result<Vec<WireInput<'_>>, Inexpressible> {
                 // ego minted. It stays explicit rather than falling into a
                 // wildcard so that adding a block kind is a compile error
                 // here rather than a silently dropped field.
-                ContentBlock::ProviderContent { state } => {
+                ContentBlock::ProviderContent { state, .. } => {
                     if state.dialect != "openai-responses" {
                         return Err(Inexpressible::ProviderContentNotCarriable);
                     }
@@ -295,6 +358,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
             name: &tool.name,
             description: &tool.description,
             parameters: &tool.parameters,
+            strict: false,
         })
         .collect();
     if req.web_search.is_some() {
@@ -303,27 +367,7 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     let wire = WireRequest {
         max_tool_calls: req.web_search.map(|search| search.max_requests.get()),
         prompt_cache_key: super::cache::routing_key(req, "openai"),
-        prompt_cache_retention: req.cache.as_ref().and_then(|cache| {
-            // Current vendor guide: GPT-5.6+ uses a different TTL contract.
-            // Do not infer support from a model-name prefix.
-            const EXTENDED: &[&str] = &[
-                "gpt-5.5",
-                "gpt-5.5-pro",
-                "gpt-5.4",
-                "gpt-5.2",
-                "gpt-5.1-codex-max",
-                "gpt-5.1",
-                "gpt-5.1-codex",
-                "gpt-5.1-codex-mini",
-                "gpt-5.1-chat-latest",
-                "gpt-5",
-                "gpt-5-codex",
-                "gpt-4.1",
-            ];
-            (cache.retention == ego_core::generator::capabilities::CacheRetention::Long
-                && EXTENDED.contains(&req.model.as_str()))
-            .then_some("24h")
-        }),
+        prompt_cache_retention: cache_retention(req),
         model: &req.model,
         stream: true,
         store: false,
@@ -513,6 +557,10 @@ impl StreamDecoder {
 }
 
 impl super::StreamSink for StreamDecoder {
+    fn usage_incoherent(&self) -> bool {
+        self.usage_incoherent
+    }
+
     fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
         let mut out = Vec::new();
         for frame in self.sse.push(chunk) {
@@ -526,19 +574,7 @@ impl super::StreamSink for StreamDecoder {
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
         }
-        if self.usage_incoherent {
-            out.push(AiEvent::Error {
-                message:
-                    "OpenAI's cached input count exceeded its input total; usage was discarded"
-                        .to_string(),
-                kind: ErrorKind::Unclassified,
-            });
-        }
-        if self.finish_reason != Some(StopReason::Error) {
-            self.flush_calls(&mut out);
-        } else {
-            self.calls.clear();
-        }
+        self.flush_calls(&mut out);
         if let Some(usage) = self.usage.take() {
             out.push(AiEvent::Usage(usage));
         }
@@ -609,6 +645,7 @@ impl StreamDecoder {
                     }
                     out.push(AiEvent::ProviderContent {
                         state: ego_core::generator::types::ReasoningState {
+                            connection: None,
                             dialect: "openai-responses".into(),
                             blob: serde_json::to_string(item).expect("JSON value"),
                         },
@@ -638,6 +675,7 @@ impl StreamDecoder {
                     }
                     out.push(AiEvent::ProviderContent {
                         state: ego_core::generator::types::ReasoningState {
+                            connection: None,
                             dialect: "openai-responses".into(),
                             blob: serde_json::to_string(item).expect("JSON value"),
                         },
@@ -717,13 +755,13 @@ impl StreamDecoder {
                     "incomplete" => self.finish_reason = Some(StopReason::Length),
                     "failed" | "cancelled" => {
                         let error = event.response.and_then(|done| done.error);
-                        let kind = super::classify_stream_code(
+                        let class = super::classify_stream_code(
                             error.as_ref().and_then(|error| error.code.as_deref()),
                         );
                         let message = error
                             .and_then(|error| error.message)
                             .unwrap_or_else(|| format!("OpenAI reported response status {status}"));
-                        out.extend(super::streamed_failure(message, kind));
+                        out.extend(super::streamed_failure(message, class));
                         self.finish_reason = Some(StopReason::Error);
                     }
                     _ if !self.calls.is_empty() => self.finish_reason = Some(StopReason::ToolUse),
@@ -739,7 +777,7 @@ impl StreamDecoder {
                     .as_ref()
                     .and_then(|error| error.code.clone())
                     .or(event.code);
-                let kind = super::classify_stream_code(code.as_deref());
+                let class = super::classify_stream_code(code.as_deref());
                 let message = error
                     .and_then(|error| error.message)
                     .or(event.message)
@@ -747,7 +785,7 @@ impl StreamDecoder {
                         Some(code) => format!("OpenAI reported streamed Responses error {code}"),
                         None => "OpenAI reported a streamed Responses error".to_string(),
                     });
-                out.extend(super::streamed_failure(message, kind));
+                out.extend(super::streamed_failure(message, class));
                 self.finish_reason = Some(StopReason::Error);
             }
             _ => {}
@@ -755,23 +793,10 @@ impl StreamDecoder {
     }
 
     fn flush_calls(&mut self, out: &mut Vec<AiEvent>) {
-        for (index, (_, call)) in std::mem::take(&mut self.calls).into_iter().enumerate() {
-            let Some(id) = call.id.filter(|id| !id.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!(
-                        "OpenAI streamed a function_call at slot {index} with no call_id"
-                    ),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
-            let Some(name) = call.name.filter(|name| !name.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!("OpenAI streamed a function_call {id} with no name"),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
+        // Absent identities pass on empty; the shared stage decides.
+        for (_, call) in std::mem::take(&mut self.calls) {
+            let id = call.id.unwrap_or_default();
+            let name = call.name.unwrap_or_default();
             out.push(AiEvent::ToolCall {
                 call_id: id,
                 name,
@@ -779,4 +804,28 @@ impl StreamDecoder {
             });
         }
     }
+}
+
+fn cache_retention(req: &GenRequest) -> Option<&'static str> {
+    req.cache.as_ref().and_then(|cache| {
+        // Current vendor guide: GPT-5.6+ uses a different TTL contract.
+        // Do not infer support from a model-name prefix.
+        const EXTENDED: &[&str] = &[
+            "gpt-5.5",
+            "gpt-5.5-pro",
+            "gpt-5.4",
+            "gpt-5.2",
+            "gpt-5.1-codex-max",
+            "gpt-5.1",
+            "gpt-5.1-codex",
+            "gpt-5.1-codex-mini",
+            "gpt-5.1-chat-latest",
+            "gpt-5",
+            "gpt-5-codex",
+            "gpt-4.1",
+        ];
+        (cache.retention == ego_core::generator::capabilities::CacheRetention::Long
+            && EXTENDED.contains(&req.model.as_str()))
+        .then_some("24h")
+    })
 }

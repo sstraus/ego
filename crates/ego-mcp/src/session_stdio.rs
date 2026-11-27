@@ -535,7 +535,7 @@ mod tests {
     fn spec() -> SpawnSpec {
         SpawnSpec::new(
             vec!["/owned-server".into()],
-            Some(CanonPath::new("/")),
+            Some(CanonPath::new(std::env::temp_dir())),
             Some(Duration::from_secs(30)),
             EnvPolicy::Inherited,
         )
@@ -646,7 +646,7 @@ mod tests {
                     .client
                     .as_mut()
                     .expect("client")
-                    .call_tool_once(rmcp::model::CallToolRequestParams::new("ping")),
+                    .call_tool_once(rmcp::model::CallToolRequestParams::new("ping"), None),
             );
             tokio::select! {
                 outcome = &mut request => panic!("{mode}: request ended before peer observed it: {}", outcome.is_err()),

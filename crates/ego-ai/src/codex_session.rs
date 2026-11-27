@@ -1,9 +1,11 @@
-//! Session-scoped Codex WebSocket continuation.
+//! Codex continuation, pinned to Pi 4954d760504c11df9b2cbdc040346107b6a8153d,
+//! packages/ai/src/api/openai-codex-responses.ts:1426-1478.
 //! Retain only successful connection-local state; durable reasoning uses core history.
 use std::sync::Arc;
 
 use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::permit::{TransportError, TransportFailure};
+use ego_core::usage::CacheTransport;
 use futures::{StreamExt, lock::Mutex, stream};
 use serde_json::{Value, json};
 
@@ -14,6 +16,8 @@ pub(crate) struct Session {
     socket: Option<Box<dyn HttpWebSocket>>,
     continuation: Option<Continuation>,
     session_id: Option<ego_core::event::id::SessionId>,
+    /// Headers of the handshake that opened `socket`; the transport refuses any other.
+    handshake: Vec<ego_core::permit::HttpHeader>,
 }
 
 impl Session {
@@ -31,6 +35,12 @@ impl Session {
         }
         self.session_id = session_id;
     }
+}
+
+/// Where in-stream quota is published: the provider row and credential fingerprint.
+pub(crate) struct Quota {
+    pub(crate) provider: String,
+    pub(crate) credential: String,
 }
 
 struct Continuation {
@@ -131,9 +141,11 @@ fn fingerprint(request: &HttpRequest, body: &Value, transport: &str) {
 }
 
 fn invalid() -> HttpError {
-    HttpError::transport(TransportError::definitely_unsent(
-        TransportFailure::AuthorityMismatch,
-    ))
+    HttpError::transport(
+        TransportError::definitely_unsent(TransportFailure::AuthorityMismatch),
+        None,
+        None,
+    )
 }
 
 pub(crate) async fn execute(
@@ -142,12 +154,14 @@ pub(crate) async fn execute(
     profile: AdmittedHttpProfile,
     mut request: HttpRequest,
     session_id: Option<ego_core::event::id::SessionId>,
-) -> Result<HttpResponse, HttpError> {
+    quota: Quota,
+) -> Result<(HttpResponse, CacheTransport), HttpError> {
     let mut owner = session.lock_owned().await;
     owner.bind_session(session_id);
     let body: Value = serde_json::from_slice(request.body.as_deref().unwrap_or_default())
         .map_err(|_| invalid())?;
     fingerprint(&request, &body, "websocket_attempt");
+    let host = request.url.host_str().unwrap_or_default().to_owned();
     let fallback = HttpRequest {
         url: request.url.clone(),
         method: request.method,
@@ -161,12 +175,18 @@ pub(crate) async fn execute(
         "openai-beta",
         b"responses_websockets=2026-02-06".to_vec(),
     ));
+    // The routing headers follow the prefix cache key, which changes with the system
+    // text, model or tools. A socket opened with other headers cannot carry this request.
+    if owner.handshake != request.headers {
+        owner.socket = None;
+    }
     // Taking the connection makes cancellation/drop fail closed: no partial response can be reused.
     let socket_reused = owner.socket.is_some();
     let mut socket = match owner.socket.take() {
         Some(socket) => socket,
         None => {
             owner.continuation = None;
+            owner.handshake = request.headers.clone();
             let prepared = profile
                 .prepare(
                     request.url.clone(),
@@ -181,9 +201,12 @@ pub(crate) async fn execute(
                 {
                     fingerprint(&fallback, &body, "http");
                     drop(owner);
-                    return profile.execute(http.as_ref(), fallback).await;
+                    return profile
+                        .execute(http.as_ref(), fallback)
+                        .await
+                        .map(|response| (response, CacheTransport::HttpFull));
                 }
-                Err(error) => return Err(HttpError::transport(error)),
+                Err(error) => return Err(HttpError::transport(error, Some(&host), None)),
             }
         }
     };
@@ -237,24 +260,42 @@ pub(crate) async fn execute(
         )
         .map_err(|_| invalid())?;
     fingerprint(&request, &outgoing, "websocket");
-    socket.send(prepared).await.map_err(HttpError::transport)?;
-    let chunks = stream::unfold(Some((owner, socket, body)), |state| async move {
-        let (mut owner, mut socket, body) = state?;
+    socket
+        .send(prepared)
+        .await
+        .map_err(|error| HttpError::transport(error, Some(&host), None))?;
+    // The send succeeded with this exact rewritten body on the selected socket.
+    let transport = if outgoing.get("previous_response_id").is_some() {
+        CacheTransport::WebSocketContinuation
+    } else if socket_reused {
+        CacheTransport::WebSocketReusedFull
+    } else {
+        CacheTransport::WebSocketFresh
+    };
+    let q = (http, quota);
+    let chunks = stream::unfold(Some((owner, socket, body, host, q)), |state| async move {
+        let (mut owner, mut socket, body, host, q) = state?;
         match socket.receive().await {
             Ok(Some(bytes)) => {
                 let event: Value = match serde_json::from_slice(&bytes) {
                     Ok(value) => value,
                     Err(_) => {
                         return Some((
-                            Err(HttpError::transport(TransportError::possibly_sent(
-                                TransportFailure::ResponseBody(
+                            Err(HttpError::transport(
+                                TransportError::possibly_sent(TransportFailure::ResponseBody(
                                     "invalid Codex WebSocket JSON".into(),
-                                ),
-                            ))),
+                                )),
+                                Some(&host),
+                                None,
+                            )),
                             None,
                         ));
                     }
                 };
+                if event["type"] == "codex.rate_limits" {
+                    let (http, quota) = &q;
+                    http.observe_rate_limit_event(&quota.provider, &quota.credential, &event);
+                }
                 let mut sse = b"data: ".to_vec();
                 sse.extend_from_slice(&bytes);
                 sse.extend_from_slice(b"\n\n");
@@ -281,18 +322,24 @@ pub(crate) async fn execute(
                     }
                     Some((Ok(bytes::Bytes::from(sse)), None))
                 } else {
-                    Some((Ok(bytes::Bytes::from(sse)), Some((owner, socket, body))))
+                    Some((
+                        Ok(bytes::Bytes::from(sse)),
+                        Some((owner, socket, body, host, q)),
+                    ))
                 }
             }
             Ok(None) => None,
-            Err(error) => Some((Err(HttpError::transport(error)), None)),
+            Err(error) => Some((Err(HttpError::transport(error, Some(&host), None)), None)),
         }
     });
-    Ok(HttpResponse {
-        status: 200,
-        headers: vec![],
-        body: chunks.boxed(),
-    })
+    Ok((
+        HttpResponse {
+            status: 200,
+            headers: vec![],
+            body: chunks.boxed(),
+        },
+        transport,
+    ))
 }
 
 #[cfg(test)]
@@ -353,6 +400,7 @@ mod tests {
             session_id: Some(parent),
             continuation: Some(prior()),
             socket: None,
+            handshake: Vec::new(),
         };
         session.bind_session(Some(parent));
         assert!(session.continuation.is_some());

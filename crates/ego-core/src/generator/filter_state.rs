@@ -69,6 +69,7 @@ impl FilterVariables {
 #[derive(Debug)]
 pub struct FilterStateSnapshot {
     pub session_id: SessionId,
+    pub turn_index: u64,
     pub state: FilterVariables,
 }
 

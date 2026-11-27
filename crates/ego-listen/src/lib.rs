@@ -1,8 +1,12 @@
 //! The one inbound listener: bind, accept, and establish who connected.
 //!
-//! [`ego_core::endpoint`] defines endpoint kinds and authentication. This
-//! crate binds streams and establishes peer identity without owning a
-//! protocol. A2A and ACP consume the admitted streams instead of binding them.
+//! `docs/internals/decisions/2026-09-07-one-inbound-endpoint-serves-every-host-protocol.md`
+//! separates the endpoint from the protocol. [`ego_core::endpoint`] decides
+//! which endpoint kinds exist and which authentication each compels; this crate
+//! is the thin impure half that opens one and answers *who is on the other
+//! end*. It owns no protocol and cannot reach one: A2A serves `hyper` over the
+//! stream it yields and ACP serves `ByteStreams` over the same stream, and
+//! neither binds anything.
 //!
 //! **The local endpoint is authenticated by the operating system.** On Unix,
 //! the socket lives in a directory the current user alone may enter and every
@@ -242,19 +246,41 @@ async fn bind_local(path: &Path) -> io::Result<Bound> {
         Err(error) => return Err(error),
     }
     let owner = rustix::process::geteuid().as_raw();
-    let metadata = std::fs::symlink_metadata(parent)?;
-    if !metadata.is_dir() || metadata.uid() != owner || metadata.mode() & 0o777 != 0o700 {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "the local endpoint needs a directory owned by the current user with mode 0700; choose a private directory",
-        ));
-    }
     let name = path.file_name().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidInput,
             "the local endpoint needs a socket filename",
         )
     })?;
+    let is_private = |metadata: &std::fs::Metadata| {
+        metadata.is_dir() && metadata.uid() == owner && metadata.mode() & 0o777 == 0o700
+    };
+    // An ordinary parent is never chmod-ed: the socket lives in a private child
+    // directory instead, and `advertised` reports the path it really got.
+    let (parent, path) = if is_private(&std::fs::symlink_metadata(parent)?) {
+        (parent.to_path_buf(), path.to_path_buf())
+    } else {
+        let mut child_name = name.to_os_string();
+        child_name.push(".d");
+        let child = parent.join(child_name);
+        match std::fs::DirBuilder::new().mode(0o700).create(&child) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+        if !is_private(&std::fs::symlink_metadata(&child)?) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "the private socket directory {} exists but is not a directory owned by the current user with mode 0700; remove it or choose another path",
+                    child.display()
+                ),
+            ));
+        }
+        let path = child.join(name);
+        (child, path)
+    };
+    let (parent, path) = (parent.as_path(), path.as_path());
     let mut lock_name = name.to_os_string();
     lock_name.push(".lock");
     // Reuse the session store's kernel lease mechanism, without its session

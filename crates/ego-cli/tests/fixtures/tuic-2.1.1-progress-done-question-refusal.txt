@@ -1,0 +1,1 @@
+progress.question is only valid with type=blocked, but this call has type=done; an unchanged retry will fail again. To finish, resend with type=done and omit question. Use type=blocked with question={"kind":"yes_no"} only when you stop to wait for a yes/no answer; type=blocked without question accepts a free-text reply.

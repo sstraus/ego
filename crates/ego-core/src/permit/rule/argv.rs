@@ -1,8 +1,10 @@
 //! `exec(...)` patterns: a token vector, never a string.
 //!
-//! Tokenize patterns once at parse time so whitespace aliases have one
-//! rule ID. Match canonical argv token by token; never render a pattern
-//! back into a shell command, including for `ego rules ls`.
+//! `docs/internals/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §6. The
+//! pattern is tokenised once, at parse time, so that `git   *` and `git *`
+//! are one rule with one ID; matching then runs token by token against a
+//! canonical argv. A pattern is never re-rendered into a shell string, for
+//! any purpose — `ego rules ls` renders the token vector.
 //!
 //! **This half is only worth anything if the argv is the real argv.** The
 //! argv-native exec producer supplies that other half: it constructs one
@@ -12,7 +14,7 @@
 use std::ffi::OsString;
 use std::fmt;
 
-use super::glob::{Elem, Glob, GlobBuilder, matches_sequence};
+use super::glob::{Case, Elem, Glob, GlobBuilder, matches_sequence};
 use super::parse::RuleParseError;
 
 /// One token of a canonicalised `exec` pattern.
@@ -38,9 +40,24 @@ impl ArgvPattern {
         &self.tokens
     }
 
-    /// Tokenize exec patterns with whitespace, grouping quotes, and backslash escapes. Perform
-    /// no shell expansion or filesystem globbing. Escaped stars are literal; unescaped stars
-    /// remain wildcards under the grammar's quoting rules.
+    /// True when no token is a wildcard: the pattern names one argv and nothing else.
+    pub fn is_exact(&self) -> bool {
+        self.tokens
+            .iter()
+            .all(|token| matches!(token, ArgvToken::One(glob) if glob.as_literal().is_some()))
+    }
+
+    /// Tokenise the text between `exec(` and `)`.
+    ///
+    /// POSIX-ish, and only as much of it as §6 lists: runs of whitespace
+    /// separate tokens, `'…'` and `"…"` group, `\` escapes. Nothing expands —
+    /// there is no command substitution here, no parameter expansion and no
+    /// globbing against the filesystem, because a *pattern* that consulted
+    /// the world would mean something different on every machine.
+    ///
+    /// Quoting groups; it does not disarm a `*`. `\*` is the literal star and
+    /// `*` is the wildcard, one spelling each, so `'*'` is a literal star for
+    /// the same reason `'a'` is the letter `a`.
     pub fn parse(raw: &str) -> Result<Self, RuleParseError> {
         let mut tokens: Vec<ArgvToken> = Vec::new();
         let mut current = GlobBuilder::default();
@@ -140,7 +157,7 @@ impl ArgvPattern {
             })
             .collect();
         let target: Vec<&str> = argv.iter().map(String::as_str).collect();
-        matches_sequence(&elements, &target)
+        matches_sequence(&elements, &target, Case::Exact)
     }
 
     /// Match a host-native argv without repairing non-Unicode arguments.

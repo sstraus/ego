@@ -1,0 +1,30 @@
+{
+  "body": {
+    "include": [
+      "reasoning.encrypted_content"
+    ],
+    "input": [
+      {
+        "content": "Reply with the single word: ok",
+        "role": "user"
+      }
+    ],
+    "model": "gpt-5.6-sol",
+    "reasoning": {
+      "effort": "medium"
+    },
+    "store": false,
+    "stream": true
+  },
+  "header_names": [
+    "content-type",
+    "accept",
+    "authorization",
+    "chatgpt-account-id",
+    "openai-beta",
+    "originator",
+    "user-agent"
+  ],
+  "method": "Post",
+  "url": "https://chatgpt.com/backend-api/codex/responses"
+}

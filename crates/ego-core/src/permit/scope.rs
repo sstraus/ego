@@ -1,4 +1,6 @@
-//! Independent path, network, process and evidence scopes.
+//! `Scope`: what a minted [`Permit`](super::Permit) allows, expressed over
+//! canonical structure — paths, network endpoints and process specs — never over
+//! rendered shell strings (`ARCHITECTURE.md` §3.4 axis 2).
 
 use super::SessionProcessAction;
 use super::path::CanonPath;
@@ -11,10 +13,32 @@ use crate::event::id::DetachedExecId;
 use crate::store::evidence::EvidenceRead;
 
 /// The boundaries a [`Permit`](super::Permit) enforces.
-/// Path lists contain allowed prefixes; endpoints, processes and evidence
-/// require exact matches. Read, write, list and search remain independent.
-/// `pub(super)` permits inspection within `permit`, but private minting in
-/// `grant.rs` prevents external scope construction from producing authority.
+///
+/// Every path list is a set of allowed prefixes: a path is in scope if it is,
+/// or is a descendant of, one of them. An endpoint must exactly match one of
+/// `endpoints`; a process must exactly equal `spawn`; session evidence must
+/// exactly equal `evidence`.
+///
+/// The four path lists are scoped separately and do not imply one another. A
+/// permit that can write somewhere is not thereby allowed to read it back;
+/// and, less obviously but more importantly, a permit that may *list* a
+/// directory is not thereby allowed to read what it finds there. Knowing that
+/// `.env` exists and knowing what is in it are different authorities, and
+/// collapsing them would mean a glob that can exfiltrate a workspace
+/// (`docs/internals/decisions/2026-08-21-reading-without-reading-everything.md` §1).
+/// **The fields are `pub(super)`, not `pub`.** `Scope` is public because a
+/// `rules explain` and the audit event both have to render one, and it is
+/// readable through the accessors below. What no longer exists is the ability
+/// to *compose* one from outside `crate::permit`: a `Scope` literal is a
+/// statement about what some permit may do, and until this was closed any
+/// holder of a `&PolicyEngine` could write that statement itself and mint it
+/// (`docs/internals/decisions/2026-08-21-a-permit-nobody-can-widen.md` §2).
+///
+/// Rust has no per-file visibility, so `pub(super)` is the tightest bound
+/// available and it admits the whole `permit` module rather than `grant.rs`
+/// alone. That is weaker than the ADR's sentence and it does not matter:
+/// [`mint`](super::PolicyEngine) *is* private to `grant.rs`, and a `Scope`
+/// nobody can mint from is an inert list of paths.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Scope {
     pub(super) write_paths: Vec<CanonPath>,
@@ -27,6 +51,9 @@ pub struct Scope {
     pub(super) endpoints: Vec<String>,
     pub(super) network: Option<NetworkTarget>,
     pub(super) http_request_digest: Option<HttpRequestDigest>,
+    /// The owner named this exact endpoint, so web admission may dial a
+    /// loopback, LAN or CGNAT address it resolves to. Never set by a mode.
+    pub(super) owner_private_network: bool,
     pub(super) secret_egress: Option<SecretEgressAuthority>,
     pub(super) foreign_invocations: Vec<(ForeignToolId, InvocationDigest)>,
     pub(super) foreign_transport: Option<ForeignTransportTarget>,

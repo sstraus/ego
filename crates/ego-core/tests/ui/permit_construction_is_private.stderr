@@ -1,0 +1,13 @@
+error: cannot construct `ego_core::permit::Permit` with struct literal syntax due to private fields
+  --> tests/ui/permit_construction_is_private.rs:10:13
+   |
+10 |     let _ = Permit {
+   |             ^^^^^^
+11 |         scope: Scope::default(),
+   |         ----------------------- private field
+12 |         call_fingerprint: None,
+   |         ---------------------- private field
+13 |         _sealed: impossible(),
+   |         --------------------- private field
+   |
+   = note: ...and other private fields `read_perimeter` and `disclosed` that were not provided

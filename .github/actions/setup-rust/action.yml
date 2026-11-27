@@ -1,0 +1,45 @@
+# One place for what every Rust job needs, so a job is its own commands and a
+# change to the toolchain, cache or temporary-directory rule is made once.
+name: setup-rust
+description: Install the Rust toolchain, cache, just and an out-of-tree temporary directory.
+
+inputs:
+  toolchain:
+    description: Toolchain to install.
+    default: stable
+  components:
+    description: Extra toolchain components.
+    default: ''
+  cache-key:
+    description: Extra cache key, so unlike jobs on one platform do not share a cache.
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ inputs.toolchain }}
+        components: ${{ inputs.components }}
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        key: ${{ inputs.cache-key }}
+
+    - uses: extractions/setup-just@v2
+
+    # Keep test fixtures outside the repository. Confinement probes require a
+    # temporary root outside the grant, and fixtures must not inherit Git roots.
+    - name: Set a temporary directory outside the checkout
+      shell: bash
+      env:
+        EGO_RUNNER_TEMP: ${{ runner.temp }}
+      run: |
+        dir="$EGO_RUNNER_TEMP/ego-test"
+        mkdir -p "$dir"
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          dir=$(cygpath -w "$dir")
+          printf 'TMP=%s\nTEMP=%s\n' "$dir" "$dir" >> "$GITHUB_ENV"
+        else
+          printf 'TMPDIR=%s\n' "$dir" >> "$GITHUB_ENV"
+        fi

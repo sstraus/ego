@@ -2,8 +2,9 @@
 
 use super::*;
 
-/// Separate clap's flat options from resolved `Args`, whose mutually exclusive session choices
-/// are one field.
+/// The clap definition. Kept separate from [`Args`] so that the shape the
+/// rest of the binary reads is the shape §4.5 describes — a mutually
+/// exclusive group is one field — rather than clap's flat set of options.
 #[derive(Debug, Parser)]
 #[command(
     name = "ego",
@@ -13,10 +14,6 @@ use super::*;
 pub(super) struct RunCommand {
     /// The prompt. `-` reads it from stdin.
     pub(super) prompt: Option<String>,
-
-    /// Resume the latest saved session in this workspace without the terminal picker.
-    #[arg(long, conflicts_with_all = ["prompt", "file", "session", "session_id", "worktree"])]
-    pub(super) continua: bool,
 
     #[command(flatten)]
     pub(super) flags: Flags,
@@ -47,11 +44,27 @@ pub(super) struct ResumeCommand {
     )]
     pub(super) answers: Vec<ResumeAnswer>,
 
+    /// Accept the authority change shown for this resume, without a question. Applies to this resume only.
+    #[arg(long, conflicts_with_all = ["name", "goal_operation"])]
+    pub(super) accept_authority_delta: bool,
+
+    /// Resume the session of this workspace whose title is exactly TITLE.
+    #[arg(long, value_name = "TITLE", conflicts_with_all = ["name", "goal_operation"])]
+    pub(super) title: Option<String>,
+
+    /// Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout.
+    #[arg(long, conflicts_with = "answers")]
+    pub(super) queue: bool,
+
+    /// Fork this session and run the prompt in the fork. A busy source forks at the last successful turn.
+    #[arg(long = "fork", requires = "id", conflicts_with_all = ["queue", "answers", "title", "name", "goal_operation"])]
+    pub(super) fork_for_prompt: bool,
+
     /// Read or change the session title without starting a turn: show, set=TEXT, clear.
     #[arg(long, value_parser = parse_name_operation, requires = "id", conflicts_with_all = ["goal_operation", "prompt", "answers", "resume-run-options"])]
     pub(super) name: Option<NameOperation>,
 
-    /// Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON.
+    /// Read or change goal metadata without starting a turn: show, stop, set=TEXT, achieve, resume, block=REASON.
     #[arg(long, value_parser = parse_goal_operation, requires = "id", conflicts_with_all = ["name", "prompt", "answers", "resume-run-options"])]
     pub(super) goal_operation: Option<GoalOperation>,
 
@@ -92,6 +105,10 @@ pub(super) struct UsageCommand {
     )]
     pub(super) period: UsagePeriod,
 
+    /// Report only this stored session.
+    #[arg(long, value_name = "ID")]
+    pub(super) session: Option<String>,
+
     /// Emit the exact versioned usage-report object.
     #[arg(long)]
     pub(super) json: bool,
@@ -112,10 +129,31 @@ pub(super) struct UsageCommand {
     disable_help_subcommand = true
 )]
 pub(super) struct ForkCommand {
+    /// Stored session ID to fork.
     pub(super) source: String,
 
+    /// Fork after the completed turn containing this message.
     #[arg(long, value_name = "ITEM_ID")]
     pub(super) at: Option<String>,
+
+    #[command(flatten)]
+    pub(super) common: Common,
+}
+
+/// `ego rewind ID --at ITEM` — restore the files and fork the conversation.
+#[derive(Debug, Parser)]
+#[command(
+    name = "ego rewind",
+    about = "Restore the files a session changed after a completed turn, then fork the conversation there.",
+    disable_help_subcommand = true
+)]
+pub(super) struct RewindCommand {
+    /// Stored session ID to rewind.
+    pub(super) source: String,
+
+    /// A user or assistant message of the turn to return to.
+    #[arg(long, value_name = "ITEM_ID")]
+    pub(super) at: String,
 
     #[command(flatten)]
     pub(super) common: Common,
@@ -136,8 +174,10 @@ pub(super) struct CompactCommand {
     /// Maximum generated tokens per request.
     #[arg(long)]
     pub(super) max_output_tokens: Option<std::num::NonZeroU64>,
+    /// Stored session ID to compact.
     pub(super) source: String,
 
+    /// Reuse this request UUID for a deterministic retry.
     #[arg(long = "request-id")]
     pub(super) request_id: Option<String>,
 
@@ -188,6 +228,12 @@ pub(super) struct ExportCommand {
     disable_help_subcommand = true
 )]
 pub(super) struct ModelsCommand {
+    /// Internal identity override.
+    #[arg(long, hide = true, conflicts_with = "account")]
+    pub(super) connection: Option<String>,
+    /// Select an account by its stable number within the provider.
+    #[arg(long, value_name = "N")]
+    pub(super) account: Option<std::num::NonZeroU32>,
     /// Restrict enumeration and output to one admitted provider.
     #[arg(long)]
     pub(super) provider: Option<String>,
@@ -222,6 +268,12 @@ pub(super) struct DoctorCommand {
     /// Emit the exact versioned health snapshot.
     #[arg(long)]
     pub(super) json: bool,
+    /// Skip every provider network probe.
+    #[arg(long)]
+    pub(super) offline: bool,
+    /// Probe the network reachability of each configured provider, like `doctor_network = true`.
+    #[arg(long)]
+    pub(super) probe_network: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -250,6 +302,17 @@ pub(super) struct AcpCommand {
 
     #[command(flatten)]
     pub(super) shape: Shape,
+
+    /// Serve an unattended read-only session that no configuration layer or host request can widen: no tools, hooks, skills, commands or MCP servers, and an environment cleared to an allow-list.
+    #[arg(
+        long,
+        conflicts_with_all = ["tools", "no_tools", "allow", "deny", "profile"]
+    )]
+    pub(super) exclusive_read_only: bool,
+
+    /// Keep this environment variable under --exclusive-read-only. Repeatable.
+    #[arg(long, value_name = "NAME", action = ArgAction::Append, requires = "exclusive_read_only")]
+    pub(super) env_allow: Vec<String>,
 
     /// Serve on a socket path or address instead of stdio.
     #[arg(long)]
@@ -310,9 +373,17 @@ pub(super) struct Shape {
     #[arg(long, value_delimiter = ',')]
     pub(super) tools: Option<Vec<String>>,
 
-    /// Offer no tools at all.
+    /// Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools.
     #[arg(long, conflicts_with = "tools")]
     pub(super) no_tools: bool,
+
+    /// Run with every hook off for this invocation; configuration is unchanged.
+    #[arg(long)]
+    pub(super) no_hooks: bool,
+
+    /// Skip the skill safety review for this launch without changing permissions.
+    #[arg(long)]
+    pub(super) no_skill_safety_check: bool,
 
     /// Allow rule, e.g. 'read(src/**)'. Repeatable.
     #[arg(long, value_name = "RULE", action = ArgAction::Append)]
@@ -332,6 +403,8 @@ pub(super) struct Shape {
 /// Its own struct rather than a field, because the ceiling belongs to the
 /// process that serves runs and not to the protocol it happens to speak:
 /// `ego a2a` is the same question and flattens the same two lines.
+///
+/// `docs/internals/decisions/2026-09-07-a-host-picks-confinement-under-a-ceiling-it-cannot-raise.md`
 #[derive(Debug, ClapArgs)]
 pub(super) struct Ceiling {
     /// The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included.
@@ -348,12 +421,14 @@ pub(super) struct Ceiling {
 #[derive(Debug, Parser)]
 #[command(
     name = "ego a2a",
-    about = "Serve the Agent2Agent protocol on a local or loopback endpoint.",
+    about = "Serve Agent2Agent discovery information on a local or loopback endpoint.",
     disable_help_subcommand = true
 )]
 pub(super) struct A2aCommand {
-    #[command(flatten)]
-    pub(super) places: Places,
+    /// Run as if started in DIR. `ego a2a` keeps no sessions, so it takes no
+    /// `--session-dir`.
+    #[arg(short = 'C', value_name = "DIR")]
+    pub(super) directory: Option<PathBuf>,
 
     #[command(flatten)]
     pub(super) ceiling: Ceiling,
@@ -371,6 +446,11 @@ pub(super) struct A2aCommand {
     pub(super) allow_public_bind: bool,
 }
 
+/// Finite launch limits when the owner names none.
+const MCP_DEFAULT_CONCURRENT_RUNS: NonZeroUsize = NonZeroUsize::new(1).unwrap();
+const MCP_DEFAULT_RETAINED_REQUESTS: NonZeroUsize = NonZeroUsize::new(16).unwrap();
+const MCP_DEFAULT_RESOURCE_BYTES: NonZeroUsize = NonZeroUsize::new(65536).unwrap();
+
 /// `ego mcp-server` — the scoped run protocol, on stdio.
 #[derive(Debug, Parser)]
 #[command(
@@ -382,51 +462,119 @@ pub(super) struct McpServerCommand {
     #[command(flatten)]
     pub(super) places: Places,
 
-    #[arg(long)]
+    /// Runs that may execute at once.
+    #[arg(long, default_value_t = MCP_DEFAULT_CONCURRENT_RUNS)]
     pub(super) max_concurrent_runs: NonZeroUsize,
 
-    #[arg(long)]
+    /// Finished requests kept for status and resource reads.
+    #[arg(long, default_value_t = MCP_DEFAULT_RETAINED_REQUESTS)]
     pub(super) retained_requests: NonZeroUsize,
 
-    #[arg(long)]
+    /// Largest resource body returned to a client, in bytes.
+    #[arg(long, default_value_t = MCP_DEFAULT_RESOURCE_BYTES)]
     pub(super) max_resource_bytes: NonZeroUsize,
+
+    /// Also let clients run in DIR. The directory given with -C (or the current one) is always allowed.
+    #[arg(long, value_name = "DIR", action = ArgAction::Append)]
+    pub(super) allow_root: Vec<PathBuf>,
+
+    /// Also let clients select this model. The configured model is always allowed.
+    #[arg(
+        long,
+        value_name = "P/M",
+        action = ArgAction::Append,
+        value_parser = parse_model_ref
+    )]
+    pub(super) allow_model: Vec<ModelRef>,
+
+    /// Also let clients select this mode. The configured mode is always allowed.
+    #[arg(long, value_parser = parse_mode, action = ArgAction::Append)]
+    pub(super) allow_mode: Vec<Mode>,
 }
 
 /// Arguments shared by the three auth operations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthArgs {
+    pub connection: Option<String>,
+    pub account: Option<std::num::NonZeroU32>,
+    pub renew: bool,
     pub action: AuthAction,
     pub provider: Option<String>,
     pub device: bool,
+    pub method: Option<AuthLoginMethod>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AuthLoginMethod {
+    ApiKey,
+    Oauth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthAction {
+    Usage { json: bool },
     Login,
     Logout,
+    Remove,
     Status,
+    StatusJson,
 }
 
 #[derive(Debug, Parser)]
-#[command(name = "ego auth", about = "Manage subscription credentials.")]
+#[command(name = "ego auth", about = "Manage provider credentials.")]
 pub(super) struct AuthCommand {
+    /// Internal identity override for maintenance.
+    #[arg(long, global = true, hide = true, conflicts_with = "account")]
+    pub(super) connection: Option<String>,
+    /// Select an account by its stable number within the provider.
+    #[arg(long, global = true, value_name = "N")]
+    pub(super) account: Option<std::num::NonZeroU32>,
     #[command(subcommand)]
     pub(super) action: AuthSubcommand,
 }
 
 #[derive(Debug, Subcommand)]
 pub(super) enum AuthSubcommand {
+    /// Read subscription quota without generating a model response.
+    Usage {
+        /// Limit the read to one stored provider.
+        provider: Option<String>,
+        /// Print quota and provider issues as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Authenticate and store a provider credential.
     Login {
+        /// Provider to authenticate.
         provider: Option<String>,
-        /// Prefer device-code login when the provider offers it.
+        /// Renew a saved account instead of creating a new account.
+        #[arg(long)]
+        renew: bool,
+        /// Prefer device-code OAuth login when the provider offers it.
         #[arg(long)]
         device: bool,
+        /// Choose API-key registration or OAuth for a provider offering both.
+        #[arg(long, value_enum)]
+        method: Option<AuthLoginMethod>,
     },
     /// Remove a stored provider credential.
-    Logout { provider: Option<String> },
+    Logout {
+        /// Provider whose credential to remove.
+        provider: Option<String>,
+    },
+    /// Delete a saved account and its local credential without reusing its number.
+    Remove {
+        /// Provider whose saved account to delete.
+        provider: String,
+    },
     /// Show credential type and expiry, never token values.
-    Status { provider: Option<String> },
+    Status {
+        /// Provider whose credential status to show.
+        provider: Option<String>,
+        /// Print versioned local credential presence without secret metadata.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Debug, Parser)]
@@ -467,51 +615,70 @@ pub(super) enum RulesSubcommand {
     /// List the effective system and selected user rules.
     #[command(name = "ls")]
     List {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Emit JSON output.
         #[arg(long)]
         json: bool,
     },
     /// Persist one allow predicate.
     Allow {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Permission rule to store.
         rule: String,
     },
     /// Persist one deny predicate.
     Deny {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Permission rule to store.
         rule: String,
     },
     /// Remove one predicate ID from both selected user lists.
     Revoke {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Identifier of the rule to revoke.
         id: String,
     },
     /// Derive persistent rules from one prepared builtin call.
     Remember {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Resolve the call in this workspace.
         #[arg(short = 'C', value_name = "DIR")]
         directory: Option<PathBuf>,
+        /// Confirm the proposed rules without a prompt.
         #[arg(long)]
         yes: bool,
+        /// Rule effect to remember.
         effect: String,
+        /// Builtin tool name.
         tool: String,
+        /// Tool arguments as a JSON object.
         #[arg(value_name = "ARGS_JSON")]
         arguments: String,
     },
     /// Explain one prepared builtin call without running it.
     Explain {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Resolve the call in this workspace.
         #[arg(short = 'C', value_name = "DIR")]
         directory: Option<PathBuf>,
+        /// Emit JSON output.
         #[arg(long)]
         json: bool,
+        /// Builtin tool name.
         tool: String,
+        /// Tool arguments as a JSON object.
         #[arg(value_name = "ARGS_JSON")]
         arguments: String,
     },
@@ -523,47 +690,61 @@ pub(super) enum ConfigSubcommand {
     Capabilities,
     /// Read stored values and their opaque owner revision as JSON.
     Snapshot {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
     },
     /// Atomically publish a bounded set of typed managed edits.
     Batch {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Set a key to a TOML value.
         #[arg(long = "set", value_name = "KEY=TOML_VALUE")]
         sets: Vec<String>,
+        /// Apply only if the owner revision matches.
         #[arg(long, value_name = "REVISION")]
         if_revision: Option<String>,
+        /// Remove a stored key.
         #[arg(long = "unset", value_name = "KEY")]
         unsets: Vec<String>,
     },
 
     /// Read one exact stored value.
     Get {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Emit JSON output.
         #[arg(long)]
         json: bool,
+        /// Managed configuration key.
         key: String,
     },
     /// Store one strictly typed TOML value.
     Set {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Managed key and its TOML value.
         #[arg(value_name = "KEY=TOML_VALUE")]
         assignment: String,
     },
     /// Remove one exact stored value.
     Unset {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Managed configuration key.
         key: String,
     },
     /// List the exact stored managed projection.
     #[command(name = "ls")]
     List {
+        /// Select the named user profile.
         #[arg(long, value_name = "NAME")]
         profile: Option<String>,
+        /// Emit JSON output.
         #[arg(long)]
         json: bool,
         /// Show the effective run perimeter instead of stored values.
@@ -580,16 +761,28 @@ pub(super) enum McpSubcommand {
     Add(McpAddCommand),
     /// Remove, mask, or reveal one configured server entry.
     #[command(name = "rm")]
-    Remove { name: String },
+    Remove {
+        /// Name of the configured server.
+        name: String,
+    },
     /// List configured and admitted MCP state.
     #[command(name = "ls")]
     List {
         /// Emit the typed machine-readable projection.
         #[arg(long)]
         json: bool,
+        /// Also list this invocation's `--mcp` selection (NAME or @FILE); it is not probed.
+        #[arg(
+            long,
+            value_name = "NAME|@FILE",
+            action = ArgAction::Append,
+            value_parser = parse_mcp_selector
+        )]
+        mcp: Vec<McpSelector>,
     },
     /// Authorize a public OAuth client with an explicit registration strategy.
     Login {
+        /// Name of the configured server.
         name: String,
         /// Operator-issued public client ID.
         #[arg(long, conflicts_with_all = ["cimd", "dcr"])]
@@ -606,20 +799,26 @@ pub(super) enum McpSubcommand {
         /// Refresh an existing issuer/resource/account-bound credential without interaction.
         #[arg(long, requires = "issuer")]
         refresh: bool,
+        /// Issuer bound to the credential to refresh.
         #[arg(long, requires = "refresh")]
         issuer: Option<String>,
+        /// Account bound to the credential to refresh.
         #[arg(long, requires = "refresh")]
         account: Option<String>,
     },
     /// Reconcile every configured server, or one named server.
-    Reload { name: Option<String> },
+    Reload {
+        /// Server to reconcile; omit to reconcile all servers.
+        name: Option<String>,
+    },
 }
 
 #[derive(Debug, ClapArgs)]
 #[command(
-    override_usage = "ego mcp add <NAME> --stdio [--cwd <DIR>] [--inherit-env <NAME>]... -- <COMMAND> [ARG]...\n       ego mcp add <NAME> --http <URL> [--auth <none|oauth>] [--allow-insecure-loopback]"
+    override_usage = "ego mcp add <NAME> --stdio [--cwd <DIR>] [--inherit-env <NAME>]... -- <COMMAND> [ARG]...\n       ego mcp add <NAME> --http <URL> [--profile <current|legacy-sse>] [--auth <none|oauth>] [--allow-insecure-loopback] [--oauth-host <URL>]..."
 )]
 pub(super) struct McpAddCommand {
+    /// Name of the server to configure.
     pub(super) name: String,
 
     /// Configure a subprocess transport. Its command follows literal `--`.
@@ -662,9 +861,20 @@ pub(super) struct McpAddCommand {
     )]
     pub(super) auth: Option<String>,
 
-    /// Consent to plaintext HTTP for an exact loopback host.
+    /// Consent to plaintext HTTP for this server on loopback or the owner network.
     #[arg(long, requires = "http", conflicts_with = "stdio")]
     pub(super) allow_insecure_loopback: bool,
+
+    /// Extra OAuth origin that may host this server's authorization, token or
+    /// registration endpoint when it differs from the issuer's. Repeatable.
+    #[arg(
+        long,
+        value_name = "URL",
+        action = ArgAction::Append,
+        requires = "http",
+        conflicts_with = "stdio"
+    )]
+    pub(super) oauth_host: Vec<String>,
 }
 
 /// The three flags every subcommand takes, declared once.
@@ -706,6 +916,10 @@ pub(super) struct Places {
 
 #[derive(Debug, ClapArgs)]
 pub(super) struct Flags {
+    /// Read UTF-8 JSON lines {"prompt":"..."} from stdin; run each turn in the same headless session.
+    #[arg(long, value_parser = ["jsonl"], conflicts_with_all = ["prompt", "file"])]
+    pub(super) input_format: Option<String>,
+
     /// Create a retained managed worktree on this explicitly approved new branch.
     #[arg(long, value_name = "BRANCH", conflicts_with_all = ["session", "session_id"])]
     pub(super) worktree: Option<String>,
@@ -734,6 +948,13 @@ pub(super) struct Flags {
     #[arg(short = 'm', long)]
     pub(super) model: Option<String>,
 
+    /// Internal identity override.
+    #[arg(long, hide = true, conflicts_with = "account")]
+    pub(super) connection: Option<String>,
+    /// Select an account by its stable number within the provider.
+    #[arg(long, value_name = "N")]
+    pub(super) account: Option<std::num::NonZeroU32>,
+
     /// No non-loopback egress from ego's own HTTP transport.
     #[arg(long)]
     pub(super) offline: bool,
@@ -760,6 +981,10 @@ pub(super) struct Flags {
     /// Trust this launch's workspace without asking; remember the answer.
     #[arg(long, conflicts_with = "bare")]
     pub(super) trust_workspace: bool,
+
+    /// Trust this workspace and future edits to its current named programs; remember the grant.
+    #[arg(long, conflicts_with_all = ["bare", "trust_workspace"])]
+    pub(super) trust_development_programs: bool,
 
     /// Named session: created or attached.
     #[arg(long, group = "session-choice")]
@@ -824,9 +1049,9 @@ pub(super) struct Flags {
     #[arg(long, default_value = "10", value_parser = clap::value_parser!(u32).range(1..))]
     pub(super) context_interval: u32,
 
-    /// Maximum automatic goal continuation turns.
-    #[arg(long, default_value_t = ego_core::goal::DEFAULT_CONTINUATION_BUDGET)]
-    pub(super) goal_turns: u32,
+    /// Optional maximum automatic goal continuation turns.
+    #[arg(long)]
+    pub(super) goal_turns: Option<u32>,
 
     /// Evaluator argv as a JSON string array; reads evidence JSON on stdin.
     #[arg(long, value_parser = parse_goal_check_command)]
@@ -848,6 +1073,19 @@ pub(super) struct Flags {
         value_parser = parse_mcp_selector
     )]
     pub(super) mcp: Vec<McpSelector>,
+
+    /// Attach only the servers that --mcp selects; enabled configured servers stay detached.
+    #[arg(long)]
+    pub(super) mcp_only: bool,
+
+    /// Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root.
+    #[arg(
+        long,
+        value_name = "PATH[:ro|rw]",
+        action = ArgAction::Append,
+        value_parser = parse_allow_dir
+    )]
+    pub(super) allow_dir: Vec<AllowDir>,
 
     /// Permission mode: plan|default|auto|accept-edits|yolo (alias: edits).
     #[arg(long, value_parser = parse_mode, group = "mode-choice")]
@@ -880,6 +1118,18 @@ pub(super) struct Flags {
     /// Use Vim normal/insert editing in the interactive composer.
     #[arg(long)]
     pub(super) vim: bool,
+
+    /// Keep a memory file for this workspace that the model can add to.
+    #[arg(long)]
+    pub(super) memory: bool,
+
+    /// Do not compress old sessions in the background during this run.
+    #[arg(long)]
+    pub(super) no_session_compression: bool,
+
+    /// Do not save file checkpoints before writes during this run.
+    #[arg(long)]
+    pub(super) no_checkpoints: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -892,22 +1142,29 @@ pub(super) struct RootsCommand {
 pub(super) enum RootsSubcommand {
     /// Add or update one user perimeter root.
     Add {
+        /// Select the named user profile.
         #[arg(long)]
         profile: Option<String>,
+        /// Access granted to this root.
         #[arg(long, default_value = "read", value_enum)]
         access: RootAccessValue,
+        /// Path of the perimeter root.
         path: PathBuf,
     },
     /// Remove a root by its stored spelling.
     Rm {
+        /// Select the named user profile.
         #[arg(long)]
         profile: Option<String>,
+        /// Path of the perimeter root.
         path: PathBuf,
     },
     /// List roots stored in the selected user target.
     Ls {
+        /// Select the named user profile.
         #[arg(long)]
         profile: Option<String>,
+        /// Emit JSON output.
         #[arg(long)]
         json: bool,
     },
@@ -933,7 +1190,7 @@ impl clap::ValueEnum for RootAccessValue {
 #[derive(Debug, Parser)]
 #[command(
     name = "ego setup",
-    about = "Configure saved user settings in an interactive terminal.",
+    about = "Review provider readiness and configure saved user settings in an interactive terminal.",
     disable_help_subcommand = true
 )]
 pub(super) struct SetupCommand {
@@ -966,7 +1223,18 @@ fn parse_goal_check_command(value: &str) -> Result<GoalCheckCommand, String> {
 )]
 pub(super) struct RmCommand {
     /// Stored session ID to delete; history needed by descendants is retained.
-    pub(super) source: String,
+    #[arg(
+        required_unless_present_any = ["incompatible", "expired"],
+        conflicts_with_all = ["incompatible", "expired"]
+    )]
+    pub(super) source: Option<String>,
+    /// Permanently remove sessions with an unsupported stored format. Requires --yes.
+    #[arg(long, requires = "yes", conflicts_with_all = ["force", "expired"])]
+    pub(super) incompatible: bool,
+    /// Permanently remove sessions not opened within `sessions.retention_days`
+    /// (30 by default). Open and held sessions stay. Requires --yes.
+    #[arg(long, requires = "yes", conflicts_with = "force")]
+    pub(super) expired: bool,
     /// Supply deletion confirmation without prompting; required without terminal stdin.
     #[arg(long)]
     pub(super) yes: bool,

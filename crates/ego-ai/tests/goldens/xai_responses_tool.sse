@@ -1,0 +1,9 @@
+: schema-derived from the current xAI Responses frames in tests/xai_responses.rs
+: offline malformed-name contract; not a live server recording
+data: {"type":"response.output_item.added","item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"read","arguments":""}}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{}"}
+
+data: {"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":4,"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0},"cost_in_usd_ticks":0}}}
+
+: fixture end

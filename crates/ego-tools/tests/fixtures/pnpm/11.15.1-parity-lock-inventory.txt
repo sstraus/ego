@@ -1,0 +1,27 @@
+ROOT /private/tmp/pnpm-store-operation-locks-501 exists=True
+/private/tmp/pnpm-store-operation-locks-501/0da8ba6312ab5a671a4d328dd6fe8519a7743547428fe37e40f49cef660a97de.lock: mode=0o600 uid=501 size=0 mtime_ns=1792646624861295867
+/private/tmp/pnpm-store-operation-locks-501/2d74f1b1f3078e60176eea879f361b4b43dcfddff6d508ec10a4176c640352b3.lock: mode=0o600 uid=501 size=0 mtime_ns=1792930433013574790
+/private/tmp/pnpm-store-operation-locks-501/49000baee278ac036490352c5d2cd1672b5dd0ec661c5015b113811f4ef70a6f.lock: mode=0o600 uid=501 size=0 mtime_ns=1792930271830630059
+/private/tmp/pnpm-store-operation-locks-501/5928f21c0460f6fb2e86ab4caf720ea66809ab7f6a22e37ce864e21cadf8897d.lock: mode=0o600 uid=501 size=0 mtime_ns=1792793242837237445
+/private/tmp/pnpm-store-operation-locks-501/all-stores.lock: mode=0o600 uid=501 size=0 mtime_ns=1792793242837079695
+/private/tmp/pnpm-store-operation-locks-501/da9561343865f12f53b16baa49423dfea5b511363081b93d47d0c7b765d07af5.lock: mode=0o600 uid=501 size=0 mtime_ns=1792929548587242151
+ROOT /Users/stefano.straus/Library/pnpm/package-manager-store/v11/tmp/engine-locks exists=True
+sha256(/Users/stefano.straus/Library/pnpm/package-manager-store/v11)=5928f21c0460f6fb2e86ab4caf720ea66809ab7f6a22e37ce864e21cadf8897d; file_exists=True
+sha256(/Users/stefano.straus/Library/pnpm/package-manager-store)=5f2957f733bbe3e247dea4dd954bb8108197146fc8351ad8c712075c1689607c; file_exists=False
+sha256(/Users/stefano.straus/Library/pnpm/store/v11)=0da8ba6312ab5a671a4d328dd6fe8519a7743547428fe37e40f49cef660a97de; file_exists=True
+sha256(/Users/stefano.straus/Library/pnpm/store)=749615665e52f9d4cbf6ed65c37047238558410788a1d6feb5931233d95605a0; file_exists=False
+sha256(/Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.621-unsandboxed-rpcq7am7/pnpm/package-manager-store/v11)=49000baee278ac036490352c5d2cd1672b5dd0ec661c5015b113811f4ef70a6f; file_exists=True
+sha256(/Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.621-unsandboxed-rpcq7am7/pnpm/package-manager-store)=36cdf62fe3e0cdc8dde767ea5f8d9454377da686f589fab888221f19ad6bab8d; file_exists=False
+lsof exact shared operation-lock files: exit=1
+
+AFTER ROOT /private/tmp/pnpm-store-operation-locks-501 exists=True
+/private/tmp/pnpm-store-operation-locks-501/0da8ba6312ab5a671a4d328dd6fe8519a7743547428fe37e40f49cef660a97de.lock: mode=0o600 uid=501 size=0
+/private/tmp/pnpm-store-operation-locks-501/2d74f1b1f3078e60176eea879f361b4b43dcfddff6d508ec10a4176c640352b3.lock: mode=0o600 uid=501 size=0
+/private/tmp/pnpm-store-operation-locks-501/49000baee278ac036490352c5d2cd1672b5dd0ec661c5015b113811f4ef70a6f.lock: mode=0o600 uid=501 size=0
+/private/tmp/pnpm-store-operation-locks-501/5928f21c0460f6fb2e86ab4caf720ea66809ab7f6a22e37ce864e21cadf8897d.lock: mode=0o600 uid=501 size=0
+/private/tmp/pnpm-store-operation-locks-501/6b986202aa89f76225d66d529111e5104e1a1c97ea8bd0e550ed27bbd3c46a69.lock: mode=0o600 uid=501 size=0
+/private/tmp/pnpm-store-operation-locks-501/all-stores.lock: mode=0o600 uid=501 size=0
+/private/tmp/pnpm-store-operation-locks-501/da9561343865f12f53b16baa49423dfea5b511363081b93d47d0c7b765d07af5.lock: mode=0o600 uid=501 size=0
+AFTER ROOT /Users/stefano.straus/Library/pnpm/package-manager-store/v11/tmp/engine-locks exists=True
+AFTER lsof exact lock files: exit=1
+

@@ -1,0 +1,17 @@
+{
+  "version": "11.15.1",
+  "store": "/Users/stefano.straus/Library/pnpm/store/v11",
+  "global": "/Users/stefano.straus/Library/pnpm/global/v11",
+  "bin": "/Users/stefano.straus/Library/pnpm/bin",
+  "package_manager_store_config": "undefined",
+  "captured_at": "2026-10-25",
+  "engine_store_entries": [
+    "files",
+    "index.db",
+    "index.db-shm",
+    "index.db-wal",
+    "links",
+    "projects",
+    "tmp"
+  ]
+}

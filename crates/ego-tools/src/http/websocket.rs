@@ -34,6 +34,7 @@ pub(super) fn open(
     request: HttpRequest,
     deadline: Instant,
 ) -> BoxFuture<'static, Result<Box<dyn WebSocketSession>, TransportError>> {
+    let idle_limit = transport.idle_limit();
     let cancel = transport.cancel.clone();
     let run_deadline = transport.run_deadline;
     let offline = transport.confinement.offline();
@@ -97,6 +98,7 @@ pub(super) fn open(
         let (sender, mut receiver) = mpsc::channel(1);
         let lifetime_cancel = cancel.clone();
         let owner = AbortOnDrop(runtime_handle().spawn(async move {
+            let mut idle_deadline = tokio::time::Instant::now() + idle_limit;
             let commands = async {
                 while let Some(command) = receiver.recv().await {
                     match command {
@@ -117,7 +119,12 @@ pub(super) fn open(
                             let result = tokio::select! {
                                 result = async {
                                     loop {
-                                        match socket.next().await {
+                                        let next = tokio::time::timeout_at(idle_deadline, socket.next()).await
+                                            .map_err(|_| possibly_sent(TransportFailure::IdleTimeout))?;
+                                        if matches!(next, Some(Ok(_))) {
+                                            idle_deadline = tokio::time::Instant::now() + idle_limit;
+                                        }
+                                        match next {
                                             Some(Ok(Message::Text(text))) => return Ok(Some(text.as_bytes().to_vec())),
                                             Some(Ok(Message::Close(_))) | None => return Ok(None),
                                             Some(Ok(Message::Ping(_) | Message::Pong(_))) => continue,

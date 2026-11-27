@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use ego_core::event::id::SessionId;
-use ego_core::permit::{CanonPath, Fs, FsError, PathResolver, Scan, ScanRequest};
+use ego_core::permit::{CanonPath, Fs, FsError, FsWriteAttempt, PathResolver, Scan, ScanRequest};
 use serde::{Deserialize, Serialize};
 
 use crate::fs::{OsFs, PreparedReplacement, sync_directory};
@@ -13,6 +13,9 @@ use crate::fs::{OsFs, PreparedReplacement, sync_directory};
 #[derive(Debug)]
 pub struct CheckpointFs {
     session: SessionId,
+    enabled: bool,
+    /// The checkpoint the last write of each path created, for its result.
+    last: std::sync::Mutex<std::collections::HashMap<PathBuf, String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -56,6 +59,14 @@ pub struct Preview {
     pub effect: &'static str,
     pub conflict: bool,
     pub already_original: bool,
+}
+
+/// One checkpoint in the session's chain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub checkpoint: String,
+    pub path: PathBuf,
+    pub restoration: bool,
 }
 
 struct Repository {
@@ -369,7 +380,19 @@ impl Repository {
 
 impl CheckpointFs {
     pub fn new(session: SessionId) -> Self {
-        Self { session }
+        Self {
+            session,
+            enabled: true,
+            last: std::sync::Mutex::default(),
+        }
+    }
+
+    /// Whether writes save a checkpoint first. Off, a write is a plain atomic write: no
+    /// Git object and no ref is created in the user's repository.
+    #[must_use]
+    pub fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
     }
 
     pub fn preview(directory: &Path, session: SessionId) -> io::Result<Vec<Preview>> {
@@ -385,6 +408,62 @@ impl CheckpointFs {
                 Err(e) => Some(Err(e)),
             })
             .collect()
+    }
+
+    /// Every checkpoint of the session, newest first, with its path and
+    /// whether it records a restore rather than a builtin write.
+    pub fn history(directory: &Path, session: SessionId) -> io::Result<Vec<HistoryEntry>> {
+        let Some(repo) = Repository::discover(directory, session)? else {
+            return Ok(Vec::new());
+        };
+        let mut lock = repo.lock()?;
+        let _guard = lock.write()?;
+        repo.ids()?
+            .into_iter()
+            .map(|id| {
+                let record = repo.record(&id)?;
+                Ok(HistoryEntry {
+                    checkpoint: id,
+                    path: record.path,
+                    restoration: record.restoration,
+                })
+            })
+            .collect()
+    }
+
+    /// The Git blob ids of a checkpoint's pre-image and post-image, so a
+    /// caller can compare successive writes of one file without its bytes.
+    pub fn images(
+        directory: &Path,
+        session: SessionId,
+        checkpoint: &str,
+    ) -> io::Result<(String, String)> {
+        let repo = Repository::discover(directory, session)?
+            .ok_or_else(|| error("no checkpoints outside Git"))?;
+        if !repo.ids()?.iter().any(|id| id == checkpoint) {
+            return Err(error("checkpoint does not belong to this session"));
+        }
+        let blob = |name: &str| {
+            text(git(
+                &repo.root,
+                &["rev-parse", &format!("{checkpoint}:{name}")],
+                &[],
+            )?)
+        };
+        Ok((blob("before")?, blob("after")?))
+    }
+
+    /// The preview of one checkpoint of the session.
+    pub fn preview_one(
+        directory: &Path,
+        session: SessionId,
+        checkpoint: &str,
+    ) -> io::Result<Preview> {
+        let repo = Repository::discover(directory, session)?
+            .ok_or_else(|| error("no checkpoints outside Git"))?;
+        let mut lock = repo.lock()?;
+        let _guard = lock.write()?;
+        repo.preview(checkpoint)
     }
 
     /// Restore exactly one selected file. Resolve conflicts outside this API, then preview again.
@@ -431,7 +510,58 @@ impl PathResolver for CheckpointFs {
     }
 }
 
+impl CheckpointFs {
+    fn publish_attempt(&self, path: &CanonPath, bytes: &[u8], create_only: bool) -> FsWriteAttempt {
+        if !self.enabled {
+            return FsWriteAttempt {
+                result: if create_only {
+                    OsFs.create_attempt(path, bytes).result
+                } else {
+                    OsFs.write(path, bytes)
+                },
+                checkpoint: None,
+            };
+        }
+        let mut checkpoint = None;
+        let result = (|| -> io::Result<()> {
+            let parent = path
+                .as_path()
+                .parent()
+                .ok_or_else(|| error("missing write parent"))?;
+            if let Some(repo) = Repository::discover(parent, self.session)? {
+                let mut lock = repo.lock()?;
+                let _guard = lock.write()?;
+                let replacement = PreparedReplacement::new(path.as_path(), bytes)?;
+                checkpoint = Some(repo.capture(path.as_path(), bytes, &replacement, false)?);
+                if create_only {
+                    replacement.commit_new()?;
+                } else {
+                    replacement.commit()?;
+                }
+            } else if create_only {
+                OsFs.create_attempt(path, bytes).result.map_err(error)?;
+            } else {
+                OsFs.write(path, bytes).map_err(error)?;
+            }
+            Ok(())
+        })()
+        .map_err(|e| FsError::Io {
+            path: path.clone(),
+            message: e.to_string(),
+        });
+        FsWriteAttempt { result, checkpoint }
+    }
+}
+
 impl Fs for CheckpointFs {
+    fn create_attempt(&self, path: &CanonPath, bytes: &[u8]) -> FsWriteAttempt {
+        self.publish_attempt(path, bytes, true)
+    }
+
+    fn write_attempt(&self, path: &CanonPath, bytes: &[u8]) -> FsWriteAttempt {
+        self.publish_attempt(path, bytes, false)
+    }
+
     fn read(&self, path: &CanonPath) -> Result<Vec<u8>, FsError> {
         OsFs.read(path)
     }
@@ -442,28 +572,29 @@ impl Fs for CheckpointFs {
         OsFs.scan(request)
     }
     fn write(&self, path: &CanonPath, bytes: &[u8]) -> Result<(), FsError> {
-        let write = || -> io::Result<()> {
-            let parent = path
-                .as_path()
-                .parent()
-                .ok_or_else(|| error("missing write parent"))?;
-            if let Some(repo) = Repository::discover(parent, self.session)? {
-                let mut lock = repo.lock()?;
-                let _guard = lock.write()?;
-                let replacement = PreparedReplacement::new(path.as_path(), bytes)?;
-                repo.capture(path.as_path(), bytes, &replacement, false)?;
-                replacement.commit()?;
-            } else {
-                OsFs.write(path, bytes).map_err(error)?;
-            }
-            Ok(())
-        };
-        write().map_err(|e| FsError::Io {
-            path: path.clone(),
-            message: e.to_string(),
-        })
+        let attempt = self.write_attempt(path, bytes);
+        if attempt.result.is_ok()
+            && let Some(checkpoint) = attempt.checkpoint
+        {
+            self.last
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(path.as_path().to_path_buf(), checkpoint);
+        }
+        attempt.result
     }
+    fn last_checkpoint(&self, path: &CanonPath) -> Option<String> {
+        self.last
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(path.as_path())
+            .cloned()
+    }
+
     fn write_notice(&self, path: &CanonPath) -> Option<String> {
+        if !self.enabled {
+            return Some("No checkpoint: checkpoints are off.".into());
+        }
         match Repository::discover(path.as_path().parent()?, self.session) {
             Ok(Some(_)) => Some(format!("Git checkpoint saved for session {}", self.session)),
             _ => Some("No checkpoint: this file is outside Git.".into()),
@@ -474,6 +605,95 @@ impl Fs for CheckpointFs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_only_checkpoint_restores_creation_and_preserves_replacement_writes() {
+        // Catches: bypassing checkpoints for generated files, or making ordinary
+        // writes create-only while adding the new publication mode.
+        let directory = tempfile::tempdir().unwrap();
+        git(directory.path(), &["init", "--quiet"], &[]).unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let session = SessionId::new();
+        let adapter = CheckpointFs::new(session);
+        let target = root.join("generated.png");
+        let path = CanonPath::new(target.clone());
+        let created = adapter.create_attempt(&path, b"generated bytes");
+        created.result.unwrap();
+        let checkpoint = created.checkpoint.expect("creation needs a checkpoint");
+        assert_eq!(fs::read(&target).unwrap(), b"generated bytes");
+        CheckpointFs::restore(&root, session, &checkpoint).unwrap();
+        assert!(!target.exists());
+
+        fs::write(&target, b"user bytes").unwrap();
+        let refused = adapter.create_attempt(&path, b"must not replace");
+        assert!(refused.result.is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"user bytes");
+        let checkpoint = refused
+            .checkpoint
+            .expect("failed publication retains its durable intent");
+        assert!(
+            CheckpointFs::restore(&root, session, &checkpoint)
+                .unwrap()
+                .already_original
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"user bytes");
+        adapter.write(&path, b"ordinary replacement").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"ordinary replacement");
+    }
+
+    #[test]
+    fn create_only_failed_publication_preserves_concurrent_file_on_restore() {
+        // Catches: claiming a file another writer created after a failed create,
+        // even when its bytes match the intended generated image.
+        let directory = tempfile::tempdir().unwrap();
+        git(directory.path(), &["init", "--quiet"], &[]).unwrap();
+        let root = fs::canonicalize(directory.path()).unwrap();
+        let session = SessionId::new();
+        let repo = Repository::discover(&root, session).unwrap().unwrap();
+        let target = root.join("generated.png");
+        let replacement = PreparedReplacement::new(&target, b"generated bytes").unwrap();
+        let checkpoint = repo
+            .capture(&target, b"generated bytes", &replacement, false)
+            .unwrap();
+        fs::write(&target, b"generated bytes").unwrap();
+        assert!(replacement.commit_new().is_err());
+        assert!(CheckpointFs::restore(&root, session, &checkpoint).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"generated bytes");
+    }
+
+    #[test]
+    fn create_only_publication_refuses_entries_created_after_staging() {
+        // Catches: an existence check followed by replace, including replacing
+        // a symlink rather than following it.
+        for directory_entry in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let target = directory.path().join("target");
+            let staged = PreparedReplacement::new(&target, b"generated bytes").unwrap();
+            if directory_entry {
+                fs::create_dir(&target).unwrap();
+            } else {
+                fs::write(&target, b"user bytes").unwrap();
+            }
+            assert!(staged.commit_new().is_err());
+            if directory_entry {
+                assert!(target.is_dir());
+            } else {
+                assert_eq!(fs::read(&target).unwrap(), b"user bytes");
+            }
+        }
+        #[cfg(unix)]
+        {
+            let directory = tempfile::tempdir().unwrap();
+            let target = directory.path().join("target");
+            let other = directory.path().join("other");
+            fs::write(&other, b"other user bytes").unwrap();
+            let staged = PreparedReplacement::new(&target, b"generated bytes").unwrap();
+            std::os::unix::fs::symlink(&other, &target).unwrap();
+            assert!(staged.commit_new().is_err());
+            assert_eq!(fs::read_link(&target).unwrap(), other);
+            assert_eq!(fs::read(&other).unwrap(), b"other user bytes");
+        }
+    }
 
     #[test]
     fn durable_intent_recovers_crashes_on_either_side_of_atomic_write() {

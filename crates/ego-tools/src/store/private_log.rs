@@ -206,6 +206,82 @@ fn private_directory(root: &Path) -> io::Result<File> {
         Err(error) => return Err(error),
     }
     fs::create_dir_all(private_parent(root))?;
+    #[cfg(windows)]
+    {
+        publish_hardened_directory(root)?;
+        open_directory(root, false)
+    }
+    #[cfg(not(windows))]
+    {
+        create_directory(root)
+    }
+}
+
+/// Windows creates a directory with an inherited DACL and hardens it only
+/// afterwards. A concurrent opener that validated the new path in between saw
+/// a directory that was not owner-only yet and refused it. Harden a uniquely
+/// named sibling first and rename it into place, so the path only ever names
+/// an owner-only directory; a creator that loses the rename uses the winner's.
+#[cfg(windows)]
+fn publish_hardened_directory(root: &Path) -> io::Result<()> {
+    let mut random = [0_u8; 16];
+    getrandom::fill(&mut random).map_err(|_| io::Error::other("private name unavailable"))?;
+    let leaf = root
+        .file_name()
+        .ok_or_else(|| io::Error::other("private log root has no name"))?;
+    let staging = private_parent(root).join(format!(
+        ".{}.{:032x}.tmp",
+        leaf.to_string_lossy(),
+        u128::from_ne_bytes(random)
+    ));
+    fs::DirBuilder::new().create(&staging)?;
+    // Close the hardened handle before the rename: it does not share DELETE.
+    let hardened = open_directory(&staging, true).map(drop);
+    let published = hardened.and_then(|()| rename_into_place(&staging, root));
+    match published {
+        Ok(()) => Ok(()),
+        Err(_) if root.is_dir() => {
+            let _ = fs::remove_dir(&staging);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_dir(&staging);
+            Err(error)
+        }
+    }
+}
+
+/// Rename a freshly hardened directory into place.
+///
+/// A virus scanner or indexer can hold a handle on a directory that was just
+/// created, and Windows then refuses its rename with an access or sharing
+/// error for a few milliseconds. Retry that refusal a bounded number of times;
+/// a creator that finds the path already published stops at once.
+#[cfg(windows)]
+fn rename_into_place(staging: &Path, root: &Path) -> io::Result<()> {
+    const ACCESS_DENIED: i32 = 5;
+    const SHARING_VIOLATION: i32 = 32;
+    let mut attempt = 0;
+    loop {
+        match fs::rename(staging, root) {
+            Err(error)
+                if attempt < 20
+                    && !root.exists()
+                    && matches!(
+                        error.raw_os_error(),
+                        Some(ACCESS_DENIED | SHARING_VIOLATION)
+                    ) =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            result => return result,
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn create_directory(root: &Path) -> io::Result<File> {
     let builder = fs::DirBuilder::new();
     #[cfg(unix)]
     let builder = {
@@ -327,13 +403,18 @@ fn validate(file: &File, directory: bool) -> io::Result<()> {
         SecurityInformation::Dacl,
     )?;
     let sid = current_process_sid()?;
-    let inheritance = if directory { "OICI" } else { "" };
+    let entry = crate::privacy::owner_only_entry(
+        &sid,
+        if directory {
+            crate::privacy::PrivatePathKind::Directory
+        } else {
+            crate::privacy::PrivatePathKind::File
+        },
+    )
+    .map_err(|_| invalid())?;
     let dacl = descriptor.dacl().ok_or_else(invalid)?;
     let sddl = descriptor.as_sddl()?.to_string_lossy().into_owned();
-    if !sddl.starts_with("D:P")
-        || dacl.len() != 1
-        || !sddl.ends_with(&format!("(A;{inheritance};FA;;;{sid})"))
-    {
+    if !sddl.starts_with("D:P") || dacl.len() != 1 || !sddl.ends_with(&entry) {
         return Err(invalid());
     }
     Ok(())

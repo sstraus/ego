@@ -1,0 +1,386 @@
+# Reviewed, hand-kept policy for the generated builtin catalogue.
+#
+# `scripts/catalogue.py generate` reads this
+# file and `upstream/models.dev.json` and writes `models.generated.toml`.
+# Boss decision 2026-10-11 (story 344-781d): the builtin catalogue lists ONLY the
+# current model generations of each provider. An older model that a vendor still
+# serves is not listed; an operator states it in `models.toml` if needed.
+#
+# ## What "current generation" means
+#
+# - `floor`: the release date of the first model of the current generation. Every
+#   snapshot model of that provider released on or after it, that takes tools,
+#   returns text and is not `deprecated`, is current.
+# - `include`: the newest model of a tier whose latest release predates the floor
+#   (the tier has not been refreshed in the current generation).
+# - `exclude`: a model released on or after the floor that ego must not list, with
+#   the reason. The generator refuses a model whose reasoning controls are not an
+#   effort list, so such a model must be named here.
+# - `id_prefix`: the text a cloud platform puts before the snapshot's model id.
+# - `drop_efforts`: effort levels the provider's backend does not offer although the
+#   snapshot row lists them (a subscription backend served from an API row).
+#
+# ## What may be written here
+#
+# Only facts a vendor published, each cited. Nothing here states a price. The
+# per-row limits, effort sets and modalities come from the snapshot; `wire` is the
+# provider-level contract the snapshot does not carry. Where a provider's wire
+# facts were not read from a vendor page, `wire` takes the fail-closed value
+# (no parallel tool calls, no cache, no reasoning carry-over, image input unknown).
+
+# ---------------------------------------------------------------------------
+# openai. Current generation: GPT-6 (including the 6.1 and 6.2 refreshes).
+# GPT-6.2 Astra/Sol API and subscription availability checked 2026-11-19:
+# https://openai.com/index/introducing-gpt-6-2-astra-sol/
+# https://developers.openai.com/api/docs/models
+# Supported efforts are low/medium/high/xhigh/max; neither accepts off.
+# No published backend default was established, so neither default is invented.
+# Wire facts read 2026-09-26 from https://developers.openai.com/api/docs/models,
+# https://developers.openai.com/api/docs/guides/function-calling and
+# https://developers.openai.com/api/docs/guides/images-vision:
+# - `reasoning_carryover = "unsupported"`: the public Responses mapping refuses
+#   ego's opaque reasoning state.
+# - `reasoning_state_dialect = "openai-responses"`: the dialect of the hosted-search
+#   items this wire mints and replays (story 1074-0083); another provider gets
+#   only their visible text.
+# - parallel tool calls: "The model may choose to call multiple functions in a
+#   single turn."
+# - `cache = "short"`: cached-input pricing exists; no caller-controlled retention.
+# - images: PNG, JPEG, WEBP, non-animated GIF; "Up to 1,500 images per request",
+#   capped at ego's own MAX_IMAGES_PER_PROMPT of 100. No per-image byte limit.
+# Default efforts: read 2026-09-26 (gpt-6-sol, gpt-6-luna) and 2026-09-29
+# (gpt-6.1-sol) from the model pages; gpt-6-astra states none.
+[provider.openai]
+models_dev = "openai"
+floor = "2026-09-04"
+
+[provider.openai.default_effort]
+"gpt-6-sol" = "medium"
+"gpt-6.1-sol" = "medium"
+"gpt-6-luna" = "medium"
+
+[provider.openai.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "unsupported"
+reasoning_state_dialect = "openai-responses"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[provider.openai.wire.image_input]
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
+# ---------------------------------------------------------------------------
+# openai-codex. The subscription serves the GPT-6 models listed here.
+# The GPT-6.2 announcement above independently confirms Astra/Sol in Codex;
+# keep the conservative subscription context ceiling and wire policy, not the
+# API context limit. No authenticated discovery or generation was performed.
+# The GPT-6 floor selects the set pi.dev publishes for `openai-codex` on 2026-10-11
+# (cross-check only; the facts come from the openai snapshot). The API row lists
+# `none`; the authenticated Codex models cache (2026-09-26) lists low..max for
+# gpt-6-sol, so `off` is dropped. The context is the
+# authenticated Codex cache value, 272,000
+# (docs/internals/decisions/2026-09-12-openai-codex-subscription-bootstrap-ceiling.md),
+# not the API's 1,050,000. Default efforts from the authenticated Codex models
+# cache: gpt-6-sol medium (2026-09-26), gpt-6.1-sol low (2026-09-29).
+[provider.openai-codex]
+models_dev = "openai"
+floor = "2026-09-04"
+drop_efforts = ["off"]
+context_override = 272000
+
+# gpt-6.1-terra: the authenticated Codex models cache (fetched 2026-11-13, client
+# 0.167.2) lists it with visibility `list` and default effort `low`.
+[provider.openai-codex.default_effort]
+"gpt-6-sol" = "medium"
+"gpt-6.1-sol" = "low"
+"gpt-6.1-terra" = "low"
+
+# Parallel tool calls: off is a read vendor fact, not a fail-closed default
+# (story 932-6641, read 2026-11-06). The vendor's own client sends
+# `parallel_tool_calls = prompt.parallel_tool_calls && !model_info.use_responses_lite`
+# (openai/codex rust-v0.166.0, commit 6ff1e1ca, codex-rs/core/src/client.rs:1159),
+# and the authenticated models cache (fetched 2026-11-06, client 0.166.0) marks
+# gpt-6-sol, gpt-6.1-sol and every other listed model `use_responses_lite = true`.
+# Recorded vendor-client sessions agree: 10,747 gpt-6.1-sol responses, none with
+# more than one call. Report: docs/internals/932-codex-parallel-tool-calls.md.
+[provider.openai-codex.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "openai-codex-responses"
+cancel = "cooperative"
+cache = "none"
+transport = "web_socket"
+
+# Image input: OpenAI model pages and Codex's InputImage protocol, checked
+# 2026-10-16. See ego-ai/tests/goldens/openai-codex/README.md for pinned sources.
+# The snapshot already states image modalities; this missing wire fact made
+# every Codex row unknown. Use the published formats and ego's 100-image cap.
+[provider.openai-codex.wire.image_input]
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100
+
+# ---------------------------------------------------------------------------
+# anthropic. Current generation: the newest model of each tier, released from
+# Fable 5.1 (2026-09-01) on: fable-5-1, opus-5-5, sonnet-5-5, haiku-5-5.
+# Wire facts read 2026-09-26 from https://platform.claude.com/docs/en/models/overview,
+# .../build-with-claude/effort and .../build-with-claude/vision:
+# - `reasoning_carryover = "same_provider_only"` with dialect "anthropic-messages":
+#   thinking blocks carry a signature only this provider accepts.
+# - parallel tool use is the default (`tool_choice.disable_parallel_tool_use`).
+# - `cache = "long"`: 1-hour retention beside the 5-minute default.
+# - images: JPEG, PNG, GIF, WebP; 8000x8000 px; 10 MB base64; count capped at 100.
+# Default efforts: fable-5-1 high, opus-5-5 medium (2026-09-26), sonnet-5-5 high
+# (2026-09-30); haiku-5-5 states none.
+# Fable 5.2 (released 2026-11-09, same generation floor): default `high`, read
+# 2026-11-13 from .../build-with-claude/effort ("The API default is `high`"). The
+# models overview of the same date lists its Claude API, Bedrock and Google Cloud
+# (Google managed) ids, so bedrock and vertex take it too.
+[provider.anthropic]
+models_dev = "anthropic"
+floor = "2026-09-01"
+
+[provider.anthropic.default_effort]
+"claude-fable-5-1" = "high"
+"claude-fable-5-2" = "high"
+"claude-opus-5-5" = "medium"
+"claude-sonnet-5-5" = "high"
+
+[provider.anthropic.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "anthropic-messages"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[provider.anthropic.wire.image_input]
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# ---------------------------------------------------------------------------
+# bedrock: Claude in Amazon Bedrock, on the bedrock-mantle Messages endpoint.
+# Read 2026-11-05 from https://platform.claude.com/docs/en/build-with-claude/claude-in-amazon-bedrock:
+# the endpoint serves "the same request body shape as Anthropic's first-party API"
+# with standard SSE, and model ids "carry an `anthropic.` provider prefix"
+# (`id_prefix`). Fable 5.1, Opus 5.5, Sonnet 5.5 and Haiku 5.5 are in its model
+# table, so the anthropic generation applies; limits and efforts are the
+# anthropic snapshot rows of the same models. Wire facts:
+# - prompt caching and thinking are supported; the prompt-caching page lists
+#   Amazon Bedrock among the platforms with the 1-hour duration (`cache = "long"`).
+# - `reasoning_state_dialect = "bedrock-messages"`: no source says a thinking
+#   signature from one platform is accepted by another, so state stays on Bedrock.
+# - images: the first-party formats; URL image sources are unsupported, and ego
+#   sends base64 only.
+[provider.bedrock]
+models_dev = "anthropic"
+floor = "2026-09-01"
+id_prefix = "anthropic."
+
+[provider.bedrock.default_effort]
+"claude-fable-5-1" = "high"
+"claude-fable-5-2" = "high"
+"claude-opus-5-5" = "medium"
+"claude-sonnet-5-5" = "high"
+
+[provider.bedrock.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "bedrock-messages"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[provider.bedrock.wire.image_input]
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# ---------------------------------------------------------------------------
+# vertex: Claude Models on Google Cloud (Google managed), on Vertex AI.
+# Read 2026-11-05 from
+# https://platform.claude.com/docs/en/build-with-claude/claude-models-on-google-cloud/google-managed:
+# the model ids of the current generation equal the first-party ids, the request
+# is the Messages body with the model in the URL, and the page lists prompt
+# caching, thinking and tool use, and a 1M-token context for these models. The
+# prompt-caching page lists this platform with the 1-hour duration. Dialect: as
+# for bedrock.
+[provider.vertex]
+models_dev = "anthropic"
+floor = "2026-09-01"
+
+[provider.vertex.default_effort]
+"claude-fable-5-1" = "high"
+"claude-fable-5-2" = "high"
+"claude-opus-5-5" = "medium"
+"claude-sonnet-5-5" = "high"
+
+[provider.vertex.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "vertex-messages"
+cancel = "cooperative"
+cache = "long"
+transport = "sse"
+
+[provider.vertex.wire.image_input]
+accepted_media_types = ["jpeg", "png", "gif", "webp"]
+max_images = 100
+max_bytes_per_image = 10485760
+max_width = 8000
+max_height = 8000
+
+# ---------------------------------------------------------------------------
+# gemini (models.dev key `google`). Current generation: Gemini 3.8 Flash
+# (2026-09-02) plus the newest Pro and Flash-Lite, which the 3.8 generation has not
+# refreshed. Wire facts read 2026-09-08 from the Gemini 3.8 Flash, function-calling,
+# thinking and Interactions documentation
+# (docs/internals/23-first-run-model-default-sources.md): parallel function calls,
+# signed thought blocks replayed within the provider, short caching, cooperative
+# cancel. Exact image admission limits stay unknown. Preview and live ids are not
+# verified against the `/v1` Interactions surface.
+[provider.gemini]
+models_dev = "google"
+floor = "2026-09-02"
+include = ["gemini-3.1-pro-preview", "gemini-3.5-flash-lite"]
+
+[provider.gemini.exclude]
+"gemini-4-neon" = "Gemini 4 Interactions wire contract not reviewed; do not inherit the Gemini 3.8 contract"
+
+[provider.gemini.default_effort]
+"gemini-3.8-flash" = "medium"
+
+[provider.gemini.wire]
+supports_parallel_tool_calls = true
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "gemini-interactions"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+# ---------------------------------------------------------------------------
+# github-copilot. Subscription row serving other vendors' models. Current
+# generation: the models of the vendors' current generations released from
+# 2026-09-01 on, plus the newest Kimi and MAI models. No wire fact was read from a
+# GitHub page, so `wire` is fail-closed.
+# New rows checked 2026-11-19 against vendor announcements:
+# https://github.blog/changelog/2026-11-17-openais-gpt-6-2-astra-and-gpt-6-2-sol-now-available/
+# https://github.blog/changelog/2026-11-17-mai-code-2-and-mai-code-2-flash-in-github-copilot/
+# https://github.blog/changelog/2026-11-13-gemini-4-hydrogen-in-github-copilot/
+# https://github.blog/changelog/2026-11-18-gemini-4-neon-in-github-copilot/
+[provider.github-copilot]
+models_dev = "github-copilot"
+floor = "2026-09-01"
+include = ["kimi-k3", "mai-code-1.1-flash"]
+
+[provider.github-copilot.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+# ---------------------------------------------------------------------------
+# xai-oauth. Current generation: grok-4.7 (2026-09-21), the newest Grok. The models.dev
+# `xai` catalogue is the API-key catalogue; that the subscription serves the same set
+# is not established. `wire` is fail-closed.
+[provider.xai-oauth]
+models_dev = "xai"
+floor = "2026-09-21"
+
+[provider.xai-oauth.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "xai-responses"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+# ---------------------------------------------------------------------------
+# minimax-oauth (models.dev key `minimax-coding-plan`). Current generation: the
+# MiniMax M3 line (2026-06-01 on). The snapshot drops the coding plan's price
+# fields: models.dev states a literal 0 for them. `wire` is fail-closed.
+[provider.minimax-oauth]
+models_dev = "minimax-coding-plan"
+floor = "2026-06-01"
+
+[provider.minimax-oauth.exclude]
+"MiniMax-M3" = "reasoning control is an on/off toggle; ego cannot state which levels it accepts"
+
+[provider.minimax-oauth.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+# ---------------------------------------------------------------------------
+# deepseek. API-key row on DeepSeek's Chat Completions endpoint (story 1112-a347).
+# Current generation: DeepSeek V4 (deepseek-v4-pro, 2026-08-13) and the Flash alias
+# deepseek-flash (DeepSeek-V4.1-Flash-1017). The snapshot marks the retired
+# names deepseek-v4-flash and deepseek-v4-flash-vision-exp deprecated, so they
+# are not listed. Limits and efforts come from the snapshot; the vendor pages
+# agree (read 2026-11-14): context "1M" and maximum output "384K" (393216) on
+# https://api-docs.deepseek.com/quick_start/pricing; the thinking switch plus
+# efforts low/high/max on https://api-docs.deepseek.com/guides/thinking_mode.
+# Wire facts:
+# - default effort `high`: "Thinking mode is enabled by default, with the default
+#   effort being `high`" (thinking mode guide).
+# - `reasoning_carryover = "same_provider_only"` with dialect "deepseek-chat": with
+#   `tools` in the request, the `reasoning_content` of all earlier turns must be
+#   sent back (thinking mode guide); `wire::deepseek` mints and replays it.
+# - parallel tool calls: `parallel_tool_calls` is not in the Chat Completions
+#   schema, so the mapping omits it and no guarantee is stated.
+# - `cache = "none"`: cache-hit pricing exists, but no caching page was reviewed
+#   for this row, so the fail-closed value stays.
+# - images: excluded from this row. The vendor states vision for deepseek-flash,
+#   but no image contract was reviewed; without `image_input` the row stays
+#   unknown and ego refuses an image before the request.
+[provider.deepseek]
+models_dev = "deepseek"
+floor = "2026-08-13"
+
+[provider.deepseek.default_effort]
+"deepseek-flash" = "high"
+"deepseek-v4-pro" = "high"
+
+[provider.deepseek.wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "same_provider_only"
+reasoning_state_dialect = "deepseek-chat"
+cancel = "cooperative"
+cache = "none"
+transport = "sse"
+
+# Vendor-stated current aliases absent from models.dev. Never inherit API facts
+# into subscription providers. Read 2026-10-15: the page states function calling,
+# text/image input, text output and these limits, but no reasoning-effort set or
+# parallel-call guarantee. Image admission uses the OpenAI vision guide above.
+[stated."openai/chat-latest"]
+source = "https://developers.openai.com/api/docs/models/chat-latest"
+read = "2026-10-15"
+# Responses probe 2026-10-15: POST https://api.openai.com/v1/responses with
+# model=chat-latest, reasoning.effort=medium returned HTTP 200, status=completed,
+# reasoning.effort=medium and output_text=ok (16 total tokens). Only Medium is
+# measured; do not infer Off, Low or High. See ADR 2026-10-11, story 444-7f32.
+reasoning = true
+reasoning_options = [{ type = "effort", values = ["medium"] }]
+limit = { context = 400000, output = 128000 }
+modalities = { input = ["text", "image"], output = ["text"] }
+
+[stated."openai/chat-latest".wire]
+supports_parallel_tool_calls = false
+reasoning_carryover = "unsupported"
+cancel = "cooperative"
+cache = "short"
+transport = "sse"
+
+[stated."openai/chat-latest".wire.image_input]
+accepted_media_types = ["png", "jpeg", "webp", "gif"]
+max_images = 100

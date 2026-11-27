@@ -22,6 +22,61 @@ use crate::privacy::{PrivatePathKind, harden_private_path};
 use crate::store::{AtomicReplacePublication, StoreIo};
 
 /// The real filesystem adapter for one user `config.toml` authority.
+fn assign_account_numbers(
+    parsed: &ego_core::config::ConfigLayer,
+    extra: Option<(&str, &str)>,
+) -> Result<ego_core::config::AccountNumbers, UserConfigError> {
+    let mut numbers = parsed.account_numbers.clone();
+    for (id, vendor) in parsed
+        .connections
+        .iter()
+        .map(|(id, connection)| (id.as_str(), connection.vendor.as_str()))
+        .chain(extra)
+    {
+        let provider = numbers.entry(vendor.into()).or_default();
+        if !provider.contains_key(id) {
+            let next = provider
+                .values()
+                .copied()
+                .max()
+                .unwrap_or(0)
+                .checked_add(1)
+                .ok_or_else(|| {
+                    UserConfigError::new(format!("account numbers exhausted for {vendor}"))
+                })?;
+            provider.insert(id.into(), next);
+        }
+    }
+    Ok(numbers)
+}
+
+fn write_account_numbers(
+    document: &mut DocumentMut,
+    parsed: &ego_core::config::ConfigLayer,
+    numbers: ego_core::config::AccountNumbers,
+) -> Result<bool, UserConfigError> {
+    if numbers == parsed.account_numbers {
+        return Ok(false);
+    }
+    for (vendor, assignments) in numbers {
+        for (id, number) in assignments {
+            if parsed
+                .account_numbers
+                .get(&vendor)
+                .and_then(|old| old.get(&id))
+                != Some(&number)
+            {
+                set_table_path(
+                    document.as_table_mut(),
+                    &["account_numbers", &vendor, &id],
+                    value(i64::from(number)),
+                )?;
+            }
+        }
+    }
+    Ok(true)
+}
+
 pub struct OsUserConfigStore<I> {
     io: I,
     path: PathBuf,
@@ -265,13 +320,24 @@ where
             UserConfigMutation::Rules { .. } | UserConfigMutation::RevokeRule { .. }
         )
         .then(|| rule_snapshot(&parsed, target.clone()));
+        let inherited_rules = (matches!(&mutation, UserConfigMutation::Rules { .. })
+            && matches!(&target, UserConfigTarget::Profile(_))
+            && before_rules
+                .as_ref()
+                .is_some_and(|before| !before.permissions_present))
+        .then(|| rule_snapshot(&parsed, UserConfigTarget::Base));
         let mut document = text
             .parse::<DocumentMut>()
             .map_err(|error| UserConfigError::new(format!("invalid user config TOML: {error}")))?;
 
         let changed = apply(&mut document, &parsed, mutation)?;
         if !changed {
-            let facts = rule_transaction_facts(facts, before_rules.as_ref(), before_rules.clone());
+            let facts = rule_transaction_facts(
+                facts,
+                before_rules.as_ref(),
+                before_rules.clone(),
+                inherited_rules,
+            );
             return Ok(UserConfigMutationResult {
                 target,
                 facts,
@@ -300,7 +366,8 @@ where
                 UserConfigPublication::PublishedDurabilityUncertain { diagnostic }
             }
         };
-        let facts = rule_transaction_facts(facts, before_rules.as_ref(), after_rules);
+        let facts =
+            rule_transaction_facts(facts, before_rules.as_ref(), after_rules, inherited_rules);
         Ok(UserConfigMutationResult {
             target,
             facts,
@@ -513,12 +580,14 @@ fn rule_transaction_facts(
     request: ego_core::config::UserConfigMutationFacts,
     before: Option<&RuleSnapshot>,
     after: Option<RuleSnapshot>,
+    inherited: Option<RuleSnapshot>,
 ) -> ego_core::config::UserConfigMutationFacts {
     match (before, after) {
         (Some(before), Some(after)) => ego_core::config::UserConfigMutationFacts::RuleTransaction {
             request: Box::new(request),
             before: before.clone(),
             after,
+            inherited: inherited.map(Box::new),
         },
         (None, None) => request,
         _ => unreachable!("rule transaction snapshots are captured as a pair"),
@@ -562,6 +631,97 @@ fn apply(
     mutation: UserConfigMutation,
 ) -> Result<bool, UserConfigError> {
     match mutation {
+        UserConfigMutation::ProviderInstance {
+            id,
+            expected,
+            replacement,
+        } => {
+            if parsed.providers.instances.get(&id) != expected.as_ref() {
+                return Err(UserConfigError::new(
+                    "provider instance changed since it was read; reload before saving",
+                ));
+            }
+            if expected == replacement {
+                return Ok(false);
+            }
+            if let Some(instance) = replacement {
+                let text = toml::to_string(&instance)
+                    .map_err(|error| UserConfigError::new(error.to_string()))?;
+                let encoded = text
+                    .parse::<DocumentMut>()
+                    .map_err(|error| UserConfigError::new(error.to_string()))?;
+                set_table_path(
+                    document.as_table_mut(),
+                    &["providers", "instances", id.as_str()],
+                    Item::Table(encoded.as_table().clone()),
+                )?;
+            } else if let Some(instances) = document
+                .get_mut("providers")
+                .and_then(Item::as_table_like_mut)
+                .and_then(|providers| providers.get_mut("instances"))
+                .and_then(Item::as_table_like_mut)
+            {
+                instances.remove(id.as_str());
+            }
+            Ok(true)
+        }
+        UserConfigMutation::NumberAccounts => {
+            write_account_numbers(document, parsed, assign_account_numbers(parsed, None)?)
+        }
+        UserConfigMutation::RemoveConnection { id, expected } => {
+            if parsed.connections.get(&id) != Some(&expected) {
+                return Err(UserConfigError::new(
+                    "saved account changed; check auth status and retry",
+                ));
+            }
+            if parsed.providers.instances.values().any(|instance| {
+                instance
+                    .credential_ref
+                    .as_ref()
+                    .is_some_and(|reference| reference.as_str() == id)
+            }) {
+                return Err(UserConfigError::new(
+                    "account is in use by a configured provider instance; detach it before removal",
+                ));
+            }
+            write_account_numbers(document, parsed, assign_account_numbers(parsed, None)?)?;
+            document["connections"]
+                .as_table_like_mut()
+                .ok_or_else(|| UserConfigError::new("connections must be a table"))?
+                .remove(&id);
+            if parsed.connection.as_deref() == Some(&id) {
+                document.as_table_mut().remove("connection");
+            }
+            Ok(true)
+        }
+        UserConfigMutation::InsertConnection { id, connection } => {
+            if parsed.connections.contains_key(&id) {
+                return Err(UserConfigError::new(format!(
+                    "connection {id} already exists"
+                )));
+            }
+            let number = assign_account_numbers(parsed, Some((&id, &connection.vendor)))?;
+            let mut table = Table::new();
+            table.insert("name", value(connection.name));
+            table.insert("vendor", value(connection.vendor));
+            table.insert(
+                "access",
+                value(match connection.access {
+                    ego_core::config::ConnectionAccess::Key => "key",
+                    ego_core::config::ConnectionAccess::Oauth => "oauth",
+                }),
+            );
+            if let Some(key_env) = connection.key_env {
+                table.insert("key_env", value(key_env));
+            }
+            set_table_path(
+                document.as_table_mut(),
+                &["connections", id.as_str()],
+                Item::Table(table),
+            )?;
+            write_account_numbers(document, parsed, number)?;
+            Ok(true)
+        }
         UserConfigMutation::GrantRoot { target, root } => {
             let mut roots = match managed_value(parsed, &target, &ManagedConfigKey::Roots, document)
             {
@@ -668,11 +828,22 @@ fn apply(
                     "user config changed before the MCP entry could be set",
                 ));
             }
-            if matches!(current, Some(McpLayerEntry::Server(current)) if current == &server) {
+            if matches!(
+                current,
+                Some(McpLayerEntry::Server(current) | McpLayerEntry::Disabled(current))
+                    if current == &server
+            ) {
                 return Ok(false);
             }
+            // Replacing a detached entry keeps it detached: `ego mcp add` has no way to say
+            // `enabled`, so writing a fresh table would attach a server the owner turned off.
+            let keep_disabled = matches!(current, Some(McpLayerEntry::Disabled(_)));
+            let mut table = server_table(&server)?;
+            if keep_disabled {
+                table.insert("enabled", value(false));
+            }
             let servers = mcp_servers_table_mut(document, &target)?;
-            servers.insert(&name.to_string(), Item::Table(server_table(&server)?));
+            servers.insert(&name.to_string(), Item::Table(table));
             Ok(true)
         }
         UserConfigMutation::McpDeleteUserEntry {
@@ -748,6 +919,14 @@ fn apply_rule_changes(
     changes: &[RuleMutation],
 ) -> Result<bool, UserConfigError> {
     let snapshot = rule_snapshot(parsed, target.clone());
+    // A profile permissions block replaces the whole user block on resolution.
+    // Seed its first publication from the inherited user authority, not empty lists.
+    let inherit = matches!(target, UserConfigTarget::Profile(_)) && !snapshot.permissions_present;
+    let snapshot = if inherit {
+        rule_snapshot(parsed, UserConfigTarget::Base)
+    } else {
+        snapshot
+    };
     let mut allow = snapshot.allow;
     let mut deny = snapshot.deny;
     let mut additions = Vec::new();
@@ -775,6 +954,9 @@ fn apply_rule_changes(
 
     if additions.is_empty() {
         return Ok(false);
+    }
+    if inherit && let Some(permissions) = document.as_table().get("permissions").cloned() {
+        managed_target_table_mut(document, target)?.insert("permissions", permissions);
     }
     for change in additions {
         rule_array_mut(document, target, change.effect)?.push(change.rule.to_string());
@@ -983,8 +1165,41 @@ fn managed_value(
                 .and_then(|exec| exec.env_allowlist.clone())
                 .map(ManagedConfigValue::ExecEnvAllowlist),
             ManagedConfigKey::Network => parsed.network.map(ManagedConfigValue::Network),
+            ManagedConfigKey::WebPrivateNetwork => parsed
+                .web_private_network
+                .map(ManagedConfigValue::WebPrivateNetwork),
             ManagedConfigKey::Budget => parsed.budget.clone().map(ManagedConfigValue::Budget),
             ManagedConfigKey::Bare => parsed.bare.map(ManagedConfigValue::Bare),
+            ManagedConfigKey::Memory => parsed.memory.map(ManagedConfigValue::Memory),
+            ManagedConfigKey::Checkpoints => {
+                parsed.checkpoints.map(ManagedConfigValue::Checkpoints)
+            }
+            ManagedConfigKey::Tools => parsed.tools.clone().map(ManagedConfigValue::Tools),
+            ManagedConfigKey::SessionsCompress => parsed
+                .sessions
+                .as_ref()
+                .and_then(|sessions| sessions.compress)
+                .map(ManagedConfigValue::SessionsCompress),
+            ManagedConfigKey::Cache => parsed.cache.map(ManagedConfigValue::Cache),
+            ManagedConfigKey::CompactionIdleMarginSeconds => parsed
+                .compaction
+                .and_then(|compaction| compaction.idle_margin_seconds)
+                .map(ManagedConfigValue::CompactionIdleMarginSeconds),
+            ManagedConfigKey::CompactionIdleThreshold => parsed
+                .compaction
+                .and_then(|compaction| compaction.idle_threshold)
+                .map(ManagedConfigValue::CompactionIdleThreshold),
+            ManagedConfigKey::InstructionsMaxFiles => parsed
+                .instructions
+                .as_ref()
+                .and_then(|instructions| instructions.max_files)
+                .and_then(std::num::NonZeroUsize::new)
+                .map(ManagedConfigValue::InstructionsMaxFiles),
+            ManagedConfigKey::Lsp => parsed.lsp.map(ManagedConfigValue::Lsp),
+            ManagedConfigKey::BuildRecipes => {
+                parsed.build_recipes.map(ManagedConfigValue::BuildRecipes)
+            }
+            ManagedConfigKey::McpTasks => parsed.mcp_tasks.map(ManagedConfigValue::McpTasks),
             ManagedConfigKey::Keybindings => parsed
                 .ui
                 .as_ref()
@@ -995,6 +1210,25 @@ fn managed_value(
                 .as_ref()
                 .and_then(|ui| ui.vim)
                 .map(ManagedConfigValue::Vim),
+            ManagedConfigKey::CompactionIdle => parsed
+                .compaction
+                .and_then(|compaction| compaction.idle)
+                .map(ManagedConfigValue::CompactionIdle),
+            ManagedConfigKey::CompactionHeadless => parsed
+                .compaction
+                .and_then(|compaction| compaction.headless)
+                .map(ManagedConfigValue::CompactionHeadless),
+            ManagedConfigKey::DoctorNetwork => {
+                parsed.doctor_network.map(ManagedConfigValue::DoctorNetwork)
+            }
+            ManagedConfigKey::RecapEnabled => parsed
+                .recap
+                .and_then(|recap| recap.enabled)
+                .map(ManagedConfigValue::RecapEnabled),
+            ManagedConfigKey::RecapAfterMinutes => parsed
+                .recap
+                .and_then(|recap| recap.after_minutes)
+                .map(ManagedConfigValue::RecapAfterMinutes),
             ManagedConfigKey::PermissionsJudge => parsed
                 .permissions
                 .as_ref()
@@ -1047,9 +1281,26 @@ fn managed_value(
                     profile.artifact_dir.clone().map(ManagedConfigValue::Path)
                 }
                 ManagedConfigKey::Bare
+                | ManagedConfigKey::WebPrivateNetwork
                 | ManagedConfigKey::StatuslineTemplate
                 | ManagedConfigKey::Keybindings
-                | ManagedConfigKey::Vim => None,
+                | ManagedConfigKey::Vim
+                | ManagedConfigKey::CompactionIdle
+                | ManagedConfigKey::CompactionIdleMarginSeconds
+                | ManagedConfigKey::CompactionIdleThreshold
+                | ManagedConfigKey::Cache
+                | ManagedConfigKey::Tools
+                | ManagedConfigKey::Checkpoints
+                | ManagedConfigKey::SessionsCompress
+                | ManagedConfigKey::InstructionsMaxFiles
+                | ManagedConfigKey::CompactionHeadless
+                | ManagedConfigKey::DoctorNetwork
+                | ManagedConfigKey::RecapEnabled
+                | ManagedConfigKey::RecapAfterMinutes
+                | ManagedConfigKey::Memory
+                | ManagedConfigKey::Lsp
+                | ManagedConfigKey::BuildRecipes
+                | ManagedConfigKey::McpTasks => None,
             }
         }
     }
@@ -1145,12 +1396,29 @@ fn managed_path(key: &ManagedConfigKey) -> Vec<&str> {
         }
         ManagedConfigKey::Roots => vec!["roots"],
         ManagedConfigKey::Network => vec!["network"],
+        ManagedConfigKey::WebPrivateNetwork => vec!["web_private_network"],
         ManagedConfigKey::Budget => vec!["budget"],
         ManagedConfigKey::Bare => vec!["bare"],
+        ManagedConfigKey::Memory => vec!["memory"],
+        ManagedConfigKey::Checkpoints => vec!["checkpoints"],
+        ManagedConfigKey::Lsp => vec!["lsp"],
+        ManagedConfigKey::BuildRecipes => vec!["build_recipes"],
+        ManagedConfigKey::McpTasks => vec!["mcp_tasks"],
         ManagedConfigKey::PermissionsJudge => vec!["permissions", "judge"],
         ManagedConfigKey::StatuslineTemplate => vec!["ui", "statusline", "template"],
         ManagedConfigKey::Keybindings => vec!["ui", "keybindings"],
         ManagedConfigKey::Vim => vec!["ui", "vim"],
+        ManagedConfigKey::CompactionIdle => vec!["compaction", "idle"],
+        ManagedConfigKey::CompactionIdleMarginSeconds => vec!["compaction", "idle_margin_seconds"],
+        ManagedConfigKey::CompactionIdleThreshold => vec!["compaction", "idle_threshold"],
+        ManagedConfigKey::Tools => vec!["tools"],
+        ManagedConfigKey::SessionsCompress => vec!["sessions", "compress"],
+        ManagedConfigKey::Cache => vec!["cache"],
+        ManagedConfigKey::InstructionsMaxFiles => vec!["instructions", "max_files"],
+        ManagedConfigKey::CompactionHeadless => vec!["compaction", "headless"],
+        ManagedConfigKey::DoctorNetwork => vec!["doctor_network"],
+        ManagedConfigKey::RecapEnabled => vec!["recap", "enabled"],
+        ManagedConfigKey::RecapAfterMinutes => vec!["recap", "after_minutes"],
         ManagedConfigKey::SessionDir => vec!["session_dir"],
         ManagedConfigKey::ArtifactDir => vec!["artifact_dir"],
     }
@@ -1328,6 +1596,14 @@ fn server_table(server: &McpServerConfig) -> Result<Table, UserConfigError> {
             }
             if http.allow_insecure_loopback {
                 table.insert("allow_insecure_loopback", value(true));
+            }
+            if !http.oauth_hosts.is_empty() {
+                let hosts = http
+                    .oauth_hosts
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                table.insert("oauth_hosts", string_array(&hosts));
             }
         }
         McpServerConfig::Acp { .. } => {

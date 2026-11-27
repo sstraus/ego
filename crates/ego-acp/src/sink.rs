@@ -47,6 +47,8 @@ use crate::project::{project_acp_updates_v1, provider_retry_cleared_v1, provider
 /// nothing can select. When the draft stabilises, that constant and this type
 /// change together.
 pub struct AcpSink {
+    rate_limits: Option<std::sync::Arc<dyn ego_core::quota::RateLimitsReader>>,
+    last_rate_limits: Mutex<Vec<ego_core::quota::RateLimits>>,
     connection: ConnectionTo<Client>,
     session: v1::SessionId,
     /// The limits the caller resolved before the turn began, used for
@@ -76,6 +78,8 @@ impl AcpSink {
         root: PathBuf,
     ) -> Self {
         AcpSink {
+            rate_limits: None,
+            last_rate_limits: Mutex::new(Vec::new()),
             connection,
             session,
             caps,
@@ -90,6 +94,14 @@ impl AcpSink {
 }
 
 impl AcpSink {
+    pub fn with_rate_limits(
+        mut self,
+        reader: Option<std::sync::Arc<dyn ego_core::quota::RateLimitsReader>>,
+    ) -> Self {
+        self.rate_limits = reader;
+        self
+    }
+
     pub fn with_child_activity(mut self, enabled: bool) -> Self {
         self.child_activity = enabled;
         self
@@ -151,8 +163,9 @@ impl EventSink for AcpSink {
     }
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
-        // The complete entry point includes reduced usage and tool progress,
-        // so `publish` carries the reduction.
+        // The complete entry point includes reduced usage and tool progress.
+        // That is why `publish` carries the reduction. See
+        // `docs/internals/decisions/2026-08-21-what-a-sink-is-handed.md`.
         let mut updates = Vec::new();
         {
             let mut generation = self
@@ -182,7 +195,17 @@ impl EventSink for AcpSink {
                 updates.push(provider_retry_cleared_v1());
             }
         }
+        if let Some(reader) = &self.rate_limits {
+            let limits = reader.rate_limits();
+            let mut previous = self.last_rate_limits.lock().expect("quota projection lock");
+            if *previous != limits {
+                updates.push(crate::project::rate_limits_v1(&limits));
+                *previous = limits;
+            }
+        }
+        updates.extend(crate::project::project_compacted_v1(event));
         updates.extend(project_acp_updates_v1(event, state, &self.caps, &self.root));
+        crate::project::correlate_tool_updates(&mut updates, &self.session.to_string(), state);
         if self.child_activity {
             updates.extend(crate::project::project_child_activity_v1(event));
         }

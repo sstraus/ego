@@ -1,13 +1,17 @@
 //! The two artifacts that are written down from the parser, not beside it.
 //!
-//! Generate reference and completions from the final clap definitions. A separate
-//! handwritten command list could silently drift from the parser.
+//! `CLI.md` §4 requires the reference and the shell completions to come from
+//! "the same final clap definitions", and says why: a hand-maintained command
+//! list is not release evidence. It is a second description of the grammar,
+//! and a second description is a thing that can quietly stop being true while
+//! every test around it stays green.
 //!
 //! So both artifacts are rendered from [`crate::cli::root_command`], the file
 //! on disk is the snapshot, and a test regenerates and compares. A flag added
 //! to a subcommand struct and not regenerated fails that test — which is the
 //! only mechanism that has ever kept a reference honest.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use clap::Command;
@@ -55,14 +59,41 @@ pub fn reference() -> String {
     out.push_str("# ego command reference\n\n");
     out.push_str(
         "Generated from the clap definitions in `crates/ego-cli/src/cli.rs`.\n\
-         Do not edit: `crates/ego-cli/tests/reference.rs` regenerates and compares it.\n\n\
+         Do not edit: `crates/ego-cli/tests/it/reference.rs` regenerates and compares it.\n\n\
          `ego PROMPT` with no subcommand starts an interactive session.\n\n",
     );
-    section(&mut out, &root, "ego");
+    let common = common_options(&root);
+    section(&mut out, &root, "ego", &common);
     out
 }
 
-fn section(out: &mut String, command: &Command, path: &str) {
+/// A command that shares at least this many options, spelled identically, with
+/// the root lists them once instead of repeating each line. Smaller commands
+/// keep every line, because a short list is easier to read whole.
+const SHARED_OPTION_THRESHOLD: usize = 8;
+
+/// The root's visible options by id, as the reference spells each one.
+fn common_options(root: &Command) -> BTreeMap<String, String> {
+    root.get_arguments()
+        .filter(|arg| !arg.is_hide_set())
+        .map(|arg| {
+            (
+                arg.get_id().as_str().to_owned(),
+                format!("{}{}", spelling(arg), metadata(root, arg)),
+            )
+        })
+        .collect()
+}
+
+fn short_name(arg: &clap::Arg) -> String {
+    match (arg.get_long(), arg.get_short()) {
+        (Some(long), _) => format!("`--{long}`"),
+        (None, Some(short)) => format!("`-{short}`"),
+        (None, None) => format!("`{}`", arg.get_id()),
+    }
+}
+
+fn section(out: &mut String, command: &Command, path: &str, common: &BTreeMap<String, String>) {
     let _ = writeln!(out, "## `{path}`\n");
     let usage = command.clone().render_usage();
     let _ = writeln!(out, "```text\n{usage}\n```\n");
@@ -79,33 +110,51 @@ fn section(out: &mut String, command: &Command, path: &str) {
     if command.get_subcommands().next().is_some() {
         out.push('\n');
     }
-    let mut flags: Vec<(bool, String, String)> = command
-        .get_arguments()
-        .filter(|arg| !arg.is_hide_set())
-        .map(|arg| {
-            (
-                // Positionals last: they are read after the flags that qualify
-                // them, which is also the order the usage line puts them in.
-                arg.get_long().is_none() && arg.get_short().is_none(),
-                arg.get_id().as_str().to_owned(),
-                format!("{}{}", spelling(arg), metadata(command, arg)),
-            )
-        })
-        .collect();
+    let mut flags: Vec<(bool, String, String)> = Vec::new();
+    let mut shared: Vec<(String, String)> = Vec::new();
+    for arg in command.get_arguments().filter(|arg| !arg.is_hide_set()) {
+        let id = arg.get_id().as_str().to_owned();
+        let line = format!("{}{}", spelling(arg), metadata(command, arg));
+        let positional = arg.get_long().is_none() && arg.get_short().is_none();
+        if !positional && common.get(&id) == Some(&line) {
+            shared.push((id.clone(), short_name(arg)));
+        }
+        // Positionals last: they are read after the flags that qualify
+        // them, which is also the order the usage line puts them in.
+        flags.push((positional, id, line));
+    }
     // Sorted by name, because clap's declaration order is a property of the
     // struct and this file is read by someone looking one flag up.
     flags.sort();
-    for (_, _, flag) in flags {
+    // The root keeps its own list; only its descendants point back to it.
+    let elide = path != "ego" && shared.len() >= SHARED_OPTION_THRESHOLD;
+    for (_, id, flag) in &flags {
+        if elide && shared.iter().any(|(shared_id, _)| shared_id == id) {
+            continue;
+        }
         let _ = writeln!(out, "{flag}");
     }
+    if elide {
+        shared.sort();
+        let names: Vec<_> = shared.into_iter().map(|(_, name)| name).collect();
+        let _ = writeln!(
+            out,
+            "\nOptions identical to those of `ego` (see its section for their help and constraints): {}.",
+            names.join(", ")
+        );
+    }
     out.push('\n');
-    if matches!(command.get_name(), "resume" | "continue") {
+    if command.get_name() == "continue" {
+        out.push_str("`ego continue` is the same command as `ego resume`; the section of `ego resume` describes both.\n\n");
+    }
+    if command.get_name() == "resume" {
         out.push_str(
             "`ego continue` shares the saved-session admission and options of `ego resume`.\n\
              In the terminal use `/resume [ID]` or `/continue`. Current execution authority\n\
              is measured before effects: narrower authority is automatic; potentially\n\
              wider authority requires explicit human consent. Headless callers cannot\n\
-             approve wider authority.\n\n\
+             be asked; `--accept-authority-delta` allows the change shown for this one\n\
+             resume and nothing later.\n\n\
              With terminal stdin and stdout, `ego resume ID \"next task\"` opens the\n\
              interactive seat, submits the task once, and accepts further messages.\n\
              Explicit `--output` (including `text`), stdin `-`, `--answer`, an agent file,\n\
@@ -133,7 +182,7 @@ fn section(out: &mut String, command: &Command, path: &str) {
         );
     }
     for sub in command.get_subcommands().filter(|sub| !sub.is_hide_set()) {
-        section(out, sub, &format!("{path} {}", sub.get_name()));
+        section(out, sub, &format!("{path} {}", sub.get_name()), common);
     }
 }
 
@@ -166,10 +215,18 @@ fn metadata(command: &Command, arg: &clap::Arg) -> String {
     if !defaults.is_empty() {
         let _ = write!(out, " Default: {}.", defaults.join(", "));
     }
-    if matches!(
-        arg.get_action(),
-        clap::ArgAction::Append | clap::ArgAction::Count
-    ) {
+    let says_repeatable = arg.get_help().is_some_and(|help| {
+        help.to_string()
+            .trim_end()
+            .trim_end_matches('.')
+            .ends_with("Repeatable")
+    });
+    if !says_repeatable
+        && matches!(
+            arg.get_action(),
+            clap::ArgAction::Append | clap::ArgAction::Count
+        )
+    {
         out.push_str(" Repeatable.");
     }
     let values: Vec<_> = arg
@@ -184,6 +241,8 @@ fn metadata(command: &Command, arg: &clap::Arg) -> String {
     let conflicts: Vec<_> = command
         .get_arg_conflicts_with(arg)
         .into_iter()
+        // A hidden option is not offered to the reader, so it is not a named conflict.
+        .filter(|other| !other.is_hide_set())
         .map(|other| match (other.get_long(), other.get_short()) {
             (Some(long), _) => format!("`--{long}`"),
             (_, Some(short)) => format!("`-{short}`"),
@@ -217,4 +276,39 @@ fn value_name(arg: &clap::Arg) -> String {
 fn help(arg: &clap::Arg) -> String {
     arg.get_help()
         .map_or_else(|| "(undocumented)".to_owned(), |help| help.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::metadata;
+    use clap::{Arg, ArgAction, Command};
+
+    // Catches: an Append flag whose help already ends with Repeatable is rendered with the
+    // word twice ("Repeatable Repeatable."), while one without it still gains the word.
+    #[test]
+    fn repeatable_is_rendered_once_for_append_flags() {
+        let command = Command::new("t")
+            .arg(
+                Arg::new("own")
+                    .long("own")
+                    .action(ArgAction::Append)
+                    .help("Allow rule. Repeatable."),
+            )
+            .arg(
+                Arg::new("plain")
+                    .long("plain")
+                    .action(ArgAction::Append)
+                    .help("Allow rule."),
+            );
+        let own = command
+            .get_arguments()
+            .find(|a| a.get_id() == "own")
+            .unwrap();
+        let plain = command
+            .get_arguments()
+            .find(|a| a.get_id() == "plain")
+            .unwrap();
+        assert_eq!(metadata(&command, own), "");
+        assert_eq!(metadata(&command, plain), " Repeatable.");
+    }
 }

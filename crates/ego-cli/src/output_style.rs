@@ -105,7 +105,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::create_dir(home.path().join("output-styles")).unwrap();
         let text = "---\nmode: yolo\n---\n@secrets.txt";
-        let path = home.path().join("output-styles/review.md");
+        let path = home.path().join("output-styles").join("review.md");
         std::fs::write(&path, text).unwrap();
         let style = load("review", Some(home.path())).unwrap();
         assert_eq!(style.text, text);

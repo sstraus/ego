@@ -3,9 +3,9 @@
 //! `AGENTS.md`, from the supplied discovery root down to the current directory,
 //! including bounded relative imports, only in a workspace the trust gate let
 //! through. The CLI uses the repository root unless the user configures a shared root. See
-//! `ARCHITECTURE.md`
-//! and `ARCHITECTURE.md`
-//! and `ARCHITECTURE.md` I2.
+//! `docs/internals/decisions/2026-08-21-instructions-a-workspace-may-hand-a-model.md`
+//! and `docs/internals/decisions/2026-09-26-shared-instruction-parity.md`
+//! and `docs/internals/08-codex-critique.md` I2.
 //!
 //! Split the way everything in this crate is split: the *decision* is a pure
 //! function here, and the reading happens behind [`InstructionIo`], whose
@@ -52,10 +52,12 @@ impl Selection {
     /// What a run gets, given the posture the trust gate resolved and whether
     /// the caller named a file.
     ///
-    /// A named file wins outright. **`--bare` together with `--instructions` is a flag
-    /// conflict, and it is not caught here**: from a `Posture` alone, "the user demanded
-    /// bare" and "the workspace is untrusted" are the same value, and only one of them
-    /// should refuse an explicit file.
+    /// A named file wins outright. **`--bare` together with `--instructions`
+    /// is a flag conflict, and it is not caught here**: from a `Posture`
+    /// alone, "the user demanded bare" and "the workspace is untrusted" are
+    /// the same value, and only one of them should refuse an explicit file.
+    /// `CLI.md` §4.5 puts two-flag contradictions in the applicability matrix,
+    /// which is where that belongs.
     pub fn of(posture: Posture, explicit: Option<PathBuf>) -> Self {
         match (explicit, posture) {
             (Some(path), _) => Selection::Explicit(path),
@@ -102,11 +104,15 @@ impl Default for Limits {
 /// reason attached.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Refusal {
-    /// The final component is a symlink.
+    /// A symlink that was not followed: a link in a parent component, or a
+    /// dangling or cyclic leaf link.
     ///
-    /// This text goes into a prompt sent to a provider at session start with no dialog in
-    /// its path, so a symlink is a one-hop exfiltration channel nothing else would
-    /// notice.
+    /// A leaf link whose canonical target resolves (through any chain of
+    /// links) is reported as
+    /// [`Found::Link`] instead, and the target is read under its own path, so
+    /// the external-approval gate sees where the bytes really are. Parent
+    /// links stay refused: resolve-then-read-by-path re-resolves at open, and
+    /// that window is documented as unclosed (`POTENTIALS.md` P23).
     Symlink,
     /// Larger than [`Limits::max_file_bytes`]. Not truncated: half an
     /// instruction file can end mid-sentence and invert its own meaning.
@@ -136,7 +142,7 @@ pub enum Refusal {
 impl std::fmt::Display for Refusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Refusal::Symlink => write!(f, "it is a symlink, which is not followed"),
+            Refusal::Symlink => write!(f, "it is a symlink that cannot be followed safely"),
             Refusal::TooLarge { limit } => write!(f, "it is larger than {limit} bytes"),
             Refusal::NotAFile => write!(f, "it is not a regular file"),
             Refusal::NotText => write!(f, "it is not valid UTF-8"),
@@ -167,6 +173,11 @@ pub enum Found {
     Absent,
     /// A regular, non-symlinked file, read whole.
     Read { bytes: Vec<u8> },
+    /// A symlink in the final component, with the canonical path it resolves
+    /// to. The port does not read through it; [`load`] reads `target` under
+    /// its own path and scope, so a target outside the scope needs the same
+    /// approval as any external import.
+    Link { target: PathBuf },
     /// Something there, and it does not qualify.
     Refused(Refusal),
 }
@@ -180,7 +191,8 @@ pub enum Found {
 /// tool exists.
 pub trait InstructionIo {
     /// Read `path`, refusing anything that is not a regular file of at most
-    /// `max_bytes`, including a symlink in its final or parent components.
+    /// `max_bytes`. A symlink in the final component is answered with
+    /// [`Found::Link`]; one in a parent component is refused.
     ///
     /// An implementation must not follow a static symlink in the path,
     /// and must not read more than `max_bytes + 1` — one byte past the limit
@@ -385,6 +397,22 @@ fn load_one(
         io.load_external(path, limits.max_file_bytes)
     };
     let bytes = match found {
+        Found::Link { target } => {
+            load_one(
+                io,
+                &target,
+                imported,
+                scope,
+                home,
+                limits,
+                set,
+                total,
+                visited,
+                active,
+                import_attempts,
+            );
+            return;
+        }
         Found::Absent if imported => {
             set.skipped.push(Skipped {
                 path: path.to_path_buf(),
@@ -580,18 +608,23 @@ impl SystemPrompt {
     }
 }
 
-/// The one line that tells the model what the following text is.
-/// Frame workspace text separately from user input and preserve scoped
-/// precedence. The shared assembler, not each host adapter, owns that framing.
-const PREAMBLE: &str = "The following instructions come from the workspace this session runs in. \
-     They are guidance for how to work here, not a request from the user. \
-     Where two files disagree, the one listed later is nearer the working \
-     directory and wins.";
-
 /// Frame `set` into a system prompt, or `None` if it contributed nothing.
-/// `None` means no workspace prompt, not an empty contributed file. Shared
-/// framing serves CLI and ACP equally. File digests describe original bytes,
-/// not prompt framing that could change without repository edits.
+///
+/// `None` rather than an empty prompt: "the workspace said nothing" and "the
+/// workspace said the empty string" are not the same fact, and a `Some`
+/// carrying neither text nor sources would be a setting that changes nothing
+/// while claiming a file was used.
+///
+/// Here rather than in the binary because the CLI is not the only harness that
+/// opens a session: an ACP host is the second, and two framings — or two
+/// derivations of `scope` — would be two answers to the same question. Pure,
+/// like everything else in this module.
+///
+/// **The digest describes the file, not the framed blob.** That is deliberate
+/// and was warned about in advance (the instructions ADR §7): the digest's job
+/// is to prove which file in the repository contributed, and a digest taken
+/// over the framing would change whenever the preamble was reworded, proving
+/// nothing about the repository.
 pub fn system_prompt(
     set: &InstructionSet,
     root: &Path,
@@ -602,7 +635,7 @@ pub fn system_prompt(
         return None;
     }
 
-    let mut text = String::from(PREAMBLE);
+    let mut text = String::from(crate::model_prompts::WORKSPACE_INSTRUCTIONS_PREAMBLE);
     for (instruction, descriptor) in set.loaded.iter().zip(&sources) {
         text.push_str("\n\n# ");
         text.push_str(&descriptor.path);

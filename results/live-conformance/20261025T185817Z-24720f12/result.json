@@ -1,0 +1,906 @@
+{
+  "schema": 1,
+  "run_id": "20261025T185817Z-24720f12",
+  "date": "2026-10-25T19:03:02.479385+00:00",
+  "ego_commit": "23f75923d59ebccd9a043345290ed3a3ac122fcc",
+  "binary_sha256": "d703f057af6f36a3f021ac25081d18851d73b8a8821f6cc098406979f15d4806",
+  "models": [
+    "openai-codex/gpt-6-luna",
+    "openai/gpt-6-luna",
+    "openrouter/anthropic/claude-haiku-5.5",
+    "openrouter/openai/gpt-6-luna",
+    "anthropic/anthropic/claude-haiku-5.5"
+  ],
+  "suites": [
+    "cache",
+    "skills",
+    "compaction",
+    "recovery"
+  ],
+  "fixture_seed": 419,
+  "fixture_hashes": {
+    "418/description/.ego/skills/amber-check/SKILL.md": "78cca7930e0b7442026fdc158537f04a215371f63872188100dcc29002db2318",
+    "418/tools/.ego/skills/tools-check/SKILL.md": "d718aa98cedb9011e1cbd2bec2e9f5210ee44f5928b56a04dd0c73dcb58596c8",
+    "418/arguments/.ego/skills/args-check/SKILL.md": "6fa12ce9d8b4f8708583414b4e0a761314eb03e9f66507b922445ef475844f8f"
+  },
+  "ceiling_usd": "0.95",
+  "provider_ceiling_usd": "0.90",
+  "cost_usd": "0.565453165",
+  "cost_uncertain": true,
+  "cases": [
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "description",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 4,
+            "zero_hits": 0,
+            "weighted_share": 0.8318891836133215
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 3279,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 3629,
+            "cache_read_tokens": 2908,
+            "cache_read_share": 0.8013226784238082,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4018,
+            "cache_read_tokens": 3351,
+            "cache_read_share": 0.8339970134395222,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4392,
+            "cache_read_tokens": 3740,
+            "cache_read_share": 0.8515482695810564,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4926,
+            "cache_read_tokens": 4114,
+            "cache_read_share": 0.8351603735282176,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.001091105",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8318891836133215,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill",
+        "skill",
+        "skill",
+        "skill"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "model",
+      "status": "blocked",
+      "reason": "isolated_home_missing_codex_credential; no login authorized"
+    },
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "tools",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 5,
+            "zero_hits": 0,
+            "weighted_share": 0.8304475226425146
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 3273,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 3623,
+            "cache_read_tokens": 2904,
+            "cache_read_share": 0.8015456803753795,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4043,
+            "cache_read_tokens": 3345,
+            "cache_read_share": 0.8273559238189463,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4417,
+            "cache_read_tokens": 3765,
+            "cache_read_share": 0.8523884989812089,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4977,
+            "cache_read_tokens": 4139,
+            "cache_read_share": 0.8316254771950975,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5464,
+            "cache_read_tokens": 4552,
+            "cache_read_share": 0.8330893118594437,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.001356550",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8304475226425146,
+        "later_zero_hits": 0,
+        "read_calls": 1,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill",
+        "skill",
+        "skill",
+        "skill",
+        "read"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "arguments",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 3,
+            "zero_hits": 0,
+            "weighted_share": 0.811484638893357
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 3288,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 3639,
+            "cache_read_tokens": 2910,
+            "cache_read_share": 0.7996702390766695,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4101,
+            "cache_read_tokens": 3359,
+            "cache_read_share": 0.8190685198732016,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4694,
+            "cache_read_tokens": 3821,
+            "cache_read_share": 0.814017895185343,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.001035025",
+        "unknown_cost": false,
+        "weighted_later_share": 0.811484638893357,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill",
+        "skill",
+        "skill"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "description",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.8486932599724897
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1854,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2181,
+            "cache_read_tokens": 1851,
+            "cache_read_share": 0.8486932599724897,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8486932599724897,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "model",
+      "status": "blocked",
+      "reason": "isolated_home_missing_codex_credential; no login authorized"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "tools",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 2,
+            "zero_hits": 0,
+            "weighted_share": 0.8540962837837838
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1851,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2200,
+            "cache_read_tokens": 1848,
+            "cache_read_share": 0.84,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 2536,
+            "cache_read_tokens": 2197,
+            "cache_read_share": 0.8663249211356467,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8540962837837838,
+        "later_zero_hits": 0,
+        "read_calls": 1,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill",
+        "read"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "arguments",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.8308658591296546
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1855,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2229,
+            "cache_read_tokens": 1852,
+            "cache_read_share": 0.8308658591296546,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8308658591296546,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 2,
+            "zero_hits": 1,
+            "weighted_share": 0.44554455445544555
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6213,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5224,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "compaction",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6715,
+            "cache_read_tokens": 5760,
+            "cache_read_share": 0.8577810871183916,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.48245246670575426,
+        "later_zero_hits": 1,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "checkpoint_valid": true,
+      "summary_model_attributed": true,
+      "summary_requests": [
+        {
+          "input_tokens": 5224,
+          "cache_read_tokens": 0,
+          "cache_read_share": 0.0,
+          "role": "compaction",
+          "turn_position": "first"
+        }
+      ],
+      "summary_cache_policy": "baseline: ADR omits cache controls"
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 2,
+            "zero_hits": 1,
+            "weighted_share": 0.4638762368462384
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6140,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5147,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "compaction",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6594,
+            "cache_read_tokens": 5907,
+            "cache_read_share": 0.8958143767060964,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.001868595",
+        "unknown_cost": false,
+        "weighted_later_share": 0.503108764159782,
+        "later_zero_hits": 1,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "checkpoint_valid": true,
+      "summary_model_attributed": true,
+      "summary_requests": [
+        {
+          "input_tokens": 5147,
+          "cache_read_tokens": 0,
+          "cache_read_share": 0.0,
+          "role": "compaction",
+          "turn_position": "first"
+        }
+      ],
+      "summary_cache_policy": "baseline: ADR omits cache controls"
+    },
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "fail",
+      "reasons": [
+        "completed",
+        "completed",
+        "process_failed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 2,
+            "zero_hits": 1,
+            "weighted_share": 0.4522884012539185
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.8974869370490172
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7586,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 8038,
+            "cache_read_tokens": 7214,
+            "cache_read_share": 0.8974869370490172,
+            "role": "compaction",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8364,
+            "cache_read_tokens": 7214,
+            "cache_read_share": 0.8625059780009565,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.001839180",
+        "unknown_cost": false,
+        "weighted_later_share": 0.87964882331423,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "checkpoint_valid": true,
+      "summary_model_attributed": true,
+      "summary_requests": [
+        {
+          "input_tokens": 8038,
+          "cache_read_tokens": 7214,
+          "cache_read_share": 0.8974869370490172,
+          "role": "compaction",
+          "turn_position": "first"
+        }
+      ],
+      "summary_cache_policy": "baseline: ADR omits cache controls"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 2,
+            "zero_hits": 1,
+            "weighted_share": 0.44781634938409853
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9345607808340728
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4216,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4508,
+            "cache_read_tokens": 4213,
+            "cache_read_share": 0.9345607808340728,
+            "role": "compaction",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4714,
+            "cache_read_tokens": 3999,
+            "cache_read_share": 0.8483241408570217,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.890479288657558,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "checkpoint_valid": true,
+      "summary_model_attributed": true,
+      "summary_requests": [
+        {
+          "input_tokens": 4508,
+          "cache_read_tokens": 4213,
+          "cache_read_share": 0.9345607808340728,
+          "role": "compaction",
+          "turn_position": "first"
+        }
+      ],
+      "summary_cache_policy": "baseline: ADR omits cache controls"
+    },
+    {
+      "model": "anthropic/anthropic/claude-haiku-5.5",
+      "provider": "anthropic",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7613,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.00502175",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 1,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "anthropic/anthropic/claude-haiku-5.5",
+      "provider": "anthropic",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7610,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.00494775",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 1,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "anthropic/anthropic/claude-haiku-5.5",
+      "provider": "anthropic",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7607,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.00497625",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 1,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "anthropic/anthropic/claude-haiku-5.5",
+      "provider": "anthropic",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "fail",
+      "reasons": [
+        "completed",
+        "process_failed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7590,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_read_share": null,
+            "role": "compaction",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.0047205",
+        "unknown_cost": true,
+        "weighted_later_share": null,
+        "later_zero_hits": 1,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "checkpoint_valid": false,
+      "summary_model_attributed": true,
+      "summary_requests": [
+        {
+          "input_tokens": 0,
+          "cache_read_tokens": 0,
+          "cache_read_share": null,
+          "role": "compaction",
+          "turn_position": "first"
+        }
+      ],
+      "summary_cache_policy": "baseline: ADR omits cache controls"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "recovery",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "anthropic/anthropic/claude-haiku-5.5",
+      "provider": "anthropic",
+      "suite": "recovery",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    }
+  ]
+}

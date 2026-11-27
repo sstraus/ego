@@ -1,0 +1,1785 @@
+{
+  "schema": 1,
+  "run_id": "20261022T230209Z-04d77b7e",
+  "date": "2026-10-22T23:09:08.302533+00:00",
+  "ego_commit": "eab45143e03d47b7ccec0e5619db692bebe230ba",
+  "binary_sha256": "43118ed81807822e84921c7fc4cdb2cae6e150dd8edbef2d40e9e8d2ff2297bc",
+  "models": [
+    "openai-codex/gpt-6-luna",
+    "openai/gpt-6-luna",
+    "anthropic/claude-sonnet-5-5",
+    "openrouter/anthropic/claude-sonnet-5.5",
+    "openrouter/openai/gpt-6-luna"
+  ],
+  "suites": [
+    "cache",
+    "skills",
+    "compaction",
+    "recovery"
+  ],
+  "fixture_seed": 419,
+  "fixture_hashes": {
+    "418/description/.ego/skills/amber-check/SKILL.md": "78cca7930e0b7442026fdc158537f04a215371f63872188100dcc29002db2318",
+    "418/model/.ego/skills/model-check/SKILL.md": "21431c0d050c80fea2d4fff377117385ad05d4d41872479175b0318a94723c04",
+    "418/tools/.ego/skills/tools-check/SKILL.md": "d718aa98cedb9011e1cbd2bec2e9f5210ee44f5928b56a04dd0c73dcb58596c8",
+    "418/arguments/.ego/skills/args-check/SKILL.md": "6fa12ce9d8b4f8708583414b4e0a761314eb03e9f66507b922445ef475844f8f"
+  },
+  "ceiling_usd": "0.95",
+  "provider_ceiling_usd": "0.90",
+  "cost_usd": "0.007182790",
+  "cost_uncertain": true,
+  "cases": [
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9469570072585148
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7164,
+            "cache_read_tokens": 6784,
+            "cache_read_share": 0.9469570072585148,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6951420473271372
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9585981478118758
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4145,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4370,
+            "cache_read_tokens": 4142,
+            "cache_read_share": 0.9478260869565217,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4595,
+            "cache_read_tokens": 4367,
+            "cache_read_share": 0.9503808487486398,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4820,
+            "cache_read_tokens": 4592,
+            "cache_read_share": 0.9526970954356846,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5057,
+            "cache_read_tokens": 4817,
+            "cache_read_share": 0.9525410322325489,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5282,
+            "cache_read_tokens": 5054,
+            "cache_read_share": 0.9568345323741008,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5507,
+            "cache_read_tokens": 5279,
+            "cache_read_share": 0.9585981478118758,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5732,
+            "cache_read_tokens": 5504,
+            "cache_read_share": 0.9602233077459874,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5969,
+            "cache_read_tokens": 5729,
+            "cache_read_share": 0.9597922600100519,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6194,
+            "cache_read_tokens": 5966,
+            "cache_read_share": 0.9631901840490797,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6419,
+            "cache_read_tokens": 6191,
+            "cache_read_share": 0.9644804486680169,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6644,
+            "cache_read_tokens": 6416,
+            "cache_read_share": 0.9656833232992174,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.001537295",
+        "unknown_cost": false,
+        "weighted_later_share": 0.958210236181485,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "fork-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9690646432219466
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6853,
+            "cache_read_tokens": 6641,
+            "cache_read_share": 0.9690646432219466,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.000110335",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6951420473271372
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9585981478118758
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4145,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4370,
+            "cache_read_tokens": 4142,
+            "cache_read_share": 0.9478260869565217,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4595,
+            "cache_read_tokens": 4367,
+            "cache_read_share": 0.9503808487486398,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4820,
+            "cache_read_tokens": 4592,
+            "cache_read_share": 0.9526970954356846,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5057,
+            "cache_read_tokens": 4817,
+            "cache_read_share": 0.9525410322325489,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5282,
+            "cache_read_tokens": 5054,
+            "cache_read_share": 0.9568345323741008,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5507,
+            "cache_read_tokens": 5279,
+            "cache_read_share": 0.9585981478118758,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5732,
+            "cache_read_tokens": 5504,
+            "cache_read_share": 0.9602233077459874,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5969,
+            "cache_read_tokens": 5729,
+            "cache_read_share": 0.9597922600100519,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6194,
+            "cache_read_tokens": 5966,
+            "cache_read_share": 0.9631901840490797,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6419,
+            "cache_read_tokens": 6191,
+            "cache_read_share": 0.9644804486680169,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6644,
+            "cache_read_tokens": 6416,
+            "cache_read_share": 0.9656833232992174,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.001545295",
+        "unknown_cost": false,
+        "weighted_later_share": 0.958210236181485,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "fork-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9690646432219466
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6853,
+            "cache_read_tokens": 6641,
+            "cache_read_share": 0.9690646432219466,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.000097835",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6953489901980133
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9583408802753124
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4147,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4374,
+            "cache_read_tokens": 4144,
+            "cache_read_share": 0.9474165523548239,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4601,
+            "cache_read_tokens": 4371,
+            "cache_read_share": 0.950010867202782,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4828,
+            "cache_read_tokens": 4598,
+            "cache_read_share": 0.9523612261806131,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5067,
+            "cache_read_tokens": 4825,
+            "cache_read_share": 0.9522399842115651,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5294,
+            "cache_read_tokens": 5064,
+            "cache_read_share": 0.9565545901020023,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5521,
+            "cache_read_tokens": 5291,
+            "cache_read_share": 0.9583408802753124,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5748,
+            "cache_read_tokens": 5518,
+            "cache_read_share": 0.9599860821155184,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5987,
+            "cache_read_tokens": 5745,
+            "cache_read_share": 0.9595790880240521,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6214,
+            "cache_read_tokens": 5984,
+            "cache_read_share": 0.9629868039909881,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6441,
+            "cache_read_tokens": 6211,
+            "cache_read_share": 0.9642912591212545,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6668,
+            "cache_read_tokens": 6438,
+            "cache_read_share": 0.9655068986202759,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.001550115",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9579540029303788,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "fork-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9691726043332849
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6877,
+            "cache_read_tokens": 6665,
+            "cache_read_share": 0.9691726043332849,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.000103575",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "suite": "cache",
+      "case": "prerequisite",
+      "status": "blocked",
+      "reason": "external blocker: direct Anthropic key capped until 2026-11-01; no retry"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "skills",
+      "case": "description",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.7675276752767528
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1846,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2168,
+            "cache_read_tokens": 1664,
+            "cache_read_share": 0.7675276752767528,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.7675276752767528,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "skills",
+      "case": "model",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.7710843373493976
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1838,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2158,
+            "cache_read_tokens": 1664,
+            "cache_read_share": 0.7710843373493976,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.7710843373493976,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill"
+      ],
+      "model_override_attributed": true
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "skills",
+      "case": "tools",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 2,
+            "zero_hits": 1,
+            "weighted_share": 0.3530659876936134
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1844,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2190,
+            "cache_read_tokens": 1664,
+            "cache_read_share": 0.7598173515981735,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 2523,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.3530659876936134,
+        "later_zero_hits": 1,
+        "read_calls": 1,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill",
+        "read"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "skills",
+      "case": "arguments",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1846,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2214,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.0,
+        "later_zero_hits": 1,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "skills",
+      "case": "description",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.8451982799808887
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1772,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2093,
+            "cache_read_tokens": 1769,
+            "cache_read_share": 0.8451982799808887,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.000297540",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8451982799808887,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "skills",
+      "case": "model",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1763,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2165,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.0002333",
+        "unknown_cost": false,
+        "weighted_later_share": 0.0,
+        "later_zero_hits": 1,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill"
+      ],
+      "model_override_attributed": true
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "skills",
+      "case": "tools",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 2,
+            "zero_hits": 0,
+            "weighted_share": 0.8509138956177054
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1764,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2106,
+            "cache_read_tokens": 1761,
+            "cache_read_share": 0.8361823361823362,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 2435,
+            "cache_read_tokens": 2103,
+            "cache_read_share": 0.8636550308008214,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.000378040",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8509138956177054,
+        "later_zero_hits": 0,
+        "read_calls": 1,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill",
+        "read"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "skills",
+      "case": "arguments",
+      "status": "pass",
+      "reasons": [
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.8259449370041997
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1773,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2143,
+            "cache_read_tokens": 1770,
+            "cache_read_share": 0.8259449370041997,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.00031230",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8259449370041997,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": true,
+      "tool_names": [
+        "skill"
+      ],
+      "model_override_attributed": null
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "suite": "skills",
+      "case": "prerequisite",
+      "status": "blocked",
+      "reason": "external blocker: direct Anthropic key capped until 2026-11-01; no retry"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "description",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "tool_names": [],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "model",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "tool_names": [],
+      "model_override_attributed": false
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "tools",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "tool_names": [],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "arguments",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "tool_names": [],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "description",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "tool_names": [],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "model",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "tool_names": [],
+      "model_override_attributed": false
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "tools",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "tool_names": [],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "arguments",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "invoked": false,
+      "tool_names": [],
+      "model_override_attributed": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 2,
+            "zero_hits": 2,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.910424538786397
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4207,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4499,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.910424538786397,
+            "role": "compaction",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4629,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.44872918492550395,
+        "later_zero_hits": 1,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "checkpoint_valid": true,
+      "summary_model_attributed": true,
+      "summary_requests": [
+        {
+          "input_tokens": 4499,
+          "cache_read_tokens": 4096,
+          "cache_read_share": 0.910424538786397,
+          "role": "compaction",
+          "turn_position": "first"
+        }
+      ],
+      "summary_cache_policy": "baseline: ADR omits cache controls"
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 2,
+            "zero_hits": 1,
+            "weighted_share": 0.4479762176995198
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9333785004516711
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4136,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4428,
+            "cache_read_tokens": 4133,
+            "cache_read_share": 0.9333785004516711,
+            "role": "compaction",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4610,
+            "cache_read_tokens": 3918,
+            "cache_read_share": 0.8498915401301519,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.001017160",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8907944235450321,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      },
+      "checkpoint_valid": true,
+      "summary_model_attributed": true,
+      "summary_requests": [
+        {
+          "input_tokens": 4428,
+          "cache_read_tokens": 4133,
+          "cache_read_share": 0.9333785004516711,
+          "role": "compaction",
+          "turn_position": "first"
+        }
+      ],
+      "summary_cache_policy": "baseline: ADR omits cache controls"
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "suite": "compaction",
+      "case": "prerequisite",
+      "status": "blocked",
+      "reason": "external blocker: direct Anthropic key capped until 2026-11-01; no retry"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "external blocker: OpenRouter Claude price row unavailable"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "compaction",
+      "case": "checkpoint-continuation",
+      "status": "blocked",
+      "reasons": [
+        "budget_refused",
+        "pricing or reservation admission refused"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "recovery",
+      "case": "fault-proxy",
+      "status": "not_applicable",
+      "reason": "provider_has_no_supported_base_url_override"
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "recovery",
+      "case": "before",
+      "status": "fail",
+      "reasons": [
+        "process_failed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": null
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_read_share": null,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_read_share": null,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": true,
+        "weighted_later_share": null,
+        "later_zero_hits": 1,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": true
+      },
+      "proxy_requests": 2,
+      "fault_injected": true,
+      "real_text_seen": false,
+      "upstream_statuses": [],
+      "transport_errors": [
+        "SSLCertVerificationError"
+      ]
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "recovery",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "suite": "recovery",
+      "case": "prerequisite",
+      "status": "blocked",
+      "reason": "external blocker: direct Anthropic key capped until 2026-11-01; no retry"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "recovery",
+      "case": "fault-proxy",
+      "status": "not_applicable",
+      "reason": "provider_has_no_supported_base_url_override"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "recovery",
+      "case": "fault-proxy",
+      "status": "not_applicable",
+      "reason": "provider_has_no_supported_base_url_override"
+    }
+  ]
+}

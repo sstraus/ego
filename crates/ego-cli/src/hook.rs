@@ -16,7 +16,7 @@ use ego_core::hook::{
 };
 use ego_core::mcp::McpRuntimeBinding;
 use ego_core::permit::{
-    Classification, HttpRoute, HttpScheme, NetworkTarget, PolicyEngine, PreparedCall,
+    Classification, HttpRoute, HttpScheme, NetworkTarget, PolicyEngine, PreparedCall, Resolution,
 };
 use ego_core::store::evidence::EvidenceRef;
 use ego_core::turn::{ToolEffectPorts, ToollessGenerationOwner};
@@ -199,7 +199,7 @@ impl<S: ToollessGenerationService> HookPromptAdapter<S> {
                     context: None,
                     raw: Vec::new(),
                     decision: HookDecision::Continue,
-                    feedback: None,
+                    feedback: Some(error.to_string()),
                     failure: Some(PromptHookFailure::Generation),
                     evidence: None,
                     delivery: error.delivery(),
@@ -217,11 +217,11 @@ impl<S: ToollessGenerationService> HookPromptAdapter<S> {
                 evidence: Some(generated.evidence),
                 delivery: generated.delivery,
             }),
-            Err(_) => Ok(PromptHookSettlement {
+            Err(error) => Ok(PromptHookSettlement {
                 raw: generated.raw,
                 context: None,
                 decision: HookDecision::Continue,
-                feedback: None,
+                feedback: Some(error.to_string()),
                 failure: Some(PromptHookFailure::Malformed),
                 evidence: Some(generated.evidence),
                 delivery: generated.delivery,
@@ -294,6 +294,7 @@ impl ToollessGenerationService for RunToollessGenerationService<'_, '_> {
 /// this owner binds each prepared effect to the run policy and converts the
 /// settlement into the core hook result vocabulary.
 pub struct HookPortAdapter<'a> {
+    egress: Option<Arc<dyn ego_core::egress::EgressFilter + 'a>>,
     policy: Arc<PolicyEngine>,
     effects: ToolEffectPorts<'a>,
     mcp: Option<Arc<dyn HookInvocationPort + 'a>>,
@@ -312,13 +313,63 @@ impl<'a> HookPortAdapter<'a> {
             effects,
             mcp,
             prompt,
+            egress: None,
         }
+    }
+
+    fn with_egress(mut self, filter: Option<Arc<dyn ego_core::egress::EgressFilter + 'a>>) -> Self {
+        self.egress = filter;
+        self
     }
 
     async fn invoke_owned(
         &self,
         request: HookInvocationRequest,
     ) -> Result<HookOutcome, Box<HookFailure>> {
+        if let Some(filter) = &self.egress {
+            let destination = match request.handler() {
+                HookHandlerConfig::Http { url, .. } => Some(url.clone()),
+                HookHandlerConfig::McpTool { server, tool, .. } => Some(format!("{server}/{tool}")),
+                _ => None,
+            };
+            if let Some(destination) = destination {
+                let mut payload = serde_json::to_value(
+                    HookHandlerRequestV1::from_runtime(&request).map_err(|_| {
+                        self.failure(
+                            &request,
+                            HookFailureKind::HandlerFailed,
+                            "invalid hook payload".to_owned(),
+                        )
+                    })?,
+                )
+                .map_err(|_| {
+                    self.failure(
+                        &request,
+                        HookFailureKind::HandlerFailed,
+                        "invalid hook payload".to_owned(),
+                    )
+                })?;
+                // The configured input is sent too, so the filter screens it.
+                if let HookHandlerConfig::McpTool { input, .. } = request.handler() {
+                    payload
+                        .as_object_mut()
+                        .expect("hook envelope")
+                        .insert("input".to_owned(), input.clone());
+                }
+                filter
+                    .filter(ego_core::egress::EgressRequest {
+                        direction: "hook_payload",
+                        destination: &destination,
+                        payload,
+                        turn: Some(request.causality().turn()),
+                        scope: Some(request.effect_scope()),
+                    })
+                    .await
+                    .map_err(|message| {
+                        self.failure(&request, HookFailureKind::EffectDenied, message.to_owned())
+                    })?;
+            }
+        }
         match request.handler() {
             HookHandlerConfig::Command { .. } => self.invoke_command(request).await,
             HookHandlerConfig::Http { .. } => self.invoke_http(request).await,
@@ -331,13 +382,16 @@ impl<'a> HookPortAdapter<'a> {
         &self,
         request: HookInvocationRequest,
     ) -> Result<HookOutcome, Box<HookFailure>> {
-        let prepared = CommandHookAdapter::prepare(request.clone())
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
-        let (prepared, effects) = self.authorize(prepared)?;
+        let prepared = CommandHookAdapter::prepare(request.clone()).map_err(|error| {
+            self.failure(&request, HookFailureKind::HandlerFailed, error.to_string())
+        })?;
+        let (prepared, effects) = self.authorize(&request, prepared).await?;
         let result = CommandHookAdapter::new(effects, prepared)
             .invoke(request.clone())
             .await
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+            .map_err(|error| {
+                self.failure(&request, HookFailureKind::HandlerFailed, error.to_string())
+            })?;
         self.settle_adapter(&request, result)
     }
 
@@ -345,14 +399,17 @@ impl<'a> HookPortAdapter<'a> {
         &self,
         request: HookInvocationRequest,
     ) -> Result<HookOutcome, Box<HookFailure>> {
-        let http = HttpHookAdapter::prepare(request.clone())
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        let http = HttpHookAdapter::prepare(request.clone()).map_err(|error| {
+            self.failure(&request, HookFailureKind::HandlerFailed, error.to_string())
+        })?;
         let prepared = self.prepare_http_authority(&request, &http)?;
-        let (prepared, effects) = self.authorize(prepared)?;
+        let (prepared, effects) = self.authorize(&request, prepared).await?;
         let result = HttpHookAdapter::new(effects, prepared, http)
             .invoke(request.clone())
             .await
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+            .map_err(|error| {
+                self.failure(&request, HookFailureKind::HandlerFailed, error.to_string())
+            })?;
         self.settle_adapter(&request, result)
     }
 
@@ -362,6 +419,7 @@ impl<'a> HookPortAdapter<'a> {
     ) -> Result<HookOutcome, Box<HookFailure>> {
         let mcp = self.mcp.as_ref().ok_or_else(|| {
             self.failure(
+                &request,
                 HookFailureKind::BackendUnavailable,
                 "the session has no MCP hook runtime".to_owned(),
             )
@@ -376,7 +434,9 @@ impl<'a> HookPortAdapter<'a> {
         let settlement = HookPromptAdapter::new(Arc::clone(&self.prompt))
             .invoke(request.clone())
             .await
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+            .map_err(|error| {
+                self.failure(&request, HookFailureKind::HandlerFailed, error.to_string())
+            })?;
         if let Some(failure) = settlement.failure() {
             let kind = match failure {
                 PromptHookFailure::Malformed => HookFailureKind::MalformedResult,
@@ -387,7 +447,10 @@ impl<'a> HookPortAdapter<'a> {
                 }
                 PromptHookFailure::Generation => HookFailureKind::BackendUnavailable,
             };
-            return Err(Box::new(HookFailure::new(kind, None)));
+            let feedback = settlement
+                .feedback()
+                .and_then(|text| self.feedback(&request, text).ok());
+            return Err(Box::new(HookFailure::new(kind, feedback)));
         }
         self.outcome(
             &request,
@@ -397,18 +460,30 @@ impl<'a> HookPortAdapter<'a> {
         )
     }
 
-    fn authorize(
+    async fn authorize(
         &self,
+        request: &HookInvocationRequest,
         prepared: PreparedCall,
     ) -> Result<(PreparedCall, ego_core::permit::GuardedEffects<'a>), Box<HookFailure>> {
-        match self.policy.classify(prepared) {
-            Classification::Settled(Ok(authorized)) => Ok(self.effects.clone().bind(authorized)),
-            Classification::Settled(Err(denial)) => {
-                Err(self.failure(HookFailureKind::EffectDenied, denial.to_string()))
+        let resolution = match self.policy.classify(prepared) {
+            Classification::Settled(result) => Resolution::Settled(result),
+            Classification::Ask(pending) => self.policy.settle(pending).await,
+        };
+        match resolution {
+            Resolution::Settled(Ok(authorized)) => Ok(self.effects.clone().bind(authorized)),
+            Resolution::Settled(Err(denial)) => {
+                Err(self.failure(request, HookFailureKind::EffectDenied, denial.to_string()))
             }
-            Classification::Ask(pending) => {
-                Err(self.failure(HookFailureKind::EffectDenied, pending.request().to_string()))
-            }
+            Resolution::Ask(pending) => Err(self.failure(
+                request,
+                HookFailureKind::EffectDenied,
+                pending.request().to_string(),
+            )),
+            Resolution::HumanSettled { .. } | Resolution::Reclassify { .. } => Err(self.failure(
+                request,
+                HookFailureKind::EffectDenied,
+                "unexpected human permission resolution for hook".to_owned(),
+            )),
         }
     }
 
@@ -426,13 +501,15 @@ impl<'a> HookPortAdapter<'a> {
         else {
             unreachable!("the HTTP branch matches the handler kind")
         };
-        let parsed = url::Url::parse(url)
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        let parsed = url::Url::parse(url).map_err(|error| {
+            self.failure(request, HookFailureKind::HandlerFailed, error.to_string())
+        })?;
         if !parsed.username().is_empty()
             || parsed.password().is_some()
             || parsed.fragment().is_some()
         {
             return Err(self.failure(
+                request,
                 HookFailureKind::HandlerFailed,
                 "HTTP hook URL contains unsupported authority or fragment".to_owned(),
             ));
@@ -442,6 +519,7 @@ impl<'a> HookPortAdapter<'a> {
             "https" => HttpScheme::Https,
             _ => {
                 return Err(self.failure(
+                    request,
                     HookFailureKind::HandlerFailed,
                     "HTTP hook URL has an unsupported scheme".to_owned(),
                 ));
@@ -449,20 +527,24 @@ impl<'a> HookPortAdapter<'a> {
         };
         let host = parsed.host_str().ok_or_else(|| {
             self.failure(
+                request,
                 HookFailureKind::HandlerFailed,
                 "HTTP hook URL has no host".to_owned(),
             )
         })?;
         let port = parsed.port_or_known_default().ok_or_else(|| {
             self.failure(
+                request,
                 HookFailureKind::HandlerFailed,
                 "HTTP hook URL has no port".to_owned(),
             )
         })?;
-        let target = NetworkTarget::new(host, port)
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
-        let route = HttpRoute::new(scheme, target)
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        let target = NetworkTarget::new(host, port).map_err(|error| {
+            self.failure(request, HookFailureKind::HandlerFailed, error.to_string())
+        })?;
+        let route = HttpRoute::new(scheme, target).map_err(|error| {
+            self.failure(request, HookFailureKind::HandlerFailed, error.to_string())
+        })?;
         let allowed = allowed_env_vars.as_deref().unwrap_or_default();
         let secret_sources = headers
             .iter()
@@ -485,13 +567,22 @@ impl<'a> HookPortAdapter<'a> {
     ) -> Result<HookOutcome, Box<HookFailure>> {
         let delivery = result.delivery_certainty();
         let HookAdapterResult::Settled(settlement) = result;
-        if settlement.failure().is_some() {
-            let kind = if delivery == DeliveryCertainty::PossiblySent {
+        if let Some(message) = settlement.failure() {
+            let kind = if delivery == DeliveryCertainty::PossiblySent
+                && !settlement.terminal_process_failure()
+            {
                 HookFailureKind::DeliveryUncertain
             } else {
                 HookFailureKind::HandlerFailed
             };
-            return Err(Box::new(HookFailure::new(kind, None)));
+            // The cause (exit code, signal, timeout, launch error) reaches the
+            // hook failure notice through the bounded feedback channel.
+            let cause = match request.handler() {
+                HookHandlerConfig::Command { command, .. } => format!("`{command}`: {message}"),
+                _ => message.to_owned(),
+            };
+            let feedback = self.feedback(request, &cause).ok();
+            return Err(Box::new(HookFailure::new(kind, feedback)));
         }
         self.outcome(
             request,
@@ -514,16 +605,24 @@ impl<'a> HookPortAdapter<'a> {
         let mut outcome = HookOutcome::new(decision, feedback);
         if let Some(context) = context {
             let text = context.text_for(request.lifecycle()).map_err(|error| {
-                self.failure(HookFailureKind::MalformedResult, error.to_string())
+                self.failure(request, HookFailureKind::MalformedResult, error.to_string())
             })?;
             outcome = outcome.with_additional_context(text);
         }
         Ok(outcome)
     }
 
-    fn failure(&self, kind: HookFailureKind, message: String) -> Box<HookFailure> {
+    fn failure(
+        &self,
+        request: &HookInvocationRequest,
+        kind: HookFailureKind,
+        message: String,
+    ) -> Box<HookFailure> {
         tracing::warn!(%message, ?kind, "hook invocation adapter refused an effect");
-        Box::new(HookFailure::new(kind, None))
+        Box::new(HookFailure::new(
+            kind,
+            self.feedback(request, &message).ok(),
+        ))
     }
 
     fn feedback(
@@ -542,6 +641,7 @@ impl<'a> HookPortAdapter<'a> {
 
 /// Builds one immutable CLI hook authority from one generation policy capture.
 pub(crate) struct CliHookInvocationBinding<'a> {
+    egress: Arc<dyn ego_core::egress::EgressFilter + 'a>,
     effects: ToolEffectPorts<'a>,
     prompt: Arc<dyn ToollessGenerationService + 'a>,
 }
@@ -550,12 +650,24 @@ impl<'a> CliHookInvocationBinding<'a> {
     pub(crate) fn new(
         effects: ToolEffectPorts<'a>,
         prompt: Arc<dyn ToollessGenerationService + 'a>,
+        egress: Arc<dyn ego_core::egress::EgressFilter + 'a>,
     ) -> Self {
-        Self { effects, prompt }
+        Self {
+            effects,
+            prompt,
+            egress,
+        }
     }
 }
 
 impl<'binding> HookInvocationBinding for CliHookInvocationBinding<'binding> {
+    fn egress_filter<'a>(&self) -> Option<Arc<dyn ego_core::egress::EgressFilter + 'a>>
+    where
+        Self: 'a,
+    {
+        Some(Arc::clone(&self.egress))
+    }
+
     fn bind<'a>(
         &self,
         policy: Arc<PolicyEngine>,
@@ -567,12 +679,10 @@ impl<'binding> HookInvocationBinding for CliHookInvocationBinding<'binding> {
         let mcp = mcp
             .map(|runtime| runtime.hook_invocation_port(Arc::clone(&policy), self.effects.clone()))
             .transpose()?;
-        Ok(Arc::new(HookPortAdapter::new(
-            policy,
-            self.effects.clone(),
-            mcp,
-            Arc::clone(&self.prompt),
-        )))
+        Ok(Arc::new(
+            HookPortAdapter::new(policy, self.effects.clone(), mcp, Arc::clone(&self.prompt))
+                .with_egress(Some(Arc::clone(&self.egress))),
+        ))
     }
 }
 
@@ -668,9 +778,120 @@ mod tests {
             EffectScope::new(Duration::from_secs(3)),
         );
         let failure = adapter.invoke(request).await.unwrap_err();
-        assert_eq!(
-            serde_json::to_value(failure).unwrap(),
-            serde_json::json!({"kind": "backend_unavailable", "feedback": null}),
+        assert_eq!(failure.kind(), HookFailureKind::BackendUnavailable);
+        let diagnostic = failure.feedback().expect("backend cause").head();
+        assert_eq!(diagnostic, "the session has no MCP hook runtime");
+        assert!(!diagnostic.contains("never-publish-hook-input"));
+    }
+    #[cfg(unix)]
+    async fn command_admission(
+        mode: Mode,
+        rules: Ruleset,
+        script: &str,
+    ) -> (Result<HookOutcome, HookFailure>, bool) {
+        let owner = tempfile::tempdir().unwrap();
+        let marker = owner.path().join("executed");
+        let scope = crate::provider_http::CommandHttpScope::online(CancelToken::new())
+            .await
+            .unwrap();
+        let ports = scope.ports();
+        let evidence = SessionEvidenceStore::open(owner.path(), SessionId::new(), 1024).unwrap();
+        let effects = ToolEffectPorts::new(
+            &OsFs,
+            ports.process(),
+            &evidence,
+            ports.resolver_handle(),
+            ports.one_hop_handle(),
+            ports.duplex_handle(),
         );
+        let adapter = HookPortAdapter::new(
+            Arc::new(PolicyEngine::new(CanonPath::new(owner.path()), mode, rules)),
+            effects,
+            None,
+            Arc::new(NoGeneration),
+        );
+        let hook = HookId::derive(
+            HookSourceAuthority::User,
+            &HookSourceLocation::parse("config.toml").unwrap(),
+            &HookContentDigest::parse(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            )
+            .unwrap(),
+            0,
+        );
+        let request = HookInvocationRequest::new(
+            HookStartedEvidence::new(
+                EventId::new(),
+                EventId::new(),
+                hook,
+                HookInvocationId::new(),
+                HookActivation::Persistent,
+            ),
+            HookCausality::session(SessionId::new(), TurnId::new()),
+            HookHandlerConfig::Command {
+                command: format!("touch '{}'; {}", marker.display(), script),
+                args: None,
+                shell: Some("bash".into()),
+                timeout_seconds: Some(3),
+            },
+            HookEvent::session(HookLifecycle::Stop),
+            EffectScope::new(Duration::from_secs(3)),
+        );
+        let result = adapter.invoke(request).await;
+        (result, marker.exists())
+    }
+
+    // Catches: yolo rejects an uncovered command before the configured hook runs.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_admission_yolo_runs_uncovered_command() {
+        let (result, ran) = command_admission(Mode::Yolo, Ruleset::default(), "exit 0").await;
+        assert!(ran, "the hook command must execute");
+        assert_eq!(result.unwrap().decision(), HookDecision::Continue);
+    }
+
+    // Catches: mode settlement bypasses explicit deny or the plan floor.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_admission_enforces_denies_and_plan() {
+        use ego_core::config::{PermCfg, Source};
+        use ego_core::permit::rule::Rule;
+        let denied = Ruleset::from_layer(
+            PermCfg {
+                judge: None,
+                allow: vec![],
+                deny: vec![Rule::load("exec(**)").unwrap()],
+            },
+            Source::User,
+        );
+        let allowed = Ruleset::from_layer(
+            PermCfg {
+                judge: None,
+                allow: vec![Rule::load("exec(**)").unwrap()],
+                deny: vec![],
+            },
+            Source::User,
+        );
+        for (mode, rules) in [
+            (Mode::Yolo, denied),
+            (Mode::Plan, allowed),
+            (Mode::Default, Ruleset::default()),
+        ] {
+            let (result, ran) = command_admission(mode, rules, "exit 0").await;
+            assert!(!ran);
+            assert_eq!(result.unwrap_err().kind(), HookFailureKind::EffectDenied);
+        }
+    }
+
+    // Catches: executing through mode admission conflates a veto with a command failure.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hook_admission_preserves_veto_and_failure() {
+        let (veto, ran) = command_admission(Mode::Yolo, Ruleset::default(), "exit 2").await;
+        assert!(ran);
+        assert_eq!(veto.unwrap().decision(), HookDecision::Block);
+        let (failure, ran) = command_admission(Mode::Yolo, Ruleset::default(), "exit 1").await;
+        assert!(ran);
+        assert_eq!(failure.unwrap_err().kind(), HookFailureKind::HandlerFailed);
     }
 }

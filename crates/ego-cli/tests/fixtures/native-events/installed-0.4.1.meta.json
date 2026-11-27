@@ -1,0 +1,27 @@
+{
+  "version": "ego 0.4.1",
+  "command": [
+    "/Users/stefano.straus/.local/bin/ego",
+    "run",
+    "--bare",
+    "--offline",
+    "--no-tools",
+    "--thinking",
+    "off",
+    "--model",
+    "ollama/fixture",
+    "--session-dir",
+    "/Users/stefano.straus/Gits/.tmp/ego-771-capture/sessions",
+    "--retry",
+    "0",
+    "--timeout",
+    "15s",
+    "--output",
+    "jsonl",
+    "Report readiness."
+  ],
+  "terminal": false,
+  "exit": 0,
+  "order": "stdout rows retain emission order",
+  "fixture_provider": "owned loopback server; no remote provider or paid turn"
+}

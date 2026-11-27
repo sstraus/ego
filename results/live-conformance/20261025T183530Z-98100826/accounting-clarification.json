@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "original_result_unchanged": true,
+  "original_cost_usd_includes_reservation": "0.499468460",
+  "prior_known_usd": "0.166121140",
+  "prior_unknown_reserved_usd": "0.263268",
+  "new_known_usd": "0.070079320",
+  "cumulative_measured_known_usd": "0.236200460",
+  "unknown_possibly_sent_attempts": 2,
+  "additional_sonnet_unknown_reserved": false,
+  "known_by_provider_usd": {
+    "openai-codex": "0",
+    "openai": "0.010302940",
+    "openrouter": "0.225897520"
+  }
+}

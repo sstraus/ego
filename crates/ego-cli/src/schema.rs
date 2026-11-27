@@ -1,6 +1,17 @@
-//! Validate schema-constrained output and re-prompt on failure. Each re-prompt is a durable
-//! turn and counts toward turn and budget limits. Exhausted schema attempts are task failure,
-//! not a command-line usage error.
+//! `--schema`: the final answer must validate, and the run says so with an
+//! exit code rather than a side field.
+//!
+//! `CLI.md` §8 claims this over the field: "@file or inline, **re-prompt until
+//! valid**, validated object *is* the result" — against Claude's inline-only
+//! no-retry side field and Codex's file-only one. Two things follow, and both
+//! are here:
+//!
+//! - The re-prompt is a **turn**, not a retry of a generation. It goes through
+//!   the loop, is written to the log, and is counted by `--max-turns`. That is
+//!   what makes §4.5's "budget beats schema-retry: exit 5" expressible at all.
+//! - Exhausting the retries is `RunTermination::TaskFailed` → exit 1, which is
+//!   §4.3's "task failed (agent reports failure / schema never validated)".
+//!   Not exit 2: the command line was fine, the model did not do the job.
 
 use jsonschema::Validator;
 use serde_json::Value;
@@ -67,9 +78,5 @@ impl Schema {
 /// prompt: the conversation already holds it, and repeating it would make the
 /// model answer the question twice.
 pub fn repair_prompt(invalid: &Invalid) -> String {
-    format!(
-        "That answer did not satisfy the required schema: {invalid}.\n\
-         Reply with the corrected JSON document and nothing else — no prose, \
-         no code fence."
-    )
+    ego_core::model_prompts::schema_repair(&invalid.to_string())
 }

@@ -1,14 +1,37 @@
 //! The resolved ruleset: rules paired with the layers that carry them.
 //!
-//! [`PermCfg`](super::PermCfg) is the per-file schema; this is the resolved
-//! form. Retain rule origins through layer merging so refusals can name
-//! which configuration the operator must change.
+//! `docs/internals/decisions/2026-08-21-a-deny-that-names-who-can-lift-it.md` decision 2.
+//! [`PermCfg`](super::PermCfg) stays the *layer* schema — what one file
+//! deserialises into. This is the *resolved* form, and the difference is the
+//! whole point: by the time `resolve` has merged six layers, the question
+//! "which file do I edit to lift this" has no answer left in a bare
+//! `Vec<Rule>`.
 
 use super::layer::PermCfg;
 use super::source::Source;
 use crate::permit::Op;
 use crate::permit::rule::Rule;
 use std::path::Path;
+
+/// Documentation and package hosts a development session fetches constantly.
+/// Hosts that fetch an origin named in the request path (the Go module proxy and
+/// pkg.go.dev) stay out: they would be a question-free channel for workspace text.
+/// Rules only: a user `deny` still wins, and every redirect and DNS check of the
+/// guarded transport still applies.
+const DEVELOPMENT_HOST_RULES: &[&str] = &[
+    "net(docs.rs:443)",
+    "net(crates.io:443)",
+    "net(static.crates.io:443)",
+    "net(index.crates.io:443)",
+    "net(doc.rust-lang.org:443)",
+    "net(registry.npmjs.org:443)",
+    "net(www.npmjs.com:443)",
+    "net(pypi.org:443)",
+    "net(files.pythonhosted.org:443)",
+    "net(docs.python.org:443)",
+    "net(developer.mozilla.org:443)",
+    "net(nodejs.org:443)",
+];
 
 const CREDENTIAL_READ_RULES: &[&str] = &[
     "read(/**/.env*)",
@@ -90,9 +113,13 @@ impl From<OriginSet> for Vec<Source> {
     }
 }
 
-/// A resolved rule and every layer carrying it. Origins are non-empty and
-/// deduplicated. Retain all layers so removing one copy can still explain a
-/// surviving decision from another source.
+/// A resolved rule and every layer that carries it.
+///
+/// `origins` is non-empty and deduplicated, and it is *every* layer rather
+/// than the winning one — decision 5. Keeping only the winner would discard
+/// the fact that answers the operator's immediate next question ("I deleted
+/// my line and it is still denied"), at identical cost, which is the deferred
+/// refactoring debt `AGENTS.md:22-37` forbids.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcedRule {
     rule: Rule,
@@ -108,6 +135,15 @@ impl SourcedRule {
         }
     }
 
+    /// True for an `exec(...)` rule that names one exact argv, with no wildcard token, and
+    /// that the owner wrote: the user file or a launch option. A project file, a local file
+    /// or an agent file can be written by the model and never pre-approves a change of
+    /// ego's own authority.
+    pub(crate) fn is_exact_exec(&self) -> bool {
+        (self.origins.contains(Source::User) || self.origins.contains(Source::Flags))
+            && matches!(&self.rule, Rule::Exec(pattern) if pattern.is_exact())
+    }
+
     /// Record that `origin` also carries this rule. Idempotent.
     ///
     /// A union, never a replacement — decision 4. "Replace the origin when
@@ -119,12 +155,27 @@ impl SourcedRule {
         self.origins.insert(origin);
     }
 
+    /// Reuse the exact user rule authority for protected filesystem paths.
+    pub(crate) fn exact_owner_allow(&self, op: &Op, root: &Path) -> bool {
+        self.origins.contains(Source::User) && self.rule.matches_exact_path(op, root)
+    }
+
+    /// A user `net` rule that names hosts is the owner's grant for them.
+    pub(crate) fn owner_net_allow(&self, op: &Op) -> bool {
+        self.origins.contains(Source::User) && self.rule.matches_owner_net(op)
+    }
+
     /// Match a deny, allowing only an effective user grant to lift defaults.
     pub(crate) fn denies(&self, op: &Op, root: &Path, allow: &[SourcedRule]) -> bool {
         let direct = self.rule.matches(op, root)
             && !(self.origins == OriginSet::just(Source::Default)
                 && allow.iter().any(|entry| {
-                    entry.origins.contains(Source::User) && entry.rule.matches_allow(op, root)
+                    entry.origins.contains(Source::User)
+                        && if matches!(op, Op::Read { path } if Ruleset::is_credential_path(path)) {
+                            entry.exact_owner_allow(op, root)
+                        } else {
+                            entry.rule.matches_allow(op, root, true)
+                        }
                 }));
         if direct {
             return true;
@@ -147,10 +198,11 @@ impl SourcedRule {
     /// Every authority needed by an operation, including all literal commands
     /// inside a shell list. Direct shell grants keep their exact semantics.
     pub(crate) fn allowing<'a>(allow: &'a [Self], op: &Op, root: &Path) -> Option<Vec<&'a Self>> {
-        if let Some(entry) = allow
-            .iter()
-            .find(|entry| entry.rule.matches_allow(op, root))
-        {
+        if let Some(entry) = allow.iter().find(|entry| {
+            entry
+                .rule
+                .matches_allow(op, root, entry.origins.contains(Source::User))
+        }) {
             return Some(vec![entry]);
         }
         let Op::Spawn { spec } = op else {
@@ -189,9 +241,12 @@ impl SourcedRule {
 
     /// The layer whose copy an operator cannot get around — decision 1.
     ///
-    /// Rule attribution authority differs from ordinary merge precedence. Flags win
-    /// ordinary values; origins must still identify every rule source that can enforce a
-    /// denial.
+    /// **Authority order differs from merge precedence.**
+    /// [`Source::rank`] orders layers for *merging*, lowest first, so `flags`
+    /// beats everything and wins a value. Authority over a deny runs the
+    /// other way: `system` is the layer nothing above can lift (`CLI.md` §7,
+    /// "non-relaxable deny/budget ceilings — the only source of ceilings"), so
+    /// the most authoritative origin is the lowest-ranked one.
     ///
     /// Built-in defaults are least authoritative, below operator rules.
     /// Two orderings over one enum is exactly the
@@ -233,9 +288,31 @@ impl SourcedRule {
 pub struct Ruleset {
     pub allow: Vec<SourcedRule>,
     pub deny: Vec<SourcedRule>,
+    /// The owner's `web_private_network = true`: web admission may dial a
+    /// loopback, LAN or shared-space (Tailscale) address for any admitted
+    /// call. Only the user layer sets it; never a rule or a mode.
+    pub web_private_network: bool,
 }
 
 impl Ruleset {
+    /// Whether a deny rule already covers the sandbox widening the owner would be asked
+    /// about: a kept "keep blocked" answer is not asked again. Execution has no path rule.
+    pub fn denies_sandbox(&self, grant: &crate::permit::SandboxGrant, workspace: &Path) -> bool {
+        let op = match grant.access {
+            crate::permit::SandboxAccess::Read => Op::Read {
+                path: grant.path.clone(),
+            },
+            crate::permit::SandboxAccess::Write => Op::Write {
+                path: grant.path.clone(),
+                change: crate::permit::Change::Whole(Vec::new()),
+            },
+            crate::permit::SandboxAccess::Exec => return false,
+        };
+        self.deny
+            .iter()
+            .any(|entry| entry.denies(&op, workspace, &self.allow))
+    }
+
     /// Whether a canonical path is covered by built-in credential protection.
     pub fn is_credential_path(path: &crate::permit::CanonPath) -> bool {
         static RULES: std::sync::OnceLock<Vec<Rule>> = std::sync::OnceLock::new();
@@ -257,6 +334,19 @@ impl Ruleset {
             Self::merge(
                 &mut self.deny,
                 Rule::load(raw).expect("valid built-in credential rule"),
+                Source::Default,
+            );
+        }
+        self
+    }
+
+    /// Allow fetches from common documentation and package hosts without a
+    /// question. Operator rules stay first and a deny still wins.
+    pub fn with_development_host_defaults(mut self) -> Self {
+        for raw in DEVELOPMENT_HOST_RULES {
+            Self::merge(
+                &mut self.allow,
+                Rule::load(raw).expect("valid built-in development host rule"),
                 Source::Default,
             );
         }

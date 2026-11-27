@@ -34,6 +34,20 @@ use super::{RequestRefused, RequestTarget, WireFormat};
 pub struct XaiResponses;
 
 impl WireFormat for XaiResponses {
+    fn supports_web_search(&self) -> bool {
+        true
+    }
+
+    fn supports_default_web_search(
+        &self,
+        _model: &str,
+        base: &url::Url,
+        _credential: &crate::provider::ResolvedCredential,
+        _strategy: &crate::provider::CredentialStrategy,
+    ) -> bool {
+        base.as_str() == crate::provider::XAI_BASE
+    }
+
     fn build_request(
         &self,
         target: &RequestTarget<'_>,
@@ -72,7 +86,7 @@ impl std::fmt::Display for Inexpressible {
             }
             Self::ReasoningStateNotCarriable => write!(
                 f,
-                "xai-responses has no established projection for ego's opaque reasoning state; dropping it is forbidden"
+                "xai-responses requires valid private items from its own dialect; dropping foreign state is forbidden"
             ),
             Self::ReasoningEffortNotSupported(level) => write!(
                 f,
@@ -108,6 +122,7 @@ struct WireRequest<'a> {
     model: &'a str,
     stream: bool,
     store: bool,
+    include: [&'static str; 1],
     input: Vec<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tools: Vec<WireTool<'a>>,
@@ -116,6 +131,8 @@ struct WireRequest<'a> {
     reasoning: WireReasoning,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_turns: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,12 +141,19 @@ struct WireReasoning {
 }
 
 #[derive(Debug, Serialize)]
-struct WireTool<'a> {
-    #[serde(rename = "type")]
-    kind: &'static str,
-    name: &'a str,
-    description: &'a str,
-    parameters: &'a Value,
+#[serde(untagged)]
+enum WireTool<'a> {
+    Function {
+        #[serde(rename = "type")]
+        kind: &'static str,
+        name: &'a str,
+        description: &'a str,
+        parameters: &'a Value,
+    },
+    WebSearch {
+        #[serde(rename = "type")]
+        kind: &'static str,
+    },
 }
 
 fn reasoning_effort(level: ThinkingLevel) -> Result<&'static str, Inexpressible> {
@@ -142,17 +166,18 @@ fn reasoning_effort(level: ThinkingLevel) -> Result<&'static str, Inexpressible>
     }
 }
 
-fn carries_reasoning(req: &GenRequest) -> bool {
-    req.messages
-        .messages()
-        .iter()
-        .flat_map(|message| &message.content)
-        .any(|block| {
-            matches!(
-                block,
-                ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. }
-            )
-        })
+fn replay_reasoning(
+    state: &ego_core::generator::types::ReasoningState,
+) -> Result<Value, Inexpressible> {
+    if state.dialect != "xai-responses" {
+        return Err(Inexpressible::ReasoningStateNotCarriable);
+    }
+    let item: Value =
+        serde_json::from_str(&state.blob).map_err(|_| Inexpressible::ReasoningStateNotCarriable)?;
+    if item["type"] != "reasoning" || !item["encrypted_content"].is_string() {
+        return Err(Inexpressible::ReasoningStateNotCarriable);
+    }
+    Ok(item)
 }
 
 const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -224,17 +249,23 @@ fn input_items(req: &GenRequest) -> Result<Vec<Value>, Inexpressible> {
                         }));
                     }
                     ContentBlock::Audio { .. } => return Err(Inexpressible::AudioNotSupported),
-                    ContentBlock::Image { .. }
-                    | ContentBlock::Text { .. }
-                    | ContentBlock::Reasoning { .. }
-                    | ContentBlock::ProviderContent { .. } => {}
+                    ContentBlock::Reasoning { state } => items.push(replay_reasoning(state)?),
+                    ContentBlock::ProviderContent { state, .. } => items.push(
+                        super::responses_search::replay(state, "xai-responses")
+                            .ok_or(Inexpressible::ReasoningStateNotCarriable)?,
+                    ),
+                    ContentBlock::Image { .. } | ContentBlock::Text { .. } => {}
                 }
             }
             continue;
         }
         for block in &message.content {
             match block {
-                ContentBlock::Reasoning { .. } | ContentBlock::ProviderContent { .. } => {}
+                ContentBlock::Reasoning { state } => items.push(replay_reasoning(state)?),
+                ContentBlock::ProviderContent { state, .. } => items.push(
+                    super::responses_search::replay(state, "xai-responses")
+                        .ok_or(Inexpressible::ReasoningStateNotCarriable)?,
+                ),
                 ContentBlock::Audio { .. } => return Err(Inexpressible::AudioNotSupported),
                 ContentBlock::Image { .. } => return Err(Inexpressible::ImageRoleNotSupported),
                 ContentBlock::Text { text } => match message.role {
@@ -275,24 +306,26 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     if super::request_has_audio(req) {
         return Err(Inexpressible::AudioNotSupported);
     }
-    if carries_reasoning(req) {
-        return Err(Inexpressible::ReasoningStateNotCarriable);
-    }
-    let tools: Vec<WireTool<'_>> = req
+    let mut tools: Vec<WireTool<'_>> = req
         .tools
         .iter()
-        .map(|tool| WireTool {
+        .filter(|tool| req.web_search.is_none() || tool.name != "web_search")
+        .map(|tool| WireTool::Function {
             kind: "function",
             name: &tool.name,
             description: &tool.description,
             parameters: &tool.parameters,
         })
         .collect();
+    if req.web_search.is_some() {
+        tools.push(WireTool::WebSearch { kind: "web_search" });
+    }
     let wire = WireRequest {
         prompt_cache_key: super::cache::routing_key(req, "xai"),
         model: &req.model,
         stream: true,
         store: false,
+        include: ["reasoning.encrypted_content"],
         input: input_items(req)?,
         parallel_tool_calls: (!tools.is_empty()).then_some(req.parallel_tool_calls),
         tools,
@@ -300,6 +333,8 @@ pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
             effort: reasoning_effort(req.thinking)?,
         },
         max_output_tokens: req.max_output_tokens,
+        // The documented field bounds agentic rounds, not individual searches.
+        max_turns: req.web_search.map(|search| search.max_requests.get()),
     };
     Ok(serde_json::to_vec(&wire).expect("WireRequest serialises"))
 }
@@ -424,9 +459,14 @@ struct PartialToolCall {
 
 #[derive(Debug)]
 struct StreamDecoder {
+    search: super::responses_search::SearchItems,
     sse: SseDecoder,
     calls: BTreeMap<String, PartialToolCall>,
     finish_reason: Option<StopReason>,
+    /// The stream's one provider failure, reported once at the end. A stream
+    /// can carry several failure frames for one refusal; the first message is
+    /// kept, and a later classified frame replaces an unclassified class.
+    failure: Option<(String, super::FailureClass)>,
     usage: Option<Usage>,
     usage_incoherent: bool,
     cost: Option<Arc<dyn ProviderCost>>,
@@ -436,9 +476,11 @@ struct StreamDecoder {
 impl StreamDecoder {
     fn new(cost: Option<Arc<dyn ProviderCost>>) -> Self {
         Self {
+            search: super::responses_search::SearchItems::default(),
             sse: SseDecoder::default(),
             calls: BTreeMap::new(),
             finish_reason: None,
+            failure: None,
             usage: None,
             usage_incoherent: false,
             cost,
@@ -448,6 +490,10 @@ impl StreamDecoder {
 }
 
 impl super::StreamSink for StreamDecoder {
+    fn usage_incoherent(&self) -> bool {
+        self.usage_incoherent
+    }
+
     fn push(&mut self, chunk: &[u8]) -> Vec<AiEvent> {
         let mut out = Vec::new();
         for frame in self.sse.push(chunk) {
@@ -461,18 +507,10 @@ impl super::StreamSink for StreamDecoder {
         if let Some(error) = &transport {
             out.push(AiEvent::DeliveryObserved(error.delivery()));
         }
-        if self.usage_incoherent {
-            out.push(AiEvent::Error {
-                message: "xAI's cached input count exceeded its input total; usage was discarded"
-                    .to_string(),
-                kind: ErrorKind::Unclassified,
-            });
+        if let Some((message, class)) = self.failure.take() {
+            out.extend(super::streamed_failure(message, class));
         }
-        if self.finish_reason != Some(StopReason::Error) {
-            self.flush_calls(&mut out);
-        } else {
-            self.calls.clear();
-        }
+        self.flush_calls(&mut out);
         if let Some(usage) = self.usage.take() {
             out.push(AiEvent::Usage(usage));
         }
@@ -520,6 +558,20 @@ impl StreamDecoder {
                 return;
             }
         };
+        self.search.capture(frame, "xai-responses", out, None);
+        if event.kind == "response.output_item.done"
+            && let Ok(raw) = serde_json::from_str::<Value>(frame)
+            && raw["item"]["type"] == "reasoning"
+            && raw["item"]["encrypted_content"].is_string()
+        {
+            out.push(AiEvent::ReasoningState(
+                ego_core::generator::types::ReasoningState {
+                    connection: None,
+                    dialect: "xai-responses".into(),
+                    blob: raw["item"].to_string(),
+                },
+            ));
+        }
         match event.kind.as_str() {
             "response.output_text.delta" => {
                 if let Some(text) = event.delta.filter(|text| !text.is_empty()) {
@@ -573,7 +625,17 @@ impl StreamDecoder {
                         self.stated_cost = Some(cost);
                     }
                     match map_usage(raw) {
-                        Some(usage) => self.usage = Some(usage),
+                        Some(mut usage) => {
+                            // Successful uses can differ from observed attempts. A supplied zero is real.
+                            usage.web_search_requests = serde_json::from_str::<Value>(raw.get())
+                                .ok()
+                                .and_then(|value| {
+                                    value["server_side_tool_usage_details"]["web_search_calls"]
+                                        .as_u64()
+                                })
+                                .unwrap_or_else(|| self.search.observed());
+                            self.usage = Some(usage);
+                        }
                         None => self.usage_incoherent = true,
                     }
                 }
@@ -587,14 +649,13 @@ impl StreamDecoder {
                     "incomplete" => self.finish_reason = Some(StopReason::Length),
                     "failed" | "cancelled" => {
                         let error = event.response.and_then(|done| done.error);
-                        let kind = super::classify_stream_code(
+                        let class = super::classify_stream_code(
                             error.as_ref().and_then(|error| error.code.as_deref()),
                         );
                         let message = error
                             .and_then(|error| error.message)
                             .unwrap_or_else(|| format!("xAI reported response status {status}"));
-                        out.extend(super::streamed_failure(message, kind));
-                        self.finish_reason = Some(StopReason::Error);
+                        self.fail(message, class);
                     }
                     _ if !self.calls.is_empty() => self.finish_reason = Some(StopReason::ToolUse),
                     _ => self.finish_reason = Some(StopReason::Stop),
@@ -609,7 +670,7 @@ impl StreamDecoder {
                     .as_ref()
                     .and_then(|error| error.code.clone())
                     .or(event.code);
-                let kind = super::classify_stream_code(code.as_deref());
+                let class = super::classify_stream_code(code.as_deref());
                 let message = error
                     .and_then(|error| error.message)
                     .or(event.message)
@@ -617,31 +678,26 @@ impl StreamDecoder {
                         Some(code) => format!("xAI reported streamed Responses error {code}"),
                         None => "xAI reported a streamed Responses error".to_string(),
                     });
-                out.extend(super::streamed_failure(message, kind));
-                self.finish_reason = Some(StopReason::Error);
+                self.fail(message, class);
             }
             _ => {}
         }
     }
 
+    fn fail(&mut self, message: String, class: super::FailureClass) {
+        match &mut self.failure {
+            None => self.failure = Some((message, class)),
+            Some((_, first)) if first.kind == ErrorKind::Unclassified => *first = class,
+            Some(_) => {}
+        }
+        self.finish_reason = Some(StopReason::Error);
+    }
+
     fn flush_calls(&mut self, out: &mut Vec<AiEvent>) {
-        for (index, (_, call)) in std::mem::take(&mut self.calls).into_iter().enumerate() {
-            let Some(id) = call.id.filter(|id| !id.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!(
-                        "xAI streamed a function_call at slot {index} with no call_id"
-                    ),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
-            let Some(name) = call.name.filter(|name| !name.is_empty()) else {
-                out.push(AiEvent::Error {
-                    message: format!("xAI streamed a function_call {id} with no name"),
-                    kind: ErrorKind::Unclassified,
-                });
-                continue;
-            };
+        // Absent identities pass on empty; the shared stage decides.
+        for (_, call) in std::mem::take(&mut self.calls) {
+            let id = call.id.unwrap_or_default();
+            let name = call.name.unwrap_or_default();
             out.push(AiEvent::ToolCall {
                 call_id: id,
                 name,

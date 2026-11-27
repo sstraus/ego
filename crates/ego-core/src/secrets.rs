@@ -1,5 +1,19 @@
 //! Exact-value disclosure masking. This policy never changes a child environment.
 
+/// Minimum environment-secret size: shorter values would corrupt ordinary output.
+pub const MIN_ENV_SECRET_LEN: usize = 8;
+
+/// Shared environment-name policy for source validation and disclosure masking.
+pub fn is_secret_environment_name(name: &str) -> bool {
+    let name = name.to_ascii_uppercase();
+    name.split('_').any(|segment| {
+        ["TOKEN", "KEY", "SECRET", "PASSWORD"]
+            .iter()
+            .any(|word| segment.ends_with(word))
+    }) || name == "AWS_ACCESS_KEY_ID"
+        || name == "GOOGLE_APPLICATION_CREDENTIALS"
+}
+
 /// Known nonempty secret values, longest first; no pattern inference.
 #[derive(Clone, Default)]
 pub struct SecretValues(Vec<Vec<u8>>);

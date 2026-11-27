@@ -1,6 +1,7 @@
 //! A provider row: where to send a request, and what to authenticate it with.
 //!
-//! See the provider guide at `docs/guides/providers.md`.
+//! See `ARCHITECTURE.md` §3.1 and
+//! `docs/internals/decisions/2026-08-21-a-generator-that-actually-reaches-a-provider.md`.
 //!
 //! A row is configuration. The credential inside it is not, and the
 //! difference is enforced by [`Secret`] rather than by field privacy: a row
@@ -24,6 +25,7 @@ use url::Url;
 use crate::http::{AdmittedHttpProfile, bearer_header};
 use crate::resolver::{KimiManaged, ModelResolver, OllamaDaemon, SubscriptionSupplied, Supplied};
 use crate::wire::anthropic_messages::AnthropicMessages;
+use crate::wire::deepseek::DeepSeek;
 use crate::wire::gemini_interactions::GeminiInteractions;
 use crate::wire::github_copilot_completions::GithubCopilotCompletions;
 use crate::wire::minimax_anthropic::MiniMaxAnthropic;
@@ -32,6 +34,16 @@ use crate::wire::openai_codex_responses::OpenAiCodexResponses;
 use crate::wire::provider_cost::{OpenRouterUsd, ProviderCost, XaiUsdTicks};
 use crate::wire::xai_responses::XaiResponses;
 
+pub(crate) mod bedrock_signing;
+mod cloud;
+mod reasoning_chat;
+pub use cloud::{
+    BEDROCK, BEDROCK_DEFAULT_REGION, BEDROCK_KEY_VAR, BEDROCK_RUNTIME, VERTEX, VERTEX_BASE,
+    VERTEX_DEFAULT_LOCATION, VERTEX_GEMINI, VERTEX_LOCATION_VAR, VERTEX_PROJECT_VAR,
+    VertexAddressPart, bedrock_base, bedrock_runtime_base, vertex_base,
+};
+pub use reasoning_chat::{KIMI_API, KIMI_API_BASE, KIMI_API_KEY_VAR, ZAI, ZAI_BASE, ZAI_KEY_VAR};
+
 /// The single core-owned provider secret type.
 ///
 /// Kept under the established public name so credential sources do not need a
@@ -39,12 +51,19 @@ use crate::wire::xai_responses::XaiResponses;
 /// redacts its formatter.
 pub type Secret = ProviderSecret;
 
+/// A host-supplied Codex access token. Its owner, not ego, controls renewal.
+pub const OPENAI_CODEX_ACCESS_TOKEN_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN";
+
 /// How a provider presents a credential, and where the credential is read
 /// from — the *strategy*, never the value.
 ///
-/// Rows name credential variables instead of holding secrets. Missing keys
-/// therefore do not remove providers from the catalogue; authentication
-/// refusals occur where the operator can act on them.
+/// `docs/internals/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §3. A row used
+/// to carry a resolved [`Secret`], which was not readable outside this module
+/// but was one `derive` away from being — and which made a row *impossible to
+/// build* without a credential, so a missing key made a provider vanish and
+/// `model.rs` had to name one provider by hand to report the true error.
+/// Naming the variable instead means every provider has a row whether or not
+/// anyone has configured it, and the refusal happens where it can be acted on.
 #[derive(Debug, Clone)]
 pub enum CredentialStrategy {
     /// None at all — a local daemon that does not authenticate. A distinct
@@ -53,6 +72,8 @@ pub enum CredentialStrategy {
     None,
     /// `Authorization: Bearer <the value of this variable>`.
     BearerFromEnv { var: String },
+    /// Sign each final request for a captured regional AWS runtime endpoint.
+    BedrockSigv4 { var: String, endpoint: Url },
     /// `<header>: <the value of this variable>`, **verbatim and with no
     /// scheme**.
     ///
@@ -67,6 +88,18 @@ pub enum CredentialStrategy {
     OAuth { provider: String },
     /// A permanent key minted through OAuth, with an environment fallback.
     OAuthOrEnv { provider: String, var: String },
+    /// A Google Cloud OAuth access token that `ego auth login PROVIDER` mints
+    /// from Application Default Credentials, sent as a bearer token to the
+    /// project and location the two variables name.
+    ///
+    /// The address is part of the credential's resolution and not of the row:
+    /// a Vertex AI endpoint names the caller's project in its path, so a
+    /// missing project is refused here, where the variable can be named.
+    GoogleCloud {
+        provider: String,
+        project_var: String,
+        location_var: String,
+    },
     /// Anthropic's API key and Claude subscription token are two wire
     /// presentations selected by the credential prefix.
     Anthropic {
@@ -80,9 +113,16 @@ impl CredentialStrategy {
     /// The credential this strategy names, read once and turned into the
     /// header that carries it.
     ///
-    /// Resolve once outside the row. Per-request resolution could fail after
-    /// startup or silently change identity if the environment rotates. The row
-    /// retains a secret-free strategy; the generator holds the resolved value.
+    /// **Once**, and that is the whole of
+    /// `docs/internals/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §6. The Step 13.5 ADR weighed resolving *in the row* against resolving
+    /// *per request* and rejected the second, correctly: it makes every
+    /// generation fallible for a condition decided at startup, and it would
+    /// change behaviour mid-run if the variable were rotated. There was a
+    /// third option it did not consider — resolve once, **outside** the row —
+    /// and this is it. The row keeps a strategy with nothing in it to leak,
+    /// and exactly one [`ResolvedCredential`] exists, held by the one
+    /// generator that must send it.
     pub fn resolve(
         &self,
         creds: &dyn Credentials,
@@ -93,6 +133,18 @@ impl CredentialStrategy {
             // missing, and collapsing them would make a misconfigured hosted
             // row look like a local daemon.
             CredentialStrategy::None => (Vec::new(), None),
+            CredentialStrategy::BedrockSigv4 { var, endpoint } => {
+                let secret = creds.secret(var)?;
+                let signer = bedrock_signing::BedrockSigner::resolve(endpoint, &secret)
+                    .ok_or_else(|| MissingCredential {
+                        var: format!("{var} (valid, unexpired AWS credential-process JSON)"),
+                    })?;
+                return Ok(ResolvedCredential {
+                    headers: Vec::new(),
+                    base_override: None,
+                    signer: Some(Arc::new(signer)),
+                });
+            }
             CredentialStrategy::BearerFromEnv { var } => {
                 let secret = creds.secret(var)?;
                 (vec![bearer_header(secret.expose_secret_bytes())], None)
@@ -105,12 +157,21 @@ impl CredentialStrategy {
                 (vec![header], None)
             }
             CredentialStrategy::OAuth { provider } => {
-                let secret =
-                    creds
-                        .secret(&format!("oauth:{provider}"))
-                        .map_err(|_| MissingCredential {
+                // Select the external credential before consulting the store. An
+                // invalid supplied token must fail, never fall back to a login.
+                let external = if provider == "openai-codex" {
+                    creds.secret(OPENAI_CODEX_ACCESS_TOKEN_ENV).ok()
+                } else {
+                    None
+                };
+                let secret = match external {
+                    Some(secret) => secret,
+                    None => creds.secret(&format!("oauth:{provider}")).map_err(|_| {
+                        MissingCredential {
                             var: format!("ego auth login {provider}"),
-                        })?;
+                        }
+                    })?,
+                };
                 let base_override = crate::oauth::provider_base(provider, secret_text(&secret)?)
                     .map_err(|_| MissingCredential {
                         var: format!("ego auth login {provider}"),
@@ -126,6 +187,11 @@ impl CredentialStrategy {
                     })?;
                 (oauth_headers(provider, &secret)?, None)
             }
+            CredentialStrategy::GoogleCloud {
+                provider,
+                project_var,
+                location_var,
+            } => cloud::google_cloud_credential(creds, provider, project_var, location_var)?,
             CredentialStrategy::Anthropic {
                 provider,
                 api_key_var,
@@ -144,6 +210,7 @@ impl CredentialStrategy {
         Ok(ResolvedCredential {
             headers,
             base_override,
+            signer: None,
         })
     }
 
@@ -164,8 +231,11 @@ impl CredentialStrategy {
     /// somewhere to put it.
     pub fn environment_var(&self) -> Option<&str> {
         match self {
-            CredentialStrategy::None | CredentialStrategy::OAuth { .. } => None,
+            CredentialStrategy::None
+            | CredentialStrategy::OAuth { .. }
+            | CredentialStrategy::GoogleCloud { .. } => None,
             CredentialStrategy::BearerFromEnv { var }
+            | CredentialStrategy::BedrockSigv4 { var, .. }
             | CredentialStrategy::HeaderFromEnv { var, .. }
             | CredentialStrategy::OAuthOrEnv { var, .. } => Some(var),
             CredentialStrategy::Anthropic { api_key_var, .. } => Some(api_key_var),
@@ -200,6 +270,7 @@ fn secret_text(secret: &SecretMaterial) -> Result<&str, MissingCredential> {
 pub struct ResolvedCredential {
     headers: Vec<HttpHeader>,
     base_override: Option<Url>,
+    pub(crate) signer: Option<Arc<bedrock_signing::BedrockSigner>>,
 }
 
 impl ResolvedCredential {
@@ -289,6 +360,13 @@ impl fmt::Display for MissingCredential {
                 self.var
             );
         }
+        if self.var == VERTEX_PROJECT_VAR || self.var == VERTEX_LOCATION_VAR {
+            return write!(
+                f,
+                "no valid Google Cloud value in {}; set this environment variable",
+                self.var
+            );
+        }
         write!(
             f,
             "no API key in {}; set this environment variable to the provider's API key",
@@ -309,16 +387,24 @@ pub enum CostExpectation {
 /// One provider profile: who it is, where it lives, how it authenticates,
 /// which shape its bytes take, and whether it states a charge.
 ///
-/// Deployment, key and account configuration live here. API-shape variation
-/// lives behind [`wire`](Self::wire), not in provider-specific shared branches.
+/// `docs/internals/decisions/2026-08-21-a-profile-is-not-a-protocol.md` §2. Everything
+/// here is configuration that varies per deployment, per key or per account;
+/// the code that varies per API shape is behind [`wire`](Self::wire) and
+/// nowhere else.
 #[derive(Debug, Clone)]
 pub struct ProviderRow {
     id: String,
     /// Scheme, host and any prefix — and **no path this row owns**.
     ///
-    /// The row carries a base URL; the mapping owns its API path.
-    /// [`RequestTarget::url`](crate::wire::RequestTarget::url) joins them so the
-    /// provider row cannot disagree with its mapping about the endpoint path.
+    /// A base and not a full endpoint, because a path is a fact about the API
+    /// shape rather than about a vendor: every provider speaking a given
+    /// mapping serves it at that mapping's own path, which is why `PATH` is
+    /// declared beside the mapping and joined on by
+    /// [`RequestTarget::url`](crate::wire::RequestTarget::url). A row carrying
+    /// the whole endpoint would be a row that could disagree with its own
+    /// mapping about where the mapping lives
+    /// (`docs/internals/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §2).
     ///
     /// **Always ends in `/`**, and the constructors guarantee it rather than
     /// asking callers to. `Url::join` treats a base without a trailing slash
@@ -344,8 +430,10 @@ pub struct ProviderRow {
     /// daemons in order to resolve any of them. The row knows; nobody else
     /// needs to.
     ///
-    /// Supplied hosted facts and live daemon discovery are different resolution
-    /// contracts; neither should be inferred from a provider name by callers.
+    /// The distinction it carries is real and not a tidy-up:
+    /// `2026-08-21-what-a-model-resolves-to.md` argues that a hosted model's
+    /// ceilings and prices are facts nobody can discover, and a local model's
+    /// are facts nobody can write down.
     pub resolver: &'static dyn ModelResolver,
     /// How this provider states the money it will charge, when it states it
     /// at all.
@@ -365,18 +453,53 @@ pub struct ProviderRow {
     /// Behind an `Arc` because a row is `Clone` and a decoder is immutable
     /// configuration shared by every generation against that row.
     pub cost: Option<Arc<dyn ProviderCost>>,
+    /// Whether, and where, the third-party price table files this row's models.
+    price_table: PriceTable,
     /// Whether this row's wire mapping has cleared the live-promotion gate.
     ///
-    /// Each constructor states promotion explicitly so a new row cannot
-    /// silently inherit selectability.
+    /// Stated by every constructor rather than defaulted, because a new row
+    /// that silently inherited "selectable" is precisely what
+    /// `docs/internals/decisions/2026-09-03-public-provider-wires-require-live-promotion.md`
+    /// was written to stop.
     pub promotion: Promotion,
+}
+
+/// How a row's models are found in the third-party price table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PriceTable {
+    /// Filed under the row's own id.
+    Own,
+    /// Filed under another namespace (`cloud.rs`).
+    Named(PriceTableName),
+    /// Never priced from the table: its single rate would misstate the
+    /// provider's actual tariff. Only an operator quote prices this row.
+    Unpriced,
+}
+
+/// A row's namespace and key prefix in the third-party price table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PriceTableName {
+    pub provider: &'static str,
+    pub key_prefix: &'static str,
 }
 
 /// Whether a row may be offered, or is waiting on evidence only an operator
 /// can produce.
-/// Live acceptance requires a provider key and recording.
-/// [`Selectable`](Self::Selectable) states only that no promotion gate is
-/// outstanding; it does not claim that a live acceptance check was performed.
+///
+/// The ADR above requires a sanitized live request and response recording —
+/// conformance check five — before a row whose mapping it names may be
+/// selected: "Published schema and deterministic fixtures establish checks one
+/// through four; only an operator-supplied key and live model can establish
+/// check five." It is the one property of a row this repository cannot
+/// establish about itself.
+///
+/// **[`Selectable`](Self::Selectable) is not a claim that check five was
+/// made.** Three rows carry it whose fixtures are `VendorSchemaDerived` and
+/// which have never been live-recorded either — `openrouter`, `anthropic`, and
+/// `openai` before this change (`crates/ego-ai/tests/profiles/mod.rs`). It
+/// says the narrower true thing: *no promotion gate is outstanding against
+/// this row's mapping*. Widening it to mean "live evidence exists" would make
+/// most of the table liars, and a status that lies is worse than no status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Promotion {
     /// No outstanding gate. May be resolved, listed as available, and picked.
@@ -393,7 +516,7 @@ pub enum Promotion {
 
 /// The base OpenAI serves its API under.
 pub const OPENAI_BASE: &str = "https://api.openai.com/v1/";
-/// Codex subscription backend (base path joined by the mapping).
+/// Codex subscription backend (Pi's `openai-codex` base, path joined by the mapping).
 pub const OPENAI_CODEX_BASE: &str = "https://chatgpt.com/backend-api/";
 /// The environment variable OpenAI's credential is read from.
 pub const OPENAI_KEY_VAR: &str = "OPENAI_API_KEY";
@@ -417,6 +540,12 @@ pub const NOUS_BASE: &str = "https://inference-api.nousresearch.com/v1/";
 pub const GEMINI_BASE: &str = "https://generativelanguage.googleapis.com/v1/";
 /// The environment variable Gemini's credential is read from.
 pub const GEMINI_KEY_VAR: &str = "GEMINI_API_KEY";
+/// The base DeepSeek serves its OpenAI-format API under, with no `/v1`
+/// segment (<https://api-docs.deepseek.com/quick_start/pricing>, read
+/// 2026-11-14).
+pub const DEEPSEEK_BASE: &str = "https://api.deepseek.com/";
+/// The environment variable DeepSeek's credential is read from.
+pub const DEEPSEEK_KEY_VAR: &str = "DEEPSEEK_API_KEY";
 
 /// Which chat-completions schema the cost decoders were written against.
 ///
@@ -433,12 +562,19 @@ static OPENAI_SUPPLIED: crate::resolver::OpenAiSupplied = crate::resolver::OpenA
 
 /// Gateways that publish an OpenAI-*compatible* chat-completions surface.
 ///
-/// Separate from [`OPENAI_SUPPLIED`]: OpenRouter serves Chat Completions,
-/// not OpenAI's Responses endpoint. Sharing a static would silently retarget
-/// compatible gateways when the OpenAI row changes mappings.
+/// A separate static from [`OPENAI_SUPPLIED`] because the two are separate
+/// facts that happened to coincide until 2026-09-07. `openrouter` is not
+/// OpenAI: it serves `POST {base}chat/completions` and has never published a
+/// Responses endpoint, so
+/// `2026-09-03-public-provider-wires-require-live-promotion.md`'s "delete the
+/// public Chat selection in the same change" is a statement about *OpenAI's
+/// row*, not about the mapping. Sharing one static would have made moving
+/// OpenAI to Responses silently retarget every compatible gateway at an
+/// endpoint it does not serve.
 static OPENROUTER_MODELS: crate::resolver::OpenRouter = crate::resolver::OpenRouter;
 static ANTHROPIC_SUPPLIED: Supplied = Supplied::new(&AnthropicMessages);
 static GEMINI_SUPPLIED: Supplied = Supplied::new(&GeminiInteractions);
+static DEEPSEEK_SUPPLIED: Supplied = Supplied::new(&DeepSeek);
 static OPENAI_CODEX_SUBSCRIPTION: SubscriptionSupplied = SubscriptionSupplied::new(
     "ego/builtin/openai-codex-subscription/v1",
     &OpenAiCodexResponses,
@@ -479,6 +615,34 @@ fn admitted_base(id: &str, base: Url) -> (Url, AdmittedHttpProfile) {
 }
 
 impl ProviderRow {
+    /// Bind a new complete trusted deployment without mutating the profile or an admitted run.
+    pub(crate) fn configured_instance(
+        &self,
+        id: &ego_core::config::ProviderInstanceId,
+        endpoint: &ego_core::config::ProviderEndpoint,
+        credential: CredentialStrategy,
+    ) -> Result<Self, String> {
+        let base = endpoint.as_url().clone();
+        let http_profile = AdmittedHttpProfile::from_urls(id.as_str(), std::slice::from_ref(&base))
+            .map_err(|error| error.to_string())?;
+        let mut instance = self.clone();
+        instance.id = id.as_str().to_owned();
+        instance.base = base;
+        instance.http_profile = http_profile;
+        instance.credential = credential;
+        instance.resolver = &crate::definitions::INSTANCE_RESOLVER;
+        // Public profile prices and provider-specific monetary decoders are not
+        // claims about an operator's separate deployment.
+        instance.price_table = PriceTable::Unpriced;
+        instance.cost = None;
+        // Vertex Gemini deployments are bound to the profile's Google hosts
+        // and the same named OAuth route that supplied its validated headers.
+        if self.id() != VERTEX_GEMINI {
+            instance.extra_headers.clear();
+        }
+        Ok(instance)
+    }
+
     /// The stable provider identifier bound into this row's HTTP profile.
     pub fn id(&self) -> &str {
         &self.id
@@ -507,9 +671,23 @@ impl ProviderRow {
         self.cost_expectation
     }
 
+    /// This row's namespace and key prefix in the third-party price table, or
+    /// `None` when the table must not price this row.
+    pub fn price_table_name(&self) -> Option<(&str, &str)> {
+        match self.price_table {
+            PriceTable::Own => Some((&self.id, &self.id)),
+            PriceTable::Named(name) => Some((name.provider, name.key_prefix)),
+            PriceTable::Unpriced => None,
+        }
+    }
+
     /// The hosted row.
-    /// Construction is infallible because rows name credential variables without
-    /// reading them. Missing keys must not make providers disappear.
+    ///
+    /// Infallible, and that is the change the profile ADR's §3 argues for: a
+    /// row names the variable its credential lives in and never reads it, so
+    /// the row exists whether or not anyone has configured a key. When it was
+    /// fallible a missing key made the provider *disappear*, and the resolver
+    /// had to special-case one provider by name to report the true error.
     pub fn openai() -> Self {
         Self::openai_at(Url::parse(OPENAI_BASE).expect("a constant this file controls"))
     }
@@ -528,16 +706,25 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::Positive,
             resolver: &OPENAI_SUPPLIED,
             credential: CredentialStrategy::BearerFromEnv {
                 var: OPENAI_KEY_VAR.to_string(),
             },
-            // OpenAI reports tokens, not a monetary total. This row uses supplied
-            // rates when available and otherwise leaves cost unknown.
+            // OpenAI reports token usage and no monetary total
+            // (`docs/internals/decisions/2026-08-21-how-a-model-is-metered.md` §6), so
+            // this row is priced from a supplied table or not at all.
             cost: None,
-            // Selectable on its published contract and deterministic offline fixtures.
-            // These fixtures do not establish live provider acceptance.
+            // Selectable on a published contract, which
+            // `docs/internals/decisions/2026-09-07-a-published-contract-is-enough-to-offer-a-row.md`
+            // amends the 2026-09-03 ADR to allow. Nothing here has been sent to
+            // OpenAI and the deterministic fixtures still only establish checks
+            // one to four — what changed is where the missing fifth check is
+            // paid for. Withholding the row made every operator's key useless
+            // against a documented endpoint to avoid an error that announces
+            // itself: a wrong Responses body comes back a 400 from OpenAI, on
+            // the first call, with OpenAI's own text.
             promotion: Promotion::Selectable,
         }
     }
@@ -566,9 +753,15 @@ impl ProviderRow {
     /// request, two transcripts, an error and two usage frames taken from a
     /// live daemon, and `EGO_SMOKE=ollama` re-takes them.
     ///
-    /// Ollama reads `max_tokens` rather than `max_completion_tokens`. Its own
-    /// mapping shares the request projection and decoder but changes that field.
-    /// The row selects the mapping; shared code does not branch on provider name.
+    /// It is not the hosted row with a different address. The same
+    /// measurement discipline found the one place the daemon's answers differ
+    /// from the family's — it reads `max_tokens` and discards
+    /// `max_completion_tokens` — and
+    /// `docs/internals/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md`
+    /// §8 spends that fact rather than excusing it: a member that fails a
+    /// conformance check is not a member. So this row names its own mapping,
+    /// which shares the family's request projection and its whole decoder and
+    /// differs in one field.
     pub fn ollama(base: Url) -> Self {
         let (base, http_profile) = admitted_base("ollama", base);
         ProviderRow {
@@ -576,6 +769,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &OllamaDaemon,
             credential: CredentialStrategy::None,
@@ -610,6 +804,7 @@ impl ProviderRow {
                     crate::oauth::EGO_USER_AGENT.to_string(),
                 ),
             ],
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &OPENAI_CODEX_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -629,13 +824,18 @@ impl ProviderRow {
             id: "github-copilot".to_string(),
             base,
             http_profile,
-            // Default headers do not impersonate the Copilot Chat extension. An operator
-            // who accepts GitHub's terms can configure `[auth.github-copilot.headers]`;
-            // the overlay replaces default identity headers by name.
+            // Pi's frozen Copilot Chat identity — `GitHubCopilotChat/0.35.0`,
+            // `vscode/1.107.0`, `copilot-chat/0.35.0`, `vscode-chat` — is not
+            // here. It is a version gate on a VS Code extension, and ego is
+            // not that extension. An operator who accepts GitHub's terms puts
+            // those four back with `[auth.github-copilot.headers]`, where the
+            // overlay replaces this row's `user-agent` by name
+            // (`docs/internals/16-subscription-login.md` §7.8).
             extra_headers: vec![(
                 "user-agent".to_string(),
                 crate::oauth::EGO_USER_AGENT.to_string(),
             )],
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &GITHUB_COPILOT_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -656,6 +856,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &XAI_OAUTH_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -679,6 +880,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &KimiManaged,
             credential: CredentialStrategy::OAuth {
@@ -699,6 +901,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &MINIMAX_OAUTH_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -719,6 +922,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::NoCharge,
             resolver: &NOUS_SUBSCRIPTION,
             credential: CredentialStrategy::OAuth {
@@ -731,9 +935,19 @@ impl ProviderRow {
 
     /// The OpenRouter row: the family's mapping, and a charge it states itself.
     ///
-    /// OpenRouter documents automatic full usage and treats `usage.include` and
-    /// `stream_options.include_usage` as inert. The latter remains in this shared
-    /// mapping because it is required by the mapping's originating contract.
+    /// The subscription-login decision promotes this row for both an
+    /// environment key and a key minted by built-in PKCE.
+    /// The ADR's §7 flagged an open question about conformance check 1 that xAI
+    /// does not raise: whether `usage.cost` arrives automatically or requires
+    /// `usage: {include: true}` in the request body — because if it requires
+    /// one, the family's request projection does not send it and this row is
+    /// not a family member at all but a fifth mapping. OpenRouter's own
+    /// usage-accounting page now answers it: that field **and** the
+    /// `stream_options.include_usage` this family already sends are
+    /// "deprecated and have no effect", with full usage returned automatically
+    /// in every response. So the projection is compatible, and the inert flag
+    /// stays — it is current on the contract the mapping is derived from
+    /// (`docs/internals/15-provider-contract-audit.md` §3).
     ///
     /// The public models endpoint supplies current inventory and stated limits.
     /// Prices are never imported; actual charges come only from response usage.
@@ -744,6 +958,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::Positive,
             resolver: &OPENROUTER_MODELS,
             credential: CredentialStrategy::OAuthOrEnv {
@@ -781,6 +996,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::Positive,
             resolver: &ANTHROPIC_SUPPLIED,
             credential: CredentialStrategy::Anthropic {
@@ -802,10 +1018,21 @@ impl ProviderRow {
         Self::anthropic(Url::parse(ANTHROPIC_BASE).expect("a constant this file controls"))
     }
 
-    /// The Gemini provider uses Interactions and supplied capabilities. Its mapping has no
-    /// `thinking_level` spelling for `Off`, so that choice is refused rather than
-    /// mistranslated. The named API-key header is represented by
-    /// `CredentialStrategy::HeaderFromEnv`.
+    /// The Gemini row, on the Interactions API.
+    ///
+    /// A selectable member of the final provider inventory. Its supplied
+    /// models are exposed through the shared CLI table, so
+    /// `--model gemini/…` resolves through this row.
+    ///
+    /// The third wire format, and the one that turns two into a seam. It also
+    /// carries the one cost `docs/14` §3.6 accepted with its eyes open:
+    /// `thinking_level` has no `off`, so a row on this mapping cannot offer
+    /// every level ego names and `ThinkingLevel::Off` is refused at the
+    /// mapping rather than mistranslated.
+    ///
+    /// `x-goog-api-key`, like Anthropic's `x-api-key`, is a header the
+    /// provider names rather than a scheme — which is why
+    /// [`CredentialStrategy::HeaderFromEnv`] is data and not a second enum.
     pub fn gemini(base: Url) -> Self {
         let (base, http_profile) = admitted_base("gemini", base);
         ProviderRow {
@@ -813,6 +1040,7 @@ impl ProviderRow {
             base,
             http_profile,
             extra_headers: Vec::new(),
+            price_table: PriceTable::Own,
             cost_expectation: CostExpectation::Positive,
             resolver: &GEMINI_SUPPLIED,
             credential: CredentialStrategy::HeaderFromEnv {
@@ -829,5 +1057,38 @@ impl ProviderRow {
     /// The Gemini row at Google's own address.
     pub fn gemini_default() -> Self {
         Self::gemini(Url::parse(GEMINI_BASE).expect("a constant this file controls"))
+    }
+
+    /// The DeepSeek row: its own Chat Completions mapping and a bearer key.
+    ///
+    /// Selectable on the published contract, under the same decision as
+    /// [`gemini`](Self::gemini); no request has been sent to DeepSeek and its
+    /// fixtures are schema-derived (`tests/goldens/profile/deepseek/`).
+    ///
+    /// DeepSeek publishes per-token prices that double in weekday peak hours.
+    /// ego has no time-of-day tariff, so the builtin catalogue writes no price
+    /// for its models, and `cost` is `None` because the usage object carries
+    /// token counts and no monetary figure. An operator quote still prices it.
+    pub fn deepseek_default() -> Self {
+        let (base, http_profile) = admitted_base(
+            "deepseek",
+            Url::parse(DEEPSEEK_BASE).expect("a constant this file controls"),
+        );
+        ProviderRow {
+            id: "deepseek".to_string(),
+            base,
+            http_profile,
+            extra_headers: Vec::new(),
+            // DeepSeek's price changes with the time of day; one table rate
+            // cannot state it (#1112-a347). Price unknown unless quoted.
+            price_table: PriceTable::Unpriced,
+            cost_expectation: CostExpectation::Positive,
+            resolver: &DEEPSEEK_SUPPLIED,
+            credential: CredentialStrategy::BearerFromEnv {
+                var: DEEPSEEK_KEY_VAR.to_string(),
+            },
+            cost: None,
+            promotion: Promotion::Selectable,
+        }
     }
 }

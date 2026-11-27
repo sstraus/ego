@@ -1,0 +1,216 @@
+# The gate, split into jobs that run, fail and retry on their own.
+#
+# Every step calls a `just` recipe rather than spelling out a cargo invocation:
+# a contributor running `just gate` and this workflow run the same commands, so
+# "it passed locally" and "it passed in CI" cannot come apart through a flag
+# added in one place only.
+#
+# Why jobs and not one long job per platform: a formatting error used to hide
+# every lint and test result behind it, and a failure in one test binary hid
+# the binaries after it, so each fix cost a full cold cycle. Now every job
+# stands alone, `cargo test` keeps going after a red target, and a failed job
+# reruns by itself (`gh run rerun <run> --failed`, or `--job <id>`).
+#
+# To run one platform only, start the workflow by hand and choose it in
+# `platform`. A push or pull request runs all three.
+#
+# The terminal suite on Windows is reported but does not block the `gate` job:
+# its harness depends on the Windows pseudo-console and the product's native
+# Windows confinement and process ownership (stories 110-8301, 111-4e26) are
+# still open. The job still shows red, so the gap stays visible.
+
+name: gate
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform to run, or all
+        type: choice
+        default: all
+        options: [all, ubuntu-latest, macos-latest, windows-latest]
+
+# A second push to the same branch makes the first run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace on the one failure that matters is worth more than the noise it
+  # adds to the runs that pass.
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The platforms this run covers, in one place.
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    outputs:
+      os: ${{ steps.os.outputs.os }}
+    steps:
+      - id: os
+        env:
+          CHOICE: ${{ inputs.platform }}
+        run: |
+          if [ -z "$CHOICE" ] || [ "$CHOICE" = all ]; then
+            echo 'os=["ubuntu-latest","macos-latest","windows-latest"]' >> "$GITHUB_OUTPUT"
+          else
+            echo "os=[\"$CHOICE\"]" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Text-only checks: no toolchain, one platform.
+  static:
+    name: static
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+      - run: just portable-paths-check
+      - run: just catalogue-check
+
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+          cache-key: fmt
+      - run: just fmt-check
+
+  lint:
+    name: lint (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+          cache-key: lint
+      - run: just lint
+
+  # Everything except the terminal suite: library, binary, doc and the other
+  # integration targets.
+  test:
+    name: test (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: test
+      - run: just test-rest
+
+  # The terminal suite, alone because it is the slowest and the most sensitive
+  # to the platform's pseudo-console.
+  pty:
+    name: pty (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    # Visible as a red job, but not part of the `gate` verdict. See the header.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: pty
+      - run: just test-pty
+
+  # The live check, and the only provider that is free and credential-less.
+  # Where Ollama is not installed this reports a skip in the job summary rather
+  # than passing silently: a smoke that did not run is not a smoke that
+  # succeeded.
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: plan
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(needs.plan.outputs.os) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Look for Ollama
+        id: ollama
+        shell: bash
+        run: |
+          if command -v ollama >/dev/null 2>&1; then
+            echo found=true >> "$GITHUB_OUTPUT"
+          else
+            echo found=false >> "$GITHUB_OUTPUT"
+            echo "ollama smoke: SKIPPED — no ollama on ${{ matrix.os }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.ollama.outputs.found == 'true'
+        uses: ./.github/actions/setup-rust
+        with:
+          cache-key: smoke
+      - if: steps.ollama.outputs.found == 'true'
+        run: just smoke ollama
+
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: extractions/setup-just@v2
+
+      # Read from the manifest instead of restating it here. A version pinned in
+      # two files is a version that will disagree with itself.
+      - name: Read rust-version from Cargo.toml
+        id: msrv
+        run: echo "version=$(just _msrv)" >> "$GITHUB_OUTPUT"
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          cache-key: msrv
+
+      # `check`, not `test`: this job answers "does the promised toolchain
+      # compile this?", which is what `rust-version` claims.
+      - run: cargo check --workspace --all-targets
+
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          # The policy is `deny.toml`, committed next to the manifest.
+          command: check
+
+  # The one verdict a branch rule or a release check reads. It fails when any
+  # job it waits for failed or was skipped, whatever the order they finished in.
+  gate:
+    name: gate
+    if: always()
+    needs: [plan, static, fmt, lint, test, pty, smoke, msrv, audit]
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          echo "$RESULTS"
+          if echo "$RESULTS" | grep -Eq 'failure|cancelled|skipped'; then
+            echo 'a gate job did not succeed' >&2
+            exit 1
+          fi

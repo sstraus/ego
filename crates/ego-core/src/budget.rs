@@ -54,9 +54,44 @@ pub struct PricingQuote {
     /// costs nothing until a request actually asks for one.
     pub cache_write_extended: Option<Amount>,
     pub output: Option<Amount>,
+    /// Long-context tiers, lowest threshold first. A request whose total input
+    /// exceeds a tier's threshold is billed at that tier's rates for the whole
+    /// request; a category the tier does not restate keeps its base rate.
+    pub long_context: Vec<LongContextTier>,
+}
+
+/// The rates one provider bills above an input-token threshold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LongContextTier {
+    pub threshold: u64,
+    pub uncached_input: Option<Amount>,
+    pub cache_read: Option<Amount>,
+    pub cache_write: Option<Amount>,
+    pub output: Option<Amount>,
 }
 
 impl PricingQuote {
+    /// The base rates, with the highest tier that `usage` exceeds applied.
+    fn tiered(&self, usage: &Usage) -> Self {
+        let input = usage
+            .uncached_input_tokens
+            .saturating_add(usage.cache_read_tokens)
+            .saturating_add(usage.cache_write_tokens)
+            .saturating_add(usage.cache_write_extended_tokens);
+        let mut quote = self.clone();
+        if let Some(tier) = self
+            .long_context
+            .iter()
+            .rfind(|tier| input > tier.threshold)
+        {
+            quote.uncached_input = tier.uncached_input.or(quote.uncached_input);
+            quote.cache_read = tier.cache_read.or(quote.cache_read);
+            quote.cache_write = tier.cache_write.or(quote.cache_write);
+            quote.output = tier.output.or(quote.output);
+        }
+        quote
+    }
+
     /// The price of one token in `category`, or the reason there is none.
     fn rate(&self, category: TokenCategory) -> Result<Amount, UnknownCost> {
         let rate = match category {
@@ -85,6 +120,7 @@ impl PricingQuote {
     /// consulted, so a quote that omits `cache_write` still prices an
     /// uncached generation exactly.
     pub fn price(&self, usage: &Usage) -> CostDelta {
+        let quote = self.tiered(usage);
         let lines = [
             (TokenCategory::WebSearch, usage.web_search_requests),
             (TokenCategory::UncachedInput, usage.uncached_input_tokens),
@@ -101,7 +137,7 @@ impl PricingQuote {
             if count == 0 {
                 continue;
             }
-            match self.line(category, count) {
+            match quote.line(category, count) {
                 Ok(line) => match total.checked_add(&line) {
                     Some(sum) => total = sum,
                     None => return CostDelta::Unknown(UnknownCost::Overflow),

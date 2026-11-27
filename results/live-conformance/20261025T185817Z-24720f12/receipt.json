@@ -1,0 +1,47 @@
+{
+  "run_id": "20261025T185817Z-24720f12",
+  "source_commit": "23f75923d59ebccd9a043345290ed3a3ac122fcc",
+  "binary": "/Users/stefano.straus/Gits/.tmp/ego-419-b7/bin/ego-636",
+  "binary_sha256_before": "d703f057af6f36a3f021ac25081d18851d73b8a8821f6cc098406979f15d4806",
+  "start_unix": 1792954697.973548,
+  "continues": "20261025T183530Z-98100826",
+  "binary_source_commit": "05102c930deecf367b448f8540f90339bb46d4f0",
+  "prior_unknown_reserves_usd": {
+    "luna": "0.263268",
+    "sonnet": "0.039128"
+  },
+  "additional_work_ceiling_usd": "0.35",
+  "additional_ceiling_total_upper_usd": "0.888596460",
+  "additional_ceiling_router_upper_usd": "0.878293520",
+  "prior_known_usd": "0.236200460",
+  "prior_unknown_reserved_usd": "0.302396",
+  "prior_unknown_actual": true,
+  "prior_unknown_reconciled": false,
+  "deadline_override": {
+    "model": "openrouter/openai/gpt-6-luna",
+    "cli_seconds": 120,
+    "watchdog_seconds": 135,
+    "reason": "observed 12.088s startup plus 32.949s first-generation-to-tool leaves insufficient whole-invocation50s budget; not measured TTFT/TPS"
+  },
+  "adapted_invoke_sha256": "a0f6a2280eb1a730ee31ec3adb708e8fa0e989a9009babc1ecee3dc8612d2dfb",
+  "wire_model": "anthropic/anthropic/claude-haiku-5.5",
+  "wire_endpoint": "https://openrouter.ai/api/v1/messages",
+  "funding_provider": "openrouter",
+  "caps_usd": {
+    "run": "0.95",
+    "provider": "0.90"
+  },
+  "runner_exit": 1,
+  "operator_facts_restored": true,
+  "binary_sha256_after": "d703f057af6f36a3f021ac25081d18851d73b8a8821f6cc098406979f15d4806",
+  "end_unix": 1792954982.741529,
+  "accounted_plus_reserved_usd": "0.565453165",
+  "new_known_usd": "0.026856705",
+  "new_cost_uncertain": true,
+  "by_provider_including_reserve": {
+    "openai-codex": "0",
+    "openai": "0.012171535",
+    "openrouter": "0.553281630"
+  },
+  "stable_endpoints": true
+}

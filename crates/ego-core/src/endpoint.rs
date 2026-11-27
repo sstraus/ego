@@ -1,7 +1,12 @@
 //! Who may reach this process, decided before a socket exists.
 //!
-//! Inbound endpoints need a peer-admission policy independent of the served
-//! protocol. This module owns that policy; adapters consume admitted streams.
+//! Every surface ego served before this one — `ego acp`, `ego mcp-server` —
+//! speaks over stdio to a parent that already had the right to run it, so
+//! "who may connect" was never a question ego had to answer. An inbound
+//! endpoint makes it one, and
+//! `docs/internals/decisions/2026-09-07-one-inbound-endpoint-serves-every-host-protocol.md`
+//! puts the answer here, above every host protocol, rather than once inside
+//! each of them.
 //!
 //! The module is policy and holds no I/O: it decides which endpoint kinds
 //! exist, which are refused, and which authentication each kind compels. The
@@ -14,7 +19,6 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use crate::credentials::SecretMaterial;
-use crate::permit::Confinement;
 
 /// One already-loaded bearer secret, compared without interpreting HTTP.
 ///
@@ -116,18 +120,6 @@ impl Admitted {
         match self {
             Self::Local { .. } => Authentication::PeerIdentity,
             Self::Loopback(_) | Self::Public(_) => Authentication::BearerCredential,
-        }
-    }
-
-    /// Narrow the operator's confinement ceiling for this endpoint.
-    ///
-    /// A publicly reachable peer may select at most Workspace execution. Local
-    /// and loopback endpoints add no restriction, and a public endpoint never
-    /// weakens an already stricter operator choice.
-    pub fn cap_confinement(&self, configured: Confinement) -> Confinement {
-        match (self, configured) {
-            (Self::Public(_), Confinement::Off | Confinement::Adaptive) => Confinement::Workspace,
-            _ => configured,
         }
     }
 }

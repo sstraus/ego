@@ -57,6 +57,101 @@ name = "reedline"
 path = "src/lib.rs"
 doctest = true
 
+[[example]]
+name = "abbreviations"
+path = "examples/abbreviations.rs"
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"
+
+[[example]]
+name = "break_signal"
+path = "examples/break_signal.rs"
+
+[[example]]
+name = "completions"
+path = "examples/completions.rs"
+
+[[example]]
+name = "custom_prompt"
+path = "examples/custom_prompt.rs"
+
+[[example]]
+name = "cwd_aware_hinter"
+path = "examples/cwd_aware_hinter.rs"
+required-features = ["sqlite"]
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+
+[[example]]
+name = "event_listener"
+path = "examples/event_listener.rs"
+
+[[example]]
+name = "event_listener_kitty_proto"
+path = "examples/event_listener_kitty_proto.rs"
+
+[[example]]
+name = "external_printer"
+path = "examples/external_printer.rs"
+required-features = ["external_printer"]
+
+[[example]]
+name = "helix"
+path = "examples/helix.rs"
+required-features = ["helix"]
+
+[[example]]
+name = "highlighter"
+path = "examples/highlighter.rs"
+
+[[example]]
+name = "hinter"
+path = "examples/hinter.rs"
+
+[[example]]
+name = "history"
+path = "examples/history.rs"
+
+[[example]]
+name = "ide_completions"
+path = "examples/ide_completions.rs"
+
+[[example]]
+name = "list_bindings"
+path = "examples/list_bindings.rs"
+
+[[example]]
+name = "mouse_click"
+path = "examples/mouse_click.rs"
+
+[[example]]
+name = "persistent_menus"
+path = "examples/persistent_menus.rs"
+
+[[example]]
+name = "selection_styling"
+path = "examples/selection_styling.rs"
+
+[[example]]
+name = "semantic_prompt_interactive"
+path = "examples/semantic_prompt_interactive.rs"
+
+[[example]]
+name = "semantic_prompt_verify"
+path = "examples/semantic_prompt_verify.rs"
+
+[[example]]
+name = "transient_prompt"
+path = "examples/transient_prompt.rs"
+
+[[example]]
+name = "validator"
+path = "examples/validator.rs"
+
 [dependencies.arboard]
 version = "3.3.0"
 features = ["wayland-data-control"]
@@ -77,7 +172,7 @@ optional = true
 
 [dependencies.crossterm]
 version = "0.29.0"
-features = ["serde"]
+features = ["serde", "event-stream"]
 
 [dependencies.fd-lock]
 version = "4.0.2"
@@ -119,3 +214,18 @@ version = "1.13.3"
 [dependencies.unicode-width]
 version = "0.2"
 
+[dev-dependencies.gethostname]
+version = "1.1.0"
+
+[dev-dependencies.pretty_assertions]
+version = "1.4.0"
+
+[dev-dependencies.rstest]
+version = "0.26.1"
+default-features = false
+
+[dev-dependencies.serde_json]
+version = "1.0"
+
+[dev-dependencies.tempfile]
+version = "3.3.0"

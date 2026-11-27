@@ -1,5 +1,16 @@
 //! Deterministic usage reporting over the durable session ledger.
 
+mod cache_lifetime;
+mod context_attribution;
+pub use cache_lifetime::{
+    CacheLifetimeEstimate, CacheLifetimeLearning, CacheRequestIdentity, CacheTransport,
+};
+mod estimate;
+pub use context_attribution::{
+    ContextAttribution, ToolContextCall, ToolContextEstimate, ToolContextResult,
+};
+pub use estimate::{CostEstimator, Estimate, EstimateBasis, EstimatedCost};
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::num::NonZeroU64;
@@ -8,7 +19,8 @@ use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 use crate::cost::{
-    Amount, CostAttribution, CostDelta, CurrencyCode, Money, SubscriptionEquivalent, UnknownCost,
+    Amount, CostAttribution, CostDelta, CurrencyCode, Money, PricingUnavailable,
+    SubscriptionEquivalent, UnknownCost,
 };
 use crate::event::domain::{GenerationRole, OccupancyProvenance};
 use crate::event::id::SessionId;
@@ -17,9 +29,9 @@ use crate::session::SessionLineage;
 use crate::state::{Charge, ChargeAttribution, SessionState, Usage};
 use crate::store::session_store::{SessionEntry, SessionMeta, SessionStore, StoreError};
 
-/// The v4 contract adds observed context capacity and provider limits.
+/// The v6 contract adds current per-credential subscription quota.
 /// Old report snapshots are not accepted through compatibility defaults.
-pub const USAGE_REPORT_VERSION: u32 = 4;
+pub const USAGE_REPORT_VERSION: u32 = 6;
 
 /// A deterministic workspace or active-session usage report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,6 +44,7 @@ pub struct UsageReport {
     /// Current-credential observations, not historical session charges.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub provider_limits: Vec<ProviderLimitsObservation>,
+    pub rate_limits: Vec<crate::quota::RateLimits>,
 }
 
 /// Which original generation timestamps a report includes.
@@ -55,7 +68,81 @@ pub struct SessionUsage {
     pub context_capacity: Option<ContextCapacity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider_limits: Option<ProviderLimitsObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_cache: Option<PromptCacheDeadline>,
+    pub context_attribution: ContextAttribution,
     pub lines: UsageLines,
+}
+
+/// Lifetime selected by the request mapping, or unknown for implicit caching.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCachePolicy {
+    pub ttl_seconds: Option<NonZeroU64>,
+    pub refresh_on_read: bool,
+    pub lock_ttl: bool,
+}
+
+/// Cache policy of one admitted provider request, bound to its exact model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheRequest {
+    pub model: String,
+    #[serde(flatten)]
+    pub policy: PromptCachePolicy,
+    /// Proof of encoded request continuity; absent means learning is unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<CacheRequestIdentity>,
+}
+
+/// The one session-owned cache deadline. It is an estimate from request policy,
+/// not proof that the provider stored or will reuse a prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptCacheDeadline {
+    pub model: String,
+    pub ttl_seconds: NonZeroU64,
+    pub expires_at: Timestamp,
+    /// Present only for a three-cycle empirical estimate, never a provider TTL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<CacheLifetimeEstimate>,
+}
+
+impl PromptCacheDeadline {
+    pub fn remaining_seconds(&self, now: Timestamp) -> u64 {
+        self.expires_at
+            .as_millis()
+            .saturating_sub(now.as_millis())
+            .div_ceil(1_000)
+    }
+
+    pub(crate) fn observe(
+        previous: Option<&Self>,
+        request: &PromptCacheRequest,
+        now: Timestamp,
+    ) -> Option<Self> {
+        let ttl = request.policy.ttl_seconds?;
+        let live = previous.filter(|previous| {
+            previous.model == request.model
+                && previous.expires_at > now
+                && previous.estimate.is_none()
+        });
+        let ttl = if request.policy.lock_ttl {
+            live.map_or(ttl, |previous| previous.ttl_seconds)
+        } else {
+            ttl
+        };
+        if !request.policy.refresh_on_read
+            && let Some(previous) = live.filter(|previous| previous.ttl_seconds == ttl)
+        {
+            return Some(previous.clone());
+        }
+        let millis = ttl.get().checked_mul(1_000)?;
+        let expires_at = Timestamp::from_millis(now.as_millis().checked_add(millis)?);
+        Some(Self {
+            model: request.model.clone(),
+            ttl_seconds: ttl,
+            expires_at,
+            estimate: None,
+        })
+    }
 }
 
 /// The latest complete context-window observation for one session.
@@ -166,6 +253,13 @@ pub struct CostBreakdown {
     pub subscription_equivalent: Vec<Money>,
     /// Missing or overflowing policy estimates (including unmetered usage), not monetary unknowns.
     pub subscription_unknown: Vec<UnknownCost>,
+    /// Read-time estimates for the generations counted in `unknown`. Never
+    /// persisted, never added to `known`, never read by a budget gate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub estimated: Vec<EstimatedCost>,
+    /// Why an unknown generation could not be estimated either.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub estimate_unavailable: Vec<PricingUnavailable>,
 }
 
 /// A report cannot truthfully place legacy spend on a generation-role line.
@@ -212,11 +306,22 @@ impl From<StoreError> for UsageReportError {
 pub struct UsageReportService<'a> {
     store: &'a dyn SessionStore,
     clock: &'a dyn Clock,
+    estimator: Option<&'a dyn CostEstimator>,
 }
 
 impl<'a> UsageReportService<'a> {
     pub fn new(store: &'a dyn SessionStore, clock: &'a dyn Clock) -> Self {
-        Self { store, clock }
+        Self {
+            store,
+            clock,
+            estimator: None,
+        }
+    }
+
+    /// Estimate unknown generation costs while building the report.
+    pub fn with_estimator(mut self, estimator: &'a dyn CostEstimator) -> Self {
+        self.estimator = Some(estimator);
+        self
     }
 
     /// Report the supplied local sessions without traversing their lineage.
@@ -236,11 +341,41 @@ impl<'a> UsageReportService<'a> {
         for meta in metadata {
             let mut state = SessionState::default();
             let mut entries = self.store.read(&meta.id)?;
+            let mut attribution = context_attribution::AttributionBuilder::default();
             let mut context_capacity = None;
-            let mut provider_limits = None;
+            let mut provider_limits = BTreeMap::new();
+            let mut model = meta.model.clone();
+            let mut attempt_models = BTreeMap::new();
             while let Some(entry) = entries.next().await {
-                if let SessionEntry::Event(event) = entry? {
+                let entry = entry?;
+                match &entry {
+                    SessionEntry::ModelSelected(selected) => model = Some(selected.0.clone()),
+                    SessionEntry::Evidence(
+                        crate::evidence::EvidenceRecord::GenerationAdmission(admission),
+                    ) if admission.role() == GenerationRole::Main => {
+                        model = Some(admission.target().canonical_model().0.clone());
+                    }
+                    _ => {}
+                }
+                if let SessionEntry::Event(event) = entry {
+                    if event.env.ts <= as_of {
+                        attribution.observe(&event, period.includes(event.env.ts, as_of));
+                    }
                     match &event.kind {
+                        crate::event::domain::EventKind::SessionSelectionsSelected {
+                            selections,
+                        } => {
+                            if let Some(selected) = selections.model() {
+                                model = Some(selected.0.clone());
+                            }
+                        }
+                        crate::event::domain::EventKind::GenerationStarted {
+                            profile: Some(profile),
+                            attempt,
+                            ..
+                        } => {
+                            attempt_models.insert(*attempt, profile.model.0.clone());
+                        }
                         crate::event::domain::EventKind::ContextWindowUpdated {
                             window, ..
                         } => {
@@ -259,15 +394,16 @@ impl<'a> UsageReportService<'a> {
                             provider,
                             model,
                             limits,
-                        } if meta.model.as_deref() == Some(model.as_str())
-                            && model.split_once('/').is_some_and(|(id, _)| id == provider) =>
-                        {
-                            provider_limits = Some(ProviderLimitsObservation {
-                                provider: provider.clone(),
-                                model: Some(model.clone()),
-                                observed_at: event.env.ts,
-                                limits: limits.clone(),
-                            });
+                        } if model.split_once('/').is_some_and(|(id, _)| id == provider) => {
+                            provider_limits.insert(
+                                model.clone(),
+                                ProviderLimitsObservation {
+                                    provider: provider.clone(),
+                                    model: Some(model.clone()),
+                                    observed_at: event.env.ts,
+                                    limits: limits.clone(),
+                                },
+                            );
                         }
                         _ => {}
                     }
@@ -287,14 +423,24 @@ impl<'a> UsageReportService<'a> {
             let mut lines = LinesAccumulator::new();
             for charge in &state.charges {
                 let ChargeAttribution::Generation {
-                    role, started_at, ..
+                    attempt,
+                    role,
+                    started_at,
                 } = charge.attribution
                 else {
                     continue;
                 };
                 if period.includes(started_at, as_of) {
-                    lines.add(role, charge);
-                    totals.add(role, charge);
+                    let estimate = self.estimate(
+                        charge,
+                        attempt_models
+                            .get(&attempt)
+                            .map(String::as_str)
+                            .or(meta.model.as_deref()),
+                        started_at,
+                    );
+                    lines.add(role, charge, estimate.as_ref());
+                    totals.add(role, charge, estimate.as_ref());
                 }
             }
 
@@ -305,13 +451,21 @@ impl<'a> UsageReportService<'a> {
                 }),
                 _ => None,
             };
+            let prompt_cache = state
+                .prompt_cache
+                .filter(|cache| model.as_deref() == Some(cache.model.as_str()));
+            let provider_limits = model
+                .as_ref()
+                .and_then(|model| provider_limits.remove(model));
             sessions.push(SessionUsage {
                 session: meta.id,
-                model: meta.model,
+                model,
                 lineage: meta.lineage,
                 context,
                 context_capacity,
                 provider_limits,
+                prompt_cache,
+                context_attribution: attribution.finish(),
                 lines: lines.finish(),
             });
         }
@@ -323,6 +477,21 @@ impl<'a> UsageReportService<'a> {
             sessions,
             totals: totals.finish(),
             provider_limits: Vec::new(),
+            rate_limits: Vec::new(),
+        })
+    }
+}
+
+impl UsageReportService<'_> {
+    /// Only an unknown cost with recorded usage is estimated.
+    fn estimate(&self, charge: &Charge, model: Option<&str>, at: Timestamp) -> Option<Estimate> {
+        let estimator = self.estimator?;
+        if !matches!(charge.cost, CostDelta::Unknown(_)) || charge.usage == Usage::IDENTITY {
+            return None;
+        }
+        Some(match model {
+            Some(model) => estimator.estimate(model, at, &charge.usage),
+            None => Estimate::Unavailable(PricingUnavailable::MissingRow),
         })
     }
 }
@@ -366,16 +535,16 @@ impl LinesAccumulator {
         }
     }
 
-    fn add(&mut self, role: GenerationRole, charge: &Charge) {
+    fn add(&mut self, role: GenerationRole, charge: &Charge, estimate: Option<&Estimate>) {
         match role {
-            GenerationRole::Main => self.main.add(charge),
-            GenerationRole::Judge => self.judge.add(charge),
-            GenerationRole::GoalCheck => self.goal_check.add(charge),
-            GenerationRole::Compaction => self.compaction.add(charge),
-            GenerationRole::Subagent => self.subagent.add(charge),
-            GenerationRole::Hook => self.hook.add(charge),
+            GenerationRole::Main => self.main.add(charge, estimate),
+            GenerationRole::Judge => self.judge.add(charge, estimate),
+            GenerationRole::GoalCheck => self.goal_check.add(charge, estimate),
+            GenerationRole::Compaction => self.compaction.add(charge, estimate),
+            GenerationRole::Subagent => self.subagent.add(charge, estimate),
+            GenerationRole::Hook | GenerationRole::SkillReview => self.hook.add(charge, estimate),
         }
-        self.total.add(charge);
+        self.total.add(charge, estimate);
     }
 
     fn finish(self) -> UsageLines {
@@ -395,6 +564,7 @@ struct LineAccumulator {
     usage: Usage,
     monetary: CostTotals,
     subscription: CostTotals,
+    estimate: estimate::EstimateTotals,
 }
 
 impl LineAccumulator {
@@ -403,11 +573,15 @@ impl LineAccumulator {
             usage: Usage::IDENTITY,
             monetary: CostTotals::default(),
             subscription: CostTotals::default(),
+            estimate: estimate::EstimateTotals::default(),
         }
     }
 
-    fn add(&mut self, charge: &Charge) {
+    fn add(&mut self, charge: &Charge, estimate: Option<&Estimate>) {
         self.usage.add(&charge.usage);
+        if let Some(estimate) = estimate {
+            self.estimate.add(estimate.clone());
+        }
         match &charge.cost {
             CostDelta::Unknown(reason) => self.monetary.unknown.push(reason.clone()),
             CostDelta::Known {
@@ -422,6 +596,7 @@ impl LineAccumulator {
     }
 
     fn finish(self) -> UsageLine {
+        let (estimated, estimate_unavailable) = self.estimate.finish();
         UsageLine {
             usage: self.usage,
             cost: CostBreakdown {
@@ -429,6 +604,8 @@ impl LineAccumulator {
                 unknown: self.monetary.unknown,
                 subscription_equivalent: self.subscription.known.into_values().collect(),
                 subscription_unknown: self.subscription.unknown,
+                estimated,
+                estimate_unavailable,
             },
         }
     }

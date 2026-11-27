@@ -1,6 +1,9 @@
 //! Shared, highest-precedence-first filesystem roots for skills and commands.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
 
 use ego_core::event::skill::SkillSourceAuthority;
 
@@ -10,10 +13,30 @@ pub(crate) struct CapabilityRoot {
     pub(crate) path: PathBuf,
 }
 
+impl CapabilityRoot {
+    pub(crate) fn canonical_skill_root(&self) -> io::Result<PathBuf> {
+        let root = self.path.canonicalize()?;
+        if self.source == SkillSourceAuthority::Project {
+            let project = self
+                .path
+                .ancestors()
+                .nth(2)
+                .expect("project skill root has a namespace")
+                .canonicalize()?;
+            if !root.starts_with(&project) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "skill root resolves outside its project directory",
+                ));
+            }
+        }
+        Ok(root)
+    }
+}
+
 /// Project roots are never inspected without trust. Walk only as far as the
 /// nearest repository marker (a directory or worktree `.git` file).
-/// Precedence: nearest project first; ego, agents, claude within each scope;
-/// then user ego, agents, claude; finally the system root.
+/// Precedence: nearest project first, then user, then system.
 pub(crate) fn discover_capability_roots(
     workspace: &Path,
     trusted_project: bool,
@@ -32,7 +55,7 @@ pub(crate) fn discover_capability_roots(
             for namespace in if leaf == "commands" {
                 &[".ego", ".agents", ".claude", ".opencode"][..]
             } else {
-                &[".ego", ".agents", ".claude", ".codex"][..]
+                &[".ego", ".agents", ".claude", ".codex", ".github"][..]
             } {
                 roots.push(CapabilityRoot {
                     source: SkillSourceAuthority::Project,

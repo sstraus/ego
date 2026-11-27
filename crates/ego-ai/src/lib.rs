@@ -1,13 +1,15 @@
 //! Provider layer: wire formats, provider table, usage, delivery certainty,
 //! model catalogues.
 //!
-//! Implements `ego-core`'s `Generator` port and owns `Http`, credentials and the provider
-//! tables.
+//! See `ARCHITECTURE.md` §3.1. Implements `ego-core`'s `Generator` port and
+//! owns `Http`, credentials and the provider tables.
 
 pub mod catalogue;
 mod codex_session;
 pub mod conformance;
+pub mod definitions;
 pub mod generator;
+pub mod google_adc;
 pub mod http;
 pub mod kimi;
 pub mod oauth;

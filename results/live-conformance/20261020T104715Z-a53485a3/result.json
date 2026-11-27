@@ -1,0 +1,123 @@
+{
+  "schema": 1,
+  "run_id": "20261020T104715Z-a53485a3",
+  "date": "2026-10-20T10:47:37.468740+00:00",
+  "ego_commit": "37af2d539f39ed5df9247fe8af2b4a92b34dbf12",
+  "binary_sha256": "dd9408f9c016aa25078f8f98f9b5b3c66819cf4c5f16db16549cb7237bbaf2ee",
+  "models": [
+    "openai-codex/gpt-6-luna",
+    "openai-codex/gpt-6-astra"
+  ],
+  "suites": [
+    "skills"
+  ],
+  "adaptation": "Coordinator-authorized subscription cross-model evidence; does not replace OpenRouter provider coverage",
+  "fixture_source_sha256": "21431c0d050c80fea2d4fff377117385ad05d4d41872479175b0318a94723c04",
+  "budget_policy": "20k token boundary per session; no currency ceiling in this sample",
+  "cost_usd": "0",
+  "cost_uncertain": false,
+  "cases": [
+    {
+      "case": "subscription-model-override-1",
+      "suite": "skills",
+      "model": "openai-codex/gpt-6-luna",
+      "override_model": "openai-codex/gpt-6-astra",
+      "provider": "openai-codex",
+      "status": "pass",
+      "exit": 0,
+      "timed_out": false,
+      "entry_model_executed": true,
+      "model_override_attributed": true,
+      "answer_oracle": true,
+      "token_budget": "20k",
+      "max_output_tokens": 1024,
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1850,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2187,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.0,
+        "later_zero_hits": 1,
+        "read_calls": 0
+      },
+      "fixture_sha256": "dd6cabc2221900a4239d2fd1c9157c53c91f8434ee4a6249da1d9aafdd2f2bd8"
+    },
+    {
+      "case": "subscription-model-override-2",
+      "suite": "skills",
+      "model": "openai-codex/gpt-6-astra",
+      "override_model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "status": "pass",
+      "exit": 0,
+      "timed_out": false,
+      "entry_model_executed": true,
+      "model_override_attributed": true,
+      "answer_oracle": true,
+      "token_budget": "20k",
+      "max_output_tokens": 1024,
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          },
+          "later": {
+            "requests": 1,
+            "zero_hits": 1,
+            "weighted_share": 0.0
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 1850,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 2205,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.0,
+        "later_zero_hits": 1,
+        "read_calls": 0
+      },
+      "fixture_sha256": "21431c0d050c80fea2d4fff377117385ad05d4d41872479175b0318a94723c04"
+    }
+  ]
+}

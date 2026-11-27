@@ -1,0 +1,868 @@
+use std::future;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::{Duration, Instant};
+
+use ego_core::event::domain::CancelCause;
+use ego_core::generator::attempt::DeliveryCertainty;
+use ego_core::permit::{
+    CanonPath, Confinement, DnsResolution, GuardedHttp, HttpRequest, HttpRoute, HttpScheme,
+    NetworkTarget, OneHop, OneHopResponse, PreparedConnect, Resolver, RunConfinement,
+    TransportError, TransportFailure,
+};
+use ego_core::turn::CancelToken;
+use futures::future::BoxFuture;
+
+use super::{OneShotHttpTransport, canonical_is_loopback};
+use crate::exec::HttpCallTimeout;
+
+const TEST_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/target/http-tests");
+
+fn offline_confinement() -> RunConfinement {
+    RunConfinement::new(Confinement::Off, true, CanonPath::new(TEST_ROOT))
+        .expect("offline test confinement")
+}
+
+struct FixedResolver {
+    calls: Arc<AtomicUsize>,
+    address: IpAddr,
+}
+
+impl FixedResolver {
+    fn new(address: IpAddr) -> Self {
+        Self {
+            calls: Arc::new(AtomicUsize::new(0)),
+            address,
+        }
+    }
+}
+
+impl Resolver for FixedResolver {
+    fn resolve(
+        &self,
+        target: NetworkTarget,
+        _deadline: Instant,
+    ) -> BoxFuture<'static, Result<DnsResolution, TransportError>> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Box::pin(future::ready(
+            DnsResolution::new(target, vec![self.address]).map_err(|_| {
+                TransportError::definitely_unsent(TransportFailure::Resolution(
+                    "invalid fixed resolver fixture".to_owned(),
+                ))
+            }),
+        ))
+    }
+}
+
+struct DelegatingHop {
+    transport: Arc<OneShotHttpTransport>,
+}
+
+impl OneHop for DelegatingHop {
+    fn begin_call(&self) -> Instant {
+        Instant::now() + Duration::from_secs(60)
+    }
+    fn execute(
+        &self,
+        connect: ego_core::permit::ResolvedConnect,
+        request: HttpRequest,
+        deadline: Instant,
+    ) -> BoxFuture<'static, Result<OneHopResponse, TransportError>> {
+        self.transport.execute(connect, request, deadline)
+    }
+}
+
+fn offline_transport(
+    resolver: Arc<dyn Resolver>,
+    cancel: CancelToken,
+) -> Arc<OneShotHttpTransport> {
+    Arc::new(OneShotHttpTransport::new(
+        resolver,
+        cancel,
+        HttpCallTimeout::default(),
+        None,
+        offline_confinement(),
+    ))
+}
+
+async fn one_hop_with_selected(
+    host: &str,
+    selected: IpAddr,
+) -> Result<OneHopResponse, TransportError> {
+    one_hop_with_selected_port(host, selected, 80).await
+}
+
+async fn one_hop_with_selected_port(
+    host: &str,
+    selected: IpAddr,
+    port: u16,
+) -> Result<OneHopResponse, TransportError> {
+    let target = NetworkTarget::new(host, port).expect("network target");
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).expect("HTTP route");
+    let request = HttpRequest::get("/").expect("HTTP request");
+    let connect = PreparedConnect::new(target, &request);
+    let resolver = Arc::new(FixedResolver::new(selected));
+    let transport = offline_transport(Arc::new(FixedResolver::new(selected)), CancelToken::new());
+    let hop = Arc::new(DelegatingHop {
+        transport: Arc::clone(&transport),
+    });
+    GuardedHttp::new(resolver.clone(), hop.clone())
+        .execute_admitted(
+            route,
+            connect,
+            request,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+}
+
+async fn cancelled_literal(host: &str) -> Result<OneHopResponse, TransportError> {
+    let target = NetworkTarget::new(host, 80).expect("literal network target");
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).expect("HTTP route");
+    let request = HttpRequest::get("/").expect("HTTP request");
+    let connect = PreparedConnect::new(target, &request);
+    let cancel = CancelToken::new();
+    cancel.cancel(CancelCause::User);
+    let transport = offline_transport(
+        Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+        cancel,
+    );
+
+    GuardedHttp::new(transport.clone(), transport.clone())
+        .execute_admitted(
+            route,
+            connect,
+            request,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+}
+
+fn assert_offline_refusal(result: Result<OneHopResponse, TransportError>) {
+    let error = result.expect_err("offline non-loopback hop must be refused");
+    assert!(matches!(error.failure(), TransportFailure::Offline));
+    assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
+}
+
+#[tokio::test]
+async fn offline_localhost_uses_deterministic_loopback_without_injected_dns() {
+    let resolver = Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))));
+    let calls = Arc::clone(&resolver.calls);
+    let transport = OneShotHttpTransport::new(
+        resolver,
+        CancelToken::new(),
+        HttpCallTimeout::default(),
+        None,
+        offline_confinement(),
+    );
+    let target = NetworkTarget::new("localhost", 80).expect("localhost target");
+    let resolution = transport
+        .resolve(target, Instant::now() + Duration::from_secs(5))
+        .await
+        .expect("localhost is the offline DNS exception");
+
+    assert_eq!(resolution.target().host(), "localhost");
+    assert_eq!(resolution.addresses(), &[IpAddr::V4(Ipv4Addr::LOCALHOST)]);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "offline localhost bypasses DNS"
+    );
+}
+
+#[tokio::test]
+async fn offline_non_local_name_is_definitely_unsent_before_dns() {
+    let resolver = Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    let calls = Arc::clone(&resolver.calls);
+    let transport = OneShotHttpTransport::new(
+        resolver,
+        CancelToken::new(),
+        HttpCallTimeout::default(),
+        None,
+        offline_confinement(),
+    );
+    let error = transport
+        .resolve(
+            NetworkTarget::new("api.example.test", 443).expect("named target"),
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect_err("offline named target must be refused");
+
+    assert!(matches!(error.failure(), TransportFailure::Offline));
+    assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
+    assert_eq!(
+        calls.load(Ordering::Relaxed),
+        0,
+        "offline refusal bypasses DNS"
+    );
+}
+
+#[test]
+fn offline_loopback_classification_preserves_ipv4_ipv6_and_mapped_ipv4() {
+    assert!(canonical_is_loopback(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    assert!(canonical_is_loopback(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    assert!(canonical_is_loopback(IpAddr::V6(Ipv6Addr::new(
+        0, 0, 0, 0, 0, 0xffff, 0x7f00, 1,
+    ))));
+    assert!(!canonical_is_loopback(IpAddr::V4(Ipv4Addr::new(
+        192, 0, 2, 10
+    ))));
+}
+
+#[tokio::test]
+async fn offline_admits_loopback_literal_forms_before_cancellation() {
+    for host in ["127.0.0.1", "[::1]", "[::ffff:127.0.0.1]"] {
+        let error = cancelled_literal(host)
+            .await
+            .expect_err("cancelled fixture must not connect");
+        assert!(
+            matches!(error.failure(), TransportFailure::Cancelled),
+            "offline literal {host:?} returned {:?}",
+            error.failure()
+        );
+        assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
+    }
+}
+
+#[tokio::test]
+async fn offline_rejects_non_loopback_logical_and_selected_targets() {
+    assert_offline_refusal(
+        one_hop_with_selected("api.example.test", IpAddr::V4(Ipv4Addr::LOCALHOST)).await,
+    );
+    assert_offline_refusal(
+        one_hop_with_selected("localhost", IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))).await,
+    );
+}
+
+/// Story 415-0490 — catches: a silent response bypasses the logical call
+/// deadline. Both absent headers and a stalled SSE body must be bounded.
+#[tokio::test]
+async fn outage_415_silent_provider_is_bounded_by_the_logical_call_deadline() {
+    use futures::StreamExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    assert_eq!(
+        HttpCallTimeout::default().duration(),
+        Duration::from_secs(1800)
+    );
+    // Prepare lazy runtime and TLS setup before the silent-response scenarios.
+    // A 150 ms budget could expire during setup: TCP connected, but the
+    // deadline cancelled the send before the server received any request.
+    crate::exec::runtime_handle();
+    let _prepared_client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for send_headers in [false, true] {
+        let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (release, hold) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            assert!(stream.read(&mut request).await.unwrap() > 0);
+            if send_headers {
+                stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
+                stream.flush().await.unwrap();
+            }
+            let _ = hold.await;
+        });
+        let target = NetworkTarget::new("localhost", port).unwrap();
+        let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+        let request = HttpRequest::get("/").unwrap();
+        let connect = PreparedConnect::new(target, &request);
+        let transport = offline_transport(
+            Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+            CancelToken::new(),
+        );
+        // Client construction is per hop; leave room for it and scheduling,
+        // while the outer watchdog still catches a missing call deadline.
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let observed = tokio::time::timeout(Duration::from_secs(3), async {
+            match GuardedHttp::new(transport.clone(), transport)
+                .execute_admitted(route, connect, request, deadline)
+                .await
+            {
+                Err(error) => error,
+                Ok(response) => {
+                    let OneHopResponse::Response { mut body, .. } = response else {
+                        panic!("fixture must not redirect");
+                    };
+                    body.next()
+                        .await
+                        .expect("timeout body event")
+                        .expect_err("silent body must time out")
+                }
+            }
+        })
+        .await;
+        let _ = release.send(());
+        server.await.unwrap();
+        let error = observed.expect("silent provider must not wait forever");
+        assert_eq!(error.failure(), &TransportFailure::TimedOut);
+        assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+    }
+}
+
+#[tokio::test]
+async fn websocket_rejects_offline_remote_before_opening_a_socket() {
+    let target = NetworkTarget::new("203.0.113.1", 443).unwrap();
+    let route = HttpRoute::new(HttpScheme::Https, target.clone()).unwrap();
+    let request = HttpRequest::new("POST", "/codex/responses", vec![], b"{}".to_vec()).unwrap();
+    let connect = PreparedConnect::new(target, &request);
+    let transport = offline_transport(
+        Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+        CancelToken::new(),
+    );
+    let result = GuardedHttp::new(transport.clone(), transport)
+        .open_websocket_admitted(
+            route,
+            connect,
+            request,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await;
+    let error = result.err().expect("offline remote socket refused");
+    assert_eq!(error.failure(), &TransportFailure::Offline);
+    assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
+}
+
+#[tokio::test]
+async fn websocket_cancelled_or_expired_run_never_connects() {
+    for expired in [false, true] {
+        let target = NetworkTarget::new("127.0.0.1", 9).unwrap();
+        let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+        let request = HttpRequest::new("POST", "/", vec![], b"{}".to_vec()).unwrap();
+        let connect = PreparedConnect::new(target, &request);
+        let cancel = CancelToken::new();
+        if !expired {
+            cancel.cancel(CancelCause::User);
+        }
+        let transport = offline_transport(
+            Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+            cancel,
+        );
+        let deadline = if expired {
+            Instant::now()
+        } else {
+            Instant::now() + Duration::from_secs(2)
+        };
+        let result = GuardedHttp::new(transport.clone(), transport)
+            .open_websocket_admitted(route, connect, request, deadline)
+            .await;
+        let error = result.err().expect("ended authority refused");
+        assert_eq!(
+            error.failure(),
+            if expired {
+                &TransportFailure::TimedOut
+            } else {
+                &TransportFailure::Cancelled
+            }
+        );
+        assert_eq!(error.delivery(), DeliveryCertainty::DefinitelyUnsent);
+    }
+}
+
+#[tokio::test]
+async fn websocket_request_substitution_is_refused_before_dns() {
+    let target = NetworkTarget::new("provider.test", 443).unwrap();
+    let route = HttpRoute::new(HttpScheme::Https, target.clone()).unwrap();
+    let request = HttpRequest::new("POST", "/", vec![], b"{}".to_vec()).unwrap();
+    let connect = PreparedConnect::new(target, &request);
+    let changed = HttpRequest::new("POST", "/other", vec![], b"{}".to_vec()).unwrap();
+    let resolver = Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    let transport = offline_transport(resolver.clone(), CancelToken::new());
+    let result = GuardedHttp::new(resolver.clone(), transport)
+        .open_websocket_admitted(
+            route,
+            connect,
+            changed,
+            Instant::now() + Duration::from_secs(2),
+        )
+        .await;
+    assert_eq!(
+        result.err().unwrap().failure(),
+        &TransportFailure::AuthorityMismatch
+    );
+    assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn websocket_checks_each_request_and_keeps_destination_pinned() {
+    use futures::StreamExt;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = async_tungstenite::tokio::accept_async(tcp).await.unwrap();
+        for expected in ["first", "second"] {
+            let message = socket.next().await.unwrap().unwrap();
+            assert_eq!(message.to_text().unwrap(), expected);
+            socket
+                .send(async_tungstenite::tungstenite::Message::Text(
+                    "reply".into(),
+                ))
+                .await
+                .unwrap();
+        }
+        // Cancellation must close an idle socket without another provider request.
+        let _ = socket.next().await;
+    });
+    let target = NetworkTarget::new("provider.test", port).unwrap();
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+    let request = HttpRequest::new("POST", "/codex/responses", vec![], b"first".to_vec()).unwrap();
+    let resolver = Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    let cancel = CancelToken::new();
+    let confinement =
+        RunConfinement::new(Confinement::Off, false, CanonPath::new(TEST_ROOT)).unwrap();
+    let transport = Arc::new(OneShotHttpTransport::new(
+        resolver.clone(),
+        cancel.clone(),
+        HttpCallTimeout::default(),
+        None,
+        confinement,
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut socket = GuardedHttp::new(resolver.clone(), transport)
+        .open_websocket_admitted(
+            route,
+            PreparedConnect::new(target.clone(), &request),
+            request.clone(),
+            deadline,
+        )
+        .await
+        .unwrap();
+    let substituted = HttpRequest::new("POST", "/elsewhere", vec![], b"stolen".to_vec()).unwrap();
+    assert_eq!(
+        socket
+            .send(
+                PreparedConnect::new(target.clone(), &substituted),
+                substituted,
+                deadline
+            )
+            .await
+            .unwrap_err()
+            .failure(),
+        &TransportFailure::AuthorityMismatch
+    );
+    let changed =
+        HttpRequest::new("POST", "/codex/responses", vec![], b"tampered".to_vec()).unwrap();
+    assert_eq!(
+        socket
+            .send(
+                PreparedConnect::new(target.clone(), &request),
+                changed,
+                deadline
+            )
+            .await
+            .unwrap_err()
+            .failure(),
+        &TransportFailure::AuthorityMismatch
+    );
+    for text in ["first", "second"] {
+        let request =
+            HttpRequest::new("POST", "/codex/responses", vec![], text.as_bytes().to_vec()).unwrap();
+        socket
+            .send(
+                PreparedConnect::new(target.clone(), &request),
+                request,
+                deadline,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            socket.receive(deadline).await.unwrap(),
+            Some(b"reply".to_vec())
+        );
+    }
+    assert_eq!(resolver.calls.load(Ordering::Relaxed), 1);
+    cancel.cancel(CancelCause::User);
+    let request = HttpRequest::new("POST", "/codex/responses", vec![], b"late".to_vec()).unwrap();
+    assert_eq!(
+        socket
+            .send(PreparedConnect::new(target, &request), request, deadline)
+            .await
+            .unwrap_err()
+            .failure(),
+        &TransportFailure::Cancelled
+    );
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn websocket_run_expiry_closes_idle_socket_and_refuses_late_request() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        use futures::StreamExt;
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = async_tungstenite::tokio::accept_async(tcp).await.unwrap();
+        let _ = socket.next().await;
+    });
+    let target = NetworkTarget::new("127.0.0.1", port).unwrap();
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+    let request = HttpRequest::new("POST", "/", vec![], b"late".to_vec()).unwrap();
+    let resolver = Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    let confinement =
+        RunConfinement::new(Confinement::Off, false, CanonPath::new(TEST_ROOT)).unwrap();
+    let transport = Arc::new(OneShotHttpTransport::new(
+        resolver.clone(),
+        CancelToken::new(),
+        HttpCallTimeout::default(),
+        Some(Instant::now() + Duration::from_millis(100)),
+        confinement,
+    ));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut socket = GuardedHttp::new(resolver, transport)
+        .open_websocket_admitted(
+            route,
+            PreparedConnect::new(target.clone(), &request),
+            request.clone(),
+            deadline,
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        socket
+            .send(PreparedConnect::new(target, &request), request, deadline)
+            .await
+            .unwrap_err()
+            .failure(),
+        &TransportFailure::TimedOut
+    );
+}
+
+/// Catches reqwest's outer Display hiding the actual TCP/TLS cause.
+#[tokio::test]
+async fn connect_failure_keeps_reqwest_source_chain_without_url_secrets() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let target = NetworkTarget::new("localhost", address.port()).unwrap();
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+    let request = HttpRequest::get("/private?key=sk-live-secret").unwrap();
+    let connect = PreparedConnect::new(target, &request);
+    let transport = offline_transport(
+        Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+        CancelToken::new(),
+    );
+    let mapped = GuardedHttp::new(transport.clone(), transport)
+        .execute_admitted(
+            route,
+            connect,
+            request,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect_err("the local fixture port is closed");
+    let TransportFailure::Connect(detail) = mapped.failure() else {
+        panic!("expected a connection failure, got {mapped:?}");
+    };
+    assert!(
+        detail.to_lowercase().contains("refused"),
+        "missing TCP cause: {detail}"
+    );
+    assert!(!detail.contains("private"));
+    assert!(!detail.contains("sk-live-secret"));
+    assert_eq!(mapped.delivery(), DeliveryCertainty::DefinitelyUnsent);
+}
+
+fn closed_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+async fn connect_detail(selected: IpAddr, port: u16) -> String {
+    let error = one_hop_with_selected_port("localhost", selected, port)
+        .await
+        .expect_err("the local fixture port is closed");
+    let TransportFailure::Connect(detail) = error.failure() else {
+        panic!("expected a connection failure, got {error:?}");
+    };
+    detail.clone()
+}
+
+/// Catches a connect error that drops the dialled address, so an ENETDOWN cannot be attributed.
+#[tokio::test]
+async fn connect_failure_names_the_ipv4_address_family_and_direct_route() {
+    let port = closed_port();
+    let detail = connect_detail(IpAddr::V4(Ipv4Addr::LOCALHOST), port).await;
+    assert!(detail.contains(&format!("127.0.0.1:{port}")), "{detail}");
+    assert!(detail.contains("IPv4"), "{detail}");
+    assert!(detail.contains("proxy: no"), "{detail}");
+}
+
+/// Catches a family label derived from the host name instead of the dialled address.
+#[tokio::test]
+async fn connect_failure_names_the_ipv6_address_and_family() {
+    let port = closed_port();
+    let detail = connect_detail(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), port).await;
+    assert!(detail.contains(&format!("[::1]:{port}")), "{detail}");
+    assert!(detail.contains("IPv6"), "{detail}");
+    assert!(detail.contains("proxy: no"), "{detail}");
+}
+
+// Catches a response header name with an RFC 9110 token character other than
+// `-` (Anthropic sends `anthropic-ratelimit-unified-7d_oi-utilization` with
+// Fable models, 2026-11-13) failing the whole exchange as a transient error.
+#[tokio::test]
+async fn response_header_name_with_underscore_keeps_the_response() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    const NAME: &str = "anthropic-ratelimit-unified-7d_oi-utilization";
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(socket.read(&mut request).await.unwrap() > 0);
+        let head = format!("HTTP/1.1 200 OK\r\n{NAME}: 0.0\r\nContent-Length: 2\r\n\r\nok");
+        socket.write_all(head.as_bytes()).await.unwrap();
+    });
+    let response = one_hop_with_selected_port("localhost", IpAddr::V4(Ipv4Addr::LOCALHOST), port)
+        .await
+        .expect("a valid token header name must not fail the exchange");
+    server.await.unwrap();
+    let OneHopResponse::Response { headers, .. } = response else {
+        panic!("response")
+    };
+    assert!(
+        headers
+            .iter()
+            .any(|header| header.name() == NAME && header.value() == b"0.0"),
+        "{headers:?}"
+    );
+}
+
+// Catches a provider body that sends an event and then never terminates.
+#[tokio::test]
+async fn silent_provider_body_after_first_event_ends_transiently() {
+    use futures::StreamExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(socket.read(&mut request).await.unwrap() > 0);
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\na\r\ndata: hi\n\n\r\n",
+            )
+            .await
+            .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let target = NetworkTarget::new("localhost", port).unwrap();
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+    let request = HttpRequest::get("/").unwrap();
+    let connect = PreparedConnect::new(target, &request);
+    let mut transport = OneShotHttpTransport::new(
+        Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+        CancelToken::new(),
+        HttpCallTimeout::default(),
+        None,
+        offline_confinement(),
+    );
+    transport.idle_limit = Duration::from_millis(100);
+    let transport = Arc::new(transport);
+    let response = GuardedHttp::new(transport.clone(), transport)
+        .execute_admitted(
+            route,
+            connect,
+            request,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let OneHopResponse::Response { mut body, .. } = response else {
+        panic!("response")
+    };
+    assert_eq!(body.next().await.unwrap().unwrap(), b"data: hi\n\n");
+    let result = tokio::time::timeout(Duration::from_secs(1), body.next()).await;
+    server.abort();
+    let error = result
+        .expect("silent body must terminate")
+        .unwrap()
+        .unwrap_err();
+    assert_eq!(error.failure(), &TransportFailure::IdleTimeout);
+    assert_eq!(error.delivery(), DeliveryCertainty::PossiblySent);
+}
+
+// Catches a timer that ignores control frames while a WebSocket is active.
+#[tokio::test]
+async fn websocket_ping_pong_reset_stream_idle_timeout() {
+    use async_tungstenite::tungstenite::Message;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = async_tungstenite::tokio::accept_async(tcp).await.unwrap();
+        for message in [
+            Message::Ping(vec![1].into()),
+            Message::Pong(vec![2].into()),
+            Message::Ping(vec![3].into()),
+        ] {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            socket.send(message).await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        socket.send(Message::Text("alive".into())).await.unwrap();
+        // Read what the client sent back (its Pong replies) before closing:
+        // Windows resets a socket closed with unread data, and the reset can
+        // overtake the message still in flight.
+        while let Ok(Some(_)) = tokio::time::timeout(
+            Duration::from_millis(300),
+            futures::StreamExt::next(&mut socket),
+        )
+        .await
+        {}
+    });
+    let target = NetworkTarget::new("127.0.0.1", port).unwrap();
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+    let request = HttpRequest::new("POST", "/", vec![], b"{}".to_vec()).unwrap();
+    let resolver = Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    let mut transport = OneShotHttpTransport::new(
+        resolver.clone(),
+        CancelToken::new(),
+        HttpCallTimeout::default(),
+        None,
+        offline_confinement(),
+    );
+    transport.idle_limit = Duration::from_millis(200);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut socket = GuardedHttp::new(resolver, Arc::new(transport))
+        .open_websocket_admitted(
+            route,
+            PreparedConnect::new(target, &request),
+            request,
+            deadline,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        socket.receive(deadline).await.unwrap(),
+        Some(b"alive".to_vec())
+    );
+    server.await.unwrap();
+}
+
+// Catches consumer backpressure being mistaken for a silent provider.
+#[tokio::test]
+async fn http_idle_clock_does_not_count_blocked_consumer() {
+    use futures::StreamExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = [0; 4096];
+        assert!(socket.read(&mut request).await.unwrap() > 0);
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            .await
+            .unwrap();
+        for _ in 0..20 {
+            socket.write_all(b"1\r\nx\r\n").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(30)).await;
+        }
+        socket.write_all(b"0\r\n\r\n").await.unwrap();
+    });
+    let target = NetworkTarget::new("localhost", port).unwrap();
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+    let request = HttpRequest::get("/").unwrap();
+    let mut transport = OneShotHttpTransport::new(
+        Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST))),
+        CancelToken::new(),
+        HttpCallTimeout::default(),
+        None,
+        offline_confinement(),
+    );
+    transport.idle_limit = Duration::from_millis(200);
+    let transport = Arc::new(transport);
+    let response = GuardedHttp::new(transport.clone(), transport)
+        .execute_admitted(
+            route,
+            PreparedConnect::new(target, &request),
+            request,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    let OneHopResponse::Response { mut body, .. } = response else {
+        panic!("response")
+    };
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = body.next().await {
+        bytes.extend(chunk.expect("live provider must not time out"));
+    }
+    assert_eq!(bytes, vec![b'x'; 20]);
+    server.await.unwrap();
+}
+
+// Catches a send or a later receive restarting a silent WebSocket's idle clock.
+#[tokio::test]
+async fn websocket_idle_deadline_survives_send_and_receive_gap() {
+    use async_tungstenite::tungstenite::Message;
+    use futures::StreamExt as _;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = tokio::spawn(async move {
+        let (tcp, _) = listener.accept().await.unwrap();
+        let mut socket = async_tungstenite::tokio::accept_async(tcp).await.unwrap();
+        socket.send(Message::Text("first".into())).await.unwrap();
+        let _ = socket.next().await;
+        std::future::pending::<()>().await;
+    });
+    let target = NetworkTarget::new("127.0.0.1", port).unwrap();
+    let route = HttpRoute::new(HttpScheme::Http, target.clone()).unwrap();
+    let request = HttpRequest::new("POST", "/", vec![], b"{}".to_vec()).unwrap();
+    let resolver = Arc::new(FixedResolver::new(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+    let mut transport = OneShotHttpTransport::new(
+        resolver.clone(),
+        CancelToken::new(),
+        HttpCallTimeout::default(),
+        None,
+        offline_confinement(),
+    );
+    transport.idle_limit = Duration::from_millis(200);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let mut socket = GuardedHttp::new(resolver, Arc::new(transport))
+        .open_websocket_admitted(
+            route,
+            PreparedConnect::new(target.clone(), &request),
+            request.clone(),
+            deadline,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        socket.receive(deadline).await.unwrap(),
+        Some(b"first".to_vec())
+    );
+    tokio::time::sleep(Duration::from_millis(350)).await;
+    socket
+        .send(PreparedConnect::new(target, &request), request, deadline)
+        .await
+        .unwrap();
+    let error = tokio::time::timeout(Duration::from_millis(100), socket.receive(deadline))
+        .await
+        .expect("expired idle deadline must not restart")
+        .unwrap_err();
+    assert_eq!(error.failure(), &TransportFailure::IdleTimeout);
+    server.abort();
+}

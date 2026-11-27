@@ -72,6 +72,9 @@ impl NativeEvents {
                     json!({"child": child, "outcome": outcome}),
                 )
             }
+            // Execution identity is consumed by ego's task surfaces; it does not
+            // introduce a new event into the terminal host's closed vocabulary.
+            PublicEvent::GenerationProfileSelected { .. } => return String::new(),
             PublicEvent::ChildProgress {
                 turn,
                 item,

@@ -1,13 +1,26 @@
 //! Path patterns: canonicalisation and matching.
 //!
-//! `*` matches within one segment; `**` spans whole segments. These
-//! permission semantics are defined here, not inherited from a glob
-//! library whose update could change authority.
+//! `docs/internals/decisions/2026-08-21-a-rule-that-means-exactly-one-thing.md` §5.
+//! Two constructs and one meaning each — `*` within a segment, `**` across
+//! whole segments — defined here rather than inherited from a glob crate,
+//! because the two things that differ between glob libraries are exactly
+//! those two, and a permission boundary that changes meaning on a
+//! `cargo update` is not a boundary. A library may implement these rules; it
+//! may not define them.
 
 use std::fmt;
 use std::path::{Component, Path};
 
-use super::glob::{Elem, Glob, GlobBuilder, matches_sequence};
+use super::glob::{Case, Elem, Glob, GlobBuilder, matches_sequence};
+
+/// NTFS ignores case, so on Windows `.SSH\id` and `.ssh\id` are one file and
+/// an exact comparison would let a different spelling walk past a deny rule.
+/// The rule ID stays the same everywhere: only the comparison changes.
+const PATH_CASE: Case = if cfg!(windows) {
+    Case::Folded
+} else {
+    Case::Exact
+};
 use super::parse::RuleParseError;
 
 /// One segment of a canonicalised path pattern.
@@ -22,7 +35,7 @@ pub enum Segment {
 
 /// A canonicalised path pattern: the AST, not the text it was written as.
 ///
-/// `read(./src//lib.rs )` and `read(src/lib.rs)` produce the same value
+/// `read( ./src//lib.rs )` and `read(src/lib.rs)` produce the same value
 /// here, and therefore the same [`RuleId`](super::RuleId).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathPattern {
@@ -44,8 +57,10 @@ impl PathPattern {
         &self.segments
     }
 
-    /// Canonicalize path-pattern text in one place so equivalent spellings cannot survive into
-    /// different AST identities.
+    /// Canonicalise the text between a head's parentheses.
+    ///
+    /// The whole of §5's path list happens here, so that no caller has to
+    /// remember any of it and no second spelling can survive into an AST.
     pub fn parse(raw: &str) -> Result<Self, RuleParseError> {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -95,15 +110,60 @@ impl PathPattern {
         Ok(Self { absolute, segments })
     }
 
+    /// The absolute pattern for a canonical `path`, and with `subtree`
+    /// everything below it too.
+    ///
+    /// A path is not pattern text: on Windows its spelling is `C:\…` or
+    /// `\\?\C:\…`, which [`parse`](Self::parse) reads as one relative segment
+    /// that matches nothing. The pattern is built from the path's components,
+    /// so the drive or UNC prefix is dropped as in [`matches`](Self::matches):
+    /// on Windows the pattern covers the same path on every volume.
+    /// `None` for a path without a root, a volume root, a non-UTF-8 component,
+    /// a name holding `*`, which a pattern cannot state literally, or a name
+    /// with leading or trailing whitespace, which its text form would lose.
+    pub fn from_path(path: &Path, subtree: bool) -> Option<Self> {
+        // `has_root`, not `is_absolute`: on Windows `\x` has a root but no
+        // drive, and names the same place on every volume as the pattern does.
+        if !path.has_root() {
+            return None;
+        }
+        let mut segments = Vec::new();
+        for name in segments_of(path)? {
+            // Rule text is trimmed when it is reloaded, so edge whitespace
+            // would turn `a.txt ` into the broader `a.txt` after a restart.
+            if name.contains('*') || name != name.trim() {
+                return None;
+            }
+            let mut glob = GlobBuilder::default();
+            name.chars().for_each(|ch| glob.literal(ch));
+            segments.push(Segment::One(glob.build()));
+        }
+        // A volume root is never one exact target, and `/**` would be every path.
+        if segments.is_empty() {
+            return None;
+        }
+        if subtree {
+            segments.push(Segment::Any);
+        }
+        Some(Self {
+            absolute: true,
+            segments,
+        })
+    }
+
     /// Does this pattern cover `path`?
     ///
     /// `root` is the workspace root, supplied at match time and used only to
     /// anchor a relative pattern. `path` is a canonical path — what the
-    /// platform's own `canonicalize` returned — and the comparison is exact:
-    /// no case folding and no Unicode normalisation, so an ID means the same
-    /// thing on every machine. The residual is that a pattern whose casing or
-    /// composition differs from the on-disk name does not match, which fails
-    /// closed and does so visibly.
+    /// platform's own `canonicalize` returned. There is no Unicode
+    /// normalisation, and case is folded only on Windows, whose file system
+    /// ignores it. The residual is that a pattern whose composition (or, off
+    /// Windows, casing) differs from the on-disk name does not match, which
+    /// fails closed and does so visibly.
+    ///
+    /// A Windows drive or UNC prefix is not a segment: an absolute pattern's
+    /// leading `/` is the root of every volume, so `/**/.ssh/**` covers
+    /// `C:\Users\u\.ssh` and `D:\home\.ssh` alike.
     pub fn matches(&self, path: &Path, root: &Path) -> bool {
         let target = if self.absolute {
             segments_of(path)
@@ -123,7 +183,7 @@ impl PathPattern {
                 Segment::Any => Elem::Rest,
             })
             .collect();
-        matches_sequence(&elements, &target)
+        matches_sequence(&elements, &target, PATH_CASE)
     }
 
     /// The canonical bytes this pattern contributes to a rule's ID.
@@ -184,10 +244,10 @@ fn segment(piece: &str, whole: &str) -> Result<Segment, RuleParseError> {
 }
 
 /// A path's segments, or `None` if it holds a component a canonical path
-/// never has — a `..`, a `.`, or a Windows prefix.
+/// never has — a `..` or a `.`. The root and a Windows prefix are dropped.
 fn segments_of(path: &Path) -> Option<Vec<&str>> {
     path.components()
-        .filter(|component| !matches!(component, Component::RootDir))
+        .filter(|component| !matches!(component, Component::RootDir | Component::Prefix(_)))
         .map(|component| match component {
             Component::Normal(name) => name.to_str(),
             _ => None,

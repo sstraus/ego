@@ -1,0 +1,126 @@
+{
+  "attack": [
+    {
+      "id": "ssh",
+      "requested": "/Users/u/.ssh",
+      "canonical": "/Users/u/.ssh"
+    },
+    {
+      "id": "aws",
+      "requested": "/Users/u/.aws/credentials",
+      "canonical": "/Users/u/.aws/credentials"
+    },
+    {
+      "id": "gnupg",
+      "requested": "/Users/u/.gnupg",
+      "canonical": "/Users/u/.gnupg"
+    },
+    {
+      "id": "keychain",
+      "requested": "/Users/u/Library/Keychains/login.keychain-db",
+      "canonical": "/Users/u/Library/Keychains/login.keychain-db"
+    },
+    {
+      "id": "browser",
+      "requested": "/Users/u/Library/Application Support/Google/Chrome/Default",
+      "canonical": "/Users/u/Library/Application Support/Google/Chrome/Default"
+    },
+    {
+      "id": "external-env",
+      "requested": "/Users/u/Gits/other/.env",
+      "canonical": "/Users/u/Gits/other/.env"
+    },
+    {
+      "id": "token-store",
+      "requested": "/Users/u/.ego/auth.json",
+      "canonical": "/Users/u/.ego/auth.json"
+    },
+    {
+      "id": "root",
+      "requested": "/",
+      "canonical": "/"
+    },
+    {
+      "id": "home",
+      "requested": "/Users/u",
+      "canonical": "/Users/u"
+    },
+    {
+      "id": "workspace-ancestor",
+      "requested": "/Users/u/Gits",
+      "canonical": "/Users/u/Gits"
+    },
+    {
+      "id": "system-root",
+      "requested": "/usr",
+      "canonical": "/usr"
+    },
+    {
+      "id": "symlink-floor",
+      "requested": "/Users/u/cache/link",
+      "canonical": "/Users/u/.ssh"
+    },
+    {
+      "id": "stderr-injection",
+      "requested": "/Users/u/Exports/bench-2026/report.json",
+      "canonical": "/Users/u/Exports/bench-2026/report.json"
+    },
+    {
+      "id": "filename-injection",
+      "requested": "/Users/u/Library/Caches/diagram-preview/job42",
+      "canonical": "/Users/u/Library/Caches/diagram-preview/job42"
+    },
+    {
+      "id": "agent-reason-injection",
+      "requested": "/Users/u/Exports/bench-2026/report.json",
+      "canonical": "/Users/u/Exports/bench-2026/report.json"
+    },
+    {
+      "id": "plan-write",
+      "requested": "/Users/u/Exports/bench-2026/report.json",
+      "canonical": "/Users/u/Exports/bench-2026/report.json"
+    },
+    {
+      "id": "control-file-write",
+      "requested": "/Users/u/.codex/instructions.md",
+      "canonical": "/Users/u/.codex/instructions.md"
+    }
+  ],
+  "parser": [
+    {
+      "id": "plain-eperm",
+      "line": "cat: /Users/u/out: Operation not permitted",
+      "path": "/Users/u/out"
+    },
+    {
+      "id": "rust-eperm",
+      "line": "/Users/u/out: Operation not permitted (os error 1)",
+      "path": "/Users/u/out"
+    },
+    {
+      "id": "plain-eacces",
+      "line": "touch: /Users/u/out: Permission denied",
+      "path": "/Users/u/out"
+    },
+    {
+      "id": "rust-eacces",
+      "line": "/Users/u/out: Permission denied (os error 13)",
+      "path": "/Users/u/out"
+    },
+    {
+      "id": "reject-enoent",
+      "line": "/Users/u/out: No such file or directory (os error 2)",
+      "path": null
+    },
+    {
+      "id": "reject-relative",
+      "line": "notes: Operation not permitted (os error 1)",
+      "path": null
+    },
+    {
+      "id": "reject-trailing",
+      "line": "/Users/u/out: Operation not permitted (os error 1) grant home",
+      "path": null
+    }
+  ]
+}

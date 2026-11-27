@@ -134,9 +134,20 @@ fn validate_atomic_rule_result(
         return Err("rule mutation returned different request facts");
     }
 
+    let inherited = result.inherited_rule_snapshot();
+    if let Some(inherited) = inherited {
+        validate_rule_snapshot(inherited)?;
+        if inherited.target != UserConfigTarget::Base
+            || !matches!(before.target, UserConfigTarget::Profile(_))
+            || before.permissions_present
+            || !matches!(request, UserConfigMutationFacts::Batch { .. })
+        {
+            return Err("rule mutation returned invalid inherited authority");
+        }
+    }
     let affected = match request {
         UserConfigMutationFacts::Batch { changes } => {
-            let expected = expected_batch_after(before, changes)?;
+            let expected = expected_batch_after(before, changes, inherited)?;
             if &expected != after {
                 return Err("rule mutation after facts do not apply its batch request");
             }
@@ -171,8 +182,10 @@ fn validate_rule_snapshot(snapshot: &RuleSnapshot) -> Result<(), &'static str> {
 fn expected_batch_after(
     before: &RuleSnapshot,
     changes: &[RuleMutation],
+    inherited: Option<&RuleSnapshot>,
 ) -> Result<RuleSnapshot, &'static str> {
-    let mut expected = before.clone();
+    let mut expected = inherited.unwrap_or(before).clone();
+    expected.target = before.target.clone();
     let mut added = false;
     for change in changes {
         match change.effect {
@@ -198,8 +211,10 @@ fn expected_batch_after(
     }
     if added {
         expected.permissions_present = true;
+        Ok(expected)
+    } else {
+        Ok(before.clone())
     }
-    Ok(expected)
 }
 
 fn removed_rule_mutations(
@@ -690,6 +705,22 @@ fn prepare_call(
     })
 }
 
+/// Interactive inventory; the rule-management CLI keeps its documented TSV.
+pub(crate) fn render_list_summary(rows: &[EffectiveRule]) -> Vec<String> {
+    let mut table = vec![vec!["Effect".into(), "Rule".into(), "Source".into()]];
+    table.extend(rows.iter().map(|row| {
+        vec![
+            effect_name(row.effect).into(),
+            row.rule.to_string(),
+            row.from.to_string(),
+        ]
+    }));
+    let mut rendered = crate::render::table::plain_table(table);
+    rendered
+        .push("Full identities: ego rules ls --json; use /permissions → explain for a call".into());
+    rendered
+}
+
 pub(crate) fn render_list_rows(rows: &[EffectiveRule]) -> Vec<String> {
     rows.iter()
         .map(|row| {
@@ -713,8 +744,8 @@ fn render_rows(rows: Vec<String>, out: &dyn TextOutput) {
 
 fn render_list_text(rows: &[EffectiveRule], out: &dyn TextOutput) {
     if rows.is_empty() {
-        // Text rule listings are tab-separated rows. An empty listing explains
-        // itself on stderr without inventing a stdout row.
+        // The rule ADR fixes the text listing as tab-separated rows, so an
+        // empty one has no stdout at all and says why on stderr instead.
         out.note(&empty_listing(
             "no permission rules are in effect",
             "ego rules allow",
@@ -803,6 +834,13 @@ fn render_remember_plan_rows(plan: &RememberPlan, effect: ManagedRuleEffect) -> 
             "OMITTED\t{}\t{}",
             operation,
             omitted_name(dimension)
+        ));
+    }
+    for operation in plan.disclosure_rows() {
+        rows.push(format!(
+            "DISCLOSES\t{}\t{}",
+            operation,
+            RememberPlan::DISCLOSURE_NOTICE
         ));
     }
     rows
@@ -968,10 +1006,8 @@ fn profile_json(target: &UserConfigTarget) -> String {
 fn publication(publication: &UserConfigPublication) -> &'static str {
     match publication {
         UserConfigPublication::NotPublished => "not_published",
-        UserConfigPublication::PublishedDurably => "published_durably",
-        UserConfigPublication::PublishedDurabilityUncertain { .. } => {
-            "published_durability_uncertain"
-        }
+        UserConfigPublication::PublishedDurably => "durable",
+        UserConfigPublication::PublishedDurabilityUncertain { .. } => "durability_uncertain",
     }
 }
 
@@ -1084,6 +1120,28 @@ mod permission_red {
     use futures::future::BoxFuture;
     use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // Catches inherited duplicate receipts being rejected or publishing a new block.
+    #[test]
+    fn inherited_profile_duplicate_keeps_physical_snapshot_and_file_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let before = "[permissions]\ndeny = ['write(private/**)']\n[profile.dev]\nmode = 'yolo'\n";
+        std::fs::write(&path, before).unwrap();
+        let store = Arc::new(OsUserConfigStore::new(Arc::new(OsIo), path.clone()));
+        let application =
+            RuleApplication::new(store, UserConfigTarget::Profile("dev".parse().unwrap()));
+        let change = application
+            .add(
+                ManagedRuleEffect::Deny,
+                Rule::load("write(private/**)").unwrap(),
+            )
+            .unwrap();
+        assert!(!change.changed());
+        assert_eq!(change.transaction().0, change.transaction().1);
+        assert!(!change.transaction().1.permissions_present);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
 
     struct AdmittedToolFake {
         name: String,
@@ -1260,6 +1318,7 @@ mod permission_red {
             UserConfigMutationResult {
                 target: UserConfigTarget::Base,
                 facts: UserConfigMutationFacts::RuleTransaction {
+                    inherited: None,
                     request: Box::new(UserConfigMutationFacts::Batch {
                         changes: vec![mutation.clone()],
                     }),
@@ -1282,7 +1341,7 @@ mod permission_red {
         assert_eq!(
             receipt_rows[0],
             format!(
-                "stored_changed\teffective_changed\tallow\t{}\tread(src/**)\tuser\t-\tpublished_durably",
+                "stored_changed\teffective_changed\tallow\t{}\tread(src/**)\tuser\t-\tdurable",
                 mutation.rule.id()
             )
         );
@@ -1346,6 +1405,7 @@ mod permission_red {
             UserConfigMutationResult {
                 target: UserConfigTarget::Base,
                 facts: UserConfigMutationFacts::RuleTransaction {
+                    inherited: None,
                     request: Box::new(UserConfigMutationFacts::Revoke { id }),
                     before: RuleSnapshot {
                         target: UserConfigTarget::Base,
@@ -1390,7 +1450,7 @@ mod permission_red {
         assert_eq!(
             render_revoke_receipt_rows(&receipt),
             vec![format!(
-                "stored_changed\teffective_changed\tboth\t{}\tread(src/**)\tuser\t-\tpublished_durably",
+                "stored_changed\teffective_changed\tboth\t{}\tread(src/**)\tuser\t-\tdurable",
                 rule.id()
             )]
         );
@@ -1449,6 +1509,7 @@ mod permission_red {
             UserConfigMutationResult {
                 target: UserConfigTarget::Base,
                 facts: UserConfigMutationFacts::RuleTransaction {
+                    inherited: None,
                     request: Box::new(UserConfigMutationFacts::Batch {
                         changes: vec![mutation.clone()],
                     }),
@@ -1496,6 +1557,38 @@ mod permission_red {
         assert_eq!(*output.0.lock().unwrap(), expected);
     }
 
+    /// Catches a `rules remember` preview of a credential read that stays
+    /// silent about the value disclosure the stored rule grants.
+    #[test]
+    fn remember_preview_states_credential_disclosure() {
+        let call = |path: &str| {
+            PreparedCall::new(
+                "read",
+                Op::Read {
+                    path: CanonPath::new(path),
+                },
+            )
+        };
+        let rows = |path: &str| {
+            let plan = RuleManagement::remember(
+                &call(path),
+                ManagedRuleEffect::Allow,
+                Path::new("/workspace"),
+            )
+            .unwrap();
+            render_remember_plan_rows(&plan, ManagedRuleEffect::Allow)
+        };
+        assert!(rows("/workspace/.env").contains(&format!(
+            "DISCLOSES\t0\t{}",
+            RememberPlan::DISCLOSURE_NOTICE
+        )));
+        assert!(
+            !rows("/workspace/src/main.rs")
+                .iter()
+                .any(|row| row.starts_with("DISCLOSES"))
+        );
+    }
+
     #[test]
     fn publication_warning_and_remember_result_rows_are_pure_and_typed() {
         let uncertain = UserConfigPublication::PublishedDurabilityUncertain {
@@ -1516,6 +1609,7 @@ mod permission_red {
             UserConfigMutationResult {
                 target: UserConfigTarget::Base,
                 facts: UserConfigMutationFacts::RuleTransaction {
+                    inherited: None,
                     request: Box::new(UserConfigMutationFacts::Batch {
                         changes: vec![RuleMutation {
                             effect: ManagedRuleEffect::Allow,
@@ -1551,7 +1645,7 @@ mod permission_red {
         .unwrap();
         assert_eq!(
             render_remember_result_rows(&UserConfigTarget::Base, Some(&receipt)),
-            vec!["RESULT\tstored_changed\teffective_changed\tuser\tpublished_durably"]
+            vec!["RESULT\tstored_changed\teffective_changed\tuser\tdurable"]
         );
     }
 }

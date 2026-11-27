@@ -1,0 +1,26 @@
+{
+  "run_id": "20261025T172908Z-08ab322f",
+  "source_commit": "9242324db061c9750e10d16e2b202d7b4759603c",
+  "binary": "/Users/stefano.straus/Gits/.tmp/ego-419-b7/bin/ego",
+  "binary_sha256_before": "96815dd21b94d588be40443bc5f54688f8a6d07ccb899bc372c0e59491aaf7d7",
+  "start_unix": 1792949348.257025,
+  "operator_home": "/Users/stefano.straus/Gits/.tmp/ego-419-continuation/operator-home",
+  "fact_sha256": "4fd7c0c2f5e7214ce8730e98a666e3f5994a40ec66fab580b959b9ba2a50ef03",
+  "fixture_recovery": "fixture-recovery.json",
+  "ceilings_usd": {
+    "run": "0.95",
+    "provider": "0.90"
+  },
+  "runner_exit": 1,
+  "operator_facts_restored": true,
+  "binary_sha256_after": "96815dd21b94d588be40443bc5f54688f8a6d07ccb899bc372c0e59491aaf7d7",
+  "end_unix": 1792949864.69485,
+  "cost_usd": "0.166121140",
+  "cost_uncertain": true,
+  "by_provider": {
+    "openai-codex": "0",
+    "openai": "0.007688440",
+    "openrouter": "0.1584327"
+  },
+  "stable_endpoints": true
+}

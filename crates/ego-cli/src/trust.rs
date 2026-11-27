@@ -1,15 +1,18 @@
 //! Workspace decisions stored outside the workspace that cannot grant
-//! themselves. Executable authority invalidates a decision; instructions do
-//! not.
+//! themselves. Executable authority invalidates a decision, except edits to
+//! named programs covered by an explicit development grant.
 //!
-//! `ego-core` decides trust inventory meaning and whether a stored answer
-//! still applies. This module owns reads and separately locked documents
-//! under `$EGO_HOME`, outside the workspace so a project cannot admit itself.
+//! See `docs/internals/decisions/2026-09-28-one-workspace-trust-answer-across-seats.md`.
+//! `ego-core` owns what each fact means and whether a stored answer still
+//! applies. This module owns trust inventory reads and the separate locked
+//! documents under `$EGO_HOME`. Records live outside the workspace on purpose:
+//! a project file must never be able to write the decision that admits it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 #[cfg(test)]
 use ego_core::config::INSTRUCTIONS_FILE;
@@ -17,7 +20,7 @@ use ego_core::config::{
     ExecutableDeclaration, ExecutableSurface, ProgramEvidence, TRUST_DIGEST_MAX_BYTES, Trust,
     TrustInventory, TrustLedger, TrustedContent,
 };
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use ego_core::config::{UNCONFINED_CONTRACT_REVISION, UnconfinedLedger};
 use ego_tools::instructions::OsInstructionIo;
 use ego_tools::privacy::{PrivatePathKind, harden_private_path};
@@ -66,9 +69,14 @@ pub(crate) fn instruction_discovery_root(
     Ok(shared)
 }
 
-fn user_instruction_discovery_root(root: &Path) -> std::io::Result<PathBuf> {
+fn user_instruction_discovery_root(
+    root: &Path,
+) -> std::io::Result<(PathBuf, ego_core::config::Limits)> {
     let effective = crate::config::user_effective().map_err(std::io::Error::other)?;
-    instruction_discovery_root(root, &effective.instructions)
+    Ok((
+        instruction_discovery_root(root, &effective.instructions)?,
+        effective.instructions.limits(),
+    ))
 }
 
 /// The terminal launch resolves the same per-root answer ACP uses.
@@ -84,9 +92,15 @@ pub(crate) fn resolve(
     explicit_grant: bool,
     ask: impl FnOnce(&str) -> Trust,
 ) -> Trust {
-    resolve_selected(root, home, diagnostics, explicit_grant, None, |context| {
-        Some(ask(context))
-    })
+    resolve_selected(
+        root,
+        home,
+        diagnostics,
+        explicit_grant,
+        false,
+        None,
+        |context| Some(ask(context)),
+    )
 }
 
 /// Headless launches may reuse an answer, but never manufacture a refusal.
@@ -97,7 +111,9 @@ pub(crate) fn resolve_headless(
     diagnostics: &dyn Diagnostics,
     explicit_grant: bool,
 ) -> Trust {
-    resolve_selected(root, home, diagnostics, explicit_grant, None, |_| None)
+    resolve_selected(root, home, diagnostics, explicit_grant, false, None, |_| {
+        None
+    })
 }
 
 pub(crate) fn resolve_selected(
@@ -105,6 +121,7 @@ pub(crate) fn resolve_selected(
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
     explicit_grant: bool,
+    development_grant: bool,
     selected: Option<&Path>,
     ask: impl FnOnce(&str) -> Option<Trust>,
 ) -> Trust {
@@ -123,10 +140,18 @@ pub(crate) fn resolve_selected(
     let surface = executable_surface_selected(root, selected);
     let key = root.display().to_string();
     let store = home.map(TrustStore::new);
-    if !explicit_grant && let Some(store) = &store {
+    if !explicit_grant
+        && !development_grant
+        && let Some(store) = &store
+    {
         match store.read() {
             Ok(ledger) => {
-                if let Some(remembered) = ledger.remembered(&key, &surface) {
+                if let Some(remembered) = remembered_or_linked(root, &ledger, &surface) {
+                    if let Some(changes) = ledger.development_changes(&key, &surface) {
+                        diagnostics.note(&format!(
+                            "workspace development grant covers changed programs:\n{changes}"
+                        ));
+                    }
                     if ledger.is_legacy(&key)
                         && let Err(error) = store.migrate_legacy(&key, surface.clone(), remembered)
                     {
@@ -160,7 +185,7 @@ pub(crate) fn resolve_selected(
         }
         None => content,
     };
-    let decision = if explicit_grant {
+    let decision = if explicit_grant || development_grant {
         Trust::Trusted
     } else {
         let Some(answer) = ask(&context) else {
@@ -173,7 +198,13 @@ pub(crate) fn resolve_selected(
         return Trust::Untrusted;
     }
     if let Some(store) = &store
-        && let Err(error) = store.remember(&key, surface, decision)
+        && let Err(error) = if development_grant {
+            store
+                .0
+                .update(|ledger| ledger.remember_development(&key, surface))
+        } else {
+            store.remember(&key, surface, decision)
+        }
     {
         // The person answered, and this session honours that answer. Losing
         // the memory of it costs one more question next launch, which is not
@@ -213,7 +244,13 @@ fn collect_executable_declarations(
                         env_keys: env_keys_in(entry),
                         details: details_in(
                             entry,
-                            &["transport", "profile", "cwd", "allow_insecure_loopback"],
+                            &[
+                                "transport",
+                                "profile",
+                                "cwd",
+                                "allow_insecure_loopback",
+                                "oauth_hosts",
+                            ],
                         ),
                     },
                 );
@@ -253,6 +290,23 @@ fn collect_executable_declarations(
                 );
             }
         }
+        if let Some(grants) = config.get("grants").and_then(toml::Value::as_table) {
+            collect_grant_declarations(surface, relative, grants);
+        }
+        if selects_long_cache(&config) {
+            surface.declarations.insert(
+                format!("{relative}:cache"),
+                ExecutableDeclaration {
+                    config: relative.to_owned(),
+                    kind: "prompt-cache retention".to_owned(),
+                    name: "cache".to_owned(),
+                    command: "long".to_owned(),
+                    args: Vec::new(),
+                    env_keys: Vec::new(),
+                    details: Default::default(),
+                },
+            );
+        }
         if let Some(auth) = config.get("auth").and_then(toml::Value::as_table) {
             for (name, entry) in auth {
                 if let Some(command) = entry
@@ -273,6 +327,54 @@ fn collect_executable_declarations(
                     );
                 }
             }
+        }
+    }
+}
+
+/// Each proposed root, executable path and MCP grant is its own declaration,
+/// keyed by its content, so the owner's answer covers exactly this text and a
+/// changed proposal is listed as added or removed.
+fn collect_grant_declarations(
+    surface: &mut ExecutableSurface,
+    relative: &str,
+    grants: &toml::Table,
+) {
+    let mut propose = |kind: &str, name: String, details| {
+        surface.declarations.insert(
+            format!("{relative}:grant:{kind}:{name}"),
+            ExecutableDeclaration {
+                config: relative.to_owned(),
+                kind: format!("grant {kind}"),
+                name,
+                command: String::new(),
+                args: Vec::new(),
+                env_keys: Vec::new(),
+                details,
+            },
+        );
+    };
+    for root in grants
+        .get("roots")
+        .and_then(toml::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let path = root
+            .get("path")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        let details = details_in(root, &["access"]);
+        propose("root", path.to_owned(), details);
+    }
+    for (key, kind) in [("exec_paths", "exec path"), ("allow", "mcp")] {
+        for value in grants
+            .get(key)
+            .and_then(toml::Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(toml::Value::as_str)
+        {
+            propose(kind, value.to_owned(), Default::default());
         }
     }
 }
@@ -324,6 +426,7 @@ pub(crate) fn executable_surface_selected(
                     digest: ego_core::digest::sha256_hex(&bytes),
                     executable: false,
                     link_target: None,
+                    resolved_target: None,
                 },
             );
         }
@@ -361,6 +464,7 @@ pub(crate) fn executable_surface_selected(
                         digest: format!("{:x}", Sha256::digest(target.as_bytes())),
                         executable: false,
                         link_target: Some(target),
+                        resolved_target: None,
                     },
                 );
             }
@@ -391,12 +495,16 @@ pub(crate) fn executable_surface_selected(
                 digest,
                 executable,
                 link_target,
+                resolved_target: resolved
+                    .as_deref()
+                    .and_then(|path| path.strip_prefix(root).ok())
+                    .map(|path| path.to_string_lossy().into_owned()),
             },
         );
     }
     if let Some(home) = std::env::var_os("HOME") {
         let home = PathBuf::from(home);
-        if let Ok(discovery_root) = user_instruction_discovery_root(root) {
+        if let Ok((discovery_root, limits)) = user_instruction_discovery_root(root) {
             let mut selections = vec![ego_core::config::Selection::Ambient];
             if let Some(selected) = selected {
                 selections.push(ego_core::config::Selection::Explicit(
@@ -415,7 +523,7 @@ pub(crate) fn executable_surface_selected(
                     &discovery_root,
                     root,
                     &selection,
-                    ego_core::config::Limits::default(),
+                    limits,
                     Some(&home),
                 ) {
                     for file in set.loaded {
@@ -447,13 +555,110 @@ pub(crate) fn remembered_decision(
             return None;
         }
     };
-    let decision = ledger.remembered(&key, surface)?;
+    let decision = remembered_or_linked(&root, &ledger, surface)?;
+    if let Some(changes) = ledger.development_changes(&key, surface) {
+        tracing::warn!("workspace development grant covers changed programs:\n{changes}");
+    }
     if ledger.is_legacy(&key)
         && let Err(error) = store.migrate_legacy(&key, surface.clone(), decision)
     {
         tracing::warn!(%error, "the legacy workspace trust record could not be migrated");
     }
     Some(decision)
+}
+
+/// An approved main checkout covers a linked worktree only while Git still
+/// registers both checkouts and their current executable authority matches.
+/// Do not persist this derived answer: revoking the main answer revokes it too.
+fn remembered_or_linked(
+    root: &Path,
+    ledger: &TrustLedger,
+    surface: &ExecutableSurface,
+) -> Option<Trust> {
+    let key = root.display().to_string();
+    if let Some(decision) = ledger.remembered(&key, surface) {
+        return Some(decision);
+    }
+    // A prior answer for this exact checkout, including an obsolete refusal,
+    // must be resolved by its own trust question, not a different checkout.
+    if ledger.prior_surface(&key).is_some() || ledger.is_legacy(&key) {
+        return None;
+    }
+    let source = linked_main_checkout(root)?;
+    // A named command can execute checkout-local code through arguments,
+    // sourced files, or the interpreter it invokes. Matching program digests
+    // alone cannot prove the executable authority of two checkouts equal.
+    if [root, source.as_path()].into_iter().any(|checkout| {
+        project_configs(checkout)
+            .iter()
+            .any(|(_, config)| !commands_in(config).is_empty())
+    }) {
+        return None;
+    }
+    let source_key = source.display().to_string();
+    let source_surface = executable_surface(&source);
+    (ledger.remembered(&source_key, &source_surface) == Some(Trust::Trusted)
+        && rebased_surface(&source_surface, &source) == rebased_surface(surface, root))
+    .then_some(Trust::Trusted)
+}
+
+/// Git itself supplies the registered worktree set. A forged `.git` file or
+/// an unrelated repository cannot make an unregistered path inherit trust.
+fn linked_main_checkout(root: &Path) -> Option<PathBuf> {
+    // Never resolve `git` through an untrusted checkout's PATH before consent.
+    #[cfg(unix)]
+    let git = "/usr/bin/git";
+    #[cfg(windows)]
+    let git = "C:\\Program Files\\Git\\cmd\\git.exe";
+    let output = Command::new(git)
+        .args(["--no-optional-locks", "-C"])
+        .arg(root)
+        .args(["worktree", "list", "--porcelain", "-z"])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let main = fs::canonicalize(text.split('\0').next()?.strip_prefix("worktree ")?).ok()?;
+    let registered = text
+        .split('\0')
+        .skip(1)
+        .filter_map(|field| field.strip_prefix("worktree "))
+        .any(|path| fs::canonicalize(path).is_ok_and(|checkout| checkout == root));
+    (main != root && registered).then_some(main)
+}
+
+fn rebased_surface(surface: &ExecutableSurface, root: &Path) -> ExecutableSurface {
+    let mut surface = surface.clone();
+    surface.programs = surface
+        .programs
+        .into_iter()
+        .map(|(path, evidence)| {
+            let relative = Path::new(&path)
+                .strip_prefix(root)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or(path);
+            (relative, evidence)
+        })
+        .collect();
+    surface.external_instructions = surface
+        .external_instructions
+        .into_iter()
+        .map(|(path, digest)| {
+            let relative = Path::new(&path)
+                .strip_prefix(root)
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or(path);
+            (relative, digest)
+        })
+        .collect();
+    surface
 }
 
 pub(crate) fn executable_changes(
@@ -528,25 +733,34 @@ fn details_in(entry: &toml::Value, names: &[&str]) -> std::collections::BTreeMap
         .collect()
 }
 
-/// Resolve the separate host-risk acknowledgement for one canonical workspace.
+/// Resolve the user's host-risk acknowledgement of Windows unconfined execution.
+///
+/// One answer per user and contract revision covers every workspace, because
+/// the missing confinement is a property of the platform, not of a project.
+/// A start that relies on the remembered answer says so, so the unconfined
+/// posture stays visible after the question stops being asked.
 ///
 /// A broken document is not an acknowledgement and is never replaced by a
 /// fresh answer. The answer still governs this invocation, so a failed write
 /// costs another question rather than making an informed interactive start
 /// unusable.
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub(crate) fn resolve_unconfined(
-    root: &Path,
     home: Option<&Path>,
     diagnostics: &dyn Diagnostics,
     ask: impl FnOnce() -> bool,
 ) -> bool {
-    let key = root.display().to_string();
     let store = home.map(UnconfinedStore::new);
     if let Some(store) = &store {
         match store.read() {
             Ok(ledger) => {
-                if ledger.acknowledged(&key, UNCONFINED_CONTRACT_REVISION) {
+                if ledger.acknowledged(UNCONFINED_CONTRACT_REVISION) {
+                    diagnostics.note(&format!(
+                        "Windows execution is unconfined: filesystem and network isolation are \
+                         not enforced (acknowledged once for this user; delete {} to be asked \
+                         again)",
+                        store.path().display()
+                    ));
                     return true;
                 }
             }
@@ -561,16 +775,16 @@ pub(crate) fn resolve_unconfined(
     if accepted && store.is_none() {
         diagnostics.note(
             "this Windows unconfined acknowledgement could not be remembered because EGO_HOME \
-             is unavailable; this workspace will be asked about again",
+             is unavailable; the next start will ask again",
         );
     }
     if accepted
         && let Some(store) = &store
-        && let Err(error) = store.acknowledge(&key)
+        && let Err(error) = store.acknowledge()
     {
         diagnostics.note(&format!(
             "this Windows unconfined acknowledgement could not be remembered ({error}); \
-             this workspace will be asked about again"
+             the next start will ask again"
         ));
     }
     accepted
@@ -650,13 +864,49 @@ fn trustable_content_selected(root: &Path, selected: Option<&Path>) -> Option<St
             rendered.push_str(&format!("- {}\n", entry.path()));
         }
     }
+    let long_cache: Vec<_> = project_configs(root)
+        .into_iter()
+        .filter(|(_, config)| selects_long_cache(config))
+        .map(|(relative, _)| relative)
+        .collect();
+    if !long_cache.is_empty() {
+        rendered.push_str(
+            "\nRequests long prompt-cache retention (1 hour; the provider keeps cached prompt \
+             content longer and may bill a higher cache-write rate):\n",
+        );
+        for relative in long_cache {
+            rendered.push_str(&format!("- {relative}\n"));
+        }
+    }
     if let Some(selected) = selected {
         rendered.push_str(&format!(
             "- {} (selected instructions)\n",
             selected.display()
         ));
     }
-    let external = executable_surface_selected(root, selected).external_instructions;
+    let surface = executable_surface_selected(root, selected);
+    let proposed: Vec<_> = surface
+        .declarations
+        .values()
+        .filter(|declaration| declaration.kind.starts_with("grant "))
+        .collect();
+    if !proposed.is_empty() {
+        rendered.push_str("\nThe project proposes this extra authority (yes approves it):\n");
+        for declaration in proposed {
+            rendered.push_str(&format!(
+                "- {} {} ({}){}\n",
+                declaration.kind,
+                declaration.name,
+                declaration.config,
+                declaration
+                    .details
+                    .get("access")
+                    .map(|access| format!(" access={access}"))
+                    .unwrap_or_default()
+            ));
+        }
+    }
+    let external = surface.external_instructions;
     if !external.is_empty() {
         rendered.push_str("\nExternal instructions offered for disclosure to the model:\n");
         for (path, digest) in external {
@@ -697,8 +947,8 @@ fn inventory(root: &Path) -> TrustInventory {
         content(path.parent()?, path)
     }));
 
-    let discovery_root = match user_instruction_discovery_root(root) {
-        Ok(discovery_root) => discovery_root,
+    let (discovery_root, limits) = match user_instruction_discovery_root(root) {
+        Ok(resolved) => resolved,
         Err(error) => {
             tracing::warn!(%error, "the workspace instruction discovery root could not be resolved");
             return TrustInventory::new(Vec::new());
@@ -709,7 +959,7 @@ fn inventory(root: &Path) -> TrustInventory {
         &discovery_root,
         root,
         &ego_core::config::Selection::Ambient,
-        ego_core::config::Limits::default(),
+        limits,
     ) {
         entries.extend(instructions.loaded.into_iter().map(|file| {
             TrustedContent::regular(
@@ -757,6 +1007,11 @@ fn project_configs(root: &Path) -> Vec<(&'static str, toml::Table)> {
             Some((relative, text.parse().ok()?))
         })
         .collect()
+}
+
+/// Whether one parsed project config sets `cache = "long"`.
+fn selects_long_cache(config: &toml::Table) -> bool {
+    config.get("cache").and_then(toml::Value::as_str) == Some("long")
 }
 
 /// Every program string one parsed config declares.
@@ -868,14 +1123,18 @@ fn skill_files(root: &Path) -> Vec<PathBuf> {
     .into_iter()
     .filter(|entry| entry.source == ego_core::event::skill::SkillSourceAuthority::Project)
     {
-        let Some(entries) = readable(&skills.path, fs::read_dir(&skills.path)) else {
+        let Some(canonical_root) = readable(&skills.path, skills.canonical_skill_root()) else {
+            continue;
+        };
+        let Some(entries) = readable(&skills.path, fs::read_dir(&canonical_root)) else {
             continue;
         };
         for path in entries
             .filter_map(|entry| readable(&skills.path, entry))
-            .map(|entry| entry.path().join(SKILL_FILE))
+            .map(|entry| skills.path.join(entry.file_name()).join(SKILL_FILE))
         {
             if let Ok(resolved) = fs::canonicalize(&path)
+                && resolved.starts_with(&canonical_root)
                 && canonical.insert(resolved)
             {
                 paths.push(path);
@@ -1048,23 +1307,27 @@ impl TrustStore {
     }
 }
 
-/// Windows unconfined-execution acknowledgements under one ego home.
-#[cfg(windows)]
+/// The user's Windows unconfined-execution acknowledgement under one ego home.
+#[cfg(any(windows, test))]
 struct UnconfinedStore(LockedJsonStore<UnconfinedLedger>);
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl UnconfinedStore {
     fn new(home: &Path) -> Self {
-        Self(LockedJsonStore::new(home, "unconfined"))
+        Self(LockedJsonStore::new(home, "windows-unconfined"))
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0.path()
     }
 
     fn read(&self) -> Result<UnconfinedLedger, String> {
         self.0.read()
     }
 
-    fn acknowledge(&self, root: &str) -> Result<(), String> {
+    fn acknowledge(&self) -> Result<(), String> {
         self.0
-            .update(|ledger| ledger.acknowledge(root, UNCONFINED_CONTRACT_REVISION))
+            .update(|ledger| ledger.acknowledge(UNCONFINED_CONTRACT_REVISION))
     }
 }
 
@@ -1121,7 +1384,10 @@ mod tests {
             fs::write(skill.join(SKILL_FILE), "a skill\n").expect("the skill");
         }
 
-        let rendered = trustable_content(root.path()).expect("a non-empty inventory");
+        // The harness hands this function its canonical workspace root; the
+        // temp directory is not canonical on Windows (`\\?\` form).
+        let canonical = root.path().canonicalize().expect("the canonical root");
+        let rendered = trustable_content(&canonical).expect("a non-empty inventory");
 
         assert!(
             rendered.contains("zzz-run.sh"),
@@ -1137,6 +1403,38 @@ mod tests {
 
     impl Diagnostics for Silent {
         fn note(&self, _message: &str) {}
+    }
+
+    #[derive(Default)]
+    struct Notes(std::sync::Mutex<Vec<String>>);
+
+    impl Diagnostics for Notes {
+        fn note(&self, message: &str) {
+            self.0.lock().unwrap().push(message.to_owned());
+        }
+    }
+
+    // Catches: the owner must acknowledge the same platform limitation in each workspace.
+    #[test]
+    fn windows_user_acknowledgement_applies_to_second_workspace() {
+        let home = tempfile::tempdir().expect("an ego home");
+        let notes = Notes::default();
+        let asked = Cell::new(0);
+        let ask = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+
+        // The caller asks about its own workspace; the answer is the user's.
+        assert!(resolve_unconfined(Some(home.path()), &notes, ask));
+        assert!(resolve_unconfined(Some(home.path()), &notes, ask));
+
+        assert_eq!(asked.get(), 1, "the second workspace asked again");
+        let notes = notes.0.into_inner().unwrap();
+        assert!(
+            notes.iter().any(|note| note.contains("unconfined")),
+            "a remembered acknowledgement started without a visible indicator: {notes:?}"
+        );
     }
 
     /// One workspace and one ego home, and a counter for how often the seat
@@ -1176,6 +1474,232 @@ mod tests {
         }
     }
 
+    // Catches: a registered worktree of a trusted checkout asks again despite
+    // identical executable authority, or inherits after a changed hook/refusal.
+    #[cfg(unix)]
+    #[test]
+    fn linked_worktree_inherits_only_matching_unrevoked_project_trust() {
+        let tree = tempfile::tempdir().expect("fixture root");
+        let source = tree.path().join("source");
+        let child = tree.path().join("child");
+        let home = tree.path().join("ego-home");
+        fs::create_dir_all(source.join(".ego")).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::write(source.join("AGENTS.md"), "approved instructions\n").unwrap();
+        fs::write(
+            source.join(".ego/config.toml"),
+            "# no executable declarations\n",
+        )
+        .unwrap();
+        let git = |path: &Path, args: &[&str]| {
+            let output = Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        };
+        git(&source, &["init", "-q"]);
+        git(&source, &["add", "AGENTS.md", ".ego/config.toml"]);
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        );
+        assert_eq!(
+            resolve(&source, Some(&home), &Silent, false, |_| Trust::Trusted),
+            Trust::Trusted
+        );
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "test-child",
+                child.to_str().unwrap(),
+            ],
+        );
+
+        let asked = Cell::new(0);
+        let decide = |path: &Path| {
+            resolve(path, Some(&home), &Silent, false, |_| {
+                asked.set(asked.get() + 1);
+                Trust::Untrusted
+            })
+        };
+        assert_eq!(decide(&child), Trust::Trusted, "equivalent linked checkout");
+        assert_eq!(asked.get(), 0, "an equivalent worktree asked again");
+
+        // Catches: identical /bin/sh declarations can execute different
+        // checkout-local scripts through an argument not in the program digest.
+        let interpreter_home = tree.path().join("interpreter-home");
+        fs::create_dir_all(&interpreter_home).unwrap();
+        let interpreter_hook = "[[hooks]]\nevent = 'Stop'\n[hooks.handler]\ntype = 'command'\ncommand = '/bin/sh'\nargs = ['./run']\n";
+        for (checkout, script) in [(&source, "approved code\n"), (&child, "unapproved code\n")] {
+            fs::write(checkout.join(".ego/config.toml"), interpreter_hook).unwrap();
+            fs::write(checkout.join("run"), script).unwrap();
+        }
+        assert_eq!(
+            resolve(&source, Some(&interpreter_home), &Silent, true, |_| {
+                Trust::Trusted
+            }),
+            Trust::Trusted
+        );
+        let interpreter_asks = Cell::new(0);
+        assert_eq!(
+            resolve(&child, Some(&interpreter_home), &Silent, false, |_| {
+                interpreter_asks.set(interpreter_asks.get() + 1);
+                Trust::Untrusted
+            }),
+            Trust::Untrusted,
+            "different shell script must require a child answer"
+        );
+        assert_eq!(interpreter_asks.get(), 1);
+        fs::remove_file(source.join("run")).unwrap();
+        fs::remove_file(child.join("run")).unwrap();
+        fs::write(
+            source.join(".ego/config.toml"),
+            "# no executable declarations\n",
+        )
+        .unwrap();
+        fs::write(
+            child.join(".ego/config.toml"),
+            "# no executable declarations\n",
+        )
+        .unwrap();
+
+        fs::write(
+            child.join(".ego/config.toml"),
+            "[[hooks]]\nevent = 'Stop'\n[hooks.handler]\ntype = 'command'\ncommand = '/bin/sh'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            decide(&child),
+            Trust::Untrusted,
+            "new hook requires consent"
+        );
+        assert_eq!(asked.get(), 1);
+        fs::write(
+            child.join(".ego/config.toml"),
+            "# no executable declarations\n",
+        )
+        .unwrap();
+        assert_eq!(
+            decide(&child),
+            Trust::Untrusted,
+            "child refusal is not replaced by main trust"
+        );
+        assert_eq!(asked.get(), 2);
+
+        let foreign = tree.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        fs::write(foreign.join("AGENTS.md"), "approved instructions\n").unwrap();
+        assert_eq!(
+            decide(&foreign),
+            Trust::Untrusted,
+            "another repository needs its own answer"
+        );
+        assert_eq!(asked.get(), 3);
+
+        // The same relative link can resolve to other bytes in another checkout.
+        // A fresh worktree with an escaping program cannot borrow main trust.
+        fs::write(
+            source.join(".ego/config.toml"),
+            "[[hooks]]\nevent = 'Stop'\n[hooks.handler]\ntype = 'command'\ncommand = './run'\n",
+        )
+        .unwrap();
+        fs::write(tree.path().join("payload"), "external code\n").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("../payload", source.join("run")).unwrap();
+        git(&source, &["add", ".ego/config.toml", "run"]);
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "-qm",
+                "hook fixture",
+            ],
+        );
+        assert_eq!(
+            resolve(&source, Some(&home), &Silent, false, |_| Trust::Trusted),
+            Trust::Trusted
+        );
+        let escaped = tree.path().join("escaped");
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "test-escaped",
+                escaped.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(
+            decide(&escaped),
+            Trust::Untrusted,
+            "outside symlink must ask independently"
+        );
+        assert_eq!(asked.get(), 4);
+
+        for (index, command) in ["../payload", "./run/../payload"].iter().enumerate() {
+            fs::write(
+                source.join(".ego/config.toml"),
+                format!("[[hooks]]\nevent = 'Stop'\n[hooks.handler]\ntype = 'command'\ncommand = '{command}'\n"),
+            )
+            .unwrap();
+            git(&source, &["add", ".ego/config.toml"]);
+            git(
+                &source,
+                &[
+                    "-c",
+                    "user.name=Test",
+                    "-c",
+                    "user.email=test@example.invalid",
+                    "commit",
+                    "-qm",
+                    "traversal fixture",
+                ],
+            );
+            assert_eq!(
+                resolve(&source, Some(&home), &Silent, false, |_| Trust::Trusted),
+                Trust::Trusted
+            );
+            let branch = format!("test-traversal-{index}");
+            let path = tree.path().join(&branch);
+            git(
+                &source,
+                &["worktree", "add", "-qb", &branch, path.to_str().unwrap()],
+            );
+            assert_eq!(
+                decide(&path),
+                Trust::Untrusted,
+                "relative parent traversal must ask: {command}"
+            );
+            assert_eq!(asked.get(), 5 + index);
+        }
+    }
+
     // Catches: an absent headless answer records a refusal, or stale executable
     // authority is reused after a project command changes.
     #[test]
@@ -1205,6 +1729,25 @@ mod tests {
             before
         );
         assert_eq!(resolve(true), Trust::Trusted);
+    }
+
+    // Catches: a project selects 1-hour remote cache retention and the trust
+    // question never says so, or a later edit adds it without a new question.
+    #[test]
+    fn trusted_project_long_cache_is_admitted_and_disclosed() {
+        let fixture = Fixture::new();
+        fixture.write(".ego/config.toml", "cache = \"short\"\n");
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.asked.get(), 1);
+
+        fixture.write(".ego/config.toml", "cache = \"long\"\n");
+        let rendered = trustable_content(fixture.workspace.path()).expect("an inventory");
+        assert!(
+            rendered.contains("long prompt-cache retention"),
+            "the trust question did not disclose long cache: {rendered}"
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(fixture.asked.get(), 2, "adding long cache must ask again");
     }
 
     #[test]
@@ -1499,6 +2042,65 @@ mod tests {
         assert_eq!(fixture.asked.get(), 2);
     }
 
+    const PROPOSAL: &str = "[grants]\nroots = [{ path = '/srv/shared', access = 'read-write' }]\n\
+                            exec_paths = ['/opt/tools/bin']\nallow = ['tool(docs/*)']\n";
+
+    // Catches: a project proposal is applied without the owner's answer covering
+    // its exact text, or an edited proposal rides on an older answer.
+    #[test]
+    fn a_project_grant_proposal_is_approved_once_and_asks_again_when_it_changes() {
+        let fixture = Fixture::new();
+        fixture.write(".ego/config.toml", PROPOSAL);
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Trusted);
+        assert_eq!(
+            fixture.asked.get(),
+            1,
+            "an unchanged proposal is not asked about again"
+        );
+
+        fixture.write(
+            ".ego/config.toml",
+            &PROPOSAL
+                .replace("read-write", "read")
+                .replace("/opt/tools/bin", "/opt/other"),
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+        assert_eq!(
+            fixture.asked.get(),
+            2,
+            "a changed proposal needs a new answer"
+        );
+
+        fixture.write(
+            ".ego/config.toml",
+            &format!("{PROPOSAL}allow = ['tool(more/*)']\n"),
+        );
+        assert_eq!(fixture.resolve(Trust::Untrusted), Trust::Untrusted);
+    }
+
+    // Catches: the owner approves proposed authority without seeing it.
+    #[test]
+    fn the_trust_question_lists_each_proposed_grant() {
+        let fixture = Fixture::new();
+        fixture.write(".ego/config.toml", PROPOSAL);
+        let rendered = trustable_content(fixture.workspace.path()).expect("offered content");
+        for expected in [
+            "grant root /srv/shared",
+            "access=\"read-write\"",
+            "grant exec path /opt/tools/bin",
+            "grant mcp tool(docs/*)",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "{expected} missing from: {rendered}"
+            );
+        }
+        let surface = executable_surface(fixture.workspace.path());
+        let changes = surface.changes_from(&ExecutableSurface::default());
+        assert!(changes.contains("grant root /srv/shared"), "{changes}");
+    }
+
     #[test]
     fn command_only_workspace_requires_trust_again_when_shell_source_changes() {
         let fixture = Fixture::new();
@@ -1587,6 +2189,8 @@ mod tests {
     }
 
     // Catches: using the workspace scope hides an Explicit file's external import inside it.
+    // External imports need race-safe reads, which are unsupported off Unix (instructions::portable_external_import_stays_unsupported).
+    #[cfg(not(windows))]
     #[test]
     fn trust_survivor_explicit_sibling_import_is_disclosed_and_reapproved() {
         let fixture = Fixture::new();
@@ -1594,13 +2198,15 @@ mod tests {
         fixture.write("selected/local.md", "local rules\n");
         fixture.write("shared.md", "first shared rules\n");
         let root = fs::canonicalize(fixture.workspace.path()).unwrap();
-        let selected = root.join("selected/rules.md");
+        // A verbatim (`\\?\`) path takes no `/` separator, so build it by components.
+        let selected = root.join("selected").join("rules.md");
         let shared = root.join("shared.md");
         let ask = |answer| {
             resolve_selected(
                 &root,
                 Some(fixture.home.path()),
                 &Silent,
+                false,
                 false,
                 Some(&selected),
                 |context| {
@@ -1612,7 +2218,9 @@ mod tests {
                     );
                     assert!(context.contains(&shared.display().to_string()), "{context}");
                     assert!(
-                        !context.contains(&root.join("selected/local.md").display().to_string()),
+                        !context.contains(
+                            &root.join("selected").join("local.md").display().to_string()
+                        ),
                         "local imports do not need external disclosure: {context}"
                     );
                     Some(answer)
@@ -1761,19 +2369,19 @@ mod tests {
         assert_eq!(fixture.asked.get(), 1, "`no` is not re-asked every launch");
     }
 
+    #[cfg(unix)]
     #[test]
-    fn a_symlinked_instruction_file_is_not_content_to_be_trusted_with() {
+    fn a_symlinked_instruction_file_with_an_in_workspace_target_is_content_to_be_trusted_with() {
         let fixture = Fixture::new();
         fixture.write("elsewhere.md", "content\n");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(
             fixture.workspace.path().join("elsewhere.md"),
             fixture.workspace.path().join("AGENTS.md"),
         )
         .expect("a temp dir is writable");
 
-        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Untrusted);
-        assert_eq!(fixture.asked.get(), 0);
+        assert_eq!(fixture.resolve(Trust::Trusted), Trust::Trusted);
+        assert_eq!(fixture.asked.get(), 1);
     }
 
     #[test]
@@ -1806,8 +2414,26 @@ mod tests {
 }
 
 #[cfg(test)]
-mod portable_skill_trust {
+mod portable_skill_trust_474 {
     use super::*;
+
+    #[test]
+    fn repository_skill_alias_is_in_the_trust_offer() {
+        // Catches: a project with only this skill root never gets a chance to approve it.
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join(".github/skills/local/SKILL.md");
+        fs::create_dir_all(skill.parent().unwrap()).unwrap();
+        fs::write(
+            &skill,
+            "---\nname: local\ndescription: Local skill\n---\nInstructions",
+        )
+        .unwrap();
+        let offer = trustable_content(dir.path()).expect("skill must trigger a trust offer");
+        assert!(
+            offer.contains(&skill.canonicalize().unwrap().display().to_string()),
+            "{offer}"
+        );
+    }
 
     #[test]
     fn portable_only_workspace_prompts_and_ancestor_changes_invalidate_trust() {
@@ -1826,3 +2452,7 @@ mod portable_skill_trust {
         assert_ne!(before.digest(), inventory(&nested).digest());
     }
 }
+
+#[cfg(test)]
+#[path = "trust/development_tests.rs"]
+mod development_tests;

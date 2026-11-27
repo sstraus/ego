@@ -40,3 +40,6 @@ tracing = "0.1.44"
 [lints]
 workspace = true
 
+[dev-dependencies]
+ego-listen.workspace = true
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time"] }

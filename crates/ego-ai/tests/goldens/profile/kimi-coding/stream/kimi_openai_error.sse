@@ -1,0 +1,2 @@
+: schema-derived from Kimi's current Chat Completions stream
+data: {"error":{"message":"request refused","type":"invalid_request_error"}}

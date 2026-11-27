@@ -1,0 +1,376 @@
+{
+  "schema": 1,
+  "allowlist": "Error, UsageUpdated, AttemptSettled, TurnCompleted, GenerationStarted; no prompts, bodies or credentials",
+  "sessions": [
+    {
+      "session": "cb658c53-9b60-4184-903d-771bbaa84dad",
+      "journal_sha256": "fcbc719bd4a9c37291690bce3faa50830acc737d99ff442d7d3dcbe45b203b07",
+      "events": [
+        {
+          "seq": 10,
+          "timestamp_ms": 1792954976315,
+          "event": {
+            "kind": "GenerationStarted",
+            "snapshot": {
+              "epoch": "01a17471-c7e2-71be-9394-7d539bcc1d0d",
+              "identity": "You are ego 0.1.3, a coding agent.\n\nPermissions and OS confinement are separate. Modes: plan prevents mutation; default uses deterministic policy and escalation; auto adds bounded analysis and an optional permissions.judge; accept-edits admits workspace file edits; yolo relaxes ordinary approvals, not confinement or hard denies. User config can select mode and sandbox silently. The workspace sandbox confines reads, writes and exec. Absent explicit roots, an existing ~/Gits is an extra read-write root. Extra read/write roots do not grant exec; extra executable paths need exec_paths via ego config edit. The first ego roots add replaces the implicit default; removing all roots leaves roots=[]; ego config unset roots restores absence. Saved perimeter changes require exit and resume without a positional prompt; they do not apply live. Ask the user to inspect /config perimeter for this session, or ego config ls --effective and ego doctor for a fresh resolution. Use ego rules ls/explain/remember to inspect approval rules; remembered shell commands stay exact. When blocked, report the exact error and required paths or authority to the user; do not bypass the block through another tool, transport or sandbox mode.\n\nFor standalone delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Use /tasks to inspect or cancel it.",
+              "system": {
+                "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /Users/stefano.straus/Gits/.tmp/ego-419-b7/final-continuation/runs/20261025T185817Z-24720f12/014-compaction/AGENTS.md\n\nUse only offered tools and skills. Never access credentials or external services. Keep answers brief.\nReference 0000: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0001: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0002: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0003: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0004: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0005: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0006: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0007: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0008: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0009: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0010: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0011: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0012: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0013: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0014: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0015: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0016: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0017: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0018: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0019: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0020: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0021: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0022: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0023: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0024: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0025: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0026: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0027: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0028: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0029: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0030: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0031: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0032: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0033: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0034: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0035: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0036: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0037: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0038: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0039: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0040: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0041: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0042: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0043: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0044: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0045: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0046: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0047: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0048: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0049: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0050: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0051: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0052: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0053: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0054: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0055: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0056: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0057: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0058: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0059: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0060: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0061: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0062: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0063: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0064: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0065: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0066: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0067: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0068: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0069: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0070: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0071: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0072: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0073: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0074: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0075: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0076: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0077: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0078: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0079: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0080: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0081: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0082: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0083: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0084: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0085: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0086: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0087: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0088: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0089: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0090: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0091: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0092: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0093: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0094: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0095: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0096: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0097: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0098: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0099: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0100: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0101: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0102: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0103: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0104: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0105: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0106: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0107: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0108: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0109: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0110: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0111: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0112: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0113: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0114: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0115: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0116: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0117: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0118: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0119: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0120: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0121: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0122: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0123: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0124: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0125: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0126: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0127: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0128: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0129: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0130: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0131: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0132: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0133: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0134: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0135: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0136: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0137: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0138: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0139: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0140: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0141: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0142: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0143: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0144: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0145: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0146: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0147: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0148: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0149: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0150: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0151: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0152: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0153: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0154: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0155: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0156: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0157: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0158: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0159: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0160: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0161: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0162: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0163: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0164: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0165: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0166: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0167: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0168: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0169: fixture seed 419 records the stable amber ledger; retain this reference unchanged.",
+                "sources": [
+                  {
+                    "path": "/Users/stefano.straus/Gits/.tmp/ego-419-b7/final-continuation/runs/20261025T185817Z-24720f12/014-compaction/AGENTS.md",
+                    "sha256": "b6a3ec9eade6e0d94717c3ca39f68379df991e19b11433d3450d289cb60b63a4",
+                    "bytes": 16931,
+                    "scope": ".",
+                    "source": "explicit"
+                  }
+                ]
+              }
+            },
+            "attempt": {
+              "generation": "01a17471-c7f8-73b0-bd9b-c6f7c138afa7",
+              "attempt": "01a17471-c7f8-73b0-bd9b-c6f8cc9b68d3"
+            },
+            "role": "main"
+          }
+        },
+        {
+          "seq": 12,
+          "timestamp_ms": 1792954977967,
+          "event": {
+            "kind": "UsageUpdated",
+            "usage": {
+              "uncached_input_tokens": 266,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 7324,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 4
+            },
+            "cost_delta": {
+              "cost": "known",
+              "amount": {
+                "amount": "0.0047205",
+                "currency": "USD"
+              },
+              "attribution": {
+                "source": "table",
+                "revision": "https://openrouter.ai/api/v1/models#retrieved-2026-10-25-max-tier+web-search-2026-10-16"
+              }
+            },
+            "attempt": {
+              "generation": "01a17471-c7f8-73b0-bd9b-c6f7c138afa7",
+              "attempt": "01a17471-c7f8-73b0-bd9b-c6f8cc9b68d3"
+            }
+          }
+        },
+        {
+          "seq": 14,
+          "timestamp_ms": 1792954977968,
+          "event": {
+            "kind": "AttemptSettled",
+            "attempt": {
+              "generation": "01a17471-c7f8-73b0-bd9b-c6f7c138afa7",
+              "attempt": "01a17471-c7f8-73b0-bd9b-c6f8cc9b68d3"
+            },
+            "outcome": {
+              "stop": "stop",
+              "delivery": "possibly_sent",
+              "usage": {
+                "reported": {
+                  "uncached_input_tokens": 266,
+                  "cache_read_tokens": 0,
+                  "cache_write_tokens": 7324,
+                  "cache_write_extended_tokens": 0,
+                  "output_tokens": 4
+                }
+              }
+            }
+          }
+        },
+        {
+          "seq": 17,
+          "timestamp_ms": 1792954977981,
+          "event": {
+            "kind": "TurnCompleted",
+            "ok": true,
+            "exit_reason": "Completed"
+          }
+        },
+        {
+          "seq": 21,
+          "timestamp_ms": 1792954980294,
+          "event": {
+            "kind": "GenerationStarted",
+            "attempt": {
+              "generation": "01a17471-d7b7-7325-9001-8cd80194c2be",
+              "attempt": "01a17471-d7b7-7325-9001-8cd9628283f8"
+            },
+            "role": "compaction"
+          }
+        },
+        {
+          "seq": 22,
+          "timestamp_ms": 1792954981505,
+          "event": {
+            "kind": "Error",
+            "message": "HTTP connection failed (openrouter.ai): error sending request: client error (Connect): Network is down (os error 50)",
+            "error_kind": "transient"
+          }
+        },
+        {
+          "seq": 23,
+          "timestamp_ms": 1792954981505,
+          "event": {
+            "kind": "UsageUpdated",
+            "usage": {
+              "uncached_input_tokens": 0,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 0,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 0,
+              "reasoning_tokens": 0
+            },
+            "cost_delta": {
+              "cost": "unknown",
+              "reason": "provider_reported_no_usage"
+            },
+            "attempt": {
+              "generation": "01a17471-d7b7-7325-9001-8cd80194c2be",
+              "attempt": "01a17471-d7b7-7325-9001-8cd9628283f8"
+            }
+          }
+        },
+        {
+          "seq": 24,
+          "timestamp_ms": 1792954981505,
+          "event": {
+            "kind": "AttemptSettled",
+            "attempt": {
+              "generation": "01a17471-d7b7-7325-9001-8cd80194c2be",
+              "attempt": "01a17471-d7b7-7325-9001-8cd9628283f8"
+            },
+            "outcome": {
+              "stop": "error",
+              "delivery": "definitely_unsent",
+              "usage": "missing"
+            }
+          }
+        },
+        {
+          "seq": 25,
+          "timestamp_ms": 1792954981505,
+          "event": {
+            "kind": "TurnCompleted",
+            "ok": false,
+            "exit_reason": "Provider"
+          }
+        }
+      ]
+    },
+    {
+      "session": "0f55d45a-1cd8-5667-9dd0-96db3e29360f",
+      "journal_sha256": "ae11bc482ef8372ee7be62cf93ec02abe552d76b8fc40857ae4e5d1de62df8d7",
+      "events": [
+        {
+          "seq": 13,
+          "timestamp_ms": 1792954830859,
+          "event": {
+            "kind": "GenerationStarted",
+            "snapshot": {
+              "epoch": "01a1746f-8faa-70c1-a439-c0ba919e127a",
+              "identity": "You are ego 0.1.3, a coding agent.\n\nPermissions and OS confinement are separate. Modes: plan prevents mutation; default uses deterministic policy and escalation; auto adds bounded analysis and an optional permissions.judge; accept-edits admits workspace file edits; yolo relaxes ordinary approvals, not confinement or hard denies. User config can select mode and sandbox silently. The workspace sandbox confines reads, writes and exec. Absent explicit roots, an existing ~/Gits is an extra read-write root. Extra read/write roots do not grant exec; extra executable paths need exec_paths via ego config edit. The first ego roots add replaces the implicit default; removing all roots leaves roots=[]; ego config unset roots restores absence. Saved perimeter changes require exit and resume without a positional prompt; they do not apply live. Ask the user to inspect /config perimeter for this session, or ego config ls --effective and ego doctor for a fresh resolution. Use ego rules ls/explain/remember to inspect approval rules; remembered shell commands stay exact. When blocked, report the exact error and required paths or authority to the user; do not bypass the block through another tool, transport or sandbox mode.\n\nFor standalone delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Use /tasks to inspect or cancel it.",
+              "system": {
+                "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /Users/stefano.straus/Gits/.tmp/ego-419-b7/final-continuation/runs/20261025T185817Z-24720f12/009-compaction/AGENTS.md\n\nUse only offered tools and skills. Never access credentials or external services. Keep answers brief.\nReference 0000: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0001: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0002: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0003: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0004: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0005: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0006: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0007: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0008: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0009: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0010: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0011: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0012: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0013: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0014: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0015: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0016: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0017: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0018: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0019: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0020: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0021: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0022: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0023: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0024: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0025: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0026: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0027: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0028: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0029: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0030: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0031: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0032: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0033: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0034: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0035: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0036: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0037: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0038: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0039: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0040: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0041: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0042: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0043: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0044: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0045: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0046: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0047: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0048: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0049: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0050: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0051: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0052: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0053: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0054: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0055: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0056: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0057: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0058: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0059: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0060: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0061: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0062: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0063: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0064: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0065: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0066: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0067: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0068: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0069: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0070: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0071: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0072: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0073: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0074: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0075: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0076: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0077: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0078: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0079: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0080: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0081: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0082: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0083: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0084: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0085: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0086: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0087: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0088: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0089: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0090: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0091: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0092: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0093: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0094: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0095: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0096: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0097: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0098: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0099: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0100: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0101: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0102: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0103: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0104: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0105: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0106: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0107: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0108: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0109: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0110: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0111: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0112: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0113: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0114: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0115: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0116: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0117: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0118: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0119: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0120: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0121: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0122: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0123: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0124: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0125: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0126: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0127: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0128: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0129: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0130: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0131: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0132: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0133: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0134: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0135: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0136: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0137: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0138: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0139: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0140: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0141: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0142: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0143: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0144: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0145: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0146: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0147: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0148: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0149: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0150: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0151: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0152: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0153: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0154: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0155: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0156: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0157: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0158: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0159: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0160: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0161: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0162: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0163: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0164: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0165: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0166: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0167: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0168: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0169: fixture seed 419 records the stable amber ledger; retain this reference unchanged.",
+                "sources": [
+                  {
+                    "path": "/Users/stefano.straus/Gits/.tmp/ego-419-b7/final-continuation/runs/20261025T185817Z-24720f12/009-compaction/AGENTS.md",
+                    "sha256": "b6a3ec9eade6e0d94717c3ca39f68379df991e19b11433d3450d289cb60b63a4",
+                    "bytes": 16931,
+                    "scope": ".",
+                    "source": "explicit"
+                  }
+                ]
+              }
+            },
+            "attempt": {
+              "generation": "01a1746f-8fcc-717e-a9d1-d5e2270d24df",
+              "attempt": "01a1746f-8fcc-717e-a9d1-d5e3812a3196"
+            },
+            "role": "main"
+          }
+        },
+        {
+          "seq": 15,
+          "timestamp_ms": 1792954877709,
+          "event": {
+            "kind": "UsageUpdated",
+            "usage": {
+              "uncached_input_tokens": 270,
+              "cache_read_tokens": 7214,
+              "cache_write_tokens": 880,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 10,
+              "reasoning_tokens": 0
+            },
+            "cost_delta": {
+              "cost": "known",
+              "amount": {
+                "amount": "0.00021414",
+                "currency": "USD"
+              },
+              "attribution": {
+                "source": "provider_reported",
+                "provider": "openrouter",
+                "field": "usage.cost",
+                "schema_revision": "2026-08-21"
+              }
+            },
+            "attempt": {
+              "generation": "01a1746f-8fcc-717e-a9d1-d5e2270d24df",
+              "attempt": "01a1746f-8fcc-717e-a9d1-d5e3812a3196"
+            }
+          }
+        },
+        {
+          "seq": 17,
+          "timestamp_ms": 1792954877710,
+          "event": {
+            "kind": "AttemptSettled",
+            "attempt": {
+              "generation": "01a1746f-8fcc-717e-a9d1-d5e2270d24df",
+              "attempt": "01a1746f-8fcc-717e-a9d1-d5e3812a3196"
+            },
+            "outcome": {
+              "stop": "stop",
+              "delivery": "possibly_sent",
+              "usage": {
+                "reported": {
+                  "uncached_input_tokens": 270,
+                  "cache_read_tokens": 7214,
+                  "cache_write_tokens": 880,
+                  "cache_write_extended_tokens": 0,
+                  "output_tokens": 10,
+                  "reasoning_tokens": 0
+                }
+              }
+            }
+          }
+        },
+        {
+          "seq": 20,
+          "timestamp_ms": 1792954877715,
+          "event": {
+            "kind": "TurnCompleted",
+            "ok": true,
+            "exit_reason": "Completed"
+          }
+        }
+      ]
+    },
+    {
+      "session": "d0f1734a-63f8-4a4f-a1c5-a5f9e4a30168",
+      "journal_sha256": "6f4bdc81d38a09306add713119cdfbeead5df02b8848bb284025cf025e065735",
+      "events": [
+        {
+          "seq": 10,
+          "timestamp_ms": 1792954945513,
+          "event": {
+            "kind": "GenerationStarted",
+            "snapshot": {
+              "epoch": "01a17471-4fa6-702b-9ad9-04501ce0ea43",
+              "identity": "You are ego 0.1.3, a coding agent.\n\nPermissions and OS confinement are separate. Modes: plan prevents mutation; default uses deterministic policy and escalation; auto adds bounded analysis and an optional permissions.judge; accept-edits admits workspace file edits; yolo relaxes ordinary approvals, not confinement or hard denies. User config can select mode and sandbox silently. The workspace sandbox confines reads, writes and exec. Absent explicit roots, an existing ~/Gits is an extra read-write root. Extra read/write roots do not grant exec; extra executable paths need exec_paths via ego config edit. The first ego roots add replaces the implicit default; removing all roots leaves roots=[]; ego config unset roots restores absence. Saved perimeter changes require exit and resume without a positional prompt; they do not apply live. Ask the user to inspect /config perimeter for this session, or ego config ls --effective and ego doctor for a fresh resolution. Use ego rules ls/explain/remember to inspect approval rules; remembered shell commands stay exact. When blocked, report the exact error and required paths or authority to the user; do not bypass the block through another tool, transport or sandbox mode.\n\nFor standalone delegation, use task. Set background=true for long work; the durable child continues independently of parent-turn interruption. Use /tasks to inspect or cancel it.",
+              "system": {
+                "text": "The following instructions come from the workspace this session runs in. They are guidance for how to work here, not a request from the user. Where two files disagree, the one listed later is nearer the working directory and wins.\n\n# /Users/stefano.straus/Gits/.tmp/ego-419-b7/final-continuation/runs/20261025T185817Z-24720f12/011-cache/AGENTS.md\n\nUse only offered tools and skills. Never access credentials or external services. Keep answers brief.\nReference 0000: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0001: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0002: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0003: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0004: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0005: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0006: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0007: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0008: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0009: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0010: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0011: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0012: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0013: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0014: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0015: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0016: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0017: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0018: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0019: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0020: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0021: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0022: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0023: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0024: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0025: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0026: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0027: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0028: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0029: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0030: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0031: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0032: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0033: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0034: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0035: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0036: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0037: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0038: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0039: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0040: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0041: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0042: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0043: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0044: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0045: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0046: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0047: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0048: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0049: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0050: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0051: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0052: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0053: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0054: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0055: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0056: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0057: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0058: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0059: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0060: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0061: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0062: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0063: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0064: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0065: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0066: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0067: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0068: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0069: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0070: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0071: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0072: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0073: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0074: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0075: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0076: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0077: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0078: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0079: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0080: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0081: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0082: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0083: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0084: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0085: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0086: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0087: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0088: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0089: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0090: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0091: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0092: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0093: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0094: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0095: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0096: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0097: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0098: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0099: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0100: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0101: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0102: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0103: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0104: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0105: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0106: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0107: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0108: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0109: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0110: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0111: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0112: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0113: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0114: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0115: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0116: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0117: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0118: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0119: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0120: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0121: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0122: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0123: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0124: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0125: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0126: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0127: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0128: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0129: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0130: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0131: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0132: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0133: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0134: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0135: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0136: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0137: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0138: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0139: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0140: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0141: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0142: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0143: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0144: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0145: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0146: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0147: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0148: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0149: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0150: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0151: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0152: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0153: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0154: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0155: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0156: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0157: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0158: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0159: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0160: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0161: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0162: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0163: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0164: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0165: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0166: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0167: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0168: fixture seed 419 records the stable amber ledger; retain this reference unchanged.\nReference 0169: fixture seed 419 records the stable amber ledger; retain this reference unchanged.",
+                "sources": [
+                  {
+                    "path": "/Users/stefano.straus/Gits/.tmp/ego-419-b7/final-continuation/runs/20261025T185817Z-24720f12/011-cache/AGENTS.md",
+                    "sha256": "b6a3ec9eade6e0d94717c3ca39f68379df991e19b11433d3450d289cb60b63a4",
+                    "bytes": 16931,
+                    "scope": ".",
+                    "source": "explicit"
+                  }
+                ]
+              }
+            },
+            "attempt": {
+              "generation": "01a17471-4fbe-7219-9d86-6342a2f8527f",
+              "attempt": "01a17471-4fbe-7219-9d86-634386940f0d"
+            },
+            "role": "main"
+          }
+        },
+        {
+          "seq": 24,
+          "timestamp_ms": 1792954957527,
+          "event": {
+            "kind": "UsageUpdated",
+            "usage": {
+              "uncached_input_tokens": 271,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 7342,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 119
+            },
+            "cost_delta": {
+              "cost": "known",
+              "amount": {
+                "amount": "0.00502175",
+                "currency": "USD"
+              },
+              "attribution": {
+                "source": "table",
+                "revision": "https://openrouter.ai/api/v1/models#retrieved-2026-10-25-max-tier+web-search-2026-10-16"
+              }
+            },
+            "attempt": {
+              "generation": "01a17471-4fbe-7219-9d86-6342a2f8527f",
+              "attempt": "01a17471-4fbe-7219-9d86-634386940f0d"
+            }
+          }
+        },
+        {
+          "seq": 25,
+          "timestamp_ms": 1792954957527,
+          "event": {
+            "kind": "AttemptSettled",
+            "attempt": {
+              "generation": "01a17471-4fbe-7219-9d86-6342a2f8527f",
+              "attempt": "01a17471-4fbe-7219-9d86-634386940f0d"
+            },
+            "outcome": {
+              "stop": "toolUse",
+              "delivery": "possibly_sent",
+              "usage": {
+                "reported": {
+                  "uncached_input_tokens": 271,
+                  "cache_read_tokens": 0,
+                  "cache_write_tokens": 7342,
+                  "cache_write_extended_tokens": 0,
+                  "output_tokens": 119
+                }
+              }
+            }
+          }
+        },
+        {
+          "seq": 34,
+          "timestamp_ms": 1792954957557,
+          "event": {
+            "kind": "Error",
+            "message": "budget denied: 0.00502175 committed + 0 outstanding + 0.62756 requested exceeds the 0.342809545 USD limit",
+            "error_kind": "unclassified"
+          }
+        },
+        {
+          "seq": 35,
+          "timestamp_ms": 1792954957557,
+          "event": {
+            "kind": "TurnCompleted",
+            "ok": false,
+            "exit_reason": "Budget"
+          }
+        }
+      ]
+    }
+  ]
+}

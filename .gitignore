@@ -1,10 +1,69 @@
-/target/
-/.ego-bin/
-/docs/book/
+.codex/
+.mdkb/
+.claude/
+.wiz/
+/target
+# Legacy local build output; shared development builds use mbx target views.
+/target-clippy
+
+# cargo-mutants scratch output: a run leaves a full copy of the tree behind.
+mutants.out/
+mutants.out.old/
 .env
-.env.*
-!.env.example
+
+# Local source installation prefix from the quick start.
+/.ego-bin
+
+# Generated mdBook output.
+/docs/book/
+
+# Editor, platform, test coverage, and temporary admission fixtures.
 .DS_Store
 *.swp
-*.profraw
+*.swo
 __pycache__/
+*.profraw
+*.profdata
+**/.ego-admission-*/
+**/.ego-critic-*/
+/stories/
+/plans/
+/reviews/
+/progress/
+/results/
+/evals/**/results/
+/docs/evidence/
+/docs/metrics/
+/docs/internals/01-fx.md
+/docs/internals/02-pi.md
+/docs/internals/05-prior-art.md
+/docs/internals/2026-11-09-skill-frontmatter-parity.md
+/docs/internals/07-cli-prior-art.md
+/docs/internals/08-codex-critique.md
+/docs/internals/10-triage.md
+/docs/internals/11-grok-subscription.md
+/docs/internals/12-cline-provider-survey.md
+/docs/internals/16-subscription-login.md
+/docs/internals/18-pi-hermes-slash-command-parity.md
+/docs/internals/evidence/
+/docs/internals/metrics/
+/docs/internals/orchestration/
+/docs/internals/documentation-validation.md
+/docs/internals/judge-eval-*.md
+/docs/internals/live-conformance*.md
+/docs/internals/prompt-cache-validation.md
+/docs/internals/skills-live-validation.md
+/POTENTIALS.md
+/HANDOFF.md
+/to-test.md
+/.mutation-registry/
+.codex/**
+.mdkb/**
+.tmp/
+/docs/internals/2026-11-07-prior-art-agent-control-surface.md
+/scripts/*
+!/scripts/bump-version.py
+!/scripts/test-bump-version.py
+
+# Private engineering investigations and runtime evidence.
+/docs/internals/

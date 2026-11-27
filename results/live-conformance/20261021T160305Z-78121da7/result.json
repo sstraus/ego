@@ -1,0 +1,504 @@
+{
+  "schema": 1,
+  "run_id": "20261021T160305Z-78121da7",
+  "date": "2026-10-21T16:05:13.200582+00:00",
+  "ego_commit": "9bfeb26e9a77e622ec3ae8b4967fc2d8631e7f46",
+  "binary_sha256": "eefc06e51763c3837d6360d33098aa9f5f4a5ef1aa0892fee1a6130640da8a52",
+  "models": [
+    "openai-codex/gpt-6-luna"
+  ],
+  "suites": [
+    "cache"
+  ],
+  "fixture_seed": 419,
+  "fixture_hashes": {},
+  "ceiling_usd": "0.95",
+  "provider_ceiling_usd": "0.90",
+  "cost_usd": "0",
+  "cost_uncertain": false,
+  "cases": [
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "fail",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6726352666407163
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 3,
+            "weighted_share": 0.6106141920095408
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4222,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4448,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4674,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.8763371844244758,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4900,
+            "cache_read_tokens": 4224,
+            "cache_read_share": 0.8620408163265306,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5138,
+            "cache_read_tokens": 4736,
+            "cache_read_share": 0.9217594394706111,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5364,
+            "cache_read_tokens": 4992,
+            "cache_read_share": 0.930648769574944,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5590,
+            "cache_read_tokens": 5248,
+            "cache_read_share": 0.9388193202146691,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5816,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6054,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.9302940204823258,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6280,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6506,
+            "cache_read_tokens": 5888,
+            "cache_read_share": 0.9050107592991086,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6732,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.9316696375519905,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.6680758349321974,
+        "later_zero_hits": 3,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.6450683945284377
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6945,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.6450683945284377,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6726352666407163
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 1,
+            "weighted_share": 0.8039753528125622
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4222,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4448,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.920863309352518,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4674,
+            "cache_read_tokens": 4224,
+            "cache_read_share": 0.9037227214377407,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4900,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.9142857142857143,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5138,
+            "cache_read_tokens": 4736,
+            "cache_read_share": 0.9217594394706111,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5364,
+            "cache_read_tokens": 4992,
+            "cache_read_share": 0.930648769574944,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5590,
+            "cache_read_tokens": 5248,
+            "cache_read_share": 0.9388193202146691,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5816,
+            "cache_read_tokens": 5376,
+            "cache_read_share": 0.9243466299862448,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6054,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.9302940204823258,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6280,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6506,
+            "cache_read_tokens": 6144,
+            "cache_read_share": 0.9443590531816785,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6732,
+            "cache_read_tokens": 5888,
+            "cache_read_share": 0.8746286393345217,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8262495528600696,
+        "later_zero_hits": 1,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9037463976945245
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6940,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.9037463976945245,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6387970704517467
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 1,
+            "weighted_share": 0.8182161078355468
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4223,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4450,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.9204494382022472,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4677,
+            "cache_read_tokens": 4224,
+            "cache_read_share": 0.9031430404105195,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4904,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5143,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.8710869142523818,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5370,
+            "cache_read_tokens": 4736,
+            "cache_read_share": 0.8819366852886406,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5597,
+            "cache_read_tokens": 4992,
+            "cache_read_share": 0.8919063784170091,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5824,
+            "cache_read_tokens": 5248,
+            "cache_read_share": 0.9010989010989011,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6063,
+            "cache_read_tokens": 5376,
+            "cache_read_share": 0.8866897575457694,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6290,
+            "cache_read_tokens": 5888,
+            "cache_read_share": 0.9360890302066772,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6517,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.8642013196255945,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6744,
+            "cache_read_tokens": 6400,
+            "cache_read_share": 0.9489916963226572,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8293736501079914,
+        "later_zero_hits": 1,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9384703852788959
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6956,
+            "cache_read_tokens": 6528,
+            "cache_read_share": 0.9384703852788959,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    }
+  ]
+}

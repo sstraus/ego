@@ -1,0 +1,1747 @@
+{
+  "schema": 1,
+  "run_id": "20261025T172908Z-08ab322f",
+  "date": "2026-10-25T17:37:44.490875+00:00",
+  "ego_commit": "9242324db061c9750e10d16e2b202d7b4759603c",
+  "binary_sha256": "96815dd21b94d588be40443bc5f54688f8a6d07ccb899bc372c0e59491aaf7d7",
+  "models": [
+    "openai-codex/gpt-6-luna",
+    "openai/gpt-6-luna",
+    "anthropic/claude-sonnet-5-5",
+    "openrouter/anthropic/claude-sonnet-5.5",
+    "openrouter/openai/gpt-6-luna",
+    "openrouter/anthropic/claude-haiku-5.5"
+  ],
+  "suites": [
+    "cache",
+    "skills",
+    "compaction",
+    "recovery"
+  ],
+  "fixture_seed": 419,
+  "fixture_hashes": {
+    "418/description/.ego/skills/amber-check/SKILL.md": "78cca7930e0b7442026fdc158537f04a215371f63872188100dcc29002db2318"
+  },
+  "ceiling_usd": "0.95",
+  "provider_ceiling_usd": "0.90",
+  "cost_usd": "0.166121140",
+  "cost_uncertain": true,
+  "cases": [
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6739642510738534
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9455626253444719
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6237,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6479,
+            "cache_read_tokens": 6016,
+            "cache_read_share": 0.9285383546843649,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6721,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.9331944651093588,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6963,
+            "cache_read_tokens": 6528,
+            "cache_read_share": 0.9375269280482551,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7217,
+            "cache_read_tokens": 6784,
+            "cache_read_share": 0.940002771234585,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7459,
+            "cache_read_tokens": 7040,
+            "cache_read_share": 0.9438262501675828,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7701,
+            "cache_read_tokens": 7296,
+            "cache_read_share": 0.9474094273470978,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7943,
+            "cache_read_tokens": 7552,
+            "cache_read_share": 0.9507742666498804,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8197,
+            "cache_read_tokens": 7808,
+            "cache_read_share": 0.9525436135171405,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 8439,
+            "cache_read_tokens": 8064,
+            "cache_read_share": 0.9555634553857092,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8681,
+            "cache_read_tokens": 8320,
+            "cache_read_share": 0.9584149291556272,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8923,
+            "cache_read_tokens": 8448,
+            "cache_read_share": 0.9467667824722626,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9457644323265229,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.951048951048951
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 9152,
+            "cache_read_tokens": 8704,
+            "cache_read_share": 0.951048951048951,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "fail",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 2,
+            "weighted_share": 0.34948401129159146
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 2,
+            "weighted_share": 0.7378320981233476
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6239,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6483,
+            "cache_read_tokens": 6016,
+            "cache_read_share": 0.9279654480950177,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6727,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6971,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.8997274422607947,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7191,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7435,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7679,
+            "cache_read_tokens": 7296,
+            "cache_read_share": 0.9501237140252637,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7923,
+            "cache_read_tokens": 7040,
+            "cache_read_share": 0.8885523160419033,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8179,
+            "cache_read_tokens": 7552,
+            "cache_read_share": 0.923340261645678,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 8423,
+            "cache_read_tokens": 7808,
+            "cache_read_share": 0.9269856345720052,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8667,
+            "cache_read_tokens": 8192,
+            "cache_read_share": 0.9451944155994,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8911,
+            "cache_read_tokens": 8448,
+            "cache_read_share": 0.9480417461564359,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.6930451950017141,
+        "later_zero_hits": 3,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9521934142872771
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 9141,
+            "cache_read_tokens": 8704,
+            "cache_read_share": 0.9521934142872771,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6768781911013858
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 1,
+            "weighted_share": 0.8178048574088178
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6205,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6488,
+            "cache_read_tokens": 6016,
+            "cache_read_share": 0.9272503082614056,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6771,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.9263033525328608,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7054,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7312,
+            "cache_read_tokens": 6912,
+            "cache_read_share": 0.9452954048140044,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7595,
+            "cache_read_tokens": 7168,
+            "cache_read_share": 0.943778801843318,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7878,
+            "cache_read_tokens": 6656,
+            "cache_read_share": 0.8448844884488449,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8161,
+            "cache_read_tokens": 7680,
+            "cache_read_share": 0.9410611444675897,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8419,
+            "cache_read_tokens": 7936,
+            "cache_read_share": 0.9426297660054639,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 8702,
+            "cache_read_tokens": 8192,
+            "cache_read_share": 0.9413927832682142,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8985,
+            "cache_read_tokens": 8576,
+            "cache_read_share": 0.9544796883695047,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9268,
+            "cache_read_tokens": 7424,
+            "cache_read_share": 0.8010358221838585,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8406958087564784,
+        "later_zero_hits": 1,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9568330174773636
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 9498,
+            "cache_read_tokens": 9088,
+            "cache_read_share": 0.9568330174773636,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 2,
+            "weighted_share": 0.320821031913398
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9679968391939945
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6129,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6369,
+            "cache_read_tokens": 6126,
+            "cache_read_share": 0.9618464437117287,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6609,
+            "cache_read_tokens": 6366,
+            "cache_read_share": 0.9632319564230595,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6849,
+            "cache_read_tokens": 6606,
+            "cache_read_share": 0.9645203679369251,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7101,
+            "cache_read_tokens": 6846,
+            "cache_read_share": 0.9640895648500212,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7341,
+            "cache_read_tokens": 7098,
+            "cache_read_share": 0.9668982427462198,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7581,
+            "cache_read_tokens": 7338,
+            "cache_read_share": 0.9679461812425801,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7821,
+            "cache_read_tokens": 7578,
+            "cache_read_share": 0.9689298043728424,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8109,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 8349,
+            "cache_read_tokens": 8106,
+            "cache_read_share": 0.970894717930291,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8589,
+            "cache_read_tokens": 8346,
+            "cache_read_share": 0.9717079986028642,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8829,
+            "cache_read_tokens": 8586,
+            "cache_read_share": 0.9724770642201835,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.00293706",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8737118029372688,
+        "later_zero_hits": 1,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "fork-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9744948658496191
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 9057,
+            "cache_read_tokens": 8826,
+            "cache_read_share": 0.9744948658496191,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.00012206",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 2,
+            "weighted_share": 0.5173658096526839
+          },
+          "later": {
+            "requests": 10,
+            "zero_hits": 0,
+            "weighted_share": 0.9625545243919802
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6165,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6405,
+            "cache_read_tokens": 6162,
+            "cache_read_share": 0.9620608899297424,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6645,
+            "cache_read_tokens": 6402,
+            "cache_read_share": 0.963431151241535,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6885,
+            "cache_read_tokens": 6642,
+            "cache_read_share": 0.9647058823529412,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7137,
+            "cache_read_tokens": 6882,
+            "cache_read_share": 0.96427070197562,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7377,
+            "cache_read_tokens": 7134,
+            "cache_read_share": 0.967059780398536,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7617,
+            "cache_read_tokens": 7374,
+            "cache_read_share": 0.9680976762504924,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7857,
+            "cache_read_tokens": 7614,
+            "cache_read_share": 0.9690721649484536,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_read_share": null,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 8109,
+            "cache_read_tokens": 7854,
+            "cache_read_share": 0.9685534591194969,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8548,
+            "cache_read_tokens": 7854,
+            "cache_read_share": 0.9188114178755264,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8788,
+            "cache_read_tokens": 8545,
+            "cache_read_share": 0.9723486572598998,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9028,
+            "cache_read_tokens": 8785,
+            "cache_read_share": 0.9730837394771821,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.002098705",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9626996540120385,
+        "later_zero_hits": 1,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "fork-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9754647643752702
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 9252,
+            "cache_read_tokens": 9025,
+            "cache_read_share": 0.9754647643752702,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.00013805",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6930925134427134
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.964015879113843
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6166,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6444,
+            "cache_read_tokens": 6163,
+            "cache_read_share": 0.9563935443823712,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6722,
+            "cache_read_tokens": 6441,
+            "cache_read_share": 0.9581969651889318,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7000,
+            "cache_read_tokens": 6719,
+            "cache_read_share": 0.9598571428571429,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7253,
+            "cache_read_tokens": 6997,
+            "cache_read_share": 0.9647042603060803,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7531,
+            "cache_read_tokens": 7250,
+            "cache_read_share": 0.9626875580932147,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 7809,
+            "cache_read_tokens": 7528,
+            "cache_read_share": 0.964015879113843,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8087,
+            "cache_read_tokens": 7806,
+            "cache_read_share": 0.965252874984543,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8340,
+            "cache_read_tokens": 8084,
+            "cache_read_share": 0.9693045563549161,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 8618,
+            "cache_read_tokens": 8337,
+            "cache_read_share": 0.9673938268739847,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8896,
+            "cache_read_tokens": 8615,
+            "cache_read_share": 0.9684127697841727,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9174,
+            "cache_read_tokens": 8893,
+            "cache_read_share": 0.9693699585785917,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.002267805",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9645876516757109,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "cache",
+      "case": "fork-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9760536398467433
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 9396,
+            "cache_read_tokens": 9171,
+            "cache_read_share": 0.9760536398467433,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.00012476",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "suite": "cache",
+      "case": "prerequisite",
+      "status": "blocked",
+      "reason": "external blocker: direct Anthropic key capped until 2026-11-01; no retry"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.671964185786234
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9286259806984656
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7601,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7955,
+            "cache_read_tokens": 7209,
+            "cache_read_share": 0.9062225015713388,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8284,
+            "cache_read_tokens": 7689,
+            "cache_read_share": 0.928174794785128,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8613,
+            "cache_read_tokens": 8018,
+            "cache_read_share": 0.9309183791942413,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8943,
+            "cache_read_tokens": 8347,
+            "cache_read_share": 0.9333556971933356,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 9273,
+            "cache_read_tokens": 8347,
+            "cache_read_share": 0.9001401919551386,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9602,
+            "cache_read_tokens": 9007,
+            "cache_read_share": 0.9380337429702146,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9931,
+            "cache_read_tokens": 9336,
+            "cache_read_share": 0.940086597522908,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 10261,
+            "cache_read_tokens": 9665,
+            "cache_read_share": 0.9419159925933145,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 10591,
+            "cache_read_tokens": 9665,
+            "cache_read_share": 0.9125672741006515,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 10920,
+            "cache_read_tokens": 10325,
+            "cache_read_share": 0.9455128205128205,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 11249,
+            "cache_read_tokens": 10654,
+            "cache_read_share": 0.9471064094586186,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.0505557",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9303175474806386,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "fork-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9519805842073329
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 11537,
+            "cache_read_tokens": 10983,
+            "cache_read_share": 0.9519805842073329,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.0024728",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6713730763484237
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9285457601576538
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7602,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7933,
+            "cache_read_tokens": 7209,
+            "cache_read_share": 0.9087356611622337,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8263,
+            "cache_read_tokens": 7666,
+            "cache_read_share": 0.9277502117874864,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8593,
+            "cache_read_tokens": 7996,
+            "cache_read_share": 0.9305248458047247,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8924,
+            "cache_read_tokens": 8326,
+            "cache_read_share": 0.9329896907216495,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 9255,
+            "cache_read_tokens": 8326,
+            "cache_read_share": 0.8996218260399784,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9585,
+            "cache_read_tokens": 8988,
+            "cache_read_share": 0.9377151799687011,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9915,
+            "cache_read_tokens": 9318,
+            "cache_read_share": 0.9397881996974281,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 10246,
+            "cache_read_tokens": 9648,
+            "cache_read_share": 0.9416357602967012,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 10577,
+            "cache_read_tokens": 9648,
+            "cache_read_share": 0.9121679115060981,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 10907,
+            "cache_read_tokens": 10310,
+            "cache_read_share": 0.9452645090308975,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 11237,
+            "cache_read_tokens": 10640,
+            "cache_read_share": 0.9468719409094954,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.0502935",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9301939583629725,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "fork-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9518438177874187
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 11525,
+            "cache_read_tokens": 10970,
+            "cache_read_share": 0.9518438177874187,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.002474",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6713783561438935
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9289056060553291
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 7600,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 7929,
+            "cache_read_tokens": 7209,
+            "cache_read_share": 0.9091940976163451,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8257,
+            "cache_read_tokens": 7664,
+            "cache_read_share": 0.9281821484800775,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8585,
+            "cache_read_tokens": 7992,
+            "cache_read_share": 0.9309260337798486,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 8914,
+            "cache_read_tokens": 8320,
+            "cache_read_share": 0.9333632488220777,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 9243,
+            "cache_read_tokens": 8320,
+            "cache_read_share": 0.90014064697609,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9571,
+            "cache_read_tokens": 8978,
+            "cache_read_share": 0.9380420018806812,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 9899,
+            "cache_read_tokens": 9306,
+            "cache_read_share": 0.9400949590867764,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 10228,
+            "cache_read_tokens": 9634,
+            "cache_read_share": 0.9419241298396559,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 10557,
+            "cache_read_tokens": 9634,
+            "cache_read_share": 0.912569858861419,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 10885,
+            "cache_read_tokens": 10292,
+            "cache_read_share": 0.9455213596692696,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 11213,
+            "cache_read_tokens": 10620,
+            "cache_read_share": 0.9471149558548114,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0.0501699",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9305477721526201,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "fork-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9519172245891662
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 11501,
+            "cache_read_tokens": 10948,
+            "cache_read_share": 0.9519172245891662,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0.0024668",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "fail",
+      "reasons": [
+        "completed",
+        "process_failed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 2,
+            "zero_hits": 1,
+            "weighted_share": 0.5320243595128098
+          },
+          "later": {
+            "requests": 6,
+            "zero_hits": 2,
+            "weighted_share": 0.9341781063005984
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4219,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_read_share": null,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4442,
+            "cache_read_tokens": 4216,
+            "cache_read_share": 0.9491220171094101,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4847,
+            "cache_read_tokens": 4216,
+            "cache_read_share": 0.869816381266763,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5070,
+            "cache_read_tokens": 4844,
+            "cache_read_share": 0.9554240631163708,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5305,
+            "cache_read_tokens": 5067,
+            "cache_read_share": 0.9551366635249764,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5528,
+            "cache_read_tokens": 5302,
+            "cache_read_share": 0.9591172214182344,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_read_share": null,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": true,
+        "weighted_later_share": 0.9385916163861543,
+        "later_zero_hits": 2,
+        "read_calls": 5,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "cache",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "skills",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "skills",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "suite": "skills",
+      "case": "prerequisite",
+      "status": "blocked",
+      "reason": "external blocker: direct Anthropic key capped until 2026-11-01; no retry"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "skills",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "compaction",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "compaction",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "suite": "compaction",
+      "case": "prerequisite",
+      "status": "blocked",
+      "reason": "external blocker: direct Anthropic key capped until 2026-11-01; no retry"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "compaction",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "compaction",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "compaction",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "recovery",
+      "case": "fault-proxy",
+      "status": "not_applicable",
+      "reason": "provider_has_no_supported_base_url_override"
+    },
+    {
+      "model": "openai/gpt-6-luna",
+      "provider": "openai",
+      "suite": "recovery",
+      "case": "prerequisite",
+      "status": "stopped",
+      "reason": "unaccounted_attempt_stops_paid_work"
+    },
+    {
+      "model": "anthropic/claude-sonnet-5-5",
+      "provider": "anthropic",
+      "suite": "recovery",
+      "case": "prerequisite",
+      "status": "blocked",
+      "reason": "external blocker: direct Anthropic key capped until 2026-11-01; no retry"
+    },
+    {
+      "model": "openrouter/anthropic/claude-sonnet-5.5",
+      "provider": "openrouter",
+      "suite": "recovery",
+      "case": "fault-proxy",
+      "status": "not_applicable",
+      "reason": "provider_has_no_supported_base_url_override"
+    },
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "provider": "openrouter",
+      "suite": "recovery",
+      "case": "fault-proxy",
+      "status": "not_applicable",
+      "reason": "provider_has_no_supported_base_url_override"
+    },
+    {
+      "model": "openrouter/anthropic/claude-haiku-5.5",
+      "provider": "openrouter",
+      "suite": "recovery",
+      "case": "fault-proxy",
+      "status": "not_applicable",
+      "reason": "provider_has_no_supported_base_url_override"
+    }
+  ]
+}

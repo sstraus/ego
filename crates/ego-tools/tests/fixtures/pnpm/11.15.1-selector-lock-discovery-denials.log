@@ -1,0 +1,39 @@
+Filtering the log data using "composedMessage CONTAINS[c] "Sandbox:" AND composedMessage CONTAINS[c] "pnpm""
+Timestamp               Ty Process[PID:TID]
+2026-10-25 12:16:33.724 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-create /Users/stefano.straus/Library/pnpm/_tmp_63992_2b277470
+2026-10-25 12:16:33.724 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-create /_tmp_63992_2b362a10
+2026-10-25 12:16:33.725 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-create /Users/_tmp_63992_2b444b40
+2026-10-25 12:16:33.726 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-create /Users/stefano.straus/_tmp_63992_2b531080
+2026-10-25 12:16:33.727 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-create /Users/stefano.straus/Gits/_tmp_63992_2b5a4058
+2026-10-25 12:16:33.727 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-create /Users/stefano.straus/scratch/_tmp_63992_2b630e40
+2026-10-25 12:16:33.729 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-create /Users/stefano.straus/scratch/_tmp_63992_2b817b50
+2026-10-25 12:16:33.925 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) system-info vfs.disk-space
+2026-10-25 12:16:33.925 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-unlink /Users/stefano.straus/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock/owner
+2026-10-25 12:16:33.927 E  kernel[0:585c85a] (Sandbox) Sandbox: pnpm(63992) deny(1) file-write-data /private/tmp/pnpm-store-operation-locks-501/all-stores.lock
+2026-10-25 12:16:33.968 E  kernel[0:585c8e6] (Sandbox) Sandbox: touch(64018) deny(1) file-write* /Users/stefano.straus/scratch/.ego-admission-e7BQN3/home/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock
+2026-10-25 12:16:34.790 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Library/pnpm/_tmp_64127_2f195b98
+2026-10-25 12:16:34.798 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /_tmp_64127_2f966368
+2026-10-25 12:16:34.803 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/_tmp_64127_2fe9a000
+2026-10-25 12:16:34.808 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/_tmp_64127_3034e588
+2026-10-25 12:16:34.813 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Gits/_tmp_64127_307ea088
+2026-10-25 12:16:34.828 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Gits/personal/_tmp_64127_31621ed0
+2026-10-25 12:16:34.829 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/_tmp_64127_316fe240
+2026-10-25 12:16:34.830 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/_tmp_64127_3180a738
+2026-10-25 12:16:34.831 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/_tmp_64127_318ad898
+2026-10-25 12:16:34.832 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/_tmp_64127_3199a990
+2026-10-25 12:16:34.832 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.tmp3Kwu3T/_tmp_64127_31a25838
+2026-10-25 12:16:34.852 E  kernel[0:585ca4c] (Sandbox) Sandbox: pnpm(64127) deny(1) file-write-create /Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.tmp3Kwu3T/_tmp_64127_32d20e38
+2026-10-25 12:16:34.886 E  kernel[0:585ca68] (Sandbox) Sandbox: touch(64133) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-GJg5P4/home/Library/pnpm/package-manager-store/v11/index.db
+2026-10-25 12:16:35.093 E  kernel[0:585cabf] (Sandbox) Sandbox: touch(64167) deny(1) file-write* /Users/stefano.straus/scratch/.ego-admission-zHgjok/home/Library/pnpm/package-manager-store/v11/links/@/pnpm/11.15.1/bin/pnpm
+2026-10-25 12:16:35.859 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-CxCBoo/home/Library
+2026-10-25 12:16:35.860 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /_tmp_64227_334f0280
+2026-10-25 12:16:35.861 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /Users/_tmp_64227_3359a140
+2026-10-25 12:16:35.862 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /Users/stefano.straus/_tmp_64227_3361afc0
+2026-10-25 12:16:35.862 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /Users/stefano.straus/Gits/_tmp_64227_33693d58
+2026-10-25 12:16:35.863 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /Users/stefano.straus/scratch/_tmp_64227_33710588
+2026-10-25 12:16:35.863 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-CxCBoo/_tmp_64227_337969f8
+2026-10-25 12:16:35.864 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-CxCBoo/tmp/_tmp_64227_3381ca80
+2026-10-25 12:16:35.865 E  kernel[0:585cb4b] (Sandbox) Sandbox: pnpm(64227) deny(1) file-write-create /Users/stefano.straus/scratch/.ego-admission-CxCBoo/tmp/_tmp_64227_339b9be0
+2026-10-25 12:16:35.947 E  kernel[0:585cb5b] (Sandbox) Sandbox: pnpm(64227) deny(1) system-info net.link.addr
+2026-10-25 12:16:35.947 E  kernel[0:585cb5b] (Sandbox) 129 duplicate reports for Sandbox: pnpm(64227) deny(1) system-info net.link.addr
+2026-10-25 12:16:35.947 E  kernel[0:585cb5b] (Sandbox) Sandbox: pnpm(64227) deny(1) network-outbound /private/var/run/mDNSResponder

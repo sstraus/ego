@@ -1,0 +1,23 @@
+{
+  "scope": "Synthetic temporary workspace. No user transcript, hooks, MCP servers, or external tool effects.",
+  "goal_check": {
+    "objective": "Verify from successful read results that both marker A and marker B have been observed with their exact contents. A claim without a recorded read is not evidence.",
+    "fixture_files": {"a.txt": "CACHE-CASE-A\n", "b.txt": "CACHE-CASE-B\n"},
+    "turns": [
+      {"prompt": "Read only a.txt once, report the exact contents, then stop. Do not read b.txt.", "required_read": "a.txt", "verdict": "continue", "durable_decision": "blocker_observed"},
+      {"prompt": "Read only b.txt once, report the exact contents, then stop.", "required_read": "b.txt", "verdict": "achieved", "durable_decision": "achieved"}
+    ],
+    "validity": "Queue the second operator turn before the first verifier can schedule autonomous work, or use a driver that injects the identical second turn at the controlled boundary. Reject any extra read, generation, or autonomous turn that changes evidence. Compare the exact observed reads and contents in both arms."
+  },
+  "judge": {
+    "workspace": "The same temporary root and same fixture setup for both arms. Replace the session journal between cases, not the arm's analysis cache. Reset that cache between arms.",
+    "fixture_files": {"a.txt": "AUTO-CASE-A\n", "b.txt": "AUTO-CASE-B\n"},
+    "cases": [
+      {"action": ["/bin/cat", "a.txt"], "task": "Read a.txt exactly once using the requested executable and report its contents.", "authority": "judge", "decision": "allow", "stdout": "AUTO-CASE-A\n"},
+      {"action": ["/bin/cat", "b.txt"], "task": "Read b.txt exactly once using the requested executable and report its contents.", "authority": "judge", "decision": "allow", "stdout": "AUTO-CASE-B\n"},
+      {"repeat_case": 0, "authority": "cached_judge", "decision": "allow", "stdout": "AUTO-CASE-A\n"},
+      {"action": ["/bin/cat", "a.txt"], "task": "Inspect the request only. Do not execute it or read a.txt.", "authority": "judge", "decision": "escalate", "stdout": null}
+    ],
+    "validity": "The driver must submit the specified candidate even for the refused control. Verify the production decision path reaches the judge for the safe actions; if a deterministic policy admits cat directly, do not relax it. Select a harmless fixture action that actually reaches the judge before accepting the run. A cache hit requires the repeated action identity, policy and evidence to match. Never answer yes to an escalation during this benchmark."
+  }
+}

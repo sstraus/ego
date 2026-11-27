@@ -1,0 +1,20 @@
+{
+  "run_id": "20261022T234940Z-2f2af0fb",
+  "source_commit": "288d8e3097e43b56d74e5b0df3def8a767b4b370",
+  "binary": "/Users/stefano.straus/Gits/.tmp/ego-419/bin/ego",
+  "binary_sha256_before": "43118ed81807822e84921c7fc4cdb2cae6e150dd8edbef2d40e9e8d2ff2297bc",
+  "start_unix": 1792712981.1465101,
+  "continues": "20261022T230209Z-04d77b7e",
+  "prior_known_cost_carried_usd": "0.007182790",
+  "prior_unknown_cost": true,
+  "prior_unknown_reconciled": false,
+  "renewed_run_authority": "coordinator 2026-10-23: rerun only prior blocked/failed/stopped cells under0.95/run and0.90/provider",
+  "fact_file": "/Users/stefano.straus/.ego/models.toml",
+  "fact_file_sha256": "9892d8c7f965cb772b8f050262cec35b420d7be68b0dc14df20f3928953e05c0",
+  "fact_file_cleanup": "removed_unchanged_task_file",
+  "completed_cells_skipped": true,
+  "runner_exit": 1,
+  "binary_sha256_after": "43118ed81807822e84921c7fc4cdb2cae6e150dd8edbef2d40e9e8d2ff2297bc",
+  "stable_endpoints": true,
+  "end_unix": 1792713632.8597991
+}

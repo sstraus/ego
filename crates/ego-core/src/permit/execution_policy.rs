@@ -51,9 +51,20 @@ impl ExecutionPolicy {
     ) -> bool {
         let mut previous = old.clone();
         for root in approved {
-            if !previous.roots.contains(root) {
-                previous.roots.push(root.clone());
+            // Multiple receipts for the same exact path retain the approved
+            // write authority, regardless of session/permanent merge order.
+            if root.access() == RootAccess::Read
+                && approved.iter().any(|other| {
+                    other.path() == root.path() && other.access() == RootAccess::ReadWrite
+                })
+            {
+                continue;
             }
+            // A read-to-write approval replaces that root. Keeping both would
+            // invent a nested read restriction that the owner just lifted.
+            // Every different-path restriction remains in the proof.
+            previous.roots.retain(|old| old.path() != root.path());
+            previous.roots.push(root.clone());
         }
         self.not_more_permissive_than(&previous)
     }

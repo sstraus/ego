@@ -1,0 +1,158 @@
+# Builds the `ego` executable for every platform, on every push to the trunk
+# and on every `v*` tag. A tag additionally publishes a GitHub Release.
+#
+# Modelled on TUICommander's `release.yml` (the `remote-daemon` matrix): one
+# matrix, one `cargo build --release --target`, no reusable-workflow layers.
+# Nothing is signed or notarized. Publishing uses GITHUB_TOKEN; stable tags
+# also dispatch to the shared Homebrew tap with HOMEBREW_TAP_TOKEN.
+#
+# NOT YET RUNNING. This repository has no remote (see ci.yml). Validate with
+# actionlint; the first real run is the first real proof.
+#
+# Keep RUST_VERSION in step with the toolchain the gate runs on. It is pinned
+# so a new stable cannot change what ships.
+
+name: release
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+
+# A newer push to a branch makes the older build pointless. A tag run is never
+# cancelled: it publishes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_VERSION: "1.98.1"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            target: aarch64-apple-darwin
+            name: macos-arm64
+          - platform: macos-latest
+            target: x86_64-apple-darwin
+            name: macos-x64
+          - platform: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            name: linux-x64
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            name: linux-arm64
+          - platform: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x64
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check tag matches version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          VERSION=$(sed -n '/^\[workspace\.package\]$/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ "$GITHUB_REF_NAME" != "v$VERSION" ]; then
+            echo "tag $GITHUB_REF_NAME does not match workspace.package.version $VERSION in Cargo.toml"
+            exit 1
+          fi
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build ego
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: 'true'
+        run: cargo build --release --locked -p ego-cli --bin ego --target ${{ matrix.target }}
+
+      - name: Check Linux GLIBC compatibility
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: scripts/check-glibc.sh target/${{ matrix.target }}/release/ego 2.35
+
+      # Keep the original target-triple archives alongside TUIC-style binaries.
+      - name: Package
+        shell: bash
+        run: scripts/package-release.sh '${{ matrix.target }}' '${{ matrix.name }}'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ego-${{ matrix.target }}
+          path: |
+            dist/*
+          if-no-files-found: error
+
+  release:
+    name: publish release
+    if: github.ref_type == 'tag'
+    needs: build
+    timeout-minutes: 15
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ego-*
+          merge-multiple: true
+          path: dist
+
+      - name: Build checksum file and release notes
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat dist/*.sha256 > dist/SHA256SUMS
+          # CHANGELOG.md is mandatory. The public squash snapshot carries no
+          # story IDs, so completeness (--history) is checked before tagging.
+          python3 -B scripts/check-changelog.py release --version "$VERSION"
+          python3 -B scripts/check-changelog.py extract --version "$VERSION" > notes.md
+
+      - name: Generate Homebrew formula
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: scripts/homebrew-formula.sh "$GITHUB_REF_NAME" "$RELEASE_REPOSITORY" dist > dist/ego.rb
+
+      - name: Create GitHub Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          FLAGS=""
+          case "$GITHUB_REF_NAME" in *-*) FLAGS="--prerelease" ;; esac
+          # FLAGS is empty or one fixed flag.
+          # shellcheck disable=SC2086
+          gh release create "$GITHUB_REF_NAME" $FLAGS \
+            --title "ego $GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            dist/*
+
+      - name: Update Homebrew tap
+        if: ${{ !contains(github.ref_name, '-') }}
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          gh api repos/sstraus/homebrew-tap/dispatches \
+            -f event_type=release-published \
+            -f 'client_payload[repo]=ego' \
+            -f "client_payload[version]=$GITHUB_REF_NAME"

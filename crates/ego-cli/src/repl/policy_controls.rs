@@ -3,7 +3,7 @@
 //! The presenter emits typed requests, while the application owner validates,
 //! persists, resolves, and stages policy for the next generation boundary.
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 use ego_core::config::rule_management::{
     EffectiveRule, RememberPlan, RuleExplanation, RuleMutationComparison,
@@ -48,6 +48,8 @@ pub enum PolicyControlRequest {
 /// The live seat's narrow bridge to the one CLI-owned atomic rule writer.
 pub trait PermissionRuleApplication: Send + Sync {
     fn remember_allow(&self, plan: RememberPlan) -> Result<String, PolicyControlError>;
+    /// Keep what the plan names refused: a deny rule, so it is not asked again.
+    fn remember_deny(&self, plan: RememberPlan) -> Result<String, PolicyControlError>;
 }
 
 /// Presenter-owned modal state for the interactive policy controls.
@@ -81,6 +83,8 @@ pub struct GenerationPolicySnapshot {
 struct GenerationPolicyState {
     active: GenerationPolicySnapshot,
     staged: Option<GenerationPolicySnapshot>,
+    published_rules: Vec<RuleSnapshot>,
+    invalidated: Option<String>,
 }
 
 /// Whether an attempted staging operation changed the next-boundary state.
@@ -93,16 +97,31 @@ pub struct PolicyStageOutcome {
 #[derive(Debug, Clone)]
 pub struct GenerationPolicySelection {
     state: Arc<RwLock<GenerationPolicyState>>,
+    rule_publication: Arc<Mutex<()>>,
 }
 
 impl GenerationPolicySelection {
     pub fn new(mode: Mode, ruleset: Ruleset) -> Self {
         Self {
+            rule_publication: Arc::new(Mutex::new(())),
             state: Arc::new(RwLock::new(GenerationPolicyState {
                 active: GenerationPolicySnapshot { mode, ruleset },
                 staged: None,
+                published_rules: Vec::new(),
+                invalidated: None,
             })),
         }
+    }
+
+    /// Keep store publication, frozen resolution and staging in one order.
+    /// Separate from the state lock: resolvers read the selected snapshot.
+    pub(crate) fn lock_rule_publication(&self) -> Result<MutexGuard<'_, ()>, PolicyControlError> {
+        let guard = self
+            .rule_publication
+            .lock()
+            .map_err(|_| rule_publication_poisoned())?;
+        drop(self.read()?);
+        Ok(guard)
     }
 
     pub fn snapshot(&self) -> Result<GenerationPolicySnapshot, PolicyControlError> {
@@ -127,12 +146,32 @@ impl GenerationPolicySelection {
         Ok(state.staged.as_ref().unwrap_or(&state.active).clone())
     }
 
-    fn stage(
+    pub(crate) fn published_rule_snapshots(&self) -> Result<Vec<RuleSnapshot>, PolicyControlError> {
+        Ok(self.read()?.published_rules.clone())
+    }
+
+    fn stage_rules(
         &self,
-        mode: Mode,
-        ruleset: Ruleset,
+        mut ruleset: Ruleset,
+        preserve_denies: bool,
+        published: RuleSnapshot,
     ) -> Result<PolicyStageOutcome, PolicyControlError> {
         let mut state = self.write()?;
+        let selected = state.staged.as_ref().unwrap_or(&state.active);
+        let mode = selected.mode;
+        // An additive refusal also preserves denies published after resolution
+        // began; mode and deny origins join the new rules under this one lock.
+        if preserve_denies {
+            for deny in &selected.ruleset.deny {
+                for origin in deny.origins().iter() {
+                    Ruleset::merge(&mut ruleset.deny, deny.rule().clone(), origin);
+                }
+            }
+        }
+        state
+            .published_rules
+            .retain(|snapshot| snapshot.target != published.target);
+        state.published_rules.push(published);
         Ok(replace_staged(
             &mut state,
             GenerationPolicySnapshot { mode, ruleset },
@@ -156,21 +195,58 @@ impl GenerationPolicySelection {
     fn read(
         &self,
     ) -> Result<std::sync::RwLockReadGuard<'_, GenerationPolicyState>, PolicyControlError> {
-        self.state
+        if self.rule_publication.is_poisoned() {
+            return Err(rule_publication_poisoned());
+        }
+        let state = self
+            .state
             .read()
             .map_err(|_| PolicyControlError::Synchronization {
                 diagnostic: "the generation policy selection lock is poisoned".into(),
-            })
+            })?;
+        if let Some(diagnostic) = &state.invalidated {
+            return Err(PolicyControlError::Resolution {
+                diagnostic: diagnostic.clone(),
+            });
+        }
+        Ok(state)
     }
 
     fn write(
         &self,
     ) -> Result<std::sync::RwLockWriteGuard<'_, GenerationPolicyState>, PolicyControlError> {
-        self.state
+        if self.rule_publication.is_poisoned() {
+            return Err(rule_publication_poisoned());
+        }
+        let state = self
+            .state
             .write()
             .map_err(|_| PolicyControlError::Synchronization {
                 diagnostic: "the generation policy selection lock is poisoned".into(),
-            })
+            })?;
+        if let Some(diagnostic) = &state.invalidated {
+            return Err(PolicyControlError::Resolution {
+                diagnostic: diagnostic.clone(),
+            });
+        }
+        Ok(state)
+    }
+
+    fn invalidate(&self, error: &PolicyControlError) {
+        // A poisoned lock already refuses all policy access.
+        if let Ok(mut state) = self.state.write() {
+            state.invalidated.get_or_insert_with(|| {
+                format!(
+                    "published permission rules could not be applied; restart this session: {error}"
+                )
+            });
+        }
+    }
+}
+
+fn rule_publication_poisoned() -> PolicyControlError {
+    PolicyControlError::Synchronization {
+        diagnostic: "the rule publication lock is poisoned; restart this session".into(),
     }
 }
 
@@ -180,7 +256,9 @@ pub(crate) struct CliGenerationPolicySource {
     workspace: CanonPath,
     roots: Vec<ProfileRoot>,
     read_perimeter: ego_core::permit::ReadPerimeter,
+    root_ceilings: ego_core::permit::RootCeilings,
     human: Option<Arc<dyn HumanApprover>>,
+    session_approvals: ego_core::permit::SessionApprovals,
 }
 
 impl CliGenerationPolicySource {
@@ -194,7 +272,9 @@ impl CliGenerationPolicySource {
             workspace,
             roots: Vec::new(),
             read_perimeter: ego_core::permit::ReadPerimeter::default(),
+            root_ceilings: ego_core::permit::RootCeilings::default(),
             human,
+            session_approvals: ego_core::permit::SessionApprovals::default(),
         }
     }
 
@@ -212,6 +292,32 @@ impl CliGenerationPolicySource {
         self
     }
 
+    pub(crate) fn with_root_ceilings(
+        mut self,
+        root_ceilings: ego_core::permit::RootCeilings,
+    ) -> Self {
+        self.root_ceilings = root_ceilings;
+        self
+    }
+
+    /// Configured and session roots as admitted at start, plus the repository's
+    /// checkouts as they are now: a worktree made mid-session joins here.
+    fn live_roots(&self) -> Vec<ProfileRoot> {
+        let fresh = crate::run::profile_roots::same_repository(&self.workspace);
+        let mut roots: Vec<_> = self
+            .roots
+            .iter()
+            .filter(|root| root.derived().is_none())
+            .cloned()
+            .collect();
+        let added: Vec<_> = fresh
+            .into_iter()
+            .filter(|root| !roots.contains(root))
+            .collect();
+        roots.extend(added);
+        roots
+    }
+
     fn engine(&self, snapshot: GenerationPolicySnapshot) -> Arc<PolicyEngine> {
         Arc::new(
             match self.human.as_ref() {
@@ -223,8 +329,10 @@ impl CliGenerationPolicySource {
                 ),
                 None => PolicyEngine::new(self.workspace.clone(), snapshot.mode, snapshot.ruleset),
             }
-            .with_profile_roots(self.roots.clone())
-            .with_read_perimeter(self.read_perimeter.clone()),
+            .with_session_approvals(self.session_approvals.clone())
+            .with_profile_roots(self.live_roots())
+            .with_read_perimeter(self.read_perimeter.clone())
+            .with_root_ceilings(self.root_ceilings.clone()),
         )
     }
 }
@@ -244,12 +352,14 @@ impl GenerationPolicySource for CliGenerationPolicySource {
             .map_err(|error| error.to_string())?;
         GenerationPolicyCapture::with_profile_roots(
             self.workspace.clone(),
-            self.roots.clone(),
+            self.live_roots(),
             snapshot.mode,
             snapshot.ruleset,
             self.human.clone(),
         )
+        .and_then(|capture| capture.with_session_approvals(self.session_approvals.clone()))
         .and_then(|capture| capture.with_read_perimeter(self.read_perimeter.clone()))
+        .and_then(|capture| capture.with_root_ceilings(self.root_ceilings.clone()))
         .map_err(|error| error.to_string())
     }
 
@@ -257,7 +367,12 @@ impl GenerationPolicySource for CliGenerationPolicySource {
         &self,
         snapshot: Arc<CapturedGenerationPolicySnapshot>,
     ) -> Result<GenerationPolicyCapture, String> {
+        self.selection
+            .snapshot()
+            .map_err(|error| error.to_string())?;
         GenerationPolicyCapture::restore(snapshot, self.human.clone())
+            .and_then(|capture| capture.with_session_approvals(self.session_approvals.clone()))
+            .and_then(|capture| capture.with_root_ceilings(self.root_ceilings.clone()))
             .map_err(|error| error.to_string())
     }
 }
@@ -444,6 +559,7 @@ impl PolicyApplicationOwner {
         &self,
         mutation: RuleMutation,
     ) -> Result<PolicyControlOutcome, PolicyControlError> {
+        let _publication = self.selection.lock_rule_publication()?;
         let change = match mutation.effect {
             ego_core::config::ManagedRuleEffect::Allow => self.rules.allow(mutation.rule),
             ego_core::config::ManagedRuleEffect::Deny => self.rules.deny(mutation.rule),
@@ -462,6 +578,7 @@ impl PolicyApplicationOwner {
                 self.explain(read).map(PolicyControlOutcome::Permission)
             }
             PermissionInput::Revoke(id) => {
+                let _publication = self.selection.lock_rule_publication()?;
                 let change = self.rules.revoke(id).map_err(map_rule_error)?;
                 let (receipt, staging) = self.finish_rule_change(change)?;
                 Ok(PolicyControlOutcome::Rule { receipt, staging })
@@ -470,6 +587,7 @@ impl PolicyApplicationOwner {
                 .preview_remember(request)
                 .map(PolicyControlOutcome::RememberPreview),
             PermissionInput::ConfirmRemember(preview) => {
+                let _publication = self.selection.lock_rule_publication()?;
                 let change = self
                     .rules
                     .confirm_remember(preview)
@@ -484,37 +602,63 @@ impl PolicyApplicationOwner {
         &self,
         change: RuleChange,
     ) -> Result<(RuleMutationReceipt, PolicyStageOutcome), PolicyControlError> {
+        finish_rule_change(&self.selection, self.resolver.as_ref(), change)
+    }
+}
+
+/// Stage one successfully published transaction using the session's frozen authority.
+pub(crate) fn finish_rule_change(
+    selection: &GenerationPolicySelection,
+    resolver: &dyn FrozenPolicyResolver,
+    change: RuleChange,
+) -> Result<(RuleMutationReceipt, PolicyStageOutcome), PolicyControlError> {
+    let result = (|| {
         if !change.changed() {
             return change
                 .into_unchanged_receipt()
                 .map(|receipt| (receipt, PolicyStageOutcome { changed: false }))
                 .map_err(map_rule_error);
         }
-
-        let resolution = {
+        let (resolution, only_adds_denies, published) = {
             let (before, after) = change.transaction();
-            self.resolver
-                .resolve_rule_transaction(before, after, change.affected())?
+            let only_adds_denies = !change.affected().is_empty()
+                && change.affected().iter().all(|mutation| {
+                    mutation.effect == ManagedRuleEffect::Deny
+                        && after.deny.contains(&mutation.rule)
+                })
+                && before.deny.iter().all(|rule| after.deny.contains(rule));
+            (
+                resolver.resolve_rule_transaction(before, after, change.affected())?,
+                only_adds_denies,
+                after.clone(),
+            )
         };
         let receipt = change
             .into_receipt(resolution.comparisons)
             .map_err(map_rule_error)?;
-        let staging = self
-            .selection
-            .stage(resolution.next.mode, resolution.next.ruleset)?;
+        let staging =
+            selection.stage_rules(resolution.next.ruleset, only_adds_denies, published)?;
         Ok((receipt, staging))
+    })();
+    if let Err(error) = &result {
+        selection.invalidate(error);
     }
+    result
 }
 
-impl PermissionRuleApplication for PolicyApplicationOwner {
-    fn remember_allow(&self, plan: RememberPlan) -> Result<String, PolicyControlError> {
+impl PolicyApplicationOwner {
+    fn remember(
+        &self,
+        effect: ManagedRuleEffect,
+        plan: RememberPlan,
+    ) -> Result<String, PolicyControlError> {
         let rules = plan
             .candidates
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        let preview = RememberPreview::presented(ManagedRuleEffect::Allow, plan);
+        let preview = RememberPreview::presented(effect, plan);
         let PolicyControlOutcome::Rule { receipt, .. } =
             self.apply_permission(PermissionInput::ConfirmRemember(preview))?
         else {
@@ -522,12 +666,29 @@ impl PermissionRuleApplication for PolicyApplicationOwner {
                 diagnostic: "remembering a presented call returned a non-rule outcome".into(),
             });
         };
-        let mut sentence = format!("Remembered: you will not be asked again for {rules}.");
+        let mut sentence = match effect {
+            ManagedRuleEffect::Allow => {
+                format!("Remembered: you will not be asked again for {rules}.")
+            }
+            ManagedRuleEffect::Deny => {
+                format!("Kept blocked: {rules} is refused and will not be asked again.")
+            }
+        };
         if let Some(warning) = crate::rules::publication_warning_text(&receipt.publication()) {
             sentence.push(' ');
             sentence.push_str(&warning);
         }
         Ok(sentence)
+    }
+}
+
+impl PermissionRuleApplication for PolicyApplicationOwner {
+    fn remember_allow(&self, plan: RememberPlan) -> Result<String, PolicyControlError> {
+        self.remember(ManagedRuleEffect::Allow, plan)
+    }
+
+    fn remember_deny(&self, plan: RememberPlan) -> Result<String, PolicyControlError> {
+        self.remember(ManagedRuleEffect::Deny, plan)
     }
 }
 
@@ -546,6 +707,615 @@ fn map_rule_error(error: RuleApplicationError) -> PolicyControlError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Catches: a late resolver restores a revoked allow or loses a newer deny
+    // when modal Remember and a native edit publish on different threads.
+    #[test]
+    fn rule_publications_stage_in_store_order_across_modal_and_native_writers() {
+        use ego_core::permit::{SandboxAccess, SandboxGrant, rule::Rule};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::time::Duration;
+        struct Preflight;
+        impl PreflightPort for Preflight {
+            fn validate_auto(&self) -> Result<(), PolicyControlError> {
+                Ok(())
+            }
+        }
+        struct OrderedResolver {
+            inner: crate::run::FrozenRuleResolver,
+            first: AtomicBool,
+            entered: mpsc::SyncSender<()>,
+            second_done: Mutex<mpsc::Receiver<()>>,
+        }
+        impl FrozenPolicyResolver for OrderedResolver {
+            fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError> {
+                self.inner.max_mode()
+            }
+            fn resolve_rule_transaction(
+                &self,
+                before: &RuleSnapshot,
+                after: &RuleSnapshot,
+                affected: &[RuleMutation],
+            ) -> Result<FrozenRuleResolution, PolicyControlError> {
+                let resolved = self
+                    .inner
+                    .resolve_rule_transaction(before, after, affected)?;
+                if self.first.swap(false, Ordering::SeqCst) {
+                    self.entered.send(()).unwrap();
+                    // Without serialization the second publication finishes
+                    // first, then this stale result overwrites its rules.
+                    let _ = self
+                        .second_done
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(1));
+                }
+                Ok(resolved)
+            }
+        }
+        for revoke in [true, false] {
+            let home = tempfile::tempdir().unwrap();
+            let path = home.path().join("config.toml");
+            std::fs::write(&path, "[permissions]\nallow = [\"read(/workspace/old)\"]\n").unwrap();
+            let store: Arc<dyn UserConfigStore> = Arc::new(
+                ego_tools::config::OsUserConfigStore::new(Arc::new(ego_tools::store::OsIo), path),
+            );
+            let old = Rule::load("read(/workspace/old)").unwrap();
+            let selection = GenerationPolicySelection::new(
+                Mode::Default,
+                Ruleset::from_layer(
+                    ego_core::config::PermCfg {
+                        judge: None,
+                        allow: vec![old.clone()],
+                        deny: vec![],
+                    },
+                    ego_core::config::Source::User,
+                ),
+            );
+            let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+            let (done_tx, done_rx) = mpsc::sync_channel(1);
+            let resolver = Arc::new(OrderedResolver {
+                inner: crate::run::FrozenRuleResolver::new(
+                    vec![],
+                    ego_core::config::Trust::Untrusted,
+                    None,
+                    selection.clone(),
+                ),
+                first: AtomicBool::new(true),
+                entered: entered_tx,
+                second_done: Mutex::new(done_rx),
+            });
+            let owner = Arc::new(PolicyApplicationOwner::new(
+                selection.clone(),
+                store.clone(),
+                Arc::new(Preflight),
+                resolver,
+            ));
+            let preview = RememberPreview::presented(
+                ManagedRuleEffect::Allow,
+                RememberPlan::for_sandbox_path(&SandboxGrant::new(
+                    CanonPath::new(crate::ai_test_support::native("/workspace/new")),
+                    SandboxAccess::Read,
+                ))
+                .unwrap(),
+            );
+            std::thread::scope(|scope| {
+                let first = owner.clone();
+                let first = scope.spawn(move || {
+                    first
+                        .apply(PolicyControlRequest::Permission(
+                            PermissionInput::ConfirmRemember(preview),
+                        ))
+                        .unwrap()
+                });
+                entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                let second = owner.clone();
+                let second = scope.spawn(move || {
+                    let request = if revoke {
+                        PolicyControlRequest::Permission(PermissionInput::Revoke(old.id()))
+                    } else {
+                        PolicyControlRequest::Rule(RuleMutation {
+                            effect: ManagedRuleEffect::Deny,
+                            rule: Rule::load("read(/workspace/blocked)").unwrap(),
+                        })
+                    };
+                    second.apply(request).unwrap();
+                    done_tx.send(()).unwrap();
+                });
+                first.join().unwrap();
+                second.join().unwrap();
+            });
+            let stored = store.rule_snapshot(UserConfigTarget::Base).unwrap();
+            let captured = selection.capture().unwrap();
+            let allow = captured
+                .ruleset
+                .allow
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .origins()
+                        .iter()
+                        .any(|origin| origin == ego_core::config::Source::User)
+                })
+                .map(|entry| entry.rule().to_string())
+                .collect::<Vec<_>>();
+            let deny = captured
+                .ruleset
+                .deny
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .origins()
+                        .iter()
+                        .any(|origin| origin == ego_core::config::Source::User)
+                })
+                .map(|entry| entry.rule().to_string())
+                .collect::<Vec<_>>();
+            assert!(
+                allow.iter().any(|rule| rule == "read(/workspace/new)"),
+                "Remember lost: {allow:?}"
+            );
+            assert_eq!(
+                allow.iter().any(|rule| rule == "read(/workspace/old)"),
+                !revoke,
+                "revoked allow restored: {allow:?}"
+            );
+            assert_eq!(
+                deny.iter().any(|rule| rule == "read(/workspace/blocked)"),
+                !revoke,
+                "deny lost: {deny:?}"
+            );
+            assert_eq!(
+                allow,
+                stored
+                    .allow
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(
+                deny,
+                stored
+                    .deny
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+
+    // Catches: a publisher panic after saving leaves stale policy capturable.
+    #[test]
+    fn poisoned_rule_publication_refuses_policy_capture_and_restore() {
+        let selection = GenerationPolicySelection::new(Mode::Yolo, Ruleset::default());
+        let source = CliGenerationPolicySource::new(
+            selection.clone(),
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+            None,
+        );
+        let before = source.capture().unwrap().snapshot();
+        let writer = selection.clone();
+        assert!(
+            std::thread::spawn(move || {
+                let _publication = writer.lock_rule_publication().unwrap();
+                panic!("publisher failed after publication");
+            })
+            .join()
+            .is_err()
+        );
+        assert!(selection.snapshot().is_err());
+        assert!(selection.capture().is_err());
+        assert!(selection.next_snapshot().is_err());
+        assert!(source.current().is_err());
+        assert!(source.capture().is_err());
+        assert!(source.restore(before).is_err());
+    }
+
+    struct PublicationResolver {
+        selection: GenerationPolicySelection,
+        fail: bool,
+    }
+
+    // Catches: an earlier resolver result overwrites a second published deny
+    // that reached the live selection while the first resolution was running.
+    #[test]
+    fn interleaved_deny_publications_preserve_both_denies_and_origins() {
+        use ego_core::config::{PermCfg, Source};
+        use ego_core::permit::{PolicyDenied, rule::Rule};
+        struct InterleavingResolver {
+            selection: GenerationPolicySelection,
+            store: Arc<dyn UserConfigStore>,
+            interleave: std::sync::atomic::AtomicBool,
+        }
+        impl FrozenPolicyResolver for InterleavingResolver {
+            fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError> {
+                Ok(None)
+            }
+            fn resolve_rule_transaction(
+                &self,
+                before: &RuleSnapshot,
+                after: &RuleSnapshot,
+                affected: &[RuleMutation],
+            ) -> Result<FrozenRuleResolution, PolicyControlError> {
+                let selected = self.selection.next_snapshot()?;
+                let rules = |snapshot: &RuleSnapshot| {
+                    Ruleset::from_layer(
+                        PermCfg {
+                            judge: None,
+                            allow: snapshot.allow.clone(),
+                            deny: snapshot.deny.clone(),
+                        },
+                        Source::User,
+                    )
+                };
+                let before_rules = rules(before);
+                let after_rules = rules(after);
+                if self
+                    .interleave
+                    .swap(false, std::sync::atomic::Ordering::SeqCst)
+                {
+                    let change = RuleApplication::new(self.store.clone(), UserConfigTarget::Base)
+                        .deny(Rule::load("write(/outside/second)").unwrap())
+                        .map_err(map_rule_error)?;
+                    finish_rule_change(&self.selection, self, change)?;
+                }
+                Ok(FrozenRuleResolution {
+                    next: GenerationPolicySnapshot {
+                        mode: selected.mode,
+                        ruleset: after_rules.clone(),
+                    },
+                    comparisons: affected
+                        .iter()
+                        .map(|mutation| {
+                            ego_core::config::rule_management::RuleManagement::compare_resolved(
+                                &before_rules,
+                                &after_rules,
+                                before != after,
+                                &mutation.rule,
+                                mutation.effect,
+                            )
+                        })
+                        .collect(),
+                })
+            }
+        }
+        let home = tempfile::tempdir().unwrap();
+        let store: Arc<dyn UserConfigStore> = Arc::new(ego_tools::config::OsUserConfigStore::new(
+            Arc::new(ego_tools::store::OsIo),
+            home.path().join("config.toml"),
+        ));
+        let selected = GenerationPolicySelection::new(
+            Mode::Yolo,
+            Ruleset::from_layer(
+                PermCfg {
+                    judge: None,
+                    allow: vec![],
+                    deny: vec![Rule::load("write(/outside/admin)").unwrap()],
+                },
+                Source::System,
+            ),
+        );
+        let resolver = InterleavingResolver {
+            selection: selected.clone(),
+            store: store.clone(),
+            interleave: std::sync::atomic::AtomicBool::new(true),
+        };
+        let first = RuleApplication::new(store.clone(), UserConfigTarget::Base)
+            .deny(Rule::load("write(/outside/first)").unwrap())
+            .unwrap();
+        finish_rule_change(&selected, &resolver, first).unwrap();
+        assert_eq!(
+            store
+                .rule_snapshot(UserConfigTarget::Base)
+                .unwrap()
+                .deny
+                .len(),
+            2
+        );
+        let confinement = ego_core::permit::RunConfinement::new(
+            ego_core::permit::Confinement::Off,
+            false,
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+        )
+        .unwrap();
+        let source = CliGenerationPolicySource::new(
+            selected,
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+            None,
+        )
+        .with_read_perimeter(&confinement);
+        let capture = source.capture().unwrap();
+        for (path, expected_source) in [
+            ("/outside/first", Source::User),
+            ("/outside/second", Source::User),
+            ("/outside/admin", Source::System),
+        ] {
+            assert!(
+                matches!(capture.policy().classify(PreparedCall::new("write", Op::Write {
+                path: CanonPath::new(path), change: Change::Whole(vec![]),
+            })), Classification::Settled(Err(PolicyDenied::Denied { from, .. })) if from == expected_source)
+            );
+        }
+    }
+
+    impl FrozenPolicyResolver for PublicationResolver {
+        fn max_mode(&self) -> Result<Option<Mode>, PolicyControlError> {
+            Ok(None)
+        }
+
+        fn resolve_rule_transaction(
+            &self,
+            before: &RuleSnapshot,
+            after: &RuleSnapshot,
+            affected: &[RuleMutation],
+        ) -> Result<FrozenRuleResolution, PolicyControlError> {
+            if self.fail {
+                return Err(PolicyControlError::Resolution {
+                    diagnostic: "injected resolution failure after publication".into(),
+                });
+            }
+            let earlier_mode = self.selection.next_snapshot()?.mode;
+            // A mode choice lands after the resolver reads its mode, before
+            // the caller publishes the resolved rules into the selection.
+            self.selection.stage_mode(Mode::Yolo)?;
+            let rules = |snapshot: &RuleSnapshot| {
+                Ruleset::from_layer(
+                    ego_core::config::PermCfg {
+                        judge: None,
+                        allow: snapshot.allow.clone(),
+                        deny: snapshot.deny.clone(),
+                    },
+                    ego_core::config::Source::User,
+                )
+            };
+            let before_rules = rules(before);
+            let after_rules = rules(after);
+            Ok(FrozenRuleResolution {
+                comparisons: affected
+                    .iter()
+                    .map(|mutation| {
+                        ego_core::config::rule_management::RuleManagement::compare_resolved(
+                            &before_rules,
+                            &after_rules,
+                            before != after,
+                            &mutation.rule,
+                            mutation.effect,
+                        )
+                    })
+                    .collect(),
+                next: GenerationPolicySnapshot {
+                    mode: earlier_mode,
+                    ruleset: after_rules,
+                },
+            })
+        }
+    }
+
+    // Catches: a persisted deny followed by resolution failure leaves a stale
+    // yolo policy available to a later generation or restored continuation.
+    #[tokio::test]
+    async fn published_deny_resolution_failure_invalidates_future_policy_access() {
+        use ego_acp::permission::PermissionRuleWriter;
+        use ego_core::permit::{SandboxAccess, SandboxGrant};
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("config.toml");
+        let selection = GenerationPolicySelection::new(Mode::Yolo, Ruleset::default());
+        let source = CliGenerationPolicySource::new(
+            selection.clone(),
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+            None,
+        );
+        let previous = source.capture().unwrap().snapshot();
+        let writer =
+            crate::acp_permission::CliAcpPermissionRules::new(path.clone(), UserConfigTarget::Base)
+                .with_live_policy(
+                    selection.clone(),
+                    Arc::new(PublicationResolver {
+                        selection: selection.clone(),
+                        fail: true,
+                    }),
+                );
+        let grant = SandboxGrant::new(CanonPath::new("/outside/data"), SandboxAccess::Write);
+        assert!(
+            writer
+                .remember(
+                    ManagedRuleEffect::Deny,
+                    RememberPlan::for_sandbox_path(&grant).unwrap()
+                )
+                .await
+                .is_err()
+        );
+        let store =
+            ego_tools::config::OsUserConfigStore::new(Arc::new(ego_tools::store::OsIo), path);
+        assert_eq!(
+            store
+                .rule_snapshot(UserConfigTarget::Base)
+                .unwrap()
+                .deny
+                .len(),
+            1,
+            "publication really succeeded"
+        );
+        assert!(selection.snapshot().is_err());
+        assert!(selection.capture().is_err());
+        assert!(selection.next_snapshot().is_err());
+        assert!(selection.stage_mode(Mode::Yolo).is_err());
+        assert!(
+            selection
+                .stage_rules(
+                    Ruleset::default(),
+                    false,
+                    store.rule_snapshot(UserConfigTarget::Base).unwrap()
+                )
+                .is_err()
+        );
+        assert!(source.current().is_err());
+        assert!(source.capture().is_err());
+        assert!(source.restore(previous).is_err());
+    }
+
+    // Catches: background rule publication stages its old mode over a newer
+    // interactive mode selection made while resolution was running.
+    #[tokio::test]
+    async fn rule_publication_preserves_mode_selected_after_resolution_snapshot() {
+        use ego_acp::permission::PermissionRuleWriter;
+        use ego_core::permit::{PolicyDenied, SandboxAccess, SandboxGrant};
+        let home = tempfile::tempdir().unwrap();
+        let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
+        let writer = crate::acp_permission::CliAcpPermissionRules::new(
+            home.path().join("config.toml"),
+            UserConfigTarget::Base,
+        )
+        .with_live_policy(
+            selection.clone(),
+            Arc::new(PublicationResolver {
+                selection: selection.clone(),
+                fail: false,
+            }),
+        );
+        let grant = SandboxGrant::new(CanonPath::new("/outside/data"), SandboxAccess::Write);
+        writer
+            .remember(
+                ManagedRuleEffect::Deny,
+                RememberPlan::for_sandbox_path(&grant).unwrap(),
+            )
+            .await
+            .unwrap();
+        let confinement = ego_core::permit::RunConfinement::new(
+            ego_core::permit::Confinement::Off,
+            false,
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+        )
+        .unwrap();
+        let source = CliGenerationPolicySource::new(
+            selection.clone(),
+            CanonPath::new(crate::ai_test_support::native("/workspace")),
+            None,
+        )
+        .with_read_perimeter(&confinement);
+        let captured = source.capture().unwrap();
+        assert_eq!(selection.snapshot().unwrap().mode, Mode::Yolo);
+        assert!(matches!(
+            captured.policy().classify(PreparedCall::new(
+                "write",
+                Op::Write {
+                    path: grant.path,
+                    change: Change::Whole(vec![]),
+                }
+            )),
+            Classification::Settled(Err(PolicyDenied::Denied { .. }))
+        ));
+    }
+
+    // Catches: restoring an old unbounded snapshot bypasses the currently
+    // admitted administrator write ceiling even though new captures bind it.
+    #[test]
+    fn current_capture_and_restore_apply_current_root_ceilings() {
+        use ego_core::permit::{
+            Confinement, PolicyDenied, RootAccess, RootCeilings, RunConfinement,
+        };
+        let workspace = CanonPath::new(crate::ai_test_support::native("/workspace"));
+        let confinement = RunConfinement::new(Confinement::Off, false, workspace.clone()).unwrap();
+        let unbounded = CliGenerationPolicySource::new(
+            GenerationPolicySelection::new(Mode::Yolo, Ruleset::default()),
+            workspace.clone(),
+            None,
+        )
+        .with_read_perimeter(&confinement);
+        let old = unbounded.capture().unwrap();
+        let bounded = CliGenerationPolicySource::new(
+            GenerationPolicySelection::new(Mode::Yolo, Ruleset::default()),
+            workspace,
+            None,
+        )
+        .with_read_perimeter(&confinement)
+        .with_root_ceilings(RootCeilings::new(vec![vec![ProfileRoot::new(
+            CanonPath::new("/allowed"),
+            RootAccess::ReadWrite,
+        )]]));
+        for policy in [
+            bounded.current().unwrap(),
+            bounded.capture().unwrap().policy(),
+            bounded.restore(old.snapshot()).unwrap().policy(),
+        ] {
+            let denied = policy.classify(PreparedCall::new(
+                "write",
+                Op::Write {
+                    path: CanonPath::new("/sibling/notes.md"),
+                    change: Change::Whole(b"changed".to_vec()),
+                },
+            ));
+            assert!(matches!(
+                denied,
+                Classification::Settled(Err(PolicyDenied::HardFloor {
+                    class: "root ceiling"
+                }))
+            ));
+        }
+    }
+
+    // Catches: same-repository roots fixed at start, so the built-in tools refuse
+    // a worktree created mid-session, and a forged entry created mid-session joining.
+    #[test]
+    fn a_worktree_made_mid_session_is_reachable_and_a_forged_entry_is_not() {
+        use ego_core::permit::PolicyDenied;
+        let tree = tempfile::tempdir().unwrap();
+        let base = tree.path().canonicalize().unwrap();
+        let git = |dir: &std::path::Path, args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(dir)
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success());
+        };
+        std::fs::create_dir(base.join("main")).unwrap();
+        git(&base.join("main"), &["init", "-q"]);
+        git(
+            &base.join("main"),
+            &["commit", "-q", "--allow-empty", "-m", "x"],
+        );
+        git(
+            &base.join("main"),
+            &["worktree", "add", "-q", "../wt", "-b", "wt"],
+        );
+        std::fs::create_dir(base.join("foreign")).unwrap();
+        git(&base.join("foreign"), &["init", "-q"]);
+        let ws = CanonPath::new(base.join("wt"));
+        let source = CliGenerationPolicySource::new(
+            GenerationPolicySelection::new(Mode::Yolo, Ruleset::default()),
+            ws.clone(),
+            None,
+        )
+        .with_profile_roots(crate::run::profile_roots::same_repository(&ws));
+        let outside = |path: std::path::PathBuf| {
+            let engine = source.current().unwrap();
+            matches!(
+                engine.classify(PreparedCall::new(
+                    "write",
+                    Op::Write { path: CanonPath::new(path), change: Change::Whole(vec![]) },
+                )),
+                Classification::Settled(Err(denied)) if matches!(denied, PolicyDenied::OutsideWorkspace { .. })
+            )
+        };
+        git(
+            &base.join("main"),
+            &["worktree", "add", "-q", "../late", "-b", "late"],
+        );
+        assert!(!outside(base.join("late/x.md")));
+        let forged = base.join("main/.git/worktrees/forged");
+        std::fs::create_dir_all(&forged).unwrap();
+        std::fs::write(
+            forged.join("gitdir"),
+            format!("{}\n", base.join("foreign/.git").display()),
+        )
+        .unwrap();
+        assert!(outside(base.join("foreign/x.md")));
+    }
 
     use ego_core::event::id::ItemId;
     use ego_core::permit::{
@@ -601,18 +1371,8 @@ mod tests {
     fn selection_keeps_active_snapshot_until_boundary_and_plan_is_idempotent() {
         let selection = GenerationPolicySelection::new(Mode::Default, Ruleset::default());
         let active = selection.snapshot().unwrap();
-        assert!(
-            selection
-                .stage(Mode::Plan, Ruleset::default())
-                .unwrap()
-                .changed
-        );
-        assert!(
-            !selection
-                .stage(Mode::Plan, Ruleset::default())
-                .unwrap()
-                .changed
-        );
+        assert!(selection.stage_mode(Mode::Plan).unwrap().changed);
+        assert!(!selection.stage_mode(Mode::Plan).unwrap().changed);
         assert_eq!(selection.snapshot().unwrap(), active);
         assert_eq!(
             selection.staged_snapshot().unwrap().unwrap().mode,

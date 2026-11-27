@@ -4,8 +4,8 @@ use std::path::Path;
 
 use ego_core::config::StatusProvider;
 use ego_core::permit::{
-    CanonPath, Classification, EnvPolicy, PolicyEngine, PrepareCtx, ProcessExecutor, Resolution,
-    StreamProvenance, ToolOutputEncoding, ToolOutputProvenance, ToolResult, TypedTool,
+    CanonPath, Classification, EnvPolicy, Op, PolicyEngine, PrepareCtx, ProcessExecutor,
+    Resolution, StreamProvenance, ToolOutputEncoding, ToolOutputProvenance, ToolResult, TypedTool,
 };
 use ego_core::turn::ToolEffectPorts;
 use ego_tools::fs::OsFs;
@@ -53,8 +53,22 @@ pub async fn collect(
                 _ => return Err("permission denied"),
             };
             let (call, guarded) = effects.clone().bind(authorization);
-            let mut result = tool
-                .execute(call, &guarded)
+            let (_, operations) = call.into_parts();
+            let mut operations = operations.into_iter();
+            let spec = match (operations.next(), operations.next()) {
+                (Some(Op::Spawn { spec }), None) => spec,
+                _ => return Err("invalid command operation"),
+            };
+            let input =
+                command_input(&crate::quota::current()).map_err(|_| "invalid quota input")?;
+            let mut result = guarded
+                .exec_handler(
+                    &spec,
+                    &input,
+                    ego_core::hook::EffectScope::new(std::time::Duration::from_millis(
+                        provider.timeout_ms,
+                    )),
+                )
                 .await
                 .map_err(|_| "execution failed or timed out")?;
             result.mask_secrets(&ego_tools::secrets::from_env());
@@ -67,6 +81,12 @@ pub async fn collect(
         }
     }
     (values, diagnostics)
+}
+
+pub(crate) fn command_input(limits: &[ego_core::quota::RateLimits]) -> serde_json::Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(&serde_json::json!({"rate_limits": limits}))?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 fn output(result: &ToolResult) -> Result<String, &'static str> {

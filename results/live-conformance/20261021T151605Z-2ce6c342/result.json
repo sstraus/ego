@@ -1,0 +1,504 @@
+{
+  "schema": 1,
+  "run_id": "20261021T151605Z-2ce6c342",
+  "date": "2026-10-21T15:18:51.609587+00:00",
+  "ego_commit": "8be264c4272b547029d81f488ca5454a0f50df8d",
+  "binary_sha256": "d7ee7b4102d77830014b71117b1dab99d0071a0e84e4d761e63aa6ac11cdde86",
+  "models": [
+    "openai-codex/gpt-6-luna"
+  ],
+  "suites": [
+    "cache"
+  ],
+  "fixture_seed": 419,
+  "fixture_hashes": {},
+  "ceiling_usd": "0.95",
+  "provider_ceiling_usd": "0.90",
+  "cost_usd": "0",
+  "cost_uncertain": false,
+  "cases": [
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6740784084259801
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 0,
+            "weighted_share": 0.9285899352267065
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4219,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4443,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.9218996173756471,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4667,
+            "cache_read_tokens": 4224,
+            "cache_read_share": 0.9050782086993786,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4891,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.9159681046820691,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5127,
+            "cache_read_tokens": 4736,
+            "cache_read_share": 0.9237370782133801,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5351,
+            "cache_read_tokens": 4992,
+            "cache_read_share": 0.9329097364978509,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5575,
+            "cache_read_tokens": 5120,
+            "cache_read_share": 0.9183856502242153,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5799,
+            "cache_read_tokens": 5376,
+            "cache_read_share": 0.9270563890325918,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6035,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.9332228666114333,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6259,
+            "cache_read_tokens": 5888,
+            "cache_read_share": 0.9407253554880971,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6483,
+            "cache_read_tokens": 6144,
+            "cache_read_share": 0.9477093937991671,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6707,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.9351423885492769,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.9286401356440648,
+        "later_zero_hits": 0,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-1",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9440347071583514
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6915,
+            "cache_read_tokens": 6528,
+            "cache_read_share": 0.9440347071583514,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-2",
+      "status": "fail",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 2,
+            "weighted_share": 0.3338549817423057
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 1,
+            "weighted_share": 0.7912615532349058
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4216,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4437,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.9231462700022538,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4658,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4879,
+            "cache_read_tokens": 4224,
+            "cache_read_share": 0.8657511785201886,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5112,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5333,
+            "cache_read_tokens": 4736,
+            "cache_read_share": 0.8880555034689668,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5554,
+            "cache_read_tokens": 4992,
+            "cache_read_share": 0.8988116672668347,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5775,
+            "cache_read_tokens": 5376,
+            "cache_read_share": 0.9309090909090909,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6008,
+            "cache_read_tokens": 5120,
+            "cache_read_share": 0.8521970705725699,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6229,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.9041579707818269,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6450,
+            "cache_read_tokens": 6016,
+            "cache_read_share": 0.9327131782945737,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6671,
+            "cache_read_tokens": 4480,
+            "cache_read_share": 0.6715634837355718,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.7310575066278271,
+        "later_zero_hits": 2,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": "414 cache fix"
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-2",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9113629758791049
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6882,
+            "cache_read_tokens": 6272,
+            "cache_read_share": 0.9113629758791049,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "multi-turn-tool-resume-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 3,
+            "zero_hits": 1,
+            "weighted_share": 0.6721120186697783
+          },
+          "later": {
+            "requests": 9,
+            "zero_hits": 1,
+            "weighted_share": 0.8412358033516003
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 4222,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 4449,
+            "cache_read_tokens": 4096,
+            "cache_read_share": 0.9206563272645538,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4676,
+            "cache_read_tokens": 4224,
+            "cache_read_share": 0.9033361847733106,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 4903,
+            "cache_read_tokens": 0,
+            "cache_read_share": 0.0,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5142,
+            "cache_read_tokens": 4736,
+            "cache_read_share": 0.9210423959548814,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 5369,
+            "cache_read_tokens": 4992,
+            "cache_read_share": 0.9297820823244553,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5596,
+            "cache_read_tokens": 5248,
+            "cache_read_share": 0.9378127233738385,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 5823,
+            "cache_read_tokens": 5376,
+            "cache_read_share": 0.9232354456465739,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6062,
+            "cache_read_tokens": 5632,
+            "cache_read_share": 0.929066314747608,
+            "role": "main",
+            "turn_position": "first"
+          },
+          {
+            "input_tokens": 6289,
+            "cache_read_tokens": 5888,
+            "cache_read_share": 0.9362378756559071,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6516,
+            "cache_read_tokens": 6144,
+            "cache_read_share": 0.9429097605893186,
+            "role": "main",
+            "turn_position": "later"
+          },
+          {
+            "input_tokens": 6743,
+            "cache_read_tokens": 6400,
+            "cache_read_share": 0.9491324336348806,
+            "role": "main",
+            "turn_position": "later"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": 0.8565488565488566,
+        "later_zero_hits": 1,
+        "read_calls": 9,
+        "proxy_proven_zero_attempt": false
+      },
+      "threshold": 0.85,
+      "tolerance": 0.05,
+      "blocked_by": null
+    },
+    {
+      "model": "openai-codex/gpt-6-luna",
+      "provider": "openai-codex",
+      "suite": "cache",
+      "case": "fork-3",
+      "status": "pass",
+      "reasons": [
+        "completed",
+        "completed"
+      ],
+      "metrics": {
+        "turn_split": {
+          "first": {
+            "requests": 1,
+            "zero_hits": 0,
+            "weighted_share": 0.9383354894351014
+          },
+          "later": {
+            "requests": 0,
+            "zero_hits": 0,
+            "weighted_share": null
+          }
+        },
+        "requests": [
+          {
+            "input_tokens": 6957,
+            "cache_read_tokens": 6528,
+            "cache_read_share": 0.9383354894351014,
+            "role": "main",
+            "turn_position": "first"
+          }
+        ],
+        "cost_usd": "0",
+        "unknown_cost": false,
+        "weighted_later_share": null,
+        "later_zero_hits": 0,
+        "read_calls": 0,
+        "proxy_proven_zero_attempt": false
+      }
+    }
+  ]
+}

@@ -1,8 +1,14 @@
 //! Ollama's OpenAI-compatible endpoint, as its own mapping.
 //!
-//! Ollama honors `max_tokens` and discards `max_completion_tokens`. Its
-//! mapping shares projection and decoding with Chat Completions but writes
-//! the ceiling field the daemon actually honors.
+//! It looks like [`openai_completions`](super::openai_completions) and it is
+//! not that format.
+//! `docs/internals/decisions/2026-08-21-a-shared-shape-is-not-a-shared-contract.md` §8
+//! settles the question from a measurement rather than from the resemblance:
+//! a live daemon honours `max_tokens` and discards `max_completion_tokens`, so
+//! Ollama fails the family's first conformance check and is not a member of
+//! it. §4 then leaves exactly three places an adaptation may live — a model
+//! fact, a transport fact, or a different mapping — and "no fourth option and
+//! no flag". A ceiling is none of the first two, so it is this file.
 //!
 //! What this mapping does *not* do is duplicate the family. The request body
 //! is [`openai_completions::common_request`] plus the one field that differs;
@@ -86,7 +92,7 @@ struct WireRequest<'a> {
 /// body is the contract with the daemon, and pinning it needs no URL.
 pub fn request_body(req: &GenRequest) -> Result<Vec<u8>, Inexpressible> {
     let wire = WireRequest {
-        common: openai_completions::common_request(req)?,
+        common: openai_completions::common_request(req, None)?,
         max_tokens: req.max_output_tokens,
     };
     Ok(serde_json::to_vec(&wire).expect("WireRequest has no non-string map keys and no NaN"))

@@ -8,7 +8,7 @@ use tree_sitter::{Node, Parser};
 
 #[path = "shell_trust.rs"]
 mod trust;
-pub use trust::trusted_read_only;
+pub use trust::{sandboxed_read_only, trusted_read_only};
 
 const MAX_SOURCE_BYTES: usize = 64 * 1024;
 const MAX_DISPLAY_BYTES: usize = 16 * 1024;
@@ -16,7 +16,8 @@ const MAX_DISPLAY_BYTES: usize = 16 * 1024;
 /// Known external program families with named subcommands. Shared by shell
 /// decomposition and remember suggestions, never a read-only proof.
 pub(crate) const SUBCOMMAND_PROGRAMS: &[&str] = &[
-    "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh",
+    "git", "cargo", "npm", "pnpm", "yarn", "docker", "kubectl", "go", "gh", "make", "just",
+    "swift", "dotnet", "uv", "bun", "mvn", "gradle",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -31,6 +32,18 @@ pub struct ShellObservation {
 
 /// Observe argv without reading scripts, environment values, or filesystem content.
 pub fn observe(argv: &[String]) -> ShellObservation {
+    observe_with(argv, false)
+}
+
+/// [`observe`] for a run whose sandbox enforces the credential and control
+/// floors at the operating system: content readers and repository inspection
+/// then qualify as read-only, because a symlink or a repository helper cannot
+/// reach what the sandbox refuses.
+pub fn observe_sandboxed(argv: &[String]) -> ShellObservation {
+    observe_with(argv, true)
+}
+
+fn observe_with(argv: &[String], relaxed: bool) -> ShellObservation {
     let shell = argv.first().map(|s| s.rsplit('/').next().unwrap_or(s));
     let script = if matches!(shell, Some("bash" | "zsh" | "sh")) {
         argv.iter()
@@ -40,11 +53,11 @@ pub fn observe(argv: &[String]) -> ShellObservation {
         None
     };
     if let Some(script) = script {
-        observe_script(script)
+        observe_script(script, relaxed)
     } else {
         ShellObservation {
             skeleton: bounded(project_words(argv).join(" ")),
-            read_only: read_only_command(argv),
+            read_only: read_only_command(argv, relaxed),
             complete: !argv.is_empty() && argv.iter().all(|arg| arg.len() <= MAX_SOURCE_BYTES),
             programs: Vec::new(),
         }
@@ -133,7 +146,7 @@ pub(crate) fn static_commands(argv: &[std::ffi::OsString]) -> Option<Vec<Vec<Str
     (!commands.is_empty()).then_some(commands)
 }
 
-fn observe_script(script: &str) -> ShellObservation {
+fn observe_script(script: &str, relaxed: bool) -> ShellObservation {
     if script.len() > MAX_SOURCE_BYTES {
         return ShellObservation {
             skeleton: "<unsupported:source-too-large>".into(),
@@ -160,6 +173,7 @@ fn observe_script(script: &str) -> ShellObservation {
         replacements: Vec::new(),
         complete: !root.has_error(),
         read_only: !root.has_error(),
+        relaxed,
         programs: Vec::new(),
     };
     observation.visit(root);
@@ -192,6 +206,7 @@ struct Walker<'a> {
     replacements: Vec<(usize, usize, String)>,
     complete: bool,
     read_only: bool,
+    relaxed: bool,
     programs: Vec<String>,
 }
 impl Walker<'_> {
@@ -219,7 +234,7 @@ impl Walker<'_> {
                     self.programs
                         .push(program.trim_matches(['\'', '"']).to_owned());
                 }
-                if !literal_words.is_some_and(|words| read_only_command(&words)) {
+                if !literal_words.is_some_and(|words| read_only_command(&words, self.relaxed)) {
                     self.read_only = false;
                 }
                 let projected = project_words(&words);
@@ -405,8 +420,8 @@ pub fn read_only_refusal(argv: &[String]) -> Option<ReadOnlyRefusal> {
 
 /// Narrow proof, not a name allowlist: reject write flags, dynamic text, sensitive
 /// reads, configuration overrides, and unknown options before accepting a command.
-fn read_only_command(raw: &[String]) -> bool {
-    if read_only_refusal(raw).is_some() {
+fn read_only_command(raw: &[String], relaxed: bool) -> bool {
+    if !relaxed && read_only_refusal(raw).is_some() {
         return false;
     }
     let words: Vec<String> = raw
@@ -439,6 +454,13 @@ fn read_only_command(raw: &[String]) -> bool {
                 return false;
             };
             match subcommand.as_str() {
+                // Repository configuration cannot be cloned in, and a write to it is
+                // refused or asked, so a helper it names is the owner's own and runs
+                // inside the sandbox.
+                "status" | "log" | "diff" | "show" if relaxed => {
+                    words[2..].iter().all(|word| git_inspect_word(word))
+                }
+                "config" if relaxed => git_config_read(&words[2..]),
                 "branch" => {
                     words.len() == 2
                         || words[2..].iter().all(|word| {
@@ -464,6 +486,7 @@ fn read_only_command(raw: &[String]) -> bool {
                         | "-ipath"
                 )
         }),
+        "rg" | "grep" if relaxed => search_words(&words[1..]),
         "ls" | "cat" | "head" | "tail" | "wc" => words[1..].iter().all(|word| {
             !word.starts_with('-')
                 || word
@@ -473,6 +496,111 @@ fn read_only_command(raw: &[String]) -> bool {
         }),
         _ => false,
     }
+}
+
+/// A `git status|log|diff|show` operand that cannot write, run a helper chosen
+/// on the command line, or change configuration. Revisions and paths pass.
+fn git_inspect_word(word: &str) -> bool {
+    if !word.starts_with('-') {
+        return true;
+    }
+    matches!(
+        word,
+        "--" | "-s"
+            | "-b"
+            | "-p"
+            | "-u"
+            | "-a"
+            | "--short"
+            | "--branch"
+            | "--porcelain"
+            | "--oneline"
+            | "--stat"
+            | "--shortstat"
+            | "--name-only"
+            | "--name-status"
+            | "--cached"
+            | "--staged"
+            | "--graph"
+            | "--decorate"
+            | "--all"
+            | "--patch"
+            | "--no-color"
+            | "--no-pager"
+            | "--no-patch"
+            | "--no-ext-diff"
+            | "--no-textconv"
+            | "--merges"
+            | "--no-merges"
+    ) || word
+        .strip_prefix("--pretty=")
+        .or_else(|| word.strip_prefix("--format="))
+        .is_some_and(|value| {
+            value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "%-_:".contains(c))
+        })
+        || word.strip_prefix("--color=").is_some_and(|v| v == "never")
+        || word
+            .strip_prefix('-')
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        || word
+            .strip_prefix("-n")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        || word
+            .strip_prefix("--max-count=")
+            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// `git config` that only reads: `--get`, `--get-all` or `--list` over the
+/// local, global, system or worktree scope. Any other flag (`--file`, `--add`,
+/// `--unset`, `--edit`) or a bare `key value` pair is a write.
+fn git_config_read(rest: &[String]) -> bool {
+    let reads = rest
+        .iter()
+        .any(|word| matches!(word.as_str(), "--get" | "--get-all" | "--list" | "-l"));
+    let keys = rest.iter().filter(|word| !word.starts_with('-')).count();
+    reads
+        && keys <= 1
+        && rest.iter().all(|word| {
+            !word.starts_with('-')
+                || matches!(
+                    word.as_str(),
+                    "--get"
+                        | "--get-all"
+                        | "--list"
+                        | "-l"
+                        | "--local"
+                        | "--global"
+                        | "--system"
+                        | "--worktree"
+                        | "--show-origin"
+                        | "--name-only"
+                )
+        })
+}
+
+/// `grep`/`rg` options that only select and print lines. Options that run a
+/// helper (`--pre`), read pattern or ignore files by name, or follow links are
+/// outside the proof.
+fn search_words(rest: &[String]) -> bool {
+    rest.iter().all(|word| {
+        !word.starts_with('-')
+            || matches!(
+                word.as_str(),
+                "--line-number"
+                    | "--ignore-case"
+                    | "--recursive"
+                    | "--files-with-matches"
+                    | "--count"
+                    | "--word-regexp"
+                    | "--fixed-strings"
+                    | "--no-heading"
+                    | "--invert-match"
+            )
+            || (!word.starts_with("--")
+                && word.chars().skip(1).all(|c| "nirRlcwFEvHhs".contains(c)))
+    })
 }
 
 fn print_only_sed(words: &[String]) -> bool {
@@ -809,7 +937,7 @@ fn cache_script(script: &str) -> Option<String> {
             let normalized = cache_argv(&words);
             // Every inner command must either qualify for data normalization or
             // be a conservative read-only command whose exact words are retained.
-            if normalized == words && !read_only_command(&words) {
+            if normalized == words && !read_only_command(&words, false) {
                 return None;
             }
             for (index, (old, new)) in words.iter().zip(normalized.iter()).enumerate() {
@@ -1189,15 +1317,18 @@ mod tests {
             assert!(!shell(source).read_only, "{source}");
         }
     }
+    // Trusted read-only programs live in Unix system directories; Windows has none, so the proof fails closed there.
+    #[cfg(not(windows))]
     #[test]
     fn path_shadowed_ls_and_loader_environment_do_not_gain_read_only_authority() {
         use super::super::analysis::{ExecutableFileIdentity, ExecutionIdentity};
         use super::super::{CanonPath, EnvName, EnvPolicy, ExplicitEnvBinding, SpawnSpec};
+        let workspace = if cfg!(windows) { r"C:\ws" } else { "/ws" };
         let spec = |target: &str, environment: EnvPolicy| {
             let path = CanonPath::new(target);
             SpawnSpec::new(
                 vec!["ls".into()],
-                Some(CanonPath::new("/ws")),
+                Some(CanonPath::new(workspace)),
                 None,
                 EnvPolicy::Inherited,
             )
@@ -1221,8 +1352,9 @@ mod tests {
             "/bin/ls",
             EnvPolicy::exact(vec![]).unwrap()
         )));
+        let shadow = std::path::Path::new(workspace).join("ls");
         assert!(!trusted_read_only(&spec(
-            "/ws/ls",
+            shadow.to_str().unwrap(),
             EnvPolicy::exact(vec![]).unwrap()
         )));
         let loader = EnvPolicy::exact(vec![

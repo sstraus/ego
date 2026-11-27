@@ -1,0 +1,12 @@
+: schema-derived from https://api-docs.deepseek.com/api/create-chat-completion and https://api-docs.deepseek.com/guides/thinking_mode (read 2026-11-14)
+: provider deepseek, model deepseek-flash
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"role":"assistant","content":null,"reasoning_content":""},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"reasoning_content":"The weather result is in. "},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"content":"Here's the weather"},"logprobs":null,"finish_reason":null}],"usage":null}
+
+data: {"id":"golden-deepseek","object":"chat.completion.chunk","created":1793084907,"model":"deepseek-flash","system_fingerprint":"golden","choices":[{"index":0,"delta":{"content":""},"logprobs":null,"finish_reason":"aborted"}],"usage":{"prompt_tokens":340,"completion_tokens":12,"total_tokens":352,"prompt_tokens_details":{"cached_tokens":256},"prompt_cache_hit_tokens":256,"prompt_cache_miss_tokens":84,"completion_tokens_details":{"reasoning_tokens":7}}}
+
+data: [DONE]
+

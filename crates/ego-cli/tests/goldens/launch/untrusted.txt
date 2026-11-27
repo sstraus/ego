@@ -1,0 +1,37 @@
+# untrusted: first launch
+⠠⠀⠤⠀⠤⠄⠤⢤⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄
+⠂⠀⠂⠐⠂⠐⠒⠐⠒⢶⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇
+⠈⠀⠉⠀⠉⠁⠉⠉⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀
+ego <version>
+Project files offered for trust:
+- <workspace>/AGENTS.md
+Yes: load project instructions, configuration, skills, hooks and MCP server
+declarations.
+No: continue without project files.
+Trust project files in <workspace>? [y/N] no
+model    ollama/qwen3
+auth     none (local provider)
+mode     default (default)
+sandbox  off (flags)
+! security sandbox off: commands can access your user files
+Esc interrupt · Shift+Tab mode · Option+P model · /help keys
+hello
+a launch transcript
+εgo: 0 unsent drafts discarded; 0 prompts waiting to run.
+εgo: To resume: 'ego resume <session>'
+
+# untrusted: next launch
+⠠⠀⠤⠀⠤⠄⠤⢤⡴⠋⠉⠉⠀⣴⠋⠉⣷⠀⢠⡞⠉⢳⡄
+⠂⠀⠂⠐⠂⠐⠒⠐⠒⢶⡋⠉⠁⠀⠀⠻⣄⣀⣿⠀⠸⣇⠀⣸⠇
+⠈⠀⠉⠀⠉⠁⠉⠉⠉⠉⠉⠀⠀⠲⣄⣠⠟⠀⠀⠈⠉⠁⠀
+ego <version>
+model    ollama/qwen3
+auth     none (local provider)
+mode     default (default)
+sandbox  off (flags)
+! security sandbox off: commands can access your user files
+Esc interrupt · Shift+Tab mode · Option+P model · /help keys
+hello
+a launch transcript
+εgo: 0 unsent drafts discarded; 0 prompts waiting to run.
+εgo: To resume: 'ego resume <session>'

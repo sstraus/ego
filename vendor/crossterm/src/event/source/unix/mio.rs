@@ -24,6 +24,7 @@ const TTY_BUFFER_SIZE: usize = 1_024;
 pub(crate) struct UnixInternalEventSource {
     poll: Poll,
     events: Events,
+    pending_tokens: VecDeque<Token>,
     parser: Parser,
     tty_buffer: [u8; TTY_BUFFER_SIZE],
     tty_fd: FileDesc<'static>,
@@ -54,6 +55,7 @@ impl UnixInternalEventSource {
         Ok(UnixInternalEventSource {
             poll,
             events: Events::with_capacity(3),
+            pending_tokens: VecDeque::with_capacity(3),
             parser: Parser::default(),
             tty_buffer: [0u8; TTY_BUFFER_SIZE],
             tty_fd: input_fd,
@@ -68,12 +70,13 @@ impl EventSource for UnixInternalEventSource {
     fn pending_events(&mut self) -> io::Result<Vec<InternalEvent>> {
         let bytes = self.tty_fd.read_pending()?;
         self.parser.advance(&bytes, false);
+        // The snapshot consumed any queued TTY readiness. Re-arm below for
+        // bytes arriving after the snapshot, without a stale blocking read.
+        self.pending_tokens.retain(|token| *token != TTY_TOKEN);
         let fd = self.tty_fd.raw_fd();
-        self.poll.registry().reregister(
-            &mut SourceFd(&fd),
-            TTY_TOKEN,
-            Interest::READABLE,
-        )?;
+        self.poll
+            .registry()
+            .reregister(&mut SourceFd(&fd), TTY_TOKEN, Interest::READABLE)?;
         Ok(self.parser.by_ref().collect())
     }
 
@@ -85,23 +88,24 @@ impl EventSource for UnixInternalEventSource {
         let timeout = PollTimeout::new(timeout);
 
         loop {
-            if let Err(e) = self.poll.poll(&mut self.events, timeout.leftover()) {
-                // Mio will throw an interrupted error in case of cursor position retrieval. We need to retry until it succeeds.
-                // Previous versions of Mio (< 0.7) would automatically retry the poll call if it was interrupted (if EINTR was returned).
-                // https://docs.rs/mio/0.7.0/mio/struct.Poll.html#notes
-                if e.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                } else {
-                    return Err(e);
+            if self.pending_tokens.is_empty() {
+                if let Err(e) = self.poll.poll(&mut self.events, timeout.leftover()) {
+                    if e.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    } else {
+                        return Err(e);
+                    }
                 }
-            };
-
-            if self.events.is_empty() {
-                // No readiness events = timeout
-                return Ok(None);
+                self.pending_tokens
+                    .extend(self.events.iter().map(|event| event.token()));
+                if self.pending_tokens.is_empty() {
+                    return Ok(None);
+                }
             }
 
-            for token in self.events.iter().map(|x| x.token()) {
+            // Returning one event must not discard other edge-triggered readiness
+            // from the same poll, especially when an external wake arrives first.
+            while let Some(token) = self.pending_tokens.pop_front() {
                 match token {
                     TTY_TOKEN => {
                         match self.tty_fd.read(&mut self.tty_buffer) {
@@ -110,10 +114,11 @@ impl EventSource for UnixInternalEventSource {
                                 &self.tty_buffer[..read_count],
                                 read_count == TTY_BUFFER_SIZE,
                             ),
-                            Err(e) if matches!(
-                                e.kind(),
-                                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                            ) => {},
+                            Err(e)
+                                if matches!(
+                                    e.kind(),
+                                    io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                                ) => {}
                             Err(e) => return Err(e),
                         }
 
@@ -215,7 +220,9 @@ impl Parser {
             // remaining bytes into ordinary key events.
             if self.buffer == [b'\x1b'] && *byte == b'\x1b' {
                 self.internal_events
-                    .push_back(InternalEvent::Event(Event::Key(crate::event::KeyCode::Esc.into())));
+                    .push_back(InternalEvent::Event(Event::Key(
+                        crate::event::KeyCode::Esc.into(),
+                    )));
                 self.buffer.clear();
             }
             self.buffer.push(*byte);

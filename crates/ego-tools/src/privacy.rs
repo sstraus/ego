@@ -86,6 +86,24 @@ pub(crate) fn owner_only_descriptor(
         })
 }
 
+/// The one ACE of the owner-only DACL, as the SDDL writer prints it.
+///
+/// The writer prints well-known accounts as aliases (`LA` for the built-in
+/// Administrator), so comparing against a hand-built SID string fails for
+/// those accounts. Rendering the expected entry through the same writer keeps
+/// both sides in one spelling.
+#[cfg(windows)]
+pub fn owner_only_entry(sid: &impl std::fmt::Display, kind: PrivatePathKind) -> io::Result<String> {
+    let expected = owner_only_descriptor(sid, kind)?
+        .as_sddl()?
+        .to_string_lossy()
+        .into_owned();
+    expected
+        .find('(')
+        .map(|start| expected[start..].to_owned())
+        .ok_or_else(|| private_error("the expected Windows DACL has no entry"))
+}
+
 /// Refuse a path whose current permissions are not the private policy.
 pub fn validate_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
@@ -129,14 +147,8 @@ pub fn validate_private_path(path: &Path, kind: PrivatePathKind) -> io::Result<(
             .ok_or_else(|| private_error("the private path has no Windows DACL"))?;
         let sddl = descriptor.as_sddl()?.to_string_lossy().into_owned();
         let sid = current_process_sid()?;
-        let inheritance = match kind {
-            PrivatePathKind::File => "",
-            PrivatePathKind::Directory => "OICI",
-        };
-        if sddl.starts_with("D:P")
-            && dacl.len() == 1
-            && sddl.ends_with(&format!("(A;{inheritance};FA;;;{sid})"))
-        {
+        let expected_entry = owner_only_entry(&sid, kind)?;
+        if sddl.starts_with("D:P") && dacl.len() == 1 && sddl.ends_with(&expected_entry) {
             return Ok(());
         }
         Err(private_error(

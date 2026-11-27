@@ -1,0 +1,70 @@
+{
+  "model": "deepseek-flash",
+  "messages": [
+    { "role": "user", "content": "How's the weather in Hangzhou Tomorrow" },
+    {
+      "role": "assistant",
+      "content": "Let me check tomorrow's weather in Hangzhou for you. First, let me get tomorrow's date.",
+      "reasoning_content": "The user is asking about the weather in Hangzhou tomorrow. I need to get tomorrow's date first, then call the weather function.",
+      "tool_calls": [
+        {
+          "id": "call_00_kw66qNnNto11bSfJVIdlV5Oo",
+          "type": "function",
+          "function": { "name": "get_date", "arguments": "{}" }
+        }
+      ]
+    },
+    { "role": "tool", "tool_call_id": "call_00_kw66qNnNto11bSfJVIdlV5Oo", "content": "2026-04-19" },
+    {
+      "role": "assistant",
+      "reasoning_content": "Today is 2026-04-19, so tomorrow is 2026-04-20. Now I'll call the weather function for Hangzhou.",
+      "tool_calls": [
+        {
+          "id": "call_00_H2SCW6136vWJGq9SQlBuhVt4",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": "{\"location\": \"Hangzhou\", \"date\": \"2026-04-20\"}"
+          }
+        }
+      ]
+    },
+    { "role": "tool", "tool_call_id": "call_00_H2SCW6136vWJGq9SQlBuhVt4", "content": "Cloudy 7~13°C" },
+    {
+      "role": "assistant",
+      "content": "Here's the weather forecast for Hangzhou tomorrow (April 20, 2026): cloudy, 7°C ~ 13°C.",
+      "reasoning_content": "The weather result is in. Let me share this with the user."
+    },
+    { "role": "user", "content": "How's the weather in Guangzhou Tomorrow" }
+  ],
+  "stream": true,
+  "stream_options": { "include_usage": true },
+  "thinking": { "type": "enabled" },
+  "reasoning_effort": "high",
+  "max_tokens": 4096,
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_date",
+        "description": "Get the current date",
+        "parameters": { "type": "object", "properties": {} }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather of a location, the user should supply the location and date.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "location": { "type": "string", "description": "The city name" },
+            "date": { "type": "string", "description": "The date in format YYYY-mm-dd" }
+          },
+          "required": ["location", "date"]
+        }
+      }
+    }
+  ]
+}

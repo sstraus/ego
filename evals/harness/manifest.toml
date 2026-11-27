@@ -1,0 +1,19 @@
+# Surfaces that can change agent performance. `harness.py affected` reports
+# which of them a diff touches. Information only: nothing here gates a merge.
+version = 1
+
+[surfaces]
+prompts = ["crates/ego-core/src/model_prompts.rs", "evals/sandbox-auto/v3/judge-system.txt", "crates/ego-cli/src/skills/*.md"]
+tools = ["crates/ego-tools/src/tools/*.rs", "crates/ego-core/src/history.rs", "crates/ego-core/src/question.rs", "crates/ego-core/src/permit/tool.rs"]
+context = ["crates/ego-core/src/compact/**", "crates/ego-core/src/generator/history.rs", "crates/ego-core/src/turn/{identity,judge,tools,context_capacity,compaction_fit}.rs"]
+models = ["crates/ego-cli/catalogue/*.toml", "crates/ego-ai/src/wire/cache.rs"]
+
+[run]
+model = "openrouter/anthropic/claude-haiku-5.5"
+runs = 3
+flags = ["--bare", "--no-hooks", "--sandbox", "workspace", "--mode", "yolo", "--budget", "0.5$", "--max-turns", "20", "--timeout", "600s", "--max-output-tokens", "4000"]
+
+[decision]
+noise_margin = 2          # trials; A/A 2026-11-08: observed pass delta 1 (see docs/internals/2026-11-08-harness-aa-calibration.md)
+cost_flag_ratio = 1.20
+max_invalid_ratio = 0.10

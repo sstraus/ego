@@ -1,0 +1,8 @@
+tuic bg: command=/bin/bash /Users/stefano.straus/scratch/ego-sbx-621-timeout-diagnose.sh
+Observed engine lock owner='63992-1792926993833206000-0', mtime=1792926993.8373544
+Owner process check exit=1: ''
+Removed ONLY stale owner file /Users/stefano.straus/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock/owner and empty directory /Users/stefano.straus/Library/pnpm/package-manager-store/v11/tmp/engine-locks/package-manager-env.lock; PID is absent. Persistent operation-lock files retained.
+Baseline cold: owned PID=17991 cwd=/Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.tmp-621-baseline-vd89rwf8/workspace
+Baseline cold: exit=0 duration=2.470s stdout=b'' stderr=b''
+Baseline warm: owned PID=18221 cwd=/Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.tmp-621-baseline-vd89rwf8/workspace
+Baseline warm: exit=0 duration=2.015s stdout=b'' stderr=b''

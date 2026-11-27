@@ -1,0 +1,301 @@
+[
+  {
+    "session": "5ab27057-94ab-48fc-89aa-4b0858166587",
+    "journal_sha256": "8403973ef6b95905abab3342f2f159cfa7723adf48221d05b094316fc1e7f0ea",
+    "events": [
+      {
+        "seq": 14,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-6b18-7188-a33c-e19d90a9542e",
+            "attempt": "01a1745c-6b18-7188-a33c-e19ebec8c74f"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 268,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 2985,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 46,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 24,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-7824-7587-92fa-d3410013fd5d",
+            "attempt": "01a1745c-7824-7587-92fa-d342bfa3e3b5"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 270,
+                "cache_read_tokens": 2895,
+                "cache_write_tokens": 429,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 69,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 34,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-7fe1-7138-9952-a4a1462f5d20",
+            "attempt": "01a1745c-7fe1-7138-9952-a4a2a57f3e90"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 270,
+                "cache_read_tokens": 3324,
+                "cache_write_tokens": 380,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 70,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 44,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-8b55-7265-be55-75fb9270e135",
+            "attempt": "01a1745c-8b55-7265-be55-75fc7d91c6a1"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 270,
+                "cache_read_tokens": 3704,
+                "cache_write_tokens": 365,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 94,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 52,
+        "event": {
+          "kind": "Error",
+          "message": "no stored subscription credential: run `ego auth login openai-codex`",
+          "error_kind": "unclassified"
+        }
+      },
+      {
+        "seq": 53,
+        "event": {
+          "kind": "TurnCompleted",
+          "ok": false,
+          "exit_reason": "Usage"
+        }
+      }
+    ]
+  },
+  {
+    "session": "00519ff3-9d7a-455a-9bc2-060c6dea1bfa",
+    "journal_sha256": "cac6d1d8507a95477cbc1f34ff29127c5562b345924b80cbf754f9d79b93575e",
+    "events": [
+      {
+        "seq": 14,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-9f59-7401-946e-a407d9a72ca2",
+            "attempt": "01a1745c-9f59-7401-946e-a408318c08bb"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 273,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 2991,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 47,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 22,
+        "event": {
+          "kind": "Error",
+          "message": "HTTP exchange failed (openrouter.ai)",
+          "error_kind": "transient"
+        }
+      },
+      {
+        "seq": 24,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-a50b-70ab-8e61-5af93e486442",
+            "attempt": "01a1745c-a50b-70ab-8e61-5afa8e0d743d"
+          },
+          "outcome": {
+            "stop": "error",
+            "delivery": "possibly_sent",
+            "usage": "missing"
+          }
+        }
+      },
+      {
+        "seq": 30,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-a50b-70ab-8e61-5af93e486442",
+            "attempt": "01a1745c-a510-73b0-ba68-5a14d3da3631"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 275,
+                "cache_read_tokens": 2898,
+                "cache_write_tokens": 438,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 70,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 40,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-bb1a-7138-a98f-d7f21dad19da",
+            "attempt": "01a1745c-bb1a-7138-a98f-d7f3105bbeb8"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 275,
+                "cache_read_tokens": 3336,
+                "cache_write_tokens": 656,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 71,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 50,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-c593-77b1-9ec4-9d300c38d88e",
+            "attempt": "01a1745c-c593-77b1-9ec4-9d31dad60904"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 275,
+                "cache_read_tokens": 3992,
+                "cache_write_tokens": 371,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 93,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 63,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-cba8-7405-9aff-1a697d9dae59",
+            "attempt": "01a1745c-cba8-7405-9aff-1a6a629cbec9"
+          },
+          "outcome": {
+            "stop": "toolUse",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 412,
+                "cache_read_tokens": 4363,
+                "cache_write_tokens": 397,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 47,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 79,
+        "event": {
+          "kind": "AttemptSettled",
+          "attempt": {
+            "generation": "01a1745c-d102-770a-9da3-b2c5d0aaae91",
+            "attempt": "01a1745c-d102-770a-9da3-b2c6f6efd74d"
+          },
+          "outcome": {
+            "stop": "stop",
+            "delivery": "possibly_sent",
+            "usage": {
+              "reported": {
+                "uncached_input_tokens": 412,
+                "cache_read_tokens": 4760,
+                "cache_write_tokens": 474,
+                "cache_write_extended_tokens": 0,
+                "output_tokens": 21,
+                "reasoning_tokens": 0
+              }
+            }
+          }
+        }
+      },
+      {
+        "seq": 82,
+        "event": {
+          "kind": "TurnCompleted",
+          "ok": true,
+          "exit_reason": "Completed"
+        }
+      }
+    ]
+  }
+]

@@ -17,10 +17,10 @@ use {
     crossterm::{
         cursor::{self, MoveTo, RestorePosition, SavePosition},
         style::{Attribute, Print, ResetColor, SetAttribute},
-        terminal::{self, Clear, ClearType},
+        terminal::{self, BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
         QueueableCommand,
     },
-    std::io::{Result, Write},
+    std::io::{IsTerminal, Result, Write},
     std::ops::RangeInclusive,
     unicode_segmentation::UnicodeSegmentation,
     unicode_width::UnicodeWidthStr,
@@ -99,6 +99,13 @@ pub enum W {
     /// output-level invariant).
     #[cfg(test)]
     Capture(Vec<u8>),
+    /// Fails once after a byte budget, then accepts cleanup writes.
+    #[cfg(test)]
+    FailOnce {
+        bytes: Vec<u8>,
+        remaining: usize,
+        failed: bool,
+    },
 }
 
 impl W {
@@ -127,6 +134,7 @@ impl W {
     pub(crate) fn captured(&self) -> &[u8] {
         match self {
             W::Capture(buf) => buf,
+            W::FailOnce { bytes, .. } => bytes,
             _ => panic!("captured() called on a non-capturing writer"),
         }
     }
@@ -140,6 +148,25 @@ impl Write for W {
             W::Sink(w) => w.write(buf),
             #[cfg(test)]
             W::Capture(w) => w.write(buf),
+            #[cfg(test)]
+            W::FailOnce {
+                bytes,
+                remaining,
+                failed,
+            } => {
+                if !*failed && *remaining == 0 {
+                    *failed = true;
+                    return Err(std::io::Error::other("injected paint write failure"));
+                }
+                let count = if *failed {
+                    buf.len()
+                } else {
+                    buf.len().min(*remaining)
+                };
+                bytes.extend_from_slice(&buf[..count]);
+                *remaining = remaining.saturating_sub(count);
+                Ok(count)
+            }
         }
     }
 
@@ -150,6 +177,17 @@ impl Write for W {
             W::Sink(w) => w.flush(),
             #[cfg(test)]
             W::Capture(w) => w.flush(),
+            #[cfg(test)]
+            W::FailOnce {
+                remaining, failed, ..
+            } => {
+                if !*failed && *remaining == 0 {
+                    *failed = true;
+                    Err(std::io::Error::other("injected paint flush failure"))
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -355,7 +393,9 @@ pub struct Painter {
     terminal_size: (u16, u16),
     last_required_lines: u16,
     large_buffer: bool,
-    just_resized: bool,
+    /// The cursor sits on the origin of a prompt that is not painted yet:
+    /// a host-accepted submission or an erased prompt left it there.
+    fresh_origin: bool,
     after_cursor_lines: Option<String>,
     /// Optional semantic prompt markers for terminal integration (OSC 133/633)
     semantic_markers: Option<Box<dyn SemanticPromptMarkers>>,
@@ -374,7 +414,7 @@ impl Painter {
             terminal_size: (0, 0),
             last_required_lines: 0,
             large_buffer: false,
-            just_resized: false,
+            fresh_origin: false,
             after_cursor_lines: None,
             semantic_markers: None,
             last_layout: None,
@@ -567,17 +607,18 @@ impl Painter {
     /// Erase the footprint before the owner writes anything else. A terminal
     /// reply is not needed to rediscover coordinates this owner just painted.
     pub(crate) fn erase_footprint(&mut self, footprint: &PromptFootprint) -> Result<bool> {
-        self.last_frame = None;
         let Some(row) = footprint.erasable_in(terminal::size()?) else {
+            // A resize still needs the geometry of the frame we did not erase.
             return Ok(false);
         };
+        self.last_frame = None;
         self.stdout.queue(MoveTo(0, row))?;
         self.stdout.queue(Clear(ClearType::FromCursorDown))?;
         self.stdout.flush()?;
         self.prompt_start_row.mark_verified(row);
         self.last_required_lines = 1;
         self.after_cursor_lines = None;
-        self.just_resized = false;
+        self.fresh_origin = true;
         Ok(true)
     }
 
@@ -602,7 +643,23 @@ impl Painter {
                 size
             }
         };
-        let prompt_selector = select_prompt_row(suspended_state, cursor::position()?);
+        let (position, suspended_state) = match cursor::position() {
+            Ok(position) => (position, suspended_state),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::TimedOut
+                    && std::io::stdout().is_terminal() =>
+            {
+                // After the query's deadline, establish a position ourselves.
+                // Scrolling a fresh line at the bottom preserves existing text
+                // and gives us a known blank anchor without another CPR query.
+                let row = self.screen_height().saturating_sub(1);
+                self.stdout.queue(MoveTo(0, row))?;
+                self.print_crlf()?;
+                ((0, row), None)
+            }
+            Err(error) => return Err(error),
+        };
+        let prompt_selector = select_prompt_row(suspended_state, position);
         let new_row = match prompt_selector {
             PromptRowSelector::UseExistingPrompt { start_row } => start_row,
             PromptRowSelector::MakeNewPrompt { new_row } => {
@@ -710,14 +767,12 @@ impl Painter {
             && frame.is_some()
             && frame == self.last_frame
             && matches!(self.prompt_start_row, PromptStartRow::Verified(_))
-            && !self.just_resized
         {
             return Ok(());
         }
         if only_if_changed
             && prompt.supports_indicator_row_updates()
             && matches!(self.prompt_start_row, PromptStartRow::Verified(_))
-            && !self.just_resized
             && !self.large_buffer
         {
             if let Some(ref frame) = frame {
@@ -727,39 +782,6 @@ impl Painter {
                 }
             }
         }
-        // A failed or partial write must never leave a reusable frame.
-        self.last_frame = None;
-        // Reset any ANSI styling that may have been left by external commands
-        // This ensures the prompt is not affected by previous output styling
-        // Note: Attribute::Reset (SGR 0) resets all attributes including colors
-        self.stdout.queue(SetAttribute(Attribute::Reset))?;
-
-        self.stdout.queue(cursor::Hide)?;
-
-        let screen_width = self.screen_width();
-        let screen_height = self.screen_height();
-
-        let bounded_lines = lines.with_bounded_footer(screen_width, screen_height);
-        let lines = &bounded_lines;
-
-        // We add one here as [`PromptLines::prompt_lines_with_wrap`] intentionally subtracts 1 from the real value.
-        self.prompt_height = lines.prompt_lines_with_wrap(screen_width) + 1;
-        let lines_before_cursor = lines.required_lines(screen_width, true, None);
-
-        // Calibrate prompt start position for multi-line prompt/content before cursor. Check issue #841/#848/#930
-        if self.just_resized {
-            let resized_row = self
-                .prompt_start_row
-                .last_known_row()
-                .saturating_sub(lines_before_cursor - 1);
-            // Leave as `Stale` so the drift check below still runs this
-            // paint and self-heals if the arithmetic landed wrong.
-            // Resize is infrequent; one extra call to cursor::position()
-            // per resize is fine.
-            self.prompt_start_row = PromptStartRow::Stale(resized_row);
-            self.just_resized = false;
-        }
-
         // Reconcile a stale anchor: something yielded the tty since the last paint
         // (a resize, an external completer, `$EDITOR`) and may have scrolled our
         // content.
@@ -784,94 +806,138 @@ impl Painter {
             "repaint_buffer reached before initialize_prompt_position"
         );
 
-        // Distance parameters, computed after reconciling so they reflect the
-        // re-anchored row.
-        let remaining_lines = self.remaining_lines();
-        let required_lines = lines.required_lines(screen_width, false, menu);
+        // A failed or partial write must never leave a reusable frame.
+        self.last_frame = None;
+        self.fresh_origin = false;
+        self.synchronized_paint(|painter| {
+            // Reset any ANSI styling that may have been left by external commands
+            // This ensures the prompt is not affected by previous output styling
+            // Note: Attribute::Reset (SGR 0) resets all attributes including colors
+            painter.stdout.queue(SetAttribute(Attribute::Reset))?;
 
-        // Marking the painter state as larger buffer to avoid animations
-        self.large_buffer = required_lines >= screen_height;
+            painter.stdout.queue(cursor::Hide)?;
 
-        // Moving the start position of the cursor based on the size of the required lines
-        if self.large_buffer || anchor_uninitialized {
-            for _ in 0..screen_height.saturating_sub(lines_before_cursor) {
-                self.stdout.queue(Print(&coerce_crlf("\n")))?;
+            let screen_width = painter.screen_width();
+            let screen_height = painter.screen_height();
+
+            let bounded_lines = lines.with_bounded_footer(screen_width, screen_height);
+            let lines = &bounded_lines;
+
+            // We add one here as [`PromptLines::prompt_lines_with_wrap`] intentionally subtracts 1 from the real value.
+            painter.prompt_height = lines.prompt_lines_with_wrap(screen_width) + 1;
+            let lines_before_cursor = lines.required_lines(screen_width, true, None);
+
+            // Distance parameters, computed after reconciling so they reflect the
+            // re-anchored row.
+            let remaining_lines = painter.remaining_lines();
+            let required_lines = lines.required_lines(screen_width, false, menu);
+
+            // Marking the painter state as larger buffer to avoid animations
+            painter.large_buffer = required_lines >= screen_height;
+
+            // Moving the start position of the cursor based on the size of the required lines
+            if painter.large_buffer || anchor_uninitialized {
+                for _ in 0..screen_height.saturating_sub(lines_before_cursor) {
+                    painter.stdout.queue(Print(&coerce_crlf("\n")))?;
+                }
+                // The reset puts the prompt at row 0; cache is back in sync.
+                painter.prompt_start_row.mark_verified(0);
+            } else if required_lines >= remaining_lines {
+                let extra = required_lines.saturating_sub(remaining_lines);
+                painter.queue_universal_scroll(extra)?;
+                let scrolled_row = painter
+                    .prompt_start_row
+                    .last_known_row()
+                    .saturating_sub(extra);
+                painter.prompt_start_row.mark_verified(scrolled_row);
             }
-            // The reset puts the prompt at row 0; cache is back in sync.
-            self.prompt_start_row.mark_verified(0);
-        } else if required_lines >= remaining_lines {
-            let extra = required_lines.saturating_sub(remaining_lines);
-            self.queue_universal_scroll(extra)?;
-            let scrolled_row = self.prompt_start_row.last_known_row().saturating_sub(extra);
-            self.prompt_start_row.mark_verified(scrolled_row);
-        }
 
-        // Moving the cursor to the start of the prompt
-        // from this position everything will be printed
-        let anchor_row = self.prompt_start_row.last_known_row();
-        self.clear_from_anchor(anchor_row)?;
+            // Moving the cursor to the start of the prompt
+            // from this position everything will be printed
+            let anchor_row = painter.prompt_start_row.last_known_row();
+            painter.clear_from_anchor(anchor_row)?;
 
-        let layout = self.compute_layout(lines, menu);
+            let layout = painter.compute_layout(lines, menu);
 
-        let margin_cursor_row = if self.large_buffer {
-            self.print_large_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
-        } else {
-            self.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
-        };
-
-        if !lines.footer.is_empty() {
-            // The footer owns measured rows, never the editing cursor or buffer.
-            if self.large_buffer {
-                let row = screen_height.saturating_sub(lines.footer_rows(screen_width));
-                self.stdout.queue(cursor::MoveTo(0, row))?;
+            let margin_cursor_row = if painter.large_buffer {
+                painter.print_large_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
             } else {
-                self.stdout.queue(Print("\r\n"))?;
-            }
-            self.stdout.queue(Print(&coerce_crlf(&lines.footer)))?;
-        }
-
-        self.last_layout = Some(layout);
-
-        // The last_required_lines is used to calculate safe range of the current prompt.
-        self.last_required_lines = required_lines;
-
-        self.after_cursor_lines = if !lines.after_cursor.is_empty() {
-            Some(lines.after_cursor.to_string())
-        } else {
-            None
-        };
-
-        // It has to happen *here*, after every print: the position
-        // `SavePosition` recorded is also the print head for the text after the
-        // cursor, so disambiguating it earlier either writes a glyph onto an
-        // unreserved row or overwrites the cell the next row's first grapheme
-        // belongs in. Nothing is drawn at this point, so a bare move disturbs
-        // neither.
-        self.queue_cursor_placement(margin_cursor_row)?;
-
-        if let Some(shapes) = cursor_config {
-            let shape = match &prompt_mode {
-                PromptEditMode::Emacs => shapes.emacs,
-                PromptEditMode::Vi(PromptViMode::Insert) => shapes.vi_insert,
-                PromptEditMode::Vi(PromptViMode::Normal | PromptViMode::Visual) => shapes.vi_normal,
-                #[cfg(feature = "helix")]
-                PromptEditMode::Helix(PromptHelixMode::Insert) => shapes.hx_insert,
-                #[cfg(feature = "helix")]
-                PromptEditMode::Helix(PromptHelixMode::Normal) => shapes.hx_normal,
-                #[cfg(feature = "helix")]
-                PromptEditMode::Helix(PromptHelixMode::Select) => shapes.hx_select,
-                _ => None,
+                painter.print_small_buffer(prompt, lines, menu, use_ansi_coloring, &layout)?
             };
-            if let Some(shape) = shape {
-                self.stdout.queue(shape)?;
-            }
-        }
-        self.stdout.queue(cursor::Show)?;
 
-        self.stdout.flush()?;
-        self.last_cursor_margin_row = margin_cursor_row;
+            if !lines.footer.is_empty() {
+                // The footer owns measured rows, never the editing cursor or buffer.
+                if painter.large_buffer {
+                    let row = screen_height.saturating_sub(lines.footer_rows(screen_width));
+                    painter.stdout.queue(cursor::MoveTo(0, row))?;
+                } else {
+                    painter.stdout.queue(Print("\r\n"))?;
+                }
+                painter.stdout.queue(Print(&coerce_crlf(&lines.footer)))?;
+            }
+
+            painter.last_layout = Some(layout);
+
+            // The last_required_lines is used to calculate safe range of the current prompt.
+            painter.last_required_lines = required_lines;
+
+            painter.after_cursor_lines = if !lines.after_cursor.is_empty() {
+                Some(lines.after_cursor.to_string())
+            } else {
+                None
+            };
+
+            // It has to happen *here*, after every print: the position
+            // `SavePosition` recorded is also the print head for the text after the
+            // cursor, so disambiguating it earlier either writes a glyph onto an
+            // unreserved row or overwrites the cell the next row's first grapheme
+            // belongs in. Nothing is drawn at this point, so a bare move disturbs
+            // neither.
+            painter.queue_cursor_placement(margin_cursor_row)?;
+
+            if let Some(shapes) = cursor_config {
+                let shape = match &prompt_mode {
+                    PromptEditMode::Emacs => shapes.emacs,
+                    PromptEditMode::Vi(PromptViMode::Insert) => shapes.vi_insert,
+                    PromptEditMode::Vi(PromptViMode::Normal | PromptViMode::Visual) => {
+                        shapes.vi_normal
+                    }
+                    #[cfg(feature = "helix")]
+                    PromptEditMode::Helix(PromptHelixMode::Insert) => shapes.hx_insert,
+                    #[cfg(feature = "helix")]
+                    PromptEditMode::Helix(PromptHelixMode::Normal) => shapes.hx_normal,
+                    #[cfg(feature = "helix")]
+                    PromptEditMode::Helix(PromptHelixMode::Select) => shapes.hx_select,
+                    _ => None,
+                };
+                if let Some(shape) = shape {
+                    painter.stdout.queue(shape)?;
+                }
+            }
+            painter.stdout.queue(cursor::Show)?;
+
+            painter.last_cursor_margin_row = margin_cursor_row;
+            Ok(())
+        })?;
         self.last_frame = frame;
         Ok(())
+    }
+
+    /// Keep every visible mutation in one host frame. Even a failed paint
+    /// attempts to release synchronization; preserve the original write error.
+    /// Cursor queries must happen before this boundary, never while the host
+    /// is retaining the previous frame.
+    fn synchronized_paint(&mut self, paint: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        let painted = self
+            .stdout
+            .queue(BeginSynchronizedUpdate)
+            .map(|_| ())
+            .and_then(|()| paint(self));
+        let finished = self
+            .stdout
+            .queue(EndSynchronizedUpdate)
+            .and_then(Write::flush);
+        painted.and(finished)
     }
 
     /// Patch only complete, unwrapped indicator rows above an unchanged editor.
@@ -918,22 +984,31 @@ impl Painter {
             .map(|(index, (_, row))| (index as u16, row.trim_end_matches('\r').to_owned()))
             .collect::<Vec<_>>();
         self.last_frame = None;
-        self.stdout
-            .queue(SetAttribute(Attribute::Reset))?
-            .queue(cursor::Hide)?;
-        for (offset, row) in changed {
-            self.stdout
-                .queue(MoveTo(0, self.prompt_start_row.last_known_row() + offset))?
-                .queue(Clear(ClearType::CurrentLine))?;
-            if frame.ansi {
-                self.stdout.queue(Print(frame.colors[1].prefix()))?;
+        self.synchronized_paint(|painter| {
+            painter
+                .stdout
+                .queue(SetAttribute(Attribute::Reset))?
+                .queue(cursor::Hide)?;
+            for (offset, row) in changed {
+                painter
+                    .stdout
+                    .queue(MoveTo(
+                        0,
+                        painter.prompt_start_row.last_known_row() + offset,
+                    ))?
+                    .queue(Clear(ClearType::CurrentLine))?;
+                if frame.ansi {
+                    painter.stdout.queue(Print(frame.colors[1].prefix()))?;
+                }
+                painter
+                    .stdout
+                    .queue(Print(row))?
+                    .queue(SetAttribute(Attribute::Reset))?;
             }
-            self.stdout
-                .queue(Print(row))?
-                .queue(SetAttribute(Attribute::Reset))?;
-        }
-        self.queue_cursor_placement(self.last_cursor_margin_row)?;
-        self.stdout.queue(cursor::Show)?.flush()?;
+            painter.queue_cursor_placement(painter.last_cursor_margin_row)?;
+            painter.stdout.queue(cursor::Show)?;
+            Ok(())
+        })?;
         Ok(true)
     }
 
@@ -1428,15 +1503,37 @@ impl Painter {
 
     /// Updates prompt origin and offset to handle a screen resize event
     pub(crate) fn handle_resize(&mut self, width: u16, height: u16) {
+        let old_height = self.terminal_size.1;
+        // A resize reports the cursor in the frame already on screen, not in
+        // the next frame, whose indicator may have gained queued preview rows.
+        #[cfg(not(test))]
+        let cursor_offset = self.last_frame.as_ref().map_or(0, |frame| {
+            frame
+                .lines
+                .required_lines(width, true, None)
+                .saturating_sub(1)
+        });
         self.terminal_size = (width, height);
 
         self.invalidate_prompt_start_row();
 
+        // Without a cursor report, move the frame with the screen (story 808).
+        // The TUIC grid scrolls every row up by the lost rows on shrink, and
+        // pulls them back from history on grow. A grow with less history than
+        // the added rows (a screen that never scrolled) moves the frame less
+        // than this estimate. The frame must stay inside the new screen: an
+        // origin below it makes the next paint scroll blank rows under the
+        // unerased old frame.
+        if let PromptStartRow::Stale(row) = self.prompt_start_row {
+            let bottom_frame_row = height.saturating_sub(self.last_required_lines.max(1));
+            let moved = (row + height).saturating_sub(old_height);
+            self.prompt_start_row = PromptStartRow::Stale(moved.min(bottom_frame_row));
+        }
+
         // `cursor::position()` is blocking and can time out, but a
         // resize happens infrequently enough that we accept the cost.
         // The row stored below is the *cursor* row, not the prompt's
-        // screen origin; `just_resized` in `repaint_buffer` re-anchors
-        // it on the next paint.
+        // screen origin; recover the origin with the previously painted frame.
         //
         // Known bug: on iterm2 and kitty, clearing the screen via CMD-K
         // doesn't reset the cursor position — possibly a `position()`
@@ -1444,10 +1541,23 @@ impl Painter {
         #[cfg(not(test))]
         {
             if let Ok(position) = cursor::position() {
-                self.prompt_start_row = PromptStartRow::Stale(position.1);
-                self.just_resized = true;
+                self.anchor_resized_cursor(position.1, cursor_offset);
             }
         }
+    }
+
+    /// Record the cursor row a resize reported. In a painted frame the cursor
+    /// is inside the frame, and the next paint walks back to its origin. On a
+    /// fresh origin (story 814) the cursor already is the origin, and walking
+    /// back would overwrite the rows above it.
+    #[cfg_attr(test, allow(dead_code))]
+    fn anchor_resized_cursor(&mut self, row: u16, cursor_offset: u16) {
+        let origin = if self.fresh_origin {
+            row
+        } else {
+            row.saturating_sub(cursor_offset)
+        };
+        self.prompt_start_row = PromptStartRow::Stale(origin);
     }
 
     /// Commit an entire submission receipt, without the editing viewport limit.
@@ -1554,6 +1664,7 @@ impl Painter {
         self.prompt_start_row.mark_verified(next_row);
         self.last_required_lines = 1;
         self.after_cursor_lines = None;
+        self.fresh_origin = true;
         Ok(())
     }
 
@@ -1576,6 +1687,9 @@ impl Painter {
         // wrap across its rows. Erasing only the first message row leaves old
         // prompt suffixes behind when a wrapped message is shorter on a later
         // row; repaint may scroll that contaminated row above its new anchor.
+        // DEFERRED (2026-11-11) — External messages still erase the composer before
+        // a cursor query and repaint; synchronizing that path requires removing
+        // the intervening query, beyond atomic composer-only redraws (#1049-25be).
         self.clear_from_anchor(starting_row)?;
         let max_row = self.screen_height().saturating_sub(1);
         // Invalidate up front: a `?` early-return below can leave
@@ -2320,6 +2434,87 @@ mod tests {
         }
     }
 
+    // Catches: a long composer redraw exposes an erased or partially reprinted
+    // screen between stderr buffer flushes. The protocol bytes are the oracle.
+    #[test]
+    fn composer_redraw_is_one_synchronized_update() {
+        for text in [
+            "short".to_owned(),
+            "wrapped ".repeat(600),
+            "line\n".repeat(30),
+        ] {
+            let (out, _, _) = capture_repaint(&make_lines("> ", "", "", &text, ""), 0);
+            assert_synchronized_frame(out.as_bytes());
+            assert!(out.contains("\x1b[J"), "must exercise full erasure");
+        }
+    }
+
+    // Catches: an I/O failure leaves DEC 2026 active or a failed frame cached,
+    // causing later repaint requests to skip recovery.
+    #[test]
+    fn failed_composer_redraw_releases_sync_and_repaints_on_retry() {
+        let lines = make_lines("> ", "", "", "draft", "");
+        let (complete, _, _) = capture_repaint(&lines, 0);
+        // Fail at begin, body, end, and final flush. The captured length only
+        // locates the injection; protocol literals remain the output oracle.
+        for budget in [0, 32, complete.len() - b"\x1b[?2026l".len(), complete.len()] {
+            let mut painter = Painter::new(W::FailOnce {
+                bytes: Vec::new(),
+                remaining: budget,
+                failed: false,
+            });
+            painter.terminal_size = (20, 10);
+            painter.prompt_start_row.mark_verified(0);
+            painter.prompt_height = 1;
+            let error = painter
+                .repaint_buffer_if_changed(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Default,
+                    None,
+                    false,
+                    &None,
+                )
+                .unwrap_err();
+            let expected = if budget == complete.len() {
+                "injected paint flush failure"
+            } else {
+                "injected paint write failure"
+            };
+            assert_eq!(error.to_string(), expected, "budget={budget}");
+            // On end-write failure that same attempt cannot complete the marker.
+            if budget != complete.len() - b"\x1b[?2026l".len() {
+                assert!(painter.stdout.captured().ends_with(b"\x1b[?2026l"));
+            }
+            let mark = painter.stdout.captured().len();
+            painter
+                .repaint_buffer_if_changed(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Default,
+                    None,
+                    false,
+                    &None,
+                )
+                .unwrap();
+            assert_synchronized_frame(&painter.stdout.captured()[mark..]);
+        }
+    }
+
+    fn assert_synchronized_frame(bytes: &[u8]) {
+        let out = std::str::from_utf8(bytes).unwrap();
+        assert!(
+            out.starts_with("\x1b[?2026h"),
+            "mutation before begin: {out:?}"
+        );
+        assert!(
+            out.ends_with("\x1b[?25h\x1b[?2026l"),
+            "cursor/frame not settled: {out:?}"
+        );
+        assert_eq!(out.matches("\x1b[?2026h").count(), 1);
+        assert_eq!(out.matches("\x1b[?2026l").count(), 1);
+    }
+
     #[test]
     fn repaint_at_row_0_does_not_erase_from_home_cell() {
         // tmux `scroll-on-clear` (default on) copies the whole screen into
@@ -2868,6 +3063,230 @@ mod tests {
         assert!(painter.stdout.captured().len() > length);
     }
 
+    // Catches: a resize right after a host-accepted line treats the cursor of
+    // the unpainted next prompt as a cursor inside a frame and walks the origin
+    // up by the status row, so the repaint erases the last receipt row (story
+    // 814). The cursor report of that resize is the origin itself.
+    #[test]
+    fn resize_after_accept_repaints_at_the_cursor_row() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(10);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        let paint = |painter: &mut Painter| {
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+        };
+        paint(&mut painter);
+        painter.finish_submission().unwrap();
+        let origin = painter.prompt_start_row.last_known_row();
+
+        // Test builds skip the cursor query: this is its answered path.
+        painter.handle_resize(100, 40);
+        painter.anchor_resized_cursor(origin, 1);
+        let mark = painter.stdout.captured().len();
+        paint(&mut painter);
+
+        let repaint = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        let at_origin = format!("\x1b[{};1H\x1b[J", origin + 1);
+        assert!(
+            repaint.contains(&at_origin),
+            "repaint did not start at the accepted prompt's row {origin}: {repaint:?}"
+        );
+    }
+
+    // Catches: the fresh-origin exemption leaks into a painted frame, so a
+    // resize inside an editing frame no longer walks back to its origin.
+    #[test]
+    fn resize_inside_a_painted_frame_still_walks_back_to_the_origin() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(10);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        let paint = |painter: &mut Painter| {
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+        };
+        paint(&mut painter);
+        painter.finish_submission().unwrap();
+        paint(&mut painter);
+        painter.handle_resize(100, 40);
+        // The cursor is on the prompt row, one below the frame origin.
+        painter.anchor_resized_cursor(11, 1);
+        let mark = painter.stdout.captured().len();
+        paint(&mut painter);
+
+        let repaint = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        assert!(
+            repaint.contains("\x1b[11;1H\x1b[J"),
+            "frame origin was not recovered from the cursor row: {repaint:?}"
+        );
+    }
+
+    // Catches: a shrink whose cursor report does not arrive keeps the old
+    // origin below the new bottom row. The repaint then scrolls blank rows
+    // under the unerased old frame and paints a second copy below them
+    // (story 808: native capture painted `CSI 35;1H` in a 24-row PTY).
+    // A terminal that shrinks keeps its cursor on screen by moving the
+    // bottom rows up, so the old three-row frame now starts at row 21.
+    #[test]
+    fn shrink_without_cursor_report_repaints_over_the_bottom_frame() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(37);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        painter
+            .repaint_buffer(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        assert_eq!(painter.last_required_lines, 3);
+        let mark = painter.stdout.captured().len();
+
+        // Test builds skip the resize query: this is its failed path.
+        painter.handle_resize(120, 24);
+        painter
+            .repaint_buffer(
+                &TestPrompt,
+                &lines,
+                PromptEditMode::Emacs,
+                None,
+                true,
+                &None,
+            )
+            .unwrap();
+        let repaint = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        let erase = repaint
+            .find("\x1b[22;1H\x1b[J")
+            .unwrap_or_else(|| panic!("old frame at row 21 is not erased: {repaint:?}"));
+        assert!(
+            !repaint[..erase].contains('\n'),
+            "blank rows scrolled above the repaint: {repaint:?}"
+        );
+        for row in 25..=40 {
+            assert!(
+                !repaint.contains(&format!("\x1b[{row};")),
+                "row {row} is outside the 24-row screen: {repaint:?}"
+            );
+        }
+    }
+
+    // Catches: the grow after an unanswered shrink keeps the clamped origin,
+    // so the repaint lands in the middle of the screen, erases the transcript
+    // rows the host restored from history, and leaves a blank gap below the
+    // frame. The TUIC grid (patched alacritty `grow_lines`) pulls the 16 rows
+    // the shrink pushed into history back and moves the cursor down 16 rows;
+    // the native capture confirms it: the late grow replies were `CSI 40;3R`.
+    #[test]
+    fn grow_after_unanswered_shrink_repaints_over_the_restored_bottom_frame() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(37);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        let paint = |painter: &mut Painter| {
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+        };
+        paint(&mut painter);
+
+        // Test builds skip the resize query: both resizes go unanswered.
+        painter.handle_resize(120, 24);
+        paint(&mut painter);
+        let mark = painter.stdout.captured().len();
+        painter.handle_resize(120, 40);
+        paint(&mut painter);
+
+        let repaint = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        assert!(
+            repaint.contains("\x1b[38;1H\x1b[J"),
+            "restored frame at row 37 is not erased in place: {repaint:?}"
+        );
+        assert!(
+            !repaint.contains("\x1b[22;1H"),
+            "repaint landed on the restored transcript at row 21: {repaint:?}"
+        );
+    }
+
+    // Catches: an unanswered resize clamps a frame that is not on the bottom
+    // row instead of moving it with the screen. The TUIC grid scrolls every
+    // row up by the full height change on shrink (live: a frame at row 23 of
+    // 40 replied `CSI 9;3R` after 40->24), so the clamp repaints at row 21,
+    // leaves the old footer at row 7 and erases transcript rows; the grow
+    // brings the frame back to row 23.
+    #[test]
+    fn unanswered_resize_moves_a_mid_screen_frame_with_the_screen() {
+        let mut painter = Painter::new(W::capture());
+        painter.terminal_size = (120, 40);
+        painter.prompt_start_row.mark_verified(23);
+        let mut lines = make_lines("", "status\n> ", "", "", "");
+        lines.footer = Cow::Borrowed("footer");
+        let paint = |painter: &mut Painter| {
+            painter
+                .repaint_buffer(
+                    &TestPrompt,
+                    &lines,
+                    PromptEditMode::Emacs,
+                    None,
+                    true,
+                    &None,
+                )
+                .unwrap();
+        };
+        paint(&mut painter);
+
+        // Test builds skip the resize query: both resizes go unanswered.
+        let mark = painter.stdout.captured().len();
+        painter.handle_resize(120, 24);
+        paint(&mut painter);
+        let shrink = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        assert!(
+            shrink.contains("\x1b[8;1H\x1b[J"),
+            "frame moved to row 7 is not erased in place: {shrink:?}"
+        );
+
+        let mark = painter.stdout.captured().len();
+        painter.handle_resize(120, 40);
+        paint(&mut painter);
+        let grow = String::from_utf8_lossy(&painter.stdout.captured()[mark..]).into_owned();
+        assert!(
+            grow.contains("\x1b[24;1H\x1b[J"),
+            "frame restored to row 23 is not erased in place: {grow:?}"
+        );
+    }
+
     // Catches: a timer-only status change erases and redraws the unchanged draft.
     #[test]
     fn indicator_tick_preserves_composer_and_unchanged_plan_rows() {
@@ -2898,6 +3317,7 @@ mod tests {
             )
             .unwrap();
         let patch = String::from_utf8_lossy(&painter.stdout.captured()[mark..]);
+        assert_synchronized_frame(&painter.stdout.captured()[mark..]);
         assert!(patch.contains("Working 2s"));
         for unchanged in ["plan stays", "draft", "> ", "\x1b[J"] {
             assert!(!patch.contains(unchanged), "{patch:?}");

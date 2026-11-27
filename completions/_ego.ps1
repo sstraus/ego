@@ -21,6 +21,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
 
     $completions = @(switch ($command) {
         'ego' {
+            [CompletionResult]::new('--input-format', '--input-format', [CompletionResultType]::ParameterName, 'Read UTF-8 JSON lines {"prompt":"..."} from stdin; run each turn in the same headless session')
             [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
@@ -28,6 +29,8 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--attach', '--attach', [CompletionResultType]::ParameterName, 'Add exact image bytes as ordered context before the prompt text')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
             [CompletionResult]::new('--model', '--model', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
             [CompletionResult]::new('--proxy', '--proxy', [CompletionResultType]::ParameterName, 'Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)')
             [CompletionResult]::new('--proxy-ca', '--proxy-ca', [CompletionResultType]::ParameterName, 'Additional PEM trust anchor for provider HTTPS through --proxy only')
             [CompletionResult]::new('--sandbox', '--sandbox', [CompletionResultType]::ParameterName, 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included')
@@ -55,22 +58,26 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--max-output-tokens', '--max-output-tokens', [CompletionResultType]::ParameterName, 'Maximum generated tokens per request')
             [CompletionResult]::new('--goal', '--goal', [CompletionResultType]::ParameterName, 'Set a checked session objective')
             [CompletionResult]::new('--context-interval', '--context-interval', [CompletionResultType]::ParameterName, 'Minimum completed turns between model-requested transitions')
-            [CompletionResult]::new('--goal-turns', '--goal-turns', [CompletionResultType]::ParameterName, 'Maximum automatic goal continuation turns')
+            [CompletionResult]::new('--goal-turns', '--goal-turns', [CompletionResultType]::ParameterName, 'Optional maximum automatic goal continuation turns')
             [CompletionResult]::new('--goal-check-command', '--goal-check-command', [CompletionResultType]::ParameterName, 'Evaluator argv as a JSON string array; reads evidence JSON on stdin')
             [CompletionResult]::new('--max-turns', '--max-turns', [CompletionResultType]::ParameterName, 'Cap the turns this run may take')
             [CompletionResult]::new('--timeout', '--timeout', [CompletionResultType]::ParameterName, 'Wall clock, e.g. ''90s'' or ''10m''')
             [CompletionResult]::new('--mcp', '--mcp', [CompletionResultType]::ParameterName, 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server')
+            [CompletionResult]::new('--allow-dir', '--allow-dir', [CompletionResultType]::ParameterName, 'Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root')
             [CompletionResult]::new('--mode', '--mode', [CompletionResultType]::ParameterName, 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)')
             [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
-            [CompletionResult]::new('--continua', '--continua', [CompletionResultType]::ParameterName, 'Resume the latest saved session in this workspace without the terminal picker')
             [CompletionResult]::new('--offline', '--offline', [CompletionResultType]::ParameterName, 'No non-loopback egress from ego''s own HTTP transport')
             [CompletionResult]::new('--bare', '--bare', [CompletionResultType]::ParameterName, 'No ambient discovery, even in a trusted workspace')
-            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no tools at all')
+            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools')
+            [CompletionResult]::new('--no-hooks', '--no-hooks', [CompletionResultType]::ParameterName, 'Run with every hook off for this invocation; configuration is unchanged')
+            [CompletionResult]::new('--no-skill-safety-check', '--no-skill-safety-check', [CompletionResultType]::ParameterName, 'Skip the skill safety review for this launch without changing permissions')
             [CompletionResult]::new('--trust-workspace', '--trust-workspace', [CompletionResultType]::ParameterName, 'Trust this launch''s workspace without asking; remember the answer')
+            [CompletionResult]::new('--trust-development-programs', '--trust-development-programs', [CompletionResultType]::ParameterName, 'Trust this workspace and future edits to its current named programs; remember the grant')
             [CompletionResult]::new('--ephemeral', '--ephemeral', [CompletionResultType]::ParameterName, 'Refused: every run uses a durable session')
             [CompletionResult]::new('--no-context-tool', '--no-context-tool', [CompletionResultType]::ParameterName, 'Disable model-requested context transitions')
             [CompletionResult]::new('--context-clear', '--context-clear', [CompletionResultType]::ParameterName, 'Permit the model to discard conversation history using clear')
+            [CompletionResult]::new('--mcp-only', '--mcp-only', [CompletionResultType]::ParameterName, 'Attach only the servers that --mcp selects; enabled configured servers stay detached')
             [CompletionResult]::new('--plan', '--plan', [CompletionResultType]::ParameterName, 'Shorthand for --mode plan')
             [CompletionResult]::new('--yolo', '--yolo', [CompletionResultType]::ParameterName, 'Shorthand for --mode yolo')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
@@ -78,6 +85,9 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
             [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
             [CompletionResult]::new('--vim', '--vim', [CompletionResultType]::ParameterName, 'Use Vim normal/insert editing in the interactive composer')
+            [CompletionResult]::new('--memory', '--memory', [CompletionResultType]::ParameterName, 'Keep a memory file for this workspace that the model can add to')
+            [CompletionResult]::new('--no-session-compression', '--no-session-compression', [CompletionResultType]::ParameterName, 'Do not compress old sessions in the background during this run')
+            [CompletionResult]::new('--no-checkpoints', '--no-checkpoints', [CompletionResultType]::ParameterName, 'Do not save file checkpoints before writes during this run')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('-V', '-V ', [CompletionResultType]::ParameterName, 'Print version')
@@ -86,6 +96,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('resume', 'resume', [CompletionResultType]::ParameterValue, 'Continue a stored session.')
             [CompletionResult]::new('continue', 'continue', [CompletionResultType]::ParameterValue, 'Continue a stored session.')
             [CompletionResult]::new('fork', 'fork', [CompletionResultType]::ParameterValue, 'Fork a session at its tip or after the completed turn containing a message.')
+            [CompletionResult]::new('rewind', 'rewind', [CompletionResultType]::ParameterValue, 'Restore the files a session changed after a completed turn, then fork the conversation there.')
             [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Delete a stored session (history is retained for descendants).')
             [CompletionResult]::new('compact', 'compact', [CompletionResultType]::ParameterValue, 'Compact a session into its deterministic successor.')
             [CompletionResult]::new('export', 'export', [CompletionResultType]::ParameterValue, 'Export a session locally or as a structurally sanitized bundle.')
@@ -95,19 +106,21 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('hooks', 'hooks', [CompletionResultType]::ParameterValue, 'Inspect the admitted system and user hook catalogue.')
             [CompletionResult]::new('doctor', 'doctor', [CompletionResultType]::ParameterValue, 'Report a read-only redacted health snapshot of this installation.')
             [CompletionResult]::new('checkpoint', 'checkpoint', [CompletionResultType]::ParameterValue, 'Preview or selectively restore session-owned Git file checkpoints.')
-            [CompletionResult]::new('setup', 'setup', [CompletionResultType]::ParameterValue, 'Configure saved user settings in an interactive terminal.')
+            [CompletionResult]::new('setup', 'setup', [CompletionResultType]::ParameterValue, 'Review provider readiness and configure saved user settings in an interactive terminal.')
             [CompletionResult]::new('acp', 'acp', [CompletionResultType]::ParameterValue, 'Serve the Agent Client Protocol on stdio or an endpoint.')
-            [CompletionResult]::new('a2a', 'a2a', [CompletionResultType]::ParameterValue, 'Serve the Agent2Agent protocol on a local or loopback endpoint.')
-            [CompletionResult]::new('auth', 'auth', [CompletionResultType]::ParameterValue, 'Manage subscription credentials.')
+            [CompletionResult]::new('a2a', 'a2a', [CompletionResultType]::ParameterValue, 'Serve Agent2Agent discovery information on a local or loopback endpoint.')
+            [CompletionResult]::new('auth', 'auth', [CompletionResultType]::ParameterValue, 'Manage provider credentials.')
             [CompletionResult]::new('mcp', 'mcp', [CompletionResultType]::ParameterValue, 'Manage configured MCP servers.')
             [CompletionResult]::new('config', 'config', [CompletionResultType]::ParameterValue, 'Manage stored user configuration.')
             [CompletionResult]::new('roots', 'roots', [CompletionResultType]::ParameterValue, 'roots')
             [CompletionResult]::new('rules', 'rules', [CompletionResultType]::ParameterValue, 'Inspect and manage persistent permission rules.')
             [CompletionResult]::new('mcp-server', 'mcp-server', [CompletionResultType]::ParameterValue, 'Serve scoped ego runs over MCP on stdio.')
             [CompletionResult]::new('worktree', 'worktree', [CompletionResultType]::ParameterValue, 'Inspect or clean up a retained local worktree.')
+            [CompletionResult]::new('build-recipes', 'build-recipes', [CompletionResultType]::ParameterValue, 'Inspect, disable, enable or delete the learned build-output recipes of this workspace.')
             break
         }
         'ego;run' {
+            [CompletionResult]::new('--input-format', '--input-format', [CompletionResultType]::ParameterName, 'Read UTF-8 JSON lines {"prompt":"..."} from stdin; run each turn in the same headless session')
             [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
@@ -115,6 +128,8 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--attach', '--attach', [CompletionResultType]::ParameterName, 'Add exact image bytes as ordered context before the prompt text')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
             [CompletionResult]::new('--model', '--model', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
             [CompletionResult]::new('--proxy', '--proxy', [CompletionResultType]::ParameterName, 'Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)')
             [CompletionResult]::new('--proxy-ca', '--proxy-ca', [CompletionResultType]::ParameterName, 'Additional PEM trust anchor for provider HTTPS through --proxy only')
             [CompletionResult]::new('--sandbox', '--sandbox', [CompletionResultType]::ParameterName, 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included')
@@ -142,43 +157,54 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--max-output-tokens', '--max-output-tokens', [CompletionResultType]::ParameterName, 'Maximum generated tokens per request')
             [CompletionResult]::new('--goal', '--goal', [CompletionResultType]::ParameterName, 'Set a checked session objective')
             [CompletionResult]::new('--context-interval', '--context-interval', [CompletionResultType]::ParameterName, 'Minimum completed turns between model-requested transitions')
-            [CompletionResult]::new('--goal-turns', '--goal-turns', [CompletionResultType]::ParameterName, 'Maximum automatic goal continuation turns')
+            [CompletionResult]::new('--goal-turns', '--goal-turns', [CompletionResultType]::ParameterName, 'Optional maximum automatic goal continuation turns')
             [CompletionResult]::new('--goal-check-command', '--goal-check-command', [CompletionResultType]::ParameterName, 'Evaluator argv as a JSON string array; reads evidence JSON on stdin')
             [CompletionResult]::new('--max-turns', '--max-turns', [CompletionResultType]::ParameterName, 'Cap the turns this run may take')
             [CompletionResult]::new('--timeout', '--timeout', [CompletionResultType]::ParameterName, 'Wall clock, e.g. ''90s'' or ''10m''')
             [CompletionResult]::new('--mcp', '--mcp', [CompletionResultType]::ParameterName, 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server')
+            [CompletionResult]::new('--allow-dir', '--allow-dir', [CompletionResultType]::ParameterName, 'Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root')
             [CompletionResult]::new('--mode', '--mode', [CompletionResultType]::ParameterName, 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)')
             [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--offline', '--offline', [CompletionResultType]::ParameterName, 'No non-loopback egress from ego''s own HTTP transport')
             [CompletionResult]::new('--bare', '--bare', [CompletionResultType]::ParameterName, 'No ambient discovery, even in a trusted workspace')
-            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no tools at all')
+            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools')
+            [CompletionResult]::new('--no-hooks', '--no-hooks', [CompletionResultType]::ParameterName, 'Run with every hook off for this invocation; configuration is unchanged')
+            [CompletionResult]::new('--no-skill-safety-check', '--no-skill-safety-check', [CompletionResultType]::ParameterName, 'Skip the skill safety review for this launch without changing permissions')
             [CompletionResult]::new('--trust-workspace', '--trust-workspace', [CompletionResultType]::ParameterName, 'Trust this launch''s workspace without asking; remember the answer')
+            [CompletionResult]::new('--trust-development-programs', '--trust-development-programs', [CompletionResultType]::ParameterName, 'Trust this workspace and future edits to its current named programs; remember the grant')
             [CompletionResult]::new('--ephemeral', '--ephemeral', [CompletionResultType]::ParameterName, 'Refused: every run uses a durable session')
             [CompletionResult]::new('--no-context-tool', '--no-context-tool', [CompletionResultType]::ParameterName, 'Disable model-requested context transitions')
             [CompletionResult]::new('--context-clear', '--context-clear', [CompletionResultType]::ParameterName, 'Permit the model to discard conversation history using clear')
+            [CompletionResult]::new('--mcp-only', '--mcp-only', [CompletionResultType]::ParameterName, 'Attach only the servers that --mcp selects; enabled configured servers stay detached')
             [CompletionResult]::new('--plan', '--plan', [CompletionResultType]::ParameterName, 'Shorthand for --mode plan')
             [CompletionResult]::new('--yolo', '--yolo', [CompletionResultType]::ParameterName, 'Shorthand for --mode yolo')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--quiet', '--quiet', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
             [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
+            [CompletionResult]::new('--memory', '--memory', [CompletionResultType]::ParameterName, 'Keep a memory file for this workspace that the model can add to')
+            [CompletionResult]::new('--no-session-compression', '--no-session-compression', [CompletionResultType]::ParameterName, 'Do not compress old sessions in the background during this run')
+            [CompletionResult]::new('--no-checkpoints', '--no-checkpoints', [CompletionResultType]::ParameterName, 'Do not save file checkpoints before writes during this run')
             [CompletionResult]::new('--vim', '--vim', [CompletionResultType]::ParameterName, 'Use Vim normal/insert editing in the interactive composer')
-            [CompletionResult]::new('--continua', '--continua', [CompletionResultType]::ParameterName, 'Resume the latest saved session in this workspace without the terminal picker')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;resume' {
             [CompletionResult]::new('--answer', '--answer', [CompletionResultType]::ParameterName, 'Settle a pending question. Repeat for multiple sibling questions')
+            [CompletionResult]::new('--title', '--title', [CompletionResultType]::ParameterName, 'Resume the session of this workspace whose title is exactly TITLE')
             [CompletionResult]::new('--name', '--name', [CompletionResultType]::ParameterName, 'Read or change the session title without starting a turn: show, set=TEXT, clear')
-            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON')
+            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, stop, set=TEXT, achieve, resume, block=REASON')
+            [CompletionResult]::new('--input-format', '--input-format', [CompletionResultType]::ParameterName, 'Read UTF-8 JSON lines {"prompt":"..."} from stdin; run each turn in the same headless session')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable. Requires --file')
             [CompletionResult]::new('--attach', '--attach', [CompletionResultType]::ParameterName, 'Add exact image bytes as ordered context before the prompt text')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
             [CompletionResult]::new('--model', '--model', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
             [CompletionResult]::new('--proxy', '--proxy', [CompletionResultType]::ParameterName, 'Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)')
             [CompletionResult]::new('--proxy-ca', '--proxy-ca', [CompletionResultType]::ParameterName, 'Additional PEM trust anchor for provider HTTPS through --proxy only')
             [CompletionResult]::new('--sandbox', '--sandbox', [CompletionResultType]::ParameterName, 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included')
@@ -204,24 +230,32 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--max-output-tokens', '--max-output-tokens', [CompletionResultType]::ParameterName, 'Maximum generated tokens per request')
             [CompletionResult]::new('--goal', '--goal', [CompletionResultType]::ParameterName, 'Set a checked session objective')
             [CompletionResult]::new('--context-interval', '--context-interval', [CompletionResultType]::ParameterName, 'Minimum completed turns between model-requested transitions')
-            [CompletionResult]::new('--goal-turns', '--goal-turns', [CompletionResultType]::ParameterName, 'Maximum automatic goal continuation turns')
+            [CompletionResult]::new('--goal-turns', '--goal-turns', [CompletionResultType]::ParameterName, 'Optional maximum automatic goal continuation turns')
             [CompletionResult]::new('--goal-check-command', '--goal-check-command', [CompletionResultType]::ParameterName, 'Evaluator argv as a JSON string array; reads evidence JSON on stdin')
             [CompletionResult]::new('--max-turns', '--max-turns', [CompletionResultType]::ParameterName, 'Cap the turns this run may take')
             [CompletionResult]::new('--timeout', '--timeout', [CompletionResultType]::ParameterName, 'Wall clock, e.g. ''90s'' or ''10m''')
             [CompletionResult]::new('--mcp', '--mcp', [CompletionResultType]::ParameterName, 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server')
+            [CompletionResult]::new('--allow-dir', '--allow-dir', [CompletionResultType]::ParameterName, 'Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root')
             [CompletionResult]::new('--mode', '--mode', [CompletionResultType]::ParameterName, 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)')
             [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--session', '--session', [CompletionResultType]::ParameterName, 'Named session: created or attached')
             [CompletionResult]::new('--session-id', '--session-id', [CompletionResultType]::ParameterName, 'A session id supplied by the caller')
             [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
+            [CompletionResult]::new('--accept-authority-delta', '--accept-authority-delta', [CompletionResultType]::ParameterName, 'Accept the authority change shown for this resume, without a question. Applies to this resume only')
+            [CompletionResult]::new('--queue', '--queue', [CompletionResultType]::ParameterName, 'Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout')
+            [CompletionResult]::new('--fork', '--fork', [CompletionResultType]::ParameterName, 'Fork this session and run the prompt in the fork. A busy source forks at the last successful turn')
             [CompletionResult]::new('--offline', '--offline', [CompletionResultType]::ParameterName, 'No non-loopback egress from ego''s own HTTP transport')
             [CompletionResult]::new('--bare', '--bare', [CompletionResultType]::ParameterName, 'No ambient discovery, even in a trusted workspace')
-            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no tools at all')
+            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools')
+            [CompletionResult]::new('--no-hooks', '--no-hooks', [CompletionResultType]::ParameterName, 'Run with every hook off for this invocation; configuration is unchanged')
+            [CompletionResult]::new('--no-skill-safety-check', '--no-skill-safety-check', [CompletionResultType]::ParameterName, 'Skip the skill safety review for this launch without changing permissions')
             [CompletionResult]::new('--trust-workspace', '--trust-workspace', [CompletionResultType]::ParameterName, 'Trust this launch''s workspace without asking; remember the answer')
+            [CompletionResult]::new('--trust-development-programs', '--trust-development-programs', [CompletionResultType]::ParameterName, 'Trust this workspace and future edits to its current named programs; remember the grant')
             [CompletionResult]::new('--ephemeral', '--ephemeral', [CompletionResultType]::ParameterName, 'Refused: every run uses a durable session')
             [CompletionResult]::new('--no-context-tool', '--no-context-tool', [CompletionResultType]::ParameterName, 'Disable model-requested context transitions')
             [CompletionResult]::new('--context-clear', '--context-clear', [CompletionResultType]::ParameterName, 'Permit the model to discard conversation history using clear')
+            [CompletionResult]::new('--mcp-only', '--mcp-only', [CompletionResultType]::ParameterName, 'Attach only the servers that --mcp selects; enabled configured servers stay detached')
             [CompletionResult]::new('--plan', '--plan', [CompletionResultType]::ParameterName, 'Shorthand for --mode plan')
             [CompletionResult]::new('--yolo', '--yolo', [CompletionResultType]::ParameterName, 'Shorthand for --mode yolo')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
@@ -229,20 +263,27 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
             [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
             [CompletionResult]::new('--vim', '--vim', [CompletionResultType]::ParameterName, 'Use Vim normal/insert editing in the interactive composer')
+            [CompletionResult]::new('--memory', '--memory', [CompletionResultType]::ParameterName, 'Keep a memory file for this workspace that the model can add to')
+            [CompletionResult]::new('--no-session-compression', '--no-session-compression', [CompletionResultType]::ParameterName, 'Do not compress old sessions in the background during this run')
+            [CompletionResult]::new('--no-checkpoints', '--no-checkpoints', [CompletionResultType]::ParameterName, 'Do not save file checkpoints before writes during this run')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;continue' {
             [CompletionResult]::new('--answer', '--answer', [CompletionResultType]::ParameterName, 'Settle a pending question. Repeat for multiple sibling questions')
+            [CompletionResult]::new('--title', '--title', [CompletionResultType]::ParameterName, 'Resume the session of this workspace whose title is exactly TITLE')
             [CompletionResult]::new('--name', '--name', [CompletionResultType]::ParameterName, 'Read or change the session title without starting a turn: show, set=TEXT, clear')
-            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, set=TEXT, extend=N, achieve, block=REASON')
+            [CompletionResult]::new('--goal-operation', '--goal-operation', [CompletionResultType]::ParameterName, 'Read or change goal metadata without starting a turn: show, stop, set=TEXT, achieve, resume, block=REASON')
+            [CompletionResult]::new('--input-format', '--input-format', [CompletionResultType]::ParameterName, 'Read UTF-8 JSON lines {"prompt":"..."} from stdin; run each turn in the same headless session')
             [CompletionResult]::new('-f', '-f', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--file', '--file', [CompletionResultType]::ParameterName, 'Read the instruction and its invocation configuration from an agent file')
             [CompletionResult]::new('--var', '--var', [CompletionResultType]::ParameterName, 'Supply one declared agent-file template variable. Requires --file')
             [CompletionResult]::new('--attach', '--attach', [CompletionResultType]::ParameterName, 'Add exact image bytes as ordered context before the prompt text')
             [CompletionResult]::new('-m', '-m', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
             [CompletionResult]::new('--model', '--model', [CompletionResultType]::ParameterName, 'provider/model slug, e.g. ollama/qwen3')
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
             [CompletionResult]::new('--proxy', '--proxy', [CompletionResultType]::ParameterName, 'Explicit HTTP CONNECT proxy for provider HTTPS (no ambient proxy discovery)')
             [CompletionResult]::new('--proxy-ca', '--proxy-ca', [CompletionResultType]::ParameterName, 'Additional PEM trust anchor for provider HTTPS through --proxy only')
             [CompletionResult]::new('--sandbox', '--sandbox', [CompletionResultType]::ParameterName, 'Filesystem confinement: ro|workspace|adaptive|off; off = no confinement, credentials included')
@@ -268,24 +309,32 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--max-output-tokens', '--max-output-tokens', [CompletionResultType]::ParameterName, 'Maximum generated tokens per request')
             [CompletionResult]::new('--goal', '--goal', [CompletionResultType]::ParameterName, 'Set a checked session objective')
             [CompletionResult]::new('--context-interval', '--context-interval', [CompletionResultType]::ParameterName, 'Minimum completed turns between model-requested transitions')
-            [CompletionResult]::new('--goal-turns', '--goal-turns', [CompletionResultType]::ParameterName, 'Maximum automatic goal continuation turns')
+            [CompletionResult]::new('--goal-turns', '--goal-turns', [CompletionResultType]::ParameterName, 'Optional maximum automatic goal continuation turns')
             [CompletionResult]::new('--goal-check-command', '--goal-check-command', [CompletionResultType]::ParameterName, 'Evaluator argv as a JSON string array; reads evidence JSON on stdin')
             [CompletionResult]::new('--max-turns', '--max-turns', [CompletionResultType]::ParameterName, 'Cap the turns this run may take')
             [CompletionResult]::new('--timeout', '--timeout', [CompletionResultType]::ParameterName, 'Wall clock, e.g. ''90s'' or ''10m''')
             [CompletionResult]::new('--mcp', '--mcp', [CompletionResultType]::ParameterName, 'Select an effective server by name, even one marked enabled = false, or attach a strict invocation-scoped JSON MCP server')
+            [CompletionResult]::new('--allow-dir', '--allow-dir', [CompletionResultType]::ParameterName, 'Allow this run to reach one existing canonical absolute directory, read-only unless `:rw`. Not stored; `ego roots add` stores a root')
             [CompletionResult]::new('--mode', '--mode', [CompletionResultType]::ParameterName, 'Permission mode: plan|default|auto|accept-edits|yolo (alias: edits)')
             [CompletionResult]::new('-c', '-c', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'Dotted-path config override, value parsed as TOML')
             [CompletionResult]::new('--session', '--session', [CompletionResultType]::ParameterName, 'Named session: created or attached')
             [CompletionResult]::new('--session-id', '--session-id', [CompletionResultType]::ParameterName, 'A session id supplied by the caller')
             [CompletionResult]::new('--worktree', '--worktree', [CompletionResultType]::ParameterName, 'Create a retained managed worktree on this explicitly approved new branch')
+            [CompletionResult]::new('--accept-authority-delta', '--accept-authority-delta', [CompletionResultType]::ParameterName, 'Accept the authority change shown for this resume, without a question. Applies to this resume only')
+            [CompletionResult]::new('--queue', '--queue', [CompletionResultType]::ParameterName, 'Wait while another process owns the session, then run the prompt headless. Waiting counts toward --timeout')
+            [CompletionResult]::new('--fork', '--fork', [CompletionResultType]::ParameterName, 'Fork this session and run the prompt in the fork. A busy source forks at the last successful turn')
             [CompletionResult]::new('--offline', '--offline', [CompletionResultType]::ParameterName, 'No non-loopback egress from ego''s own HTTP transport')
             [CompletionResult]::new('--bare', '--bare', [CompletionResultType]::ParameterName, 'No ambient discovery, even in a trusted workspace')
-            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no tools at all')
+            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools')
+            [CompletionResult]::new('--no-hooks', '--no-hooks', [CompletionResultType]::ParameterName, 'Run with every hook off for this invocation; configuration is unchanged')
+            [CompletionResult]::new('--no-skill-safety-check', '--no-skill-safety-check', [CompletionResultType]::ParameterName, 'Skip the skill safety review for this launch without changing permissions')
             [CompletionResult]::new('--trust-workspace', '--trust-workspace', [CompletionResultType]::ParameterName, 'Trust this launch''s workspace without asking; remember the answer')
+            [CompletionResult]::new('--trust-development-programs', '--trust-development-programs', [CompletionResultType]::ParameterName, 'Trust this workspace and future edits to its current named programs; remember the grant')
             [CompletionResult]::new('--ephemeral', '--ephemeral', [CompletionResultType]::ParameterName, 'Refused: every run uses a durable session')
             [CompletionResult]::new('--no-context-tool', '--no-context-tool', [CompletionResultType]::ParameterName, 'Disable model-requested context transitions')
             [CompletionResult]::new('--context-clear', '--context-clear', [CompletionResultType]::ParameterName, 'Permit the model to discard conversation history using clear')
+            [CompletionResult]::new('--mcp-only', '--mcp-only', [CompletionResultType]::ParameterName, 'Attach only the servers that --mcp selects; enabled configured servers stay detached')
             [CompletionResult]::new('--plan', '--plan', [CompletionResultType]::ParameterName, 'Shorthand for --mode plan')
             [CompletionResult]::new('--yolo', '--yolo', [CompletionResultType]::ParameterName, 'Shorthand for --mode yolo')
             [CompletionResult]::new('-q', '-q', [CompletionResultType]::ParameterName, 'Suppress progress and diagnostics on stderr; stdout is unaffected')
@@ -293,12 +342,24 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--no-color', '--no-color', [CompletionResultType]::ParameterName, 'Never emit ANSI colour, whatever the terminal claims to support')
             [CompletionResult]::new('--plain', '--plain', [CompletionResultType]::ParameterName, 'Append plain output without terminal styling or live retry updates')
             [CompletionResult]::new('--vim', '--vim', [CompletionResultType]::ParameterName, 'Use Vim normal/insert editing in the interactive composer')
+            [CompletionResult]::new('--memory', '--memory', [CompletionResultType]::ParameterName, 'Keep a memory file for this workspace that the model can add to')
+            [CompletionResult]::new('--no-session-compression', '--no-session-compression', [CompletionResultType]::ParameterName, 'Do not compress old sessions in the background during this run')
+            [CompletionResult]::new('--no-checkpoints', '--no-checkpoints', [CompletionResultType]::ParameterName, 'Do not save file checkpoints before writes during this run')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;fork' {
-            [CompletionResult]::new('--at', '--at', [CompletionResultType]::ParameterName, 'at')
+            [CompletionResult]::new('--at', '--at', [CompletionResultType]::ParameterName, 'Fork after the completed turn containing this message')
+            [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
+            [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'text|json|jsonl')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;rewind' {
+            [CompletionResult]::new('--at', '--at', [CompletionResultType]::ParameterName, 'A user or assistant message of the turn to return to')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
             [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'text|json|jsonl')
@@ -309,6 +370,8 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;rm' {
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
+            [CompletionResult]::new('--incompatible', '--incompatible', [CompletionResultType]::ParameterName, 'Permanently remove sessions with an unsupported stored format. Requires --yes')
+            [CompletionResult]::new('--expired', '--expired', [CompletionResultType]::ParameterName, 'Permanently remove sessions not opened within `sessions.retention_days` (30 by default). Open and held sessions stay. Requires --yes')
             [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'Supply deletion confirmation without prompting; required without terminal stdin')
             [CompletionResult]::new('--force', '--force', [CompletionResultType]::ParameterName, 'Acknowledge an uncertain prior run; does not replace deletion confirmation and is not a general override')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -318,7 +381,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;compact' {
             [CompletionResult]::new('--budget', '--budget', [CompletionResultType]::ParameterName, 'Hard spend ceiling, as for run')
             [CompletionResult]::new('--max-output-tokens', '--max-output-tokens', [CompletionResultType]::ParameterName, 'Maximum generated tokens per request')
-            [CompletionResult]::new('--request-id', '--request-id', [CompletionResultType]::ParameterName, 'request-id')
+            [CompletionResult]::new('--request-id', '--request-id', [CompletionResultType]::ParameterName, 'Reuse this request UUID for a deterministic retry')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
             [CompletionResult]::new('--output', '--output', [CompletionResultType]::ParameterName, 'text|json|jsonl')
@@ -349,6 +412,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;usage' {
             [CompletionResult]::new('--period', '--period', [CompletionResultType]::ParameterName, 'all|Ns|Nm|Nh')
+            [CompletionResult]::new('--session', '--session', [CompletionResultType]::ParameterName, 'Report only this stored session')
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit the exact versioned usage-report object')
@@ -358,6 +422,8 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;models' {
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
             [CompletionResult]::new('--provider', '--provider', [CompletionResultType]::ParameterName, 'Restrict enumeration and output to one admitted provider')
             [CompletionResult]::new('--refresh', '--refresh', [CompletionResultType]::ParameterName, 'Refresh the selected discoverable provider slices')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit the exact versioned snapshot object')
@@ -379,13 +445,15 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         }
         'ego;doctor' {
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit the exact versioned health snapshot')
+            [CompletionResult]::new('--offline', '--offline', [CompletionResultType]::ParameterName, 'Skip every provider network probe')
+            [CompletionResult]::new('--probe-network', '--probe-network', [CompletionResultType]::ParameterName, 'Probe the network reachability of each configured provider, like `doctor_network = true`')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;checkpoint' {
-            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'C')
-            [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'directory')
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Workspace that owns the session')
+            [CompletionResult]::new('--directory', '--directory', [CompletionResultType]::ParameterName, 'Workspace that owns the session')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('preview', 'preview', [CompletionResultType]::ParameterValue, 'List checkpoint IDs, paths, effects, and external-change conflicts as JSON')
@@ -429,20 +497,23 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--allow', '--allow', [CompletionResultType]::ParameterName, 'Allow rule, e.g. ''read(src/**)''. Repeatable')
             [CompletionResult]::new('--deny', '--deny', [CompletionResultType]::ParameterName, 'Deny rule, e.g. ''write(**)''. Repeatable')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Layer [profile.NAME] from config')
+            [CompletionResult]::new('--env-allow', '--env-allow', [CompletionResultType]::ParameterName, 'Keep this environment variable under --exclusive-read-only. Repeatable')
             [CompletionResult]::new('--listen', '--listen', [CompletionResultType]::ParameterName, 'Serve on a socket path or address instead of stdio')
             [CompletionResult]::new('--max-connections', '--max-connections', [CompletionResultType]::ParameterName, 'Maximum simultaneous listener connections (runtime default: 32)')
             [CompletionResult]::new('--connection-lifetime', '--connection-lifetime', [CompletionResultType]::ParameterName, 'Maximum lifetime of one listener connection: 90s, 10m or 2h (runtime default: 24h)')
             [CompletionResult]::new('--max-ingress-bytes', '--max-ingress-bytes', [CompletionResultType]::ParameterName, 'Maximum cumulative bytes read from one listener connection (runtime default: 134217728 bytes)')
             [CompletionResult]::new('--bare', '--bare', [CompletionResultType]::ParameterName, 'No ambient discovery, even in a trusted workspace')
-            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no tools at all')
+            [CompletionResult]::new('--no-tools', '--no-tools', [CompletionResultType]::ParameterName, 'Offer no builtin tools; run/resume also disable MCP. ACP still permits host-admitted MCP tools')
+            [CompletionResult]::new('--no-hooks', '--no-hooks', [CompletionResultType]::ParameterName, 'Run with every hook off for this invocation; configuration is unchanged')
+            [CompletionResult]::new('--no-skill-safety-check', '--no-skill-safety-check', [CompletionResultType]::ParameterName, 'Skip the skill safety review for this launch without changing permissions')
+            [CompletionResult]::new('--exclusive-read-only', '--exclusive-read-only', [CompletionResultType]::ParameterName, 'Serve an unattended read-only session that no configuration layer or host request can widen: no tools, hooks, skills, commands or MCP servers, and an environment cleared to an allow-list')
             [CompletionResult]::new('--allow-public-bind', '--allow-public-bind', [CompletionResultType]::ParameterName, 'Serve on an address reachable from outside this machine')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;a2a' {
-            [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
-            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR. `ego a2a` keeps no sessions, so it takes no `--session-dir`')
             [CompletionResult]::new('--sandbox', '--sandbox', [CompletionResultType]::ParameterName, 'The weakest confinement a session may select: ro|workspace|adaptive|off; off = no confinement, credentials included')
             [CompletionResult]::new('--listen', '--listen', [CompletionResultType]::ParameterName, 'Where to serve: a socket path, or an address such as `127.0.0.1:8080`')
             [CompletionResult]::new('--allow-public-bind', '--allow-public-bind', [CompletionResultType]::ParameterName, 'Serve on an address reachable from outside this machine')
@@ -451,25 +522,53 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;auth' {
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override for maintenance')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('usage', 'usage', [CompletionResultType]::ParameterValue, 'Read subscription quota without generating a model response')
             [CompletionResult]::new('login', 'login', [CompletionResultType]::ParameterValue, 'Authenticate and store a provider credential')
             [CompletionResult]::new('logout', 'logout', [CompletionResultType]::ParameterValue, 'Remove a stored provider credential')
+            [CompletionResult]::new('remove', 'remove', [CompletionResultType]::ParameterValue, 'Delete a saved account and its local credential without reusing its number')
             [CompletionResult]::new('status', 'status', [CompletionResultType]::ParameterValue, 'Show credential type and expiry, never token values')
             break
         }
+        'ego;auth;usage' {
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override for maintenance')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print quota and provider issues as JSON')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
         'ego;auth;login' {
-            [CompletionResult]::new('--device', '--device', [CompletionResultType]::ParameterName, 'Prefer device-code login when the provider offers it')
+            [CompletionResult]::new('--method', '--method', [CompletionResultType]::ParameterName, 'Choose API-key registration or OAuth for a provider offering both')
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override for maintenance')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
+            [CompletionResult]::new('--renew', '--renew', [CompletionResultType]::ParameterName, 'Renew a saved account instead of creating a new account')
+            [CompletionResult]::new('--device', '--device', [CompletionResultType]::ParameterName, 'Prefer device-code OAuth login when the provider offers it')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;auth;logout' {
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override for maintenance')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;auth;remove' {
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override for maintenance')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;auth;status' {
+            [CompletionResult]::new('--connection', '--connection', [CompletionResultType]::ParameterName, 'Internal identity override for maintenance')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Select an account by its stable number within the provider')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Print versioned local credential presence without secret metadata')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -490,8 +589,9 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--inherit-env', '--inherit-env', [CompletionResultType]::ParameterName, 'Environment variable inherited by the stdio child. Repeatable')
             [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Explicit HTTP wire profile; never selected by fallback')
             [CompletionResult]::new('--auth', '--auth', [CompletionResultType]::ParameterName, 'HTTP authentication mode')
+            [CompletionResult]::new('--oauth-host', '--oauth-host', [CompletionResultType]::ParameterName, 'Extra OAuth origin that may host this server''s authorization, token or registration endpoint when it differs from the issuer''s. Repeatable')
             [CompletionResult]::new('--stdio', '--stdio', [CompletionResultType]::ParameterName, 'Configure a subprocess transport. Its command follows literal `--`')
-            [CompletionResult]::new('--allow-insecure-loopback', '--allow-insecure-loopback', [CompletionResultType]::ParameterName, 'Consent to plaintext HTTP for an exact loopback host')
+            [CompletionResult]::new('--allow-insecure-loopback', '--allow-insecure-loopback', [CompletionResultType]::ParameterName, 'Consent to plaintext HTTP for this server on loopback or the owner network')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -502,6 +602,7 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;mcp;ls' {
+            [CompletionResult]::new('--mcp', '--mcp', [CompletionResultType]::ParameterName, 'Also list this invocation''s `--mcp` selection (NAME or @FILE); it is not probed')
             [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit the typed machine-readable projection')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -511,8 +612,8 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             [CompletionResult]::new('--client-id', '--client-id', [CompletionResultType]::ParameterName, 'Operator-issued public client ID')
             [CompletionResult]::new('--cimd', '--cimd', [CompletionResultType]::ParameterName, 'Published HTTPS client metadata document URL')
             [CompletionResult]::new('--callback-port', '--callback-port', [CompletionResultType]::ParameterName, 'Loopback port registered with the authorization server (0 selects a free port)')
-            [CompletionResult]::new('--issuer', '--issuer', [CompletionResultType]::ParameterName, 'issuer')
-            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'account')
+            [CompletionResult]::new('--issuer', '--issuer', [CompletionResultType]::ParameterName, 'Issuer bound to the credential to refresh')
+            [CompletionResult]::new('--account', '--account', [CompletionResultType]::ParameterName, 'Account bound to the credential to refresh')
             [CompletionResult]::new('--dcr', '--dcr', [CompletionResultType]::ParameterName, 'Explicitly use issuer-advertised dynamic registration')
             [CompletionResult]::new('--refresh', '--refresh', [CompletionResultType]::ParameterName, 'Refresh an existing issuer/resource/account-bound credential without interaction')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
@@ -543,42 +644,42 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;config;snapshot' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;config;batch' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'set')
-            [CompletionResult]::new('--if-revision', '--if-revision', [CompletionResultType]::ParameterName, 'if-revision')
-            [CompletionResult]::new('--unset', '--unset', [CompletionResultType]::ParameterName, 'unset')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
+            [CompletionResult]::new('--set', '--set', [CompletionResultType]::ParameterName, 'Set a key to a TOML value')
+            [CompletionResult]::new('--if-revision', '--if-revision', [CompletionResultType]::ParameterName, 'Apply only if the owner revision matches')
+            [CompletionResult]::new('--unset', '--unset', [CompletionResultType]::ParameterName, 'Remove a stored key')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;config;get' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'json')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit JSON output')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;config;set' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;config;unset' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;config;ls' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'json')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit JSON output')
             [CompletionResult]::new('--effective', '--effective', [CompletionResultType]::ParameterName, 'Show the effective run perimeter instead of stored values')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
@@ -598,21 +699,21 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;roots;add' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('--access', '--access', [CompletionResultType]::ParameterName, 'access')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
+            [CompletionResult]::new('--access', '--access', [CompletionResultType]::ParameterName, 'Access granted to this root')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;roots;rm' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;roots;ls' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'json')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit JSON output')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -629,42 +730,42 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;rules;ls' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'json')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit JSON output')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;rules;allow' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;rules;deny' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;rules;revoke' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;rules;remember' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'C')
-            [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'yes')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Resolve the call in this workspace')
+            [CompletionResult]::new('--yes', '--yes', [CompletionResultType]::ParameterName, 'Confirm the proposed rules without a prompt')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
         }
         'ego;rules;explain' {
-            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'profile')
-            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'C')
-            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'json')
+            [CompletionResult]::new('--profile', '--profile', [CompletionResultType]::ParameterName, 'Select the named user profile')
+            [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Resolve the call in this workspace')
+            [CompletionResult]::new('--json', '--json', [CompletionResultType]::ParameterName, 'Emit JSON output')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -672,9 +773,12 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
         'ego;mcp-server' {
             [CompletionResult]::new('--session-dir', '--session-dir', [CompletionResultType]::ParameterName, 'Override the store location')
             [CompletionResult]::new('-C', '-C ', [CompletionResultType]::ParameterName, 'Run as if started in DIR')
-            [CompletionResult]::new('--max-concurrent-runs', '--max-concurrent-runs', [CompletionResultType]::ParameterName, 'max-concurrent-runs')
-            [CompletionResult]::new('--retained-requests', '--retained-requests', [CompletionResultType]::ParameterName, 'retained-requests')
-            [CompletionResult]::new('--max-resource-bytes', '--max-resource-bytes', [CompletionResultType]::ParameterName, 'max-resource-bytes')
+            [CompletionResult]::new('--max-concurrent-runs', '--max-concurrent-runs', [CompletionResultType]::ParameterName, 'Runs that may execute at once')
+            [CompletionResult]::new('--retained-requests', '--retained-requests', [CompletionResultType]::ParameterName, 'Finished requests kept for status and resource reads')
+            [CompletionResult]::new('--max-resource-bytes', '--max-resource-bytes', [CompletionResultType]::ParameterName, 'Largest resource body returned to a client, in bytes')
+            [CompletionResult]::new('--allow-root', '--allow-root', [CompletionResultType]::ParameterName, 'Also let clients run in DIR. The directory given with -C (or the current one) is always allowed')
+            [CompletionResult]::new('--allow-model', '--allow-model', [CompletionResultType]::ParameterName, 'Also let clients select this model. The configured model is always allowed')
+            [CompletionResult]::new('--allow-mode', '--allow-mode', [CompletionResultType]::ParameterName, 'Also let clients select this mode. The configured mode is always allowed')
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break
@@ -692,6 +796,41 @@ Register-ArgumentCompleter -Native -CommandName 'ego' -ScriptBlock {
             break
         }
         'ego;worktree;cleanup' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;build-recipes' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('ls', 'ls', [CompletionResultType]::ParameterValue, 'List the recipes of this workspace')
+            [CompletionResult]::new('show', 'show', [CompletionResultType]::ParameterValue, 'Print one recipe as JSON')
+            [CompletionResult]::new('disable', 'disable', [CompletionResultType]::ParameterValue, 'Stop using one recipe; it stays stored')
+            [CompletionResult]::new('enable', 'enable', [CompletionResultType]::ParameterValue, 'Use one disabled recipe again')
+            [CompletionResult]::new('rm', 'rm', [CompletionResultType]::ParameterValue, 'Delete one recipe')
+            break
+        }
+        'ego;build-recipes;ls' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;build-recipes;show' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;build-recipes;disable' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;build-recipes;enable' {
+            [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
+            [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
+            break
+        }
+        'ego;build-recipes;rm' {
             [CompletionResult]::new('-h', '-h', [CompletionResultType]::ParameterName, 'Print help')
             [CompletionResult]::new('--help', '--help', [CompletionResultType]::ParameterName, 'Print help')
             break

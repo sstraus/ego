@@ -4,9 +4,11 @@
 These guides explain how to use ego. Start with
 what you want to do; each guide explains the feature before its controls.
 
-Use [the guide summary](SUMMARY.md) for chapter navigation: user tasks first,
-then integrations and reference. The Markdown guide can be read directly in
-this repository; no documentation tools or hosted site are required.
+Read the [hosted user guide](https://ego.tuicommander.com/docs/) for chapter
+navigation, search, and a print view. Its sidebar follows
+[the book summary](SUMMARY.md): user tasks first, then integrations and reference.
+GitHub Actions builds and publishes the guide; you do not need documentation tools
+to read it. Contributors can use [build and maintenance](maintaining.md).
 
 | Your task | Guide |
 | --- | --- |
@@ -25,8 +27,11 @@ this repository; no documentation tools or hosted site are required.
 | Connect ACP, MCP, A2A, skills, hooks, or TUICommander | [Integrations](integrations/README.md) |
 | Implement an ACP client for ego's wire extensions | [ACP extensions](integrations/acp-extensions.md) |
 | Diagnose a refusal or platform limitation | [Troubleshooting](guides/troubleshooting.md) |
+| Read the changes in each version | [Changelog](changelog.md) |
 | Understand crate responsibilities and design | [Architecture](architecture.md) |
 
 The [generated command reference](reference/cli.md) remains at its generator-owned
 path. [Configuration](reference/configuration.md) identifies the source schemas.
-[CLI.md](../CLI.md) describes command conventions. Use the source-backed guides and current binary help for invocation details.
+[CLI.md](../CLI.md), [SPEC.md](../SPEC.md), and [ARCHITECTURE.md](../ARCHITECTURE.md)
+remain design authorities; they include planned behavior and older examples, so
+use the source-backed guides and current binary help for invocation details.

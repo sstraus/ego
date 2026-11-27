@@ -13,6 +13,7 @@
 //! already knows, and a fact nobody knows is reported as unknown rather than
 //! guessed at or quietly dropped.
 //!
+//! See `docs/internals/decisions/2026-09-03-doctor-observes-one-redacted-health-snapshot.md`.
 
 /// The narrowly scoped operator-visible perimeter.
 pub mod perimeter;

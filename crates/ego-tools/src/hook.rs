@@ -41,6 +41,7 @@ pub struct HookAdapterSettlement {
     feedback: Option<String>,
     context: Option<ego_core::hook::HookContextOutput>,
     failure: Option<String>,
+    terminal_process_failure: bool,
     evidence: Option<EvidenceRef>,
     delivery: DeliveryCertainty,
 }
@@ -56,6 +57,7 @@ impl HookAdapterSettlement {
             feedback: result.feedback().map(str::to_owned),
             context: result.context().cloned(),
             failure: None,
+            terminal_process_failure: false,
             evidence,
             delivery,
         }
@@ -67,6 +69,7 @@ impl HookAdapterSettlement {
             feedback: None,
             context: None,
             failure: Some(message.into()),
+            terminal_process_failure: false,
             evidence: None,
             delivery,
         }
@@ -90,6 +93,10 @@ impl HookAdapterSettlement {
 
     pub fn evidence(&self) -> Option<&EvidenceRef> {
         self.evidence.as_ref()
+    }
+
+    pub fn terminal_process_failure(&self) -> bool {
+        self.terminal_process_failure
     }
 }
 
@@ -162,9 +169,18 @@ impl<'a> CommandHookAdapter<'a> {
             Err(ProcessError::Exit {
                 code: Some(2),
                 result,
-            }) => parse_veto_output(result),
+            }) => parse_veto_output(*result),
             Err(error) => {
-                HookAdapterSettlement::failed(error.to_string(), process_failure_delivery(&error))
+                let terminal = matches!(
+                    error,
+                    ProcessError::Exit { .. } | ProcessError::Signal { .. }
+                );
+                let mut settlement = HookAdapterSettlement::failed(
+                    error.to_string(),
+                    process_failure_delivery(&error),
+                );
+                settlement.terminal_process_failure = terminal;
+                settlement
             }
         };
         Ok(HookAdapterResult::Settled(settlement))
@@ -252,6 +268,7 @@ fn parse_veto_output(output: ToolResult) -> HookAdapterSettlement {
             feedback: None,
             context: None,
             failure: None,
+            terminal_process_failure: false,
             evidence: stdout.and_then(|stdout| stdout.evidence_reference().cloned()),
             delivery: DeliveryCertainty::DefinitelySent,
         };

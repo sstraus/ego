@@ -1,0 +1,13 @@
+{
+  "kind": "event",
+  "connectionId": "01a199e3-fc36-7596-955b-00b20a853e3c",
+  "generation": 1,
+  "sequence": 9,
+  "sessionId": "f96cd33f-a3c7-5989-b7f3-a5e3bce1552d",
+  "turnId": "01a199e4-0e28-7528-b3c6-bbdac8aec407",
+  "event": {
+    "kind": "turnFailed",
+    "message": "the sandbox value `workspace` was refused: the seatbelt process backend (revision seatbelt-inline-profile-v11-optional-pnpm-locks:34e67894e891d5389c40929864bfd17d86c5f975ebb3a0b165cf43d23a7e62e6) demonstrated read only inside the workspace and the fixed runtime roots, write only inside the workspace and ego's private scratch directory, but this run requires read only inside the workspace and the fixed runtime roots, write only inside the workspace and ego's private scratch directory, no IP networking for spawned processes, loopback included; missing no IP networking for spawned processes, loopback included (probe transcript e3b1ae7b8bc22df503e5f9ae33508d0f97d7e053cc4bab67627ebe7b0f1fd8bd)",
+    "state": "idle"
+  }
+}

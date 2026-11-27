@@ -1,0 +1,13 @@
+{
+  "type": "response.completed",
+  "response": {
+    "status": "completed",
+    "usage": {
+      "input_tokens": 10,
+      "input_tokens_details": {
+        "cached_tokens": 3
+      },
+      "output_tokens": 2
+    }
+  }
+}

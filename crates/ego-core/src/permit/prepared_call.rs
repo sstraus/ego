@@ -1,5 +1,7 @@
-//! This is what the policy engine classifies to mint a `Permit`, and what a judge model
-//! evaluates in `auto` mode.
+//! `PreparedCall`: canonical operations, resolved at `prepare` time — never
+//! prose, never a rendered shell string (`ARCHITECTURE.md` §3.2, §3.4).
+//! This is what the policy engine classifies to mint a `Permit`, and what a
+//! judge model evaluates in `auto` mode.
 
 use std::fmt;
 
@@ -12,7 +14,7 @@ use super::foreign::{
     InvocationDigest, NetworkTarget, PreparedConnect, Subject,
 };
 use super::path::CanonPath;
-use super::spawn::SpawnSpec;
+use super::spawn::{DetachedExecMonitor, SpawnSpec};
 use crate::event::hook::HookId;
 use crate::event::id::DetachedExecId;
 use crate::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject};
@@ -25,12 +27,17 @@ pub(crate) fn frame(digest: &mut Sha256, bytes: &[u8]) {
 
 /// One canonical operation a `Tool::execute` intends to perform.
 ///
-/// [`GuardedIo`](super::GuardedIo) covers both the filesystem operations and exact
-/// argv-native process execution.
+/// [`GuardedIo`](super::GuardedIo) covers both the filesystem operations and
+/// exact argv-native process execution. Network operations remain owned by
+/// their transport seams (`ARCHITECTURE.md` §3.4 axis 4).
 ///
-/// [`Op::List`] and [`Op::Search`] are narrower than subtree read access.
-/// Representing glob as `Read { path: root }` would authorize reading bytes
-/// when the caller requested only names.
+/// [`Op::List`] and [`Op::Search`] exist so that a tool which walks a subtree
+/// does not have to be described as one that reads it. See
+/// `docs/internals/decisions/2026-08-21-reading-without-reading-everything.md` §1–2:
+/// expressing a glob as `Read { path: root }` would hand it the authority to
+/// read every byte under `root`, which is not a rounding error in the
+/// description — it is a much larger grant, arrived at because no other
+/// variant existed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Op {
     /// One named file's contents.
@@ -89,12 +96,21 @@ pub enum SessionProcessAction {
 /// — to independently agree they are the same authority, with nothing holding
 /// them to it. One `Op::Write` has one arm in each of the four.
 ///
-/// Whole-file replacement and string replacement share write authority.
-/// By contrast, [`Op::List`] and [`Op::Search`] represent distinct authorities.
+/// That is the same test [`Op::List`] and [`Op::Search`] pass and these two
+/// fail: those are separate variants because they are separate *authorities*
+/// (see `2026-08-21-reading-without-reading-everything.md` §1–2). Replacing a
+/// whole file and replacing a string inside it are one authority applied two
+/// ways.
 ///
-/// [`Change::Replace`] does not determine output bytes, whereas
-/// [`Change::Whole`] does. Preparation cannot read existing bytes before a
-/// permit exists; both forms nevertheless authorize exactly the named path.
+/// **[`Change::Replace`] does not determine the resulting bytes** and
+/// [`Change::Whole`] does. That is a real difference in what a party
+/// authorising this call is being shown, and it is unavoidable: the bytes an
+/// edit produces are a function of the bytes already there, and the only
+/// moment that could compute them is `prepare` — which has no read authority,
+/// because it runs before a `Permit` exists. See
+/// `docs/internals/decisions/2026-08-23-an-edit-is-two-authorities-and-a-conditional-write.md`.
+/// What is *not* weakened is the authority granted: both reach exactly the one
+/// path the op names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     /// Every byte of the file, replaced.
@@ -105,9 +121,27 @@ pub enum Change {
     /// occurrence must exist. Bulk mode replaces original non-overlapping matches.
     Replace {
         replace_all: bool,
-        old_string: String,
-        new_string: String,
+        chunks: Vec<ReplaceChunk>,
     },
+    /// A whole file whose bytes a bound network response produces at
+    /// execution time, such as a generated image. Like [`Change::Replace`]
+    /// it does not determine the resulting bytes; unlike it, the bytes do not
+    /// depend on the file. The authority is the exact path plus the named
+    /// producer, and the request that yields the bytes is bound by the
+    /// call's own `Op::Connect` request digest.
+    Generated {
+        /// What the file will be, for example `image/png`.
+        media_type: String,
+        /// What produces it, for example `api.openai.com gpt-image-2`.
+        producer: String,
+    },
+}
+
+/// One exact replacement, in execution order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceChunk {
+    pub old_string: String,
+    pub new_string: String,
 }
 
 /// A cell mutation, bound into the same permission identity as other writes.
@@ -201,9 +235,18 @@ impl Op {
         }
     }
 
-    /// Whether an operation mutates. Plan refuses mutation; default can settle ordinary
-    /// workspace reads. Derive this intrinsic property from the variant, not the current
-    /// producer inventory.
+    /// Does this operation change the world?
+    ///
+    /// The one axis the mode floor and ceiling turn on
+    /// (`2026-08-21-a-permit-nobody-can-widen.md` §6): `plan` refuses every
+    /// mutating op outright, and `default` reviews unresolved *sensitive*
+    /// actions rather than every action, because `ARCHITECTURE.md:238` counts
+    /// prompt fatigue as a security bug. A read inside the workspace that
+    /// stopped the run to ask would be that bug.
+    ///
+    /// Derived from the variant and not from a table, because unlike §6a's
+    /// head→operations mapping this is not a fact about *this build* — a
+    /// write mutates in every build there will ever be.
     pub fn mutates(&self) -> bool {
         match self {
             Op::Read { .. }
@@ -351,6 +394,10 @@ pub struct PreparedCall {
     ops: Vec<Op>,
     background: Option<DetachedExecId>,
     read_offset: u64,
+    read_items: Vec<(String, u64)>,
+    write_items: Vec<String>,
+    web_output_limit: Option<usize>,
+    monitor: Option<Box<DetachedExecMonitor>>,
     mcp: Option<Box<McpPreparedEnvelope>>,
     hook_http: Option<Box<HookHttpPreparedEnvelope>>,
     web_http: Option<Box<(HttpRoute, HttpRequest)>>,
@@ -401,6 +448,7 @@ pub struct McpPreparedEnvelope {
     transport_fingerprint: String,
     transport: ForeignTransportTarget,
     parameters: Vec<u8>,
+    resume_parameters: Option<(String, Value)>,
     annotations: Value,
 }
 
@@ -432,6 +480,13 @@ impl McpPreparedEnvelope {
     pub fn parameters(&self) -> &[u8] {
         &self.parameters
     }
+
+    /// Protocol state and input responses attached by a verified continuation.
+    pub fn resume_parameters(&self) -> Option<(&str, &Value)> {
+        self.resume_parameters
+            .as_ref()
+            .map(|(state, responses)| (state.as_str(), responses))
+    }
 }
 
 impl PreparedCall {
@@ -441,6 +496,10 @@ impl PreparedCall {
             ops: vec![first],
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             hook_http: None,
             web_http: None,
@@ -489,6 +548,48 @@ impl PreparedCall {
 
     pub fn read_offset(&self) -> u64 {
         self.read_offset
+    }
+
+    /// Presentation names and offsets for ordered native read operations.
+    pub fn with_read_items(mut self, items: Vec<(String, u64)>) -> Self {
+        self.read_items = items;
+        self
+    }
+
+    pub fn read_items(&self) -> &[(String, u64)] {
+        &self.read_items
+    }
+
+    /// Original names for the ordered native whole-file write operations.
+    pub fn with_write_items(mut self, items: Vec<String>) -> Self {
+        self.write_items = items;
+        self
+    }
+
+    pub fn write_items(&self) -> &[String] {
+        &self.write_items
+    }
+
+    /// Requested rendered-output bound for a web fetch; this grants no extra
+    /// authority and is outside the authority fingerprint.
+    pub fn with_web_output_limit(mut self, bytes: usize) -> Self {
+        self.web_output_limit = Some(bytes);
+        self
+    }
+
+    pub fn web_output_limit(&self) -> Option<usize> {
+        self.web_output_limit
+    }
+
+    /// Requested output subscription for an inspected session process; this
+    /// grants no extra authority and is outside the authority fingerprint.
+    pub fn with_monitor(mut self, monitor: DetachedExecMonitor) -> Self {
+        self.monitor = Some(Box::new(monitor));
+        self
+    }
+
+    pub fn monitor(&self) -> Option<&DetachedExecMonitor> {
+        self.monitor.as_deref()
     }
 
     pub fn tool(&self) -> &str {
@@ -559,6 +660,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -566,6 +671,7 @@ impl PreparedCall {
                 transport_fingerprint,
                 transport,
                 parameters,
+                resume_parameters: None,
                 annotations: Value::Null,
             })),
             hook_http: None,
@@ -613,6 +719,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -620,6 +730,7 @@ impl PreparedCall {
                 transport_fingerprint,
                 transport,
                 parameters,
+                resume_parameters: None,
                 annotations: Value::Null,
             })),
             hook_http: None,
@@ -664,6 +775,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: Some(Box::new(McpPreparedEnvelope {
                 subject,
                 operation,
@@ -671,6 +786,7 @@ impl PreparedCall {
                 transport_fingerprint,
                 transport,
                 parameters,
+                resume_parameters: None,
                 annotations: Value::Null,
             })),
             hook_http: None,
@@ -689,6 +805,57 @@ impl PreparedCall {
 
     pub fn mcp_envelope(&self) -> Option<&McpPreparedEnvelope> {
         self.mcp.as_deref()
+    }
+
+    /// The same prepared call, re-aimed at `tasks/get` or `tasks/cancel` for
+    /// `task_id`. Invocations, transport, admission and operations are the
+    /// original's, so classification and the egress claim are the original's.
+    /// Only [`crate::mcp::McpTaskTicket`] calls this.
+    pub(crate) fn mcp_task_call(
+        &self,
+        operation: McpOperationKind,
+        task_id: &str,
+        responses: Option<Value>,
+    ) -> Result<Self, crate::mcp::McpProjectionError> {
+        let envelope = self
+            .mcp
+            .as_deref()
+            .ok_or(crate::mcp::McpProjectionError::InvalidIdentity)?;
+        let McpSubject::Tool { server, name } = envelope.subject() else {
+            return Err(crate::mcp::McpProjectionError::InvalidIdentity);
+        };
+        let subject = McpSubject::Task {
+            server: server.clone(),
+            tool: name.clone(),
+            task_id: task_id.to_owned(),
+        };
+        subject.validate()?;
+        if !matches!(
+            operation,
+            McpOperationKind::GetTask | McpOperationKind::CancelTask | McpOperationKind::UpdateTask
+        ) || !operation.matches(&subject)
+            || (operation == McpOperationKind::UpdateTask) != responses.is_some()
+        {
+            return Err(crate::mcp::McpProjectionError::InvalidIdentity);
+        }
+        let mut params = serde_json::json!({ "taskId": task_id });
+        if let Some(responses) = responses {
+            params["inputResponses"] = responses;
+        }
+        let parameters = serde_json::to_vec(&params)
+            .map_err(|_| crate::mcp::McpProjectionError::InvalidContent)?;
+        let mut call = self.clone();
+        call.mcp = Some(Box::new(McpPreparedEnvelope {
+            subject,
+            operation,
+            admission: envelope.admission.clone(),
+            transport_fingerprint: envelope.transport_fingerprint.clone(),
+            transport: envelope.transport.clone(),
+            parameters,
+            resume_parameters: None,
+            annotations: Value::Null,
+        }));
+        Ok(call)
     }
 
     pub fn hook_http(
@@ -731,6 +898,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             web_http: None,
             hook_http: Some(Box::new(HookHttpPreparedEnvelope {
@@ -749,15 +920,83 @@ impl PreparedCall {
 
     pub(crate) fn apply_verified_resume_parameters(
         &mut self,
-        parameters: &Value,
+        request_state: String,
+        input_responses: Value,
     ) -> Result<(), crate::mcp::McpProjectionError> {
         let envelope = self
             .mcp
             .as_deref_mut()
             .ok_or(crate::mcp::McpProjectionError::InvalidIdentity)?;
-        envelope.parameters = serde_json::to_vec(parameters)
-            .map_err(|_| crate::mcp::McpProjectionError::InvalidContent)?;
+        envelope.resume_parameters = Some((request_state, input_responses));
         Ok(())
+    }
+
+    /// The identity of a credential-free native GET apart from its path: the
+    /// logical host and port. `None` for every other call, including the POST
+    /// of a web search. A session reuses one approval for each later fetch from
+    /// the same host, so a host is asked about once, not once per URL.
+    pub(super) fn web_host_fingerprint(&self) -> Option<[u8; 32]> {
+        let (_, request) = self.web_http.as_deref()?;
+        let [Op::Connect { target, .. }] = self.ops.as_slice() else {
+            return None;
+        };
+        if request.method() != "GET" || self.background.is_some() {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        frame(&mut digest, b"ego:web-host:v1");
+        frame(&mut digest, target.to_string().as_bytes());
+        Some(digest.finalize().into())
+    }
+
+    /// The identity of an MCP tool call apart from its arguments: the tool, the
+    /// admitted server, the transport and the process or route that serves it.
+    ///
+    /// `None` for every other call. A session reuses one approval for each call
+    /// that shares this identity, so a server tool is asked about once, not once
+    /// per argument set. A reload that changes the admission or transport changes
+    /// the fingerprint and asks again.
+    pub(super) fn mcp_tool_fingerprint(&self) -> Option<[u8; 32]> {
+        let envelope = self.mcp.as_deref()?;
+        if envelope.operation != McpOperationKind::CallTool || self.background.is_some() {
+            return None;
+        }
+        let mut digest = Sha256::new();
+        frame(&mut digest, b"ego:mcp-tool-call:v1");
+        frame(&mut digest, self.tool.as_bytes());
+        frame(
+            &mut digest,
+            &serde_json::to_vec(&(&envelope.subject, &envelope.admission))
+                .expect("closed MCP identity"),
+        );
+        frame(&mut digest, envelope.transport_fingerprint.as_bytes());
+        frame(&mut digest, envelope.transport.to_string().as_bytes());
+        frame(&mut digest, &(self.ops.len() as u64).to_be_bytes());
+        for op in &self.ops {
+            match op {
+                Op::Opaque {
+                    tool, transport, ..
+                } => {
+                    frame(&mut digest, b"tool");
+                    frame(&mut digest, tool.to_string().as_bytes());
+                    frame(&mut digest, transport.to_string().as_bytes());
+                }
+                Op::Spawn { spec } => {
+                    frame(&mut digest, b"spawn");
+                    frame(
+                        &mut digest,
+                        &PreparedCall::new(&self.tool, Op::Spawn { spec: spec.clone() })
+                            .authority_fingerprint(),
+                    );
+                }
+                Op::ProtocolConnect { target } => {
+                    frame(&mut digest, b"protocol");
+                    frame(&mut digest, target.to_string().as_bytes());
+                }
+                _ => return None,
+            }
+        }
+        Some(digest.finalize().into())
     }
 
     /// Stable within the current contract: every canonical operation, MCP
@@ -802,15 +1041,25 @@ impl PreparedCall {
                         frame(&mut digest, b"whole");
                         frame(&mut digest, bytes);
                     }
+                    Change::Generated {
+                        media_type,
+                        producer,
+                    } => {
+                        frame(&mut digest, b"generated");
+                        frame(&mut digest, media_type.as_bytes());
+                        frame(&mut digest, producer.as_bytes());
+                    }
                     Change::Replace {
                         replace_all,
-                        old_string,
-                        new_string,
+                        chunks,
                     } => {
                         frame(&mut digest, b"replace");
                         frame(&mut digest, &[u8::from(*replace_all)]);
-                        frame(&mut digest, old_string.as_bytes());
-                        frame(&mut digest, new_string.as_bytes());
+                        frame(&mut digest, &(chunks.len() as u64).to_be_bytes());
+                        for chunk in chunks {
+                            frame(&mut digest, chunk.old_string.as_bytes());
+                            frame(&mut digest, chunk.new_string.as_bytes());
+                        }
                     }
                 },
                 Op::Spawn { spec } => {
@@ -890,6 +1139,13 @@ impl PreparedCall {
             frame(&mut digest, envelope.transport_fingerprint.as_bytes());
             frame(&mut digest, envelope.transport.to_string().as_bytes());
             frame(&mut digest, &envelope.parameters);
+            if let Some(resume) = &envelope.resume_parameters {
+                frame(&mut digest, b"mcp-resume");
+                frame(
+                    &mut digest,
+                    &serde_json::to_vec(resume).expect("closed MCP resume parameters"),
+                );
+            }
         }
         frame(&mut digest, &[u8::from(self.hook_http.is_some())]);
         if let Some(envelope) = &self.hook_http {
@@ -941,6 +1197,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             hook_http: None,
             web_http: None,
@@ -969,6 +1229,10 @@ impl PreparedCall {
             ],
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             hook_http: None,
             web_http: None,
@@ -1011,6 +1275,10 @@ impl PreparedCall {
             ops,
             background: None,
             read_offset: 0,
+            read_items: Vec::new(),
+            write_items: Vec::new(),
+            web_output_limit: None,
+            monitor: None,
             mcp: None,
             hook_http: None,
             web_http: None,

@@ -1,0 +1,67 @@
+# Dependency policy, enforced by `cargo deny check` in CI and by `just audit`.
+#
+# The allow-list below is not a guess at what a Rust project usually pulls in:
+# it is the exact set of SPDX identifiers appearing in `cargo metadata
+# --all-features` for this workspace as of 2026-09-07, with the identifiers that
+# only ever appear on the permissive side of an `OR` left out. That matters for
+# the one case worth naming — `MIT OR Apache-2.0 OR LGPL-2.1-or-later` — where
+# the LGPL arm is never selected because two permissive arms precede it. If a
+# future dependency offers LGPL *alone*, this file has no entry for it and the
+# check fails, which is the point.
+
+[advisories]
+# A security advisory always fails the build; current `cargo deny` does not
+# offer a lint level for that and is right not to. `yanked` is raised to the
+# same footing here, because a yanked release is one the publisher withdrew and
+# a build still resolving to it is reproducing a known-bad graph.
+#
+# `unmaintained = "workspace"` narrows that particular check to crates this
+# workspace actually depends on. Transitive unmaintained crates are a real
+# signal but not an actionable one — the fix belongs to the intermediate
+# dependency — and failing on them turns an upstream's inactivity into an
+# inability to ship a hotfix here.
+yanked = "deny"
+unmaintained = "workspace"
+ignore = []
+
+[licenses]
+# Anything not listed is a failure. There is no `copyleft = "warn"` escape here
+# on purpose: a licence question is answered before the dependency lands, not
+# after it is already in a release.
+confidence-threshold = 0.9
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+# Two versions of one crate is normal in a large graph and is not worth failing
+# a build over; it is worth seeing, because it is usually the first visible sign
+# that a dependency bump was only half applied.
+multiple-versions = "warn"
+wildcards = "deny"
+# A path dependency between two crates in this workspace has no version to
+# state — `ego-core.workspace = true` resolves to `*` — and denying that would
+# fail on every crate here while catching nothing. `wildcards = "deny"` exists
+# to stop a wildcard against the *registry*, where it means "whatever version
+# resolves today", and that stays denied.
+allow-wildcard-paths = true
+
+[sources]
+# Everything comes from crates.io. A git dependency is a supply-chain decision
+# that should require editing this file, not just a manifest.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

@@ -4,7 +4,7 @@
 ///
 /// Ordered lowest-precedence first for readability; [`resolve`](super::resolve)
 /// applies the layers highest-precedence-last (`flags` beats everything).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Source {
     /// Built-in credential rules, below operator-written authority.

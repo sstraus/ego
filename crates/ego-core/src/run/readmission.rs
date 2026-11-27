@@ -68,6 +68,7 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
                     &approved,
                     CanonPath::new(snapshot.root.as_path()),
                     bindings.human().as_deref(),
+                    false,
                     journal,
                     |message| bindings.sink_factory.execution_policy_notice(message),
                 )
@@ -99,12 +100,18 @@ impl<S: SessionStore, E: RunExecutor, C: Clock, I: IdSource> RunController<S, E,
 
 /// Decide a measured saved-session authority transition before external effects.
 /// Both run-controller continuations and direct terminal sessions use this policy.
+///
+/// `accept_delta` is the owner's explicit resume option: the delta shown in the
+/// notice is allowed without a question. It is journaled as a party decision and
+/// covers only this measurement; ceilings were applied before it was measured.
+#[allow(clippy::too_many_arguments)]
 pub async fn admit_execution_policy(
     previous: &ExecObservation,
     observed: &ExecObservation,
     approved_roots: &[crate::permit::ProfileRoot],
     root: CanonPath,
     human: Option<&dyn crate::permit::HumanApprover>,
+    accept_delta: bool,
     journal: &mut crate::turn::Journal<'_>,
     notice: impl Fn(&str) -> Result<(), String>,
 ) -> Result<bool, RunError> {
@@ -134,10 +141,17 @@ pub async fn admit_execution_policy(
             },
         )?;
         let decision = match human {
+            _ if accept_delta => Some(crate::permit::PermissionDecision::Allow),
             Some(human) => Some(human.decide(item, &question).await),
             None => None,
         };
-        let allowed = matches!(decision, Some(crate::permit::PermissionDecision::Allow));
+        let allowed = matches!(
+            decision,
+            Some(
+                crate::permit::PermissionDecision::Allow
+                    | crate::permit::PermissionDecision::AllowOnce
+            )
+        );
         journal.append(
             turn,
             Some(item),

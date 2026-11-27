@@ -1,0 +1,38 @@
+{
+  "recorded_at": "2026-11-20T18:38:32Z",
+  "recorded_with": "ego 0.4.18 run --bare, xai-oauth/grok-4.7, OAuth login, 'Reply with OK.'; debug log target ego_ai::provider_status",
+  "redaction": "method, URL, status and response header names only; no header values, no request headers, no body",
+  "request": {
+    "method": "POST",
+    "url": "https://api.x.ai/v1/responses"
+  },
+  "status": 200,
+  "response_header_names": [
+    "access-control-allow-origin",
+    "access-control-expose-headers",
+    "cache-control",
+    "cf-cache-status",
+    "cf-ray",
+    "content-type",
+    "date",
+    "server",
+    "set-cookie",
+    "strict-transport-security",
+    "vary",
+    "x-data-retention",
+    "x-ratelimit-limit-requests",
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining-tokens",
+    "x-request-id",
+    "x-watermark",
+    "x-zero-data-retention"
+  ],
+  "quota_header_names": [
+    "x-ratelimit-limit-requests",
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining-tokens"
+  ],
+  "body_recorded": false
+}

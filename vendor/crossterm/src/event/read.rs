@@ -39,6 +39,16 @@ impl InternalEventReader {
         self.source.as_ref().expect("reader source not set").waker()
     }
 
+    #[cfg(feature = "event-stream")]
+    pub(crate) fn try_waker(&self) -> io::Result<Waker> {
+        self.source
+            .as_ref()
+            .map(|source| source.waker())
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Other, "Failed to initialize input reader")
+            })
+    }
+
     /// Discard matching events already available, without waiting or losing input.
     #[cfg(unix)]
     pub(crate) fn discard_pending<F: Filter>(&mut self, filter: &F) -> io::Result<()> {
@@ -282,9 +292,9 @@ mod tests {
     #[test]
     #[cfg(all(unix, feature = "bracketed-paste"))]
     fn partial_paste_rechecks_already_ready_bytes() {
-        use std::{io::Write, os::unix::net::UnixStream};
         use crate::event::source::unix::UnixInternalEventSource;
         use crate::terminal::sys::file_descriptor::FileDesc;
+        use std::{io::Write, os::unix::net::UnixStream};
 
         let (receiver, mut sender) = UnixStream::pair().unwrap();
         #[cfg(feature = "libc")]
@@ -296,24 +306,30 @@ mod tests {
         let fd = FileDesc::Owned(receiver.into());
         let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
         let text = "x".repeat(2048);
-        sender.write_all(format!("\x1b[200~{text}\x1b[201~").as_bytes()).unwrap();
+        sender
+            .write_all(format!("\x1b[200~{text}\x1b[201~").as_bytes())
+            .unwrap();
         let mut reader = InternalEventReader {
             events: VecDeque::new(),
             source: Some(Box::new(source)),
             skipped_events: Vec::new(),
         };
-        assert!(reader.poll(Some(Duration::from_millis(100)), &InternalEventFilter).unwrap());
-        assert_eq!(reader.read(&InternalEventFilter).unwrap(), InternalEvent::Event(Event::Paste(text)));
+        assert!(reader
+            .poll(Some(Duration::from_millis(100)), &InternalEventFilter)
+            .unwrap());
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Paste(text))
+        );
     }
-
 
     // Catches: a zero-timeout drain follows new paste bytes until the producer stops.
     #[test]
     #[cfg(all(unix, feature = "bracketed-paste"))]
     fn zero_timeout_does_not_follow_continuously_arriving_paste() {
-        use std::{io::Write, os::unix::net::UnixStream, time::Instant};
         use crate::event::source::unix::UnixInternalEventSource;
         use crate::terminal::sys::file_descriptor::FileDesc;
+        use std::{io::Write, os::unix::net::UnixStream, time::Instant};
         let (receiver, mut sender) = UnixStream::pair().unwrap();
         #[cfg(feature = "libc")]
         let fd = {
@@ -342,11 +358,101 @@ mod tests {
         reader.discard_pending(&CursorPositionFilter).unwrap();
         let elapsed = start.elapsed();
         // Drain the producer afterward even on a correct early return.
-        assert!(matches!(reader.read(&InternalEventFilter).unwrap(), InternalEvent::Event(Event::Paste(_))));
+        assert!(matches!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Paste(_))
+        ));
         let _sender = writer.join().unwrap();
         eprintln!("continuous paste zero-timeout drain: {elapsed:?}");
-        assert!(elapsed < Duration::from_millis(100), "zero-timeout drain followed new input for {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "zero-timeout drain followed new input for {elapsed:?}"
+        );
     }
+    // Catches: a cursor drain consumes bytes but leaves queued TTY readiness,
+    // making the next timed poll block in a stale blocking read.
+    #[test]
+    #[cfg(all(unix, feature = "event-stream", not(feature = "use-dev-tty")))]
+    fn cursor_drain_after_external_wake_does_not_block_on_stale_readiness() {
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+        use std::{io::Write, os::unix::net::UnixStream, time::Instant};
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::unix::io::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        source.waker().wake().unwrap();
+        sender.write_all(b"\x1b[1;1R").unwrap();
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        reader
+            .poll(Some(Duration::from_millis(100)), &InternalEventFilter)
+            .unwrap();
+        reader.discard_pending(&CursorPositionFilter).unwrap();
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            sender.write_all(b"x").unwrap();
+        });
+        let start = Instant::now();
+        let ready = reader
+            .poll(Some(Duration::from_millis(20)), &InternalEventFilter)
+            .unwrap();
+        let elapsed = start.elapsed();
+        writer.join().unwrap();
+        assert!(
+            !ready && elapsed < Duration::from_millis(100),
+            "cursor drain left stale readiness: ready={ready}, elapsed={elapsed:?}"
+        );
+    }
+
+    // Catches: an external wake discards keyboard readiness from the same OS poll.
+    #[test]
+    #[cfg(all(unix, feature = "event-stream"))]
+    fn external_wake_preserves_simultaneous_key_readiness() {
+        use crate::event::source::unix::UnixInternalEventSource;
+        use crate::terminal::sys::file_descriptor::FileDesc;
+        use std::{io::Write, os::unix::net::UnixStream};
+        let (receiver, mut sender) = UnixStream::pair().unwrap();
+        #[cfg(feature = "libc")]
+        let fd = {
+            use std::os::unix::io::AsRawFd;
+            FileDesc::new(receiver.as_raw_fd(), false)
+        };
+        #[cfg(not(feature = "libc"))]
+        let fd = FileDesc::Owned(receiver.into());
+        let source = UnixInternalEventSource::from_file_descriptor(fd).unwrap();
+        source.waker().wake().unwrap();
+        sender.write_all(b"x").unwrap();
+        let mut reader = InternalEventReader {
+            events: VecDeque::new(),
+            source: Some(Box::new(source)),
+            skipped_events: Vec::new(),
+        };
+        // Some backends report the key first; otherwise the wake returns false.
+        let ready = reader
+            .poll(Some(Duration::from_millis(100)), &InternalEventFilter)
+            .unwrap();
+        assert!(
+            ready
+                || reader
+                    .poll(Some(Duration::from_millis(100)), &InternalEventFilter)
+                    .unwrap(),
+            "wake discarded simultaneous input readiness"
+        );
+        assert_eq!(
+            reader.read(&InternalEventFilter).unwrap(),
+            InternalEvent::Event(Event::Key(super::super::KeyCode::Char('x').into()))
+        );
+    }
+
     #[test]
     fn test_poll_fails_without_event_source() {
         let mut reader = InternalEventReader {

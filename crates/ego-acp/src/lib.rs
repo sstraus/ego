@@ -1,8 +1,9 @@
 //! ACP projection: core events → `session/update`, ACP requests → core
 //! operations.
 //!
-//! A thin projection over `ego-core`; it retains only protocol correlation and active
-//! opaque cancellation keys while core owns the durable run lifecycle.
+//! See `ARCHITECTURE.md` §7. A thin projection over `ego-core`; it retains only
+//! protocol correlation and active opaque cancellation keys while core owns
+//! the durable run lifecycle.
 
 pub mod auth;
 pub mod controls;

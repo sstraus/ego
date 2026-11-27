@@ -81,6 +81,70 @@ windows = [
 name = "crossterm"
 path = "src/lib.rs"
 
+[[example]]
+name = "copy-to-clipboard"
+path = "examples/copy-to-clipboard.rs"
+required-features = ["osc52"]
+
+[[example]]
+name = "event-match-modifiers"
+path = "examples/event-match-modifiers.rs"
+required-features = [
+    "bracketed-paste",
+    "events",
+]
+
+[[example]]
+name = "event-poll-read"
+path = "examples/event-poll-read.rs"
+required-features = [
+    "bracketed-paste",
+    "events",
+]
+
+[[example]]
+name = "event-read"
+path = "examples/event-read.rs"
+required-features = [
+    "bracketed-paste",
+    "events",
+]
+
+[[example]]
+name = "event-read-char-line"
+path = "examples/event-read-char-line.rs"
+required-features = ["events"]
+
+[[example]]
+name = "event-stream-async-std"
+path = "examples/event-stream-async-std.rs"
+required-features = [
+    "event-stream",
+    "events",
+]
+
+[[example]]
+name = "event-stream-tokio"
+path = "examples/event-stream-tokio.rs"
+required-features = [
+    "event-stream",
+    "events",
+]
+
+[[example]]
+name = "is_tty"
+path = "examples/is_tty.rs"
+
+[[example]]
+name = "key-display"
+path = "examples/key-display.rs"
+required-features = ["events"]
+
+[[example]]
+name = "stderr"
+path = "examples/stderr.rs"
+required-features = ["events"]
+
 [dependencies.base64]
 version = "0.22"
 optional = true
@@ -108,6 +172,28 @@ version = "0.12"
 version = "1.0"
 features = ["derive"]
 optional = true
+
+[dev-dependencies.async-std]
+version = "1.13"
+
+[dev-dependencies.futures]
+version = "0.3"
+
+[dev-dependencies.futures-timer]
+version = "3.0"
+
+[dev-dependencies.serde_json]
+version = "1.0"
+
+[dev-dependencies.serial_test]
+version = "3.0.0"
+
+[dev-dependencies.temp-env]
+version = "0.3.6"
+
+[dev-dependencies.tokio]
+version = "1.44"
+features = ["full"]
 
 [target."cfg(unix)".dependencies.filedescriptor]
 version = "0.8"

@@ -1,0 +1,6 @@
+unsandboxed baseline: owned PID/PGID=99253, argv=['/opt/homebrew/bin/pnpm', 'exec', '/usr/bin/true'], PNPM_HOME=/Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.621-unsandboxed-rpcq7am7/pnpm
+unsandboxed baseline: timeout=False, exit=0, elapsed=5.648608709s, stdout=b'', stderr=b''
+fixture: waited dead PID=99735, signal-zero ESRCH; owner='99735-1792930274048053000-0'
+unsandboxed dead-owner witness: owned PID/PGID=99736, argv=['/opt/homebrew/bin/pnpm', 'exec', '/usr/bin/true'], PNPM_HOME=/Users/stefano.straus/Gits/personal/ego__wt/fix-sandbox-escalation-620/crates/ego-tools/.621-unsandboxed-rpcq7am7/pnpm
+unsandboxed dead-owner witness: timeout=True, exit=-9, elapsed=10.063030042s, stdout=b'', stderr=b''
+owner_after='99735-1792930274048053000-0'; owner_unchanged=True

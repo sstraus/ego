@@ -1,0 +1,5703 @@
+//! contract for argv-native execution, confinement, and process evidence.
+//!
+//! The provider is never involved here. Each process is a real argv-native
+//! child launched through the same run-owned guarded process path production uses.
+//! Platform evidence is accepted only when paired controls demonstrate it;
+//! unsupported guarantees must return `MissingCapabilities` before spawn.
+//!
+//! Direct backend tests prove lifecycle, evidence, and paired confinement
+//! behaviour. The composite test below also proves the production
+//! ExecTool -> PolicyEngine -> Authorized -> GuardedEffects -> process adapter
+//! path; direct backend calls never stand in for that authorization proof.
+
+use std::ffi::OsString;
+use std::future::Future;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream, UdpSocket};
+use std::process::Command;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use ego_core::config::{Mode, PermCfg, Ruleset, Source};
+use ego_core::event::domain::CancelCause;
+use ego_core::event::id::SessionId;
+use ego_core::permit::{
+    BackendIdentity, CanonPath, Classification, Confinement, EnvName, EnvPolicy, ExecCaps,
+    ExecObservation, Op, PolicyDenied, PolicyDigest, RunConfinement, SpawnSpec, StreamProvenance,
+    ToolOutputProvenance, ToolResult,
+};
+use ego_core::store::evidence::{EvidenceRef, EvidenceStore as _};
+use ego_core::turn::CancelToken;
+use ego_core::turn::{ToolEffectPorts, Tools as TurnTools};
+use ego_tools::exec::{
+    ExecLimits, ExecRunConfig, HttpCallTimeout, ProcessError, RunEffectPorts, SessionEvidenceStore,
+};
+use ego_tools::fs::OsFs;
+use ego_tools::http::SystemResolver;
+use ego_tools::tools::builtins;
+
+fn block_on<F: Future>(future: F) -> F::Output {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("test Tokio runtime")
+        .block_on(future)
+}
+
+fn decode_standard_base64(encoded: &str) -> Vec<u8> {
+    fn value(byte: u8) -> u8 {
+        match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            other => panic!("invalid STANDARD base64 byte: {other:?}"),
+        }
+    }
+
+    assert_eq!(encoded.len() % 4, 0, "STANDARD base64 is quartet-aligned");
+    let mut decoded = Vec::with_capacity(encoded.len() / 4 * 3);
+    for quartet in encoded.as_bytes().as_chunks::<4>().0 {
+        let first = value(quartet[0]);
+        let second = value(quartet[1]);
+        decoded.push((first << 2) | (second >> 4));
+        if quartet[2] != b'=' {
+            let third = value(quartet[2]);
+            decoded.push((second << 4) | (third >> 2));
+            if quartet[3] != b'=' {
+                let fourth = value(quartet[3]);
+                decoded.push((third << 6) | fourth);
+            }
+        }
+    }
+    decoded
+}
+
+struct Run {
+    _evidence_root: tempfile::TempDir,
+    evidence: SessionEvidenceStore,
+    ports: RunEffectPorts,
+    observation: ExecObservation,
+    cancel: CancelToken,
+}
+
+fn cwd() -> CanonPath {
+    CanonPath::new(std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap())
+}
+
+fn exact_executable_rule(executable: &str) -> ego_core::permit::rule::Rule {
+    let quoted = executable.replace('\\', "\\\\").replace('"', "\\\"");
+    ego_core::permit::rule::Rule::load(&format!("exec(\"{quoted}\" *)"))
+        .expect("the exact executable rule parses")
+}
+
+fn run_confinement(level: Confinement, offline: bool, workspace: CanonPath) -> RunConfinement {
+    RunConfinement::new(level, offline, workspace).unwrap()
+}
+
+/// One attempt to open a run, keeping the session evidence store whether the
+/// backend was accepted or refused. A refusal cites evidence stored in that
+/// session, so a test that drops the store cannot read what it cites.
+struct Attempt {
+    evidence_root: tempfile::TempDir,
+    evidence: SessionEvidenceStore,
+    cancel: CancelToken,
+    outcome: Result<
+        (
+            RunEffectPorts,
+            ExecObservation,
+            Option<ego_core::store::evidence::EvidenceRef>,
+        ),
+        ProcessError,
+    >,
+}
+
+impl Attempt {
+    fn into_run(self) -> Result<Run, ProcessError> {
+        let (ports, observation, _) = self.outcome?;
+        Ok(Run {
+            _evidence_root: self.evidence_root,
+            evidence: self.evidence,
+            ports,
+            observation,
+            cancel: self.cancel,
+        })
+    }
+}
+
+struct ConfigFixture {
+    evidence_root: tempfile::TempDir,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    session: SessionId,
+    evidence: SessionEvidenceStore,
+    cancel: CancelToken,
+    config: ExecRunConfig,
+}
+
+fn config_fixture(
+    level: Confinement,
+    offline: bool,
+    workspace: CanonPath,
+    hard_cap: u64,
+    preview: usize,
+) -> ConfigFixture {
+    config_fixture_for(
+        run_confinement(level, offline, workspace),
+        hard_cap,
+        preview,
+    )
+}
+
+fn config_fixture_for(policy: RunConfinement, hard_cap: u64, preview: usize) -> ConfigFixture {
+    let evidence_root = tempfile::tempdir().expect("evidence root");
+    let session = SessionId::new();
+    let evidence = SessionEvidenceStore::open(evidence_root.path(), session, hard_cap)
+        .expect("session evidence store");
+    let cancel = CancelToken::new();
+    let limits = ExecLimits::new(preview, Duration::from_millis(250)).expect("exec limits");
+    let http_call_timeout =
+        HttpCallTimeout::new(Duration::from_secs(1)).expect("HTTP call timeout");
+    let config = ExecRunConfig::new(
+        policy,
+        evidence.clone(),
+        cancel.clone(),
+        limits,
+        http_call_timeout,
+        None,
+        Arc::new(SystemResolver::new()),
+    );
+    ConfigFixture {
+        evidence_root,
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        session,
+        evidence,
+        cancel,
+        config,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn attempt_run(
+    level: Confinement,
+    offline: bool,
+    workspace: CanonPath,
+    hard_cap: u64,
+    preview: usize,
+) -> Attempt {
+    attempt_policy(
+        run_confinement(level, offline, workspace),
+        hard_cap,
+        preview,
+    )
+}
+
+fn attempt_policy(policy: RunConfinement, hard_cap: u64, preview: usize) -> Attempt {
+    let fixture = config_fixture_for(policy, hard_cap, preview);
+    let outcome = block_on(RunEffectPorts::for_run(fixture.config));
+    Attempt {
+        evidence_root: fixture.evidence_root,
+        evidence: fixture.evidence,
+        cancel: fixture.cancel,
+        outcome,
+    }
+}
+
+fn open_run(
+    level: Confinement,
+    offline: bool,
+    workspace: CanonPath,
+    hard_cap: u64,
+    preview: usize,
+) -> Result<Run, ProcessError> {
+    open_policy(
+        run_confinement(level, offline, workspace),
+        hard_cap,
+        preview,
+    )
+}
+
+fn open_policy(policy: RunConfinement, hard_cap: u64, preview: usize) -> Result<Run, ProcessError> {
+    let attempt = attempt_policy(policy, hard_cap, preview);
+    if let Err(ProcessError::MissingCapabilities(missing)) = &attempt.outcome
+        && let Some(reference) = missing.probe_evidence()
+    {
+        eprintln!(
+            "confinement probe evidence: {}",
+            String::from_utf8_lossy(&read_evidence_pages(&attempt.evidence, reference))
+        );
+    }
+    attempt.into_run()
+}
+
+/// The one way a supported host may decline to demonstrate a confinement
+/// guarantee.
+///
+/// `MissingCapabilities` used to be an ordinary accepted outcome here, so the
+/// suite stayed green for months while `workspace` was refused on every macOS
+/// host. An installed backend must now prove the guarantee. A host that has no
+/// backend at all — no `sandbox-exec`, no usable Landlock ABI — has to say so
+/// by name, because that is a statement about the machine, not about ego.
+const BACKEND_ABSENT: &str = "EGO_TEST_CONFINEMENT_BACKEND_ABSENT";
+
+/// Open a run that requires real confinement, or `None` on a declared
+/// backend-less host, where the refusal itself is the contract.
+fn open_confined_run(
+    level: Confinement,
+    offline: bool,
+    workspace: CanonPath,
+    hard_cap: u64,
+    preview: usize,
+) -> Option<Run> {
+    match open_run(level, offline, workspace, hard_cap, preview) {
+        Ok(run) => Some(run),
+        Err(ProcessError::MissingCapabilities(missing))
+            if cfg!(not(any(target_os = "linux", target_os = "macos")))
+                || std::env::var_os(BACKEND_ABSENT).is_some() =>
+        {
+            assert_eq!(
+                missing.required(),
+                required_caps(level, offline),
+                "a refusal must still name the exact guarantees the run asked for"
+            );
+            None
+        }
+        Err(error) => panic!(
+            "{level} confinement must be demonstrated on this host: {error}. \
+             Set {BACKEND_ABSENT}=1 only if this machine has no confinement backend."
+        ),
+    }
+}
+
+fn required_caps(level: Confinement, offline: bool) -> ExecCaps {
+    let filesystem = match level {
+        Confinement::Ro => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_DENIED),
+        Confinement::Workspace => ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+        Confinement::Adaptive => ExecCaps::ADAPTIVE,
+        Confinement::Off => ExecCaps::empty(),
+    };
+    if offline {
+        filesystem.union(ExecCaps::NO_IP_NETWORK)
+    } else {
+        filesystem
+    }
+}
+
+fn execute(run: &Run, spec: SpawnSpec) -> Result<(), ProcessError> {
+    block_on(run.ports.process().execute(&spec)).map(|_| ())
+}
+
+fn assert_two_process_streams_with_full_output(result: &ToolResult) {
+    let process_blocks = result
+        .content
+        .iter()
+        .filter(|block| matches!(&block.provenance, ToolOutputProvenance::Process { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        process_blocks.len(),
+        2,
+        "completed execution must expose exactly stdout and stderr process blocks"
+    );
+    assert_eq!(
+        process_blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    &block.provenance,
+                    ToolOutputProvenance::Process {
+                        stream: StreamProvenance::Stdout,
+                        ..
+                    }
+                )
+            })
+            .count(),
+        1,
+        "completed execution must expose one stdout block"
+    );
+    assert_eq!(
+        process_blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    &block.provenance,
+                    ToolOutputProvenance::Process {
+                        stream: StreamProvenance::Stderr,
+                        ..
+                    }
+                )
+            })
+            .count(),
+        1,
+        "completed execution must expose one stderr block"
+    );
+    assert!(
+        process_blocks
+            .iter()
+            .all(|block| block.full_output.is_some()),
+        "both process streams must retain full evidence references"
+    );
+}
+
+fn read_evidence_pages(evidence: &SessionEvidenceStore, reference: &EvidenceRef) -> Vec<u8> {
+    let mut offset = 0_u64;
+    let mut bytes = Vec::new();
+    loop {
+        let request = ego_core::store::evidence::EvidenceRead::new(reference.clone(), offset)
+            .expect("page offset is within the complete reference");
+        let page = block_on(evidence.read_page(&request)).expect("evidence page");
+        assert_eq!(page.reference, *reference);
+        assert_eq!(page.offset, offset);
+        assert!(page.bytes.len() <= ego_core::store::evidence::EVIDENCE_PAGE_BYTES);
+        bytes.extend_from_slice(&page.bytes);
+        match page.next_offset {
+            Some(next) => {
+                assert!(next > offset, "evidence pagination must advance");
+                offset = next;
+            }
+            None => break,
+        }
+    }
+    bytes
+}
+
+fn fixture_arg_spec(
+    name: &str,
+    args: impl IntoIterator<Item = OsString>,
+    timeout: Option<Duration>,
+    workspace: CanonPath,
+) -> SpawnSpec {
+    fixture_arg_spec_with_env(name, args, timeout, workspace, EnvPolicy::Inherited)
+}
+
+fn fixture_arg_spec_with_env(
+    name: &str,
+    args: impl IntoIterator<Item = OsString>,
+    timeout: Option<Duration>,
+    workspace: CanonPath,
+    env: EnvPolicy,
+) -> SpawnSpec {
+    let mut argv = vec![
+        OsString::from(std::env::current_exe().unwrap()),
+        OsString::from("--ignored"),
+        OsString::from("--exact"),
+        OsString::from(name),
+        OsString::from("--nocapture"),
+        OsString::from("--"),
+    ];
+    argv.extend(args);
+    SpawnSpec::new(argv, Some(workspace), timeout, env).unwrap()
+}
+
+fn fixture_spec(
+    name: &str,
+    args: &[&std::path::Path],
+    timeout: Option<Duration>,
+    workspace: CanonPath,
+) -> SpawnSpec {
+    fixture_arg_spec(
+        name,
+        args.iter()
+            .map(|arg| OsString::from(arg.to_str().expect("fixture path is UTF-8"))),
+        timeout,
+        workspace,
+    )
+}
+
+/// One mutation a confined child can actually reach.
+///
+/// Confinement admits `process-exec*` only inside the runtime roots and the
+/// workspace, and the test executable lives under `target/`, in neither. So a
+/// mutation driven by this crate's own fixture binary could never run under
+/// `ro` or `workspace` — which is how every confined assertion here used to
+/// settle for a capability refusal instead. These are the installed utilities
+/// the backend's own paired probes use, reached through the same production
+/// exec path.
+fn mutation_spec(operation: &str, paths: &[&std::path::Path], workspace: CanonPath) -> SpawnSpec {
+    #[cfg(windows)]
+    if operation == "create" {
+        return fixture_spec("exec_contract_fixture_creates", paths, None, workspace);
+    }
+
+    let path = |index: usize| {
+        OsString::from(
+            paths
+                .get(index)
+                .unwrap_or_else(|| panic!("{operation} needs a path at {index}"))
+                .to_str()
+                .expect("fixture path is UTF-8"),
+        )
+    };
+    let argv = match operation {
+        "create" => vec![OsString::from("/usr/bin/touch"), path(0)],
+        "overwrite" => vec![OsString::from("/bin/cp"), path(0), path(1)],
+        "truncate" => vec![
+            OsString::from("/usr/bin/truncate"),
+            OsString::from("-s"),
+            OsString::from("0"),
+            path(0),
+        ],
+        "remove" => vec![OsString::from("/bin/rm"), path(0)],
+        "rename" => vec![OsString::from("/bin/mv"), path(0), path(1)],
+        "link" => vec![OsString::from("/bin/ln"), path(0), path(1)],
+        other => panic!("unknown mutation operation: {other}"),
+    };
+    SpawnSpec::new(argv, Some(workspace), None, EnvPolicy::Inherited)
+        .expect("a mutation specification is valid before launch")
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_emits_both_streams() {
+    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
+    for _ in 0..4096 {
+        stdout.write_all(b"stdout-fixture\n").unwrap();
+        stderr.write_all(b"stderr-fixture\n").unwrap();
+    }
+    stdout.flush().unwrap();
+    stderr.flush().unwrap();
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_emits_binary_streams() {
+    std::io::stdout()
+        .write_all(&[0xff, 0xfe, 0x00, b'o', b'u', b't'])
+        .unwrap();
+    std::io::stderr()
+        .write_all(&[0x80, 0x81, 0x00, b'e', b'r', b'r'])
+        .unwrap();
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_emits_until_killed() {
+    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
+    loop {
+        stdout.write_all(b"stdout-unbounded\n").unwrap();
+        stderr.write_all(b"stderr-unbounded\n").unwrap();
+        stdout.flush().unwrap();
+        stderr.flush().unwrap();
+    }
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_waits_after_large_output() {
+    let mut args = std::env::args()
+        .skip_while(|argument| argument != "--")
+        .skip(1);
+    let ready = args.next().expect("ready marker path");
+    let release = args.next().expect("release marker path");
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(b"first-stdout\n").unwrap();
+    stdout.write_all(&vec![b'x'; 100 * 1024]).unwrap();
+    stdout.write_all(b"\nlast-stdout\n").unwrap();
+    stdout.flush().unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::path::Path::new(&release).exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::io::stderr().write_all(b"last-stderr\n").unwrap();
+    std::process::exit(7);
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_prints_between_barriers() {
+    let mut args = std::env::args()
+        .skip_while(|argument| argument != "--")
+        .skip(1);
+    let ready = args.next().expect("ready marker path");
+    let go = args.next().expect("go marker path");
+    let release = args.next().expect("release marker path");
+    let wait = |marker: &str| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !std::path::Path::new(marker).exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(b"booting: server ready on 1\n").unwrap();
+    stdout.flush().unwrap();
+    std::fs::write(ready, b"ready").unwrap();
+    wait(&go);
+    stdout
+        .write_all(b"warming up\nserver ready on 3000\n")
+        .unwrap();
+    stdout.flush().unwrap();
+    std::io::stderr().write_all(b"warn: slow\n").unwrap();
+    wait(&release);
+    stdout.write_all(b"server ready again on 3001\n").unwrap();
+    stdout.flush().unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn exec_contract_fixture_waits_for_owner_shutdown() {
+    let marker = std::env::args()
+        .skip_while(|argument| argument != "--")
+        .nth(1)
+        .expect("PID marker path");
+    // Publish only after the PID is complete: the parent waits for this path.
+    let marker = std::path::PathBuf::from(marker);
+    let pending = marker.with_extension("pending");
+    std::fs::write(&pending, std::process::id().to_string()).unwrap();
+    std::fs::rename(pending, marker).unwrap();
+    let until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn detached_exec_owner_drop_reaps_child_before_returning() {
+    use nix::errno::Errno;
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+
+    let directory = tempfile::tempdir().unwrap();
+    let marker = directory.path().join("pid");
+    let root = cwd();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let spec = fixture_spec(
+        "exec_contract_fixture_waits_for_owner_shutdown",
+        &[&marker],
+        None,
+        root,
+    );
+    block_on(
+        run.ports
+            .process()
+            .start_background(ego_core::event::id::DetachedExecId::new(), &spec),
+    )
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid: i32 = std::fs::read_to_string(&marker)
+        .expect("child started")
+        .parse()
+        .unwrap();
+    assert!(kill(Pid::from_raw(pid), None).is_ok());
+    drop(run);
+    assert_eq!(
+        kill(Pid::from_raw(pid), None),
+        Err(Errno::ESRCH),
+        "dropping a session returned with its detached child still alive"
+    );
+}
+
+#[test]
+fn detached_exec_cannot_write_through_read_only_confinement() {
+    use ego_core::permit::DetachedExecOutcome;
+
+    let workspace_dir = tempfile::tempdir().unwrap();
+    let root = CanonPath::new(std::fs::canonicalize(workspace_dir.path()).unwrap());
+    let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 64) else {
+        return;
+    };
+    let target = workspace_dir.path().join("forbidden-by-ro");
+    let spec = mutation_spec("create", &[&target], root);
+    let id = ego_core::event::id::DetachedExecId::new();
+    block_on(run.ports.process().start_background(id, &spec)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let outcome = loop {
+        let snapshot = run.ports.process().background_status(id).unwrap();
+        if let Some(outcome) = snapshot.outcome {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "confined process did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        matches!(&outcome, DetachedExecOutcome::Exited { code, .. } if *code != 0),
+        "read-only confinement did not reject the detached mutation: {outcome:?}"
+    );
+    assert!(
+        !target.exists(),
+        "detached exec bypassed the filesystem sandbox"
+    );
+}
+
+#[test]
+fn detached_exec_timeout_and_launch_failure_keep_distinct_outcomes() {
+    use ego_core::permit::DetachedExecOutcome;
+
+    let root = cwd();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let timed = fixture_spec(
+        "exec_contract_fixture_waits_after_large_output",
+        &[
+            &directory.path().join("ready"),
+            &directory.path().join("release"),
+        ],
+        Some(Duration::from_millis(100)),
+        root.clone(),
+    );
+    let missing = SpawnSpec::new(
+        vec![OsString::from(root.as_path().join("no-such-executable"))],
+        Some(root),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    // Catches: timeout/launch failures publish an outcome but never wake the host.
+    let (wake, ready) = std::sync::mpsc::channel();
+    run.ports.set_background_waker(Arc::new(move || {
+        wake.send(()).expect("host is listening");
+    }));
+    let timed_id = ego_core::event::id::DetachedExecId::new();
+    let failed_id = ego_core::event::id::DetachedExecId::new();
+    block_on(run.ports.process().start_background(timed_id, &timed)).unwrap();
+    block_on(run.ports.process().start_background(failed_id, &missing)).unwrap();
+    for _ in 0..2 {
+        ready
+            .recv_timeout(Duration::from_secs(5))
+            .expect("each settlement wakes the host");
+    }
+    let settled = |id| {
+        run.ports
+            .process()
+            .background_status(id)
+            .unwrap()
+            .outcome
+            .expect("the outcome is readable before the host wakes")
+    };
+    assert!(matches!(
+        settled(timed_id),
+        DetachedExecOutcome::TimedOut { .. }
+    ));
+    assert!(matches!(
+        settled(failed_id),
+        DetachedExecOutcome::Failed { .. }
+    ));
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_emits_both_streams_and_exits_nonzero() {
+    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
+    for _ in 0..4096 {
+        stdout.write_all(b"exit-stdout\n").unwrap();
+        stderr.write_all(b"exit-stderr\n").unwrap();
+    }
+    stdout.flush().unwrap();
+    stderr.flush().unwrap();
+    std::process::exit(17);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn exec_contract_fixture_emits_both_streams_and_signals() {
+    let mut stdout = std::io::stdout().lock();
+    let mut stderr = std::io::stderr().lock();
+    for _ in 0..4096 {
+        stdout.write_all(b"signal-stdout\n").unwrap();
+        stderr.write_all(b"signal-stderr\n").unwrap();
+    }
+    stdout.flush().unwrap();
+    stderr.flush().unwrap();
+    // A spawned kill utility can outlive this fixture under load and add a
+    // stopped-descendant note to the result.
+    let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM);
+    unreachable!("SIGTERM terminates this fixture");
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_echoes_argument() {
+    let arg = std::env::args()
+        .skip_while(|arg| arg != "--")
+        .nth(1)
+        .expect("the fixture receives one argument");
+    print!("{arg}");
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_reads() {
+    let path = std::env::args()
+        .skip_while(|arg| arg != "--")
+        .nth(1)
+        .expect("the fixture receives a read path");
+    let bytes = std::fs::read(path).expect("read fixture target");
+    std::io::stdout().write_all(&bytes).unwrap();
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_creates() {
+    let path = std::env::args_os()
+        .skip_while(|arg| arg != "--")
+        .nth(1)
+        .expect("the fixture receives a create path");
+    std::fs::File::create(path).expect("create fixture target");
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_reports_environment_presence_without_values() {
+    let args = std::env::args().skip_while(|arg| arg != "--").skip(1);
+    for name in args {
+        println!(
+            "{name}={}",
+            if std::env::var_os(&name).is_some() {
+                "present"
+            } else {
+                "absent"
+            }
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_consumes_stdin_to_eof() {
+    let mut stdin = std::io::stdin().lock();
+    let mut bytes = Vec::new();
+    stdin.read_to_end(&mut bytes).unwrap();
+    print!("stdin-eof:{}", bytes.len());
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_exits_nonzero() {
+    std::process::exit(17);
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn exec_contract_fixture_terminates_by_signal() {
+    let _ = nix::sys::signal::raise(nix::sys::signal::Signal::SIGTERM);
+    unreachable!("the signal fixture must not return normally");
+}
+
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn exec_contract_fixture_rejects_inherited_fds() {
+    use std::os::unix::fs::MetadataExt;
+
+    let descriptor_metadata = |path: &std::path::Path| -> std::io::Result<std::fs::Metadata> {
+        let metadata = std::fs::metadata(path)?;
+        // macOS /dev/fd stat uses a synthetic device for regular files. Opening
+        // those files gives the original identity; sockets and pipes must only
+        // be inspected with nonblocking path metadata, never reopened.
+        #[cfg(target_os = "macos")]
+        if metadata.is_file() {
+            return std::fs::File::open(path)?.metadata();
+        }
+        Ok(metadata)
+    };
+    let owned_files = std::env::args_os()
+        .skip_while(|arg| arg != "--")
+        .skip(1)
+        .map(|path| {
+            descriptor_metadata(std::path::Path::new(&path)).expect("owned descriptor identity")
+        })
+        .collect::<Vec<_>>();
+    assert!(!owned_files.is_empty(), "the fixture needs owned files");
+    // Drop the enumeration handle before checking candidates. Descriptor numbers
+    // can be reused by libtest; only an owned file's identity proves a leak.
+    let descriptors = std::fs::read_dir("/dev/fd")
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect::<Vec<_>>();
+    for path in descriptors {
+        let Some(fd) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if fd.parse::<u32>().is_ok_and(|fd| fd >= 3)
+            && let Ok(actual) = descriptor_metadata(&path)
+            && owned_files
+                .iter()
+                .any(|owned| actual.dev() == owned.dev() && actual.ino() == owned.ino())
+        {
+            eprintln!("inherited owned file on descriptor {fd}");
+            std::process::exit(29);
+        }
+    }
+    print!("fd-clean");
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_holds_a_descendant() {
+    let pid_path = std::env::args()
+        .skip_while(|arg| arg != "--")
+        .nth(1)
+        .expect("the fixture receives a pid path");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "exec_contract_fixture_emits_until_killed",
+            "--nocapture",
+        ])
+        .spawn()
+        .expect("sleep fixture executable");
+    std::fs::write(pid_path, child.id().to_string()).expect("write child pid");
+    let _ = child.wait();
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_connects() {
+    let mut args = std::env::args().skip_while(|arg| arg != "--").skip(1);
+    let protocol = args.next().expect("network protocol");
+    let endpoint = args.next().expect("network endpoint");
+    match protocol.as_str() {
+        "tcp" => {
+            TcpStream::connect(endpoint).expect("tcp control");
+        }
+        "udp" => {
+            let socket = UdpSocket::bind("0.0.0.0:0").expect("udp socket");
+            socket.send_to(b"probe", endpoint).expect("udp control");
+            // Keep the socket alive until local delivery can be observed on macOS.
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        other => panic!("unknown network fixture protocol: {other}"),
+    }
+}
+
+/// The envelope is not merely accepted by the dispatcher — a real child spawned
+/// with it delivers the sentinel.
+///
+/// This is the test the original defect needed. The probe spawns
+/// `current_exe()`, which inside a test binary is libtest; the old envelope was
+/// parsed there as a test-name filter, so the child ran zero tests, exited 0,
+/// and connected to nothing. Every offline assertion in this file then passed
+/// by taking its "the platform refused to promise it" arm. Asserting the
+/// dispatcher parses an argv proves nothing about that; only watching the bytes
+/// arrive from a separate process does.
+///
+/// Loopback only, deliberately: this proves the envelope reaches its host, not
+/// which address classes this machine can pair on.
+///
+/// The envelope is spelled out here because the production builder is private
+/// to `probe.rs`. That is a two-part contract, not a gap: this test pins "the
+/// shape a libtest host dispatches", and `the_probe_envelope_is_the_one_both_
+/// hosts_dispatch` pins "the shape production emits" to the same words. Change
+/// the builder alone and that unit test fails.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn the_probe_envelope_delivers_its_sentinel_from_a_real_child() {
+    use std::io::{Read as _, Write as _};
+    use std::process::{Command, Stdio};
+
+    // Catches: a successful write being called delivery without the receiver's
+    // matching acknowledgement, including a wrong acknowledgement.
+    // Catches: an independent two-second child deadline expiring while the
+    // receiver is still within the production probe's 30-second budget.
+    for (acknowledge, delay) in [
+        (true, Duration::ZERO),
+        (false, Duration::ZERO),
+        (true, Duration::from_secs(3)),
+    ] {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("probe control listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let endpoint = listener.local_addr().expect("probe control endpoint");
+        let sentinel = format!("exec-contract-envelope:{}", endpoint.port());
+        let mut child = Command::new(std::env::current_exe().expect("the test executable"))
+            .args(["--ignored", "--exact", "__ego_internal_network_probe_v1"])
+            .args(["--nocapture", "--", "tcp"])
+            .args([endpoint.to_string(), sentinel.clone()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the probe child runs");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error)
+                    if error.kind() == std::io::ErrorKind::WouldBlock
+                        && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("the probe child never connected: {error}");
+                }
+            }
+        };
+        stream
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .expect("read timeout");
+        let mut received = vec![0_u8; sentinel.len()];
+        stream
+            .read_exact(&mut received)
+            .expect("the probe child connected but sent nothing");
+        assert_eq!(received, sentinel.as_bytes());
+        if !acknowledge {
+            received[0] ^= 1;
+        }
+        std::thread::sleep(delay);
+        let acknowledgement = stream.write_all(&received);
+        let output = child.wait_with_output().expect("probe child exits");
+        assert_eq!(output.status.success(), acknowledge, "{output:?}");
+        acknowledgement.expect("acknowledge sentinel");
+    }
+}
+
+// Catches: the host UDP probe exits successfully after a send even though
+// the receiver has never acknowledged the sentinel.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn udp_probe_requires_the_matching_host_acknowledgement() {
+    use std::process::{Command, Stdio};
+
+    let receiver = UdpSocket::bind(("127.0.0.1", 0)).expect("bind UDP control receiver");
+    receiver
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("bound UDP control receive");
+    let endpoint = receiver.local_addr().expect("UDP control endpoint");
+    let sentinel = "ego-udp-control-sentinel";
+    let mut child = Command::new(std::env::current_exe().expect("the test executable"))
+        .args(["--ignored", "--exact", "__ego_internal_network_probe_v1"])
+        .args(["--nocapture", "--", "udp"])
+        .args([endpoint.to_string(), sentinel.to_owned()])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn UDP control child");
+    let mut received = [0_u8; 128];
+    let (len, sender) = receiver.recv_from(&mut received).unwrap_or_else(|error| {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("UDP child did not send a sentinel: {error}");
+    });
+    let response = receiver.send_to(b"wrong-udp-acknowledgement", sender);
+    let output = child.wait_with_output().expect("UDP control child exits");
+
+    assert_eq!(&received[..len], sentinel.as_bytes());
+    response.expect("send wrong acknowledgement from the control receiver");
+    assert_eq!(output.status.code(), Some(101), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("could not deliver its sentinel"),
+        "{output:?}"
+    );
+}
+
+/// The control child of the shared offline probe, hosted by libtest.
+///
+/// The probe spawns `current_exe()` with its private envelope. Inside a test
+/// binary that executable is libtest, so without this the envelope was parsed
+/// as a test-name filter: the child ran zero tests, exited 0, and never
+/// connected. The paired control then timed out, `NO_IP_NETWORK` was never
+/// measured, and every offline assertion in this file passed by taking the
+/// "the platform refused to promise it" arm — proving nothing, on a platform
+/// where the shipped binary does deliver the guarantee.
+///
+/// The name is the token itself because `--exact` matches it, and the body
+/// calls the production dispatcher rather than reimplementing the connect, so
+/// what the tests measure cannot drift from what a real run measures.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+#[ignore = "hosts the offline probe's control child; not a test of its own"]
+fn __ego_internal_network_probe_v1() {
+    let delivered = ego_tools::exec::dispatch_network_probe(std::env::args_os())
+        .expect("libtest was handed the probe envelope but did not recognise it");
+    // A failing assertion exits non-zero, which is exactly the signal the
+    // confined half of the paired probe is looking for.
+    assert!(delivered, "the probe child could not deliver its sentinel");
+}
+
+/// A libtest host handed the Landlock helper envelope runs the helper and
+/// nothing else.
+///
+/// The old envelope reached libtest as test-name filters, so a helper child
+/// ran the real tests matching `workspace`, each of which spawned more helper
+/// children: an unbounded re-exec storm that outlived the test run. Here the
+/// helper refuses a malformed protocol before any effect, so the child must
+/// exit at once, after selecting exactly one test, with the production
+/// refusal on stderr. A deadline bounds the child in case it regresses.
+///
+/// The envelope is spelled out because the builder is private to
+/// `landlock.rs`; `the_helper_envelope_is_the_one_both_hosts_dispatch` pins
+/// the builder to the same words.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_libtest_host_runs_only_the_landlock_helper_for_its_envelope() {
+    use std::process::Stdio;
+
+    let mut child = Command::new(std::env::current_exe().expect("the test executable"))
+        .args(["--ignored", "--exact", "__ego_internal_landlock_exec_v1"])
+        .args(["--nocapture", "--", "not-a-level"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the helper child runs");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("helper child status") {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("the helper child did not exit: libtest ran more than the helper");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout pipe")
+        .read_to_string(&mut stdout)
+        .expect("helper stdout");
+    child
+        .stderr
+        .take()
+        .expect("stderr pipe")
+        .read_to_string(&mut stderr)
+        .expect("helper stderr");
+
+    assert!(!status.success(), "a refused helper must fail: {stdout}");
+    assert!(
+        stdout.contains("running 1 test\n"),
+        "libtest must select only the helper: {stdout}"
+    );
+    assert!(
+        stderr.contains("ego Landlock helper refused execution"),
+        "the production dispatcher must claim the envelope: {stderr}"
+    );
+}
+
+/// The Linux Landlock helper, hosted by libtest.
+///
+/// The backend re-execs `current_exe()` with its private envelope. Inside a
+/// test binary that executable is libtest, so without this the protocol was
+/// parsed as test-name filters: the child ran whichever real tests matched,
+/// and every confined probe timed out instead of running `cat` or `touch`.
+/// The body calls the production dispatcher, so the confinement these tests
+/// measure is the one a real run installs. Success never returns: the helper
+/// replaces this process with the confined target.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "hosts the Landlock helper; not a test of its own"]
+fn __ego_internal_landlock_exec_v1() {
+    if std::env::args_os().nth(7).is_some_and(|workspace| {
+        std::path::Path::new(&workspace)
+            .join(".ego-test-helper-failure")
+            .exists()
+    }) {
+        eprintln!("injected capability helper execution failure");
+        std::process::exit(101);
+    }
+    let refused = ego_tools::exec::dispatch_landlock_helper(std::env::args_os())
+        .expect("libtest was handed the helper envelope but did not recognise it");
+    // A refusal exits non-zero, which is what the paired probe looks for.
+    panic!("the Landlock helper refused execution: {refused:?}");
+}
+
+// Catches: a helper execution failure becomes a successful zero-bit diagnostic
+// and poisons the capability cache even after the helper can execute again.
+#[cfg(target_os = "linux")]
+#[test]
+fn filesystem_probe_helper_failure_is_not_a_cached_capability_observation() {
+    const MARKER: &str = "EGO_TEST_FAILED_CAPABILITY_HELPER";
+    if let Some(marker) = std::env::var_os(MARKER) {
+        let workspace = std::path::Path::new(&marker).parent().unwrap();
+        let read_root = workspace.join("read-root");
+        std::fs::create_dir(&read_root).unwrap();
+        let policy = run_confinement(
+            Confinement::Workspace,
+            false,
+            CanonPath::new(workspace.canonicalize().unwrap()),
+        )
+        .with_roots(vec![ego_core::permit::ProfileRoot::new(
+            CanonPath::new(read_root.canonicalize().unwrap()),
+            ego_core::permit::RootAccess::Read,
+        )]);
+        let failed = block_on(RunEffectPorts::diagnostic_capabilities(
+            &policy,
+            CancelToken::new(),
+            ExecLimits::default(),
+        ));
+        let admission_refused = matches!(
+            open_policy(policy.clone(), 1024 * 1024, 1024),
+            Err(ProcessError::Backend(_))
+        );
+        std::fs::remove_file(marker).unwrap();
+        let repaired = block_on(RunEffectPorts::diagnostic_capabilities(
+            &policy,
+            CancelToken::new(),
+            ExecLimits::default(),
+        ));
+        assert!(
+            failed.is_err(),
+            "probe execution failed but advertised {failed:?}; repaired helper measured {repaired:?}"
+        );
+        let ProcessError::Backend(detail) = failed.unwrap_err() else {
+            panic!("helper execution failure must remain an operational measurement error");
+        };
+        assert!(
+            detail.contains("injected capability helper execution failure"),
+            "the helper stderr must survive its temporary evidence store: {detail}"
+        );
+        assert!(
+            admission_refused,
+            "a failed capability control must construct no run effects"
+        );
+        assert_eq!(
+            repaired.unwrap(),
+            ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED),
+            "a failed helper execution must not poison subsequent measurement"
+        );
+        return;
+    }
+    let fixture = tempfile::tempdir().unwrap();
+    let marker = fixture.path().join(".ego-test-helper-failure");
+    std::fs::write(&marker, "injected execution failure").unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "filesystem_probe_helper_failure_is_not_a_cached_capability_observation",
+            "--nocapture",
+        ])
+        .env(MARKER, marker)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "diagnostic contract child failed:\n{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// Catches: nested read roots abort backend admission, or the selected platform
+// silently changes which authority wins for native writes.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn nested_read_root_native_writes_follow_the_reported_platform_contract() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().canonicalize().unwrap();
+    let uploads = workspace.join("uploads");
+    std::fs::create_dir(&uploads).unwrap();
+    let attachment = uploads.join("attachment");
+    let source = workspace.join("source");
+    let sibling = workspace.join("sibling");
+    std::fs::write(&attachment, "ORIGINAL").unwrap();
+    std::fs::write(&source, "REPLACEMENT").unwrap();
+    let root = CanonPath::new(&workspace);
+    let policy = run_confinement(Confinement::Workspace, false, root.clone()).with_roots(vec![
+        ProfileRoot::new(CanonPath::new(&uploads), RootAccess::Read),
+    ]);
+    let run =
+        open_policy(policy, 1024 * 1024, 1024).expect("nested read roots must not abort startup");
+    execute(
+        &run,
+        mutation_spec("overwrite", &[&source, &sibling], root.clone()),
+    )
+    .unwrap();
+    assert_eq!(std::fs::read(&sibling).unwrap(), b"REPLACEMENT");
+    let outcome = execute(
+        &run,
+        mutation_spec("overwrite", &[&source, &attachment], root),
+    );
+    #[cfg(target_os = "macos")]
+    {
+        assert!(outcome.is_err());
+        assert_eq!(std::fs::read(&attachment).unwrap(), b"ORIGINAL");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        outcome.expect("Landlock's writable ancestor wins, as the CLI warning states");
+        assert_eq!(std::fs::read(&attachment).unwrap(), b"REPLACEMENT");
+    }
+}
+
+#[test]
+fn guarded_exec_runs_the_exact_argv_without_reparse_or_mutation() {
+    let workspace = cwd();
+    let run = open_run(Confinement::Off, false, workspace, 1024 * 1024, 1024).unwrap();
+    let prepared = fixture_arg_spec(
+        "exec_contract_fixture_echoes_argument",
+        [OsString::from("literal * ; $(false)")],
+        None,
+        cwd(),
+    );
+    let out = block_on(run.ports.process().execute(&prepared)).unwrap();
+
+    let debug = format!("{out:?}");
+    assert!(debug.contains("literal * ; $(false)"));
+}
+
+#[cfg(unix)]
+#[test]
+fn analyzed_target_mutation_executes_neither_old_nor_replacement_image() {
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::tempdir().unwrap();
+    let image = directory.path().join("image");
+    let old_marker = directory.path().join("old-marker");
+    let new_marker = directory.path().join("new-marker");
+    std::fs::write(&image, b"#!/bin/sh\nprintf old > \"$1\"\n").unwrap();
+    std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let root = CanonPath::new(std::fs::canonicalize(directory.path()).unwrap());
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let spec = SpawnSpec::new(
+        vec![
+            image.clone().into_os_string(),
+            old_marker.clone().into_os_string(),
+            new_marker.clone().into_os_string(),
+        ],
+        Some(root),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let captured = run.ports.process().observe(&spec).unwrap();
+    assert!(captured.identity().unwrap().complete());
+    std::fs::write(&image, b"#!/bin/sh\nprintf new > \"$2\"\n").unwrap();
+    let error = block_on(run.ports.process().execute(&captured)).unwrap_err();
+    assert!(error.to_string().contains("identity changed"));
+    assert!(!old_marker.exists());
+    assert!(!new_marker.exists());
+}
+
+#[test]
+fn exec_tool_preparation_policy_authorization_and_guarded_execution_preserve_identity() {
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let allow = vec![exact_executable_rule(executable_text)];
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow,
+                deny: Vec::new(),
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let fs = OsFs;
+    let registry = builtins();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root.clone(),
+    );
+    let params = serde_json::json!({
+        "argv": [
+            executable_text,
+            "--ignored",
+            "--exact",
+            "exec_contract_fixture_echoes_argument",
+            "--nocapture",
+            "--",
+            "composite literal * ; $(false)"
+        ],
+        "cwd": root.to_string(),
+        "timeout_ms": 1000
+    });
+    let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+    let expected_call = call.clone();
+    let Op::Spawn {
+        spec: prepared_spec,
+    } = &call.ops()[0]
+    else {
+        panic!("ExecTool must prepare exactly one Spawn operation");
+    };
+    assert_eq!(prepared_spec.argv()[0], OsString::from(executable_text));
+    assert_eq!(prepared_spec.cwd(), Some(&root));
+    assert_eq!(prepared_spec.timeout(), Some(Duration::from_millis(1000)));
+    let EnvPolicy::Exact { bindings, .. } = prepared_spec.env_policy() else {
+        panic!("preparation must capture one exact environment before policy");
+    };
+    let expected_environment = std::env::vars_os()
+        .filter(|(name, _)| EnvName::new(name.clone()).is_ok())
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(bindings.len(), expected_environment.len());
+    assert!(
+        bindings
+            .iter()
+            .all(|binding| binding.value_os_string().ok().as_ref()
+                == expected_environment.get(binding.name().as_os_str())),
+        "captured environment must contain the exact native values"
+    );
+    #[cfg(unix)]
+    assert!(
+        prepared_spec
+            .identity()
+            .is_some_and(|identity| identity.complete())
+    );
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("the exact prepared exec must be authorized by its rule");
+    };
+    assert_eq!(authorized.call(), &expected_call);
+    assert_eq!(authorized.call().tool(), "exec");
+    assert_eq!(authorized.call().ops().len(), 1);
+    assert!(format!("{:?}", authorized.call()).contains("composite literal * ; $(false)"));
+    let result = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
+    let debug = format!("{result:?}");
+    assert!(debug.contains("composite literal * ; $(false)"));
+}
+
+#[test]
+fn exec_tool_policy_denial_stops_before_guarded_effects() {
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let rule = exact_executable_rule(executable_text);
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                // The deny must win even when an allow with the same exact
+                // argv pattern is present.  This is the authorization proof:
+                // GuardedEffects is never constructed for a denied call.
+                allow: vec![rule.clone()],
+                deny: vec![rule],
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let fs = OsFs;
+    let registry = builtins();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root.clone(),
+    );
+    let params = serde_json::json!({
+        "argv": [
+            executable_text,
+            "--ignored",
+            "--exact",
+            "exec_contract_fixture_echoes_argument",
+            "--nocapture",
+            "--",
+            "denied before spawn"
+        ],
+        "cwd": root.to_string(),
+        "timeout_ms": 1000
+    });
+    let (_tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+    match tools.authorize(&policy, call) {
+        Classification::Settled(Err(PolicyDenied::Denied { tool, .. })) => {
+            assert_eq!(tool, "exec");
+        }
+        other => panic!("deny must settle before guarded execution: {other:?}"),
+    }
+}
+
+#[test]
+fn detached_exec_request_keeps_the_foreground_spawn_authority() {
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: Vec::new(),
+                deny: vec![exact_executable_rule(executable_text)],
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let fs = OsFs;
+    let registry = builtins();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let arguments = serde_json::json!({
+        "argv": [executable_text, "--version"],
+        "background": true
+    });
+    let (_, call) = tools
+        .prepare("exec", &arguments.to_string())
+        .expect("a background request is a valid exec request");
+    assert!(matches!(call.ops(), [Op::Spawn { .. }]));
+    assert!(matches!(
+        tools.authorize(&policy, call),
+        Classification::Settled(Err(PolicyDenied::Denied { .. }))
+    ));
+}
+
+#[test]
+fn detached_exec_returns_a_handle_before_the_child_finishes() {
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable
+        .to_str()
+        .expect("test executable is UTF-8")
+        .to_owned();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let cancel = run.cancel.clone();
+    let (ready_sender, ready_receiver) = std::sync::mpsc::channel();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let policy = ego_core::permit::PolicyEngine::new(
+            root.clone(),
+            Mode::Yolo,
+            Ruleset::from_layer(
+                PermCfg {
+                    allow: vec![exact_executable_rule(&executable_text)],
+                    deny: Vec::new(),
+                    judge: None,
+                },
+                Source::Project,
+            ),
+        );
+        let fs = OsFs;
+        let registry = builtins();
+        let tools = TurnTools::new(
+            &registry,
+            ToolEffectPorts::new(
+                &fs,
+                run.ports.process(),
+                &run.evidence,
+                run.ports.resolver_handle(),
+                run.ports.one_hop_handle(),
+                run.ports.duplex_handle(),
+            ),
+            root,
+        );
+        let arguments = serde_json::json!({
+            "argv": [
+                executable_text,
+                "--ignored",
+                "--exact",
+                "exec_contract_fixture_emits_until_killed",
+                "--nocapture"
+            ],
+            "background": true
+        });
+        let (tool, call) = tools.prepare("exec", &arguments.to_string()).unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("the fixture must be authorized");
+        };
+        ready_sender.send(()).expect("ready receiver");
+        let result = block_on(tools.execute(&policy, tool.as_ref(), authorized, None));
+        sender.send(result).expect("result receiver");
+    });
+    ready_receiver
+        .recv_timeout(Duration::from_secs(10))
+        .expect("preparation must complete before timing execution");
+    let result = match receiver.recv_timeout(Duration::from_millis(500)) {
+        Ok(result) => result.expect("detached exec returns a handle"),
+        Err(error) => {
+            cancel.cancel(CancelCause::User);
+            worker.join().expect("fixture thread");
+            panic!("the call held the turn while its child ran: {error}");
+        }
+    };
+    let ego_core::mcp::ToolExecution::Complete(result) = result else {
+        panic!("exec must complete the launch call");
+    };
+    assert!(result.model_text().contains("id"), "{result:?}");
+    cancel.cancel(CancelCause::User);
+    worker.join().expect("fixture thread");
+}
+
+#[test]
+fn detached_exec_output_is_bounded_and_cancel_preserves_the_settled_exit() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let ready = directory.path().join("ready");
+    let release = directory.path().join("release");
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: Vec::new(),
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let arguments = serde_json::json!({
+        "argv": [
+            executable_text,
+            "--ignored",
+            "--exact",
+            "exec_contract_fixture_waits_after_large_output",
+            "--nocapture",
+            "--",
+            ready.to_string_lossy(),
+            release.to_string_lossy()
+        ],
+        "background": true
+    });
+    let (tool, call) = tools.prepare("exec", &arguments.to_string()).unwrap();
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("the fixture must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(started) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("exec launch must complete");
+    };
+    let id = started
+        .model_text()
+        .split_whitespace()
+        .last()
+        .expect("model receives an ID")
+        .to_owned();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !ready.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(ready.exists(), "child did not reach its output barrier");
+
+    let inspect = |id: &str| {
+        let (tool, call) = tools
+            .prepare("exec_status", &serde_json::json!({ "id": id }).to_string())
+            .expect("the model can inspect by ID");
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("session-owned status must be authorized");
+        };
+        let ego_core::mcp::ToolExecution::Complete(result) =
+            block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+        else {
+            panic!("status call must complete");
+        };
+        result.model_text()
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let running = loop {
+        let status = inspect(&id);
+        if status.contains("last-stdout") {
+            break status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "output did not reach the live tail: {status}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(running.contains("running"), "{running}");
+    assert!(running.contains("last-stdout"), "{running}");
+    assert!(!running.contains("first-stdout"), "{running}");
+    assert!(running.len() < 1024, "running output was not bounded");
+
+    std::fs::write(release, b"release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let settled = loop {
+        let status = inspect(&id);
+        if status.contains("exited") {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "child did not settle: {status}");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        settled.contains("7"),
+        "nonzero exit code was lost: {settled}"
+    );
+    assert!(
+        settled.contains("last-stderr"),
+        "stderr tail was lost: {settled}"
+    );
+    assert!(
+        settled.contains("read_tool_result"),
+        "full output evidence was unreachable: {settled}"
+    );
+    assert!(settled.len() < 1024, "settled output was not bounded");
+    // Catches cancelling an already-exited ID falsely reporting Cancelled.
+    let (tool, call) = tools
+        .prepare("exec_cancel", &serde_json::json!({"id": id}).to_string())
+        .expect("cancel settled process");
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("session-owned cancellation must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(result) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("cancel must complete");
+    };
+    assert!(
+        result.model_text().contains("cancellation requested"),
+        "{}",
+        result.model_text()
+    );
+    assert!(
+        !result.model_text().contains(": cancelled"),
+        "{}",
+        result.model_text()
+    );
+    assert!(inspect(&id).contains("exited code 7"));
+}
+
+/// Catches: completion before native monitor registration becoming an invariant error.
+#[test]
+fn monitor_after_owned_exec_settles_is_normal() {
+    // The settled command prints a marker and exits with a chosen code, through
+    // the platform's own shell.
+    let (shell, argv_for): (String, fn(&str, i32) -> serde_json::Value) = if cfg!(windows) {
+        (
+            std::env::var("ComSpec").expect("ComSpec names the Windows command interpreter"),
+            |shell, code| {
+                serde_json::json!([shell, "/C", format!("echo settled-output& exit {code}")])
+            },
+        )
+    } else {
+        ("/bin/sh".into(), |shell, code| {
+            serde_json::json!([shell, "-c", format!("printf settled-output; exit {code}")])
+        })
+    };
+    let root = cwd();
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(&shell)],
+                deny: Vec::new(),
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root.clone(),
+    );
+    let call = |name: &str, arguments: serde_json::Value| -> Result<String, String> {
+        let (tool, call) = tools.prepare(name, &arguments.to_string()).unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("{name} must be authorized");
+        };
+        match block_on(tools.execute(&policy, tool.as_ref(), authorized, None)) {
+            Ok(ego_core::mcp::ToolExecution::Complete(result)) => Ok(result.model_text()),
+            Ok(_) => panic!("{name} must complete"),
+            Err(error) => Err(error.into_failed_result().model_text()),
+        }
+    };
+    // Unknown IDs must still fail through the native tool boundary.
+    let unknown = ego_core::event::id::DetachedExecId::new();
+    let refused = call("exec_monitor", serde_json::json!({ "id": unknown })).unwrap_err();
+    assert!(refused.contains("unknown"), "{refused}");
+    let foreign = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let foreign_tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            foreign.ports.process(),
+            &foreign.evidence,
+            foreign.ports.resolver_handle(),
+            foreign.ports.one_hop_handle(),
+            foreign.ports.duplex_handle(),
+        ),
+        root,
+    );
+    for code in [0, 7] {
+        let started = call(
+            "exec",
+            serde_json::json!({
+                "argv": argv_for(&shell, code),
+                "background": true
+            }),
+        )
+        .unwrap();
+        let id = started.split_whitespace().last().unwrap();
+        let exec_id = id.parse().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let before = loop {
+            let status = run.ports.process().background_status(exec_id).unwrap();
+            if status.outcome.is_some() {
+                break status;
+            }
+            assert!(Instant::now() < deadline, "child did not settle");
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            matches!(&before.outcome,
+            Some(ego_core::permit::DetachedExecOutcome::Exited { code: actual, .. }) if *actual == code),
+            "{before:?}"
+        );
+        // Catches: accepting an ID owned by a different session as a settled no-op.
+        let (tool, prepared) = foreign_tools
+            .prepare("exec_monitor", &serde_json::json!({ "id": id }).to_string())
+            .unwrap();
+        let Classification::Settled(Ok(authorized)) = foreign_tools.authorize(&policy, prepared)
+        else {
+            panic!("inspection is authorized, ownership is enforced by the process registry");
+        };
+        let error =
+            block_on(foreign_tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap_err();
+        assert!(error.into_failed_result().model_text().contains("unknown"));
+        for _ in 0..2 {
+            let receipt = call("exec_monitor", serde_json::json!({ "id": id }))
+                .expect("settled owned exec is a normal monitor outcome");
+            assert!(
+                receipt.contains("settled; there is no new output to monitor"),
+                "{receipt}"
+            );
+        }
+        let after = run.ports.process().background_status(exec_id).unwrap();
+        assert_eq!(
+            after, before,
+            "monitor registration must preserve settlement and output"
+        );
+        let readable = call("exec_status", serde_json::json!({ "id": id })).unwrap();
+        assert!(readable.contains("settled-output"), "{readable}");
+        assert_eq!(
+            run.ports.process().take_background_output(exec_id).unwrap(),
+            None
+        );
+    }
+}
+
+/// Catches: monitored lines that reach the model only through polling, a
+/// pattern that lets other lines through, lines printed before the
+/// subscription reported as new, and a monitor that outlives its process.
+#[test]
+fn a_monitored_match_wakes_the_host_and_the_monitor_ends_at_settlement() {
+    let directory = tempfile::tempdir().expect("fixture directory");
+    let marker = |name: &str| directory.path().join(name);
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: Vec::new(),
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let (wake, woken) = std::sync::mpsc::channel();
+    run.ports.set_background_waker(Arc::new(move || {
+        let _ = wake.send(());
+    }));
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let call = |name: &str, arguments: serde_json::Value| -> Result<String, String> {
+        let (tool, call) = tools.prepare(name, &arguments.to_string()).unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("{name} must be authorized");
+        };
+        match block_on(tools.execute(&policy, tool.as_ref(), authorized, None)) {
+            Ok(ego_core::mcp::ToolExecution::Complete(result)) => Ok(result.model_text()),
+            Ok(_) => panic!("{name} must complete"),
+            Err(error) => Err(error.into_failed_result().model_text()),
+        }
+    };
+    let started = call(
+        "exec",
+        serde_json::json!({
+            "argv": [executable_text, "--ignored", "--exact",
+                "exec_contract_fixture_prints_between_barriers", "--nocapture", "--",
+                marker("ready").to_string_lossy(), marker("go").to_string_lossy(),
+                marker("release").to_string_lossy()],
+            "background": true
+        }),
+    )
+    .unwrap();
+    let id = started.split_whitespace().last().unwrap().to_owned();
+    let exec_id: ego_core::event::id::DetachedExecId = id.parse().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !marker("ready").exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        marker("ready").exists(),
+        "child did not reach its first barrier"
+    );
+    // The pipe reader runs on its own thread: the first line is "before the
+    // subscription" only once the status tail holds it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !String::from_utf8_lossy(
+        &run.ports
+            .process()
+            .background_status(exec_id)
+            .unwrap()
+            .stdout_tail,
+    )
+    .contains("booting")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "first line did not reach the tail"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let subscribed = call(
+        "exec_monitor",
+        serde_json::json!({ "id": id, "pattern": "ready (again )?on [0-9]+" }),
+    )
+    .unwrap();
+    assert!(subscribed.contains("monitoring"), "{subscribed}");
+    let process = run.ports.process();
+    assert_eq!(
+        process.take_background_output(exec_id).unwrap(),
+        None,
+        "a line printed before the subscription is not new output"
+    );
+
+    std::fs::write(marker("go"), b"go").unwrap();
+    woken
+        .recv_timeout(Duration::from_secs(5))
+        .expect("a matching line wakes the host without a status call");
+    assert!(process.background_output_ready(exec_id));
+    let delivered = process.take_background_output(exec_id).unwrap().unwrap();
+    assert_eq!(
+        delivered.model_text(),
+        format!("background exec {id} monitor: 1 new lines\nstdout: server ready on 3000")
+    );
+
+    std::fs::write(marker("release"), b"release").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process
+        .background_status(exec_id)
+        .unwrap()
+        .outcome
+        .is_none()
+    {
+        assert!(Instant::now() < deadline, "child did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // Catches: registering after settlement discards lines already queued by a live monitor.
+    let settled = call("exec_monitor", serde_json::json!({ "id": id })).unwrap();
+    assert!(settled.contains("settled"), "{settled}");
+    let last = process.take_background_output(exec_id).unwrap().unwrap();
+    assert_eq!(
+        last.lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>(),
+        ["server ready again on 3001"],
+        "a line queued before settlement is still delivered"
+    );
+    assert_eq!(process.take_background_output(exec_id).unwrap(), None);
+    let settled = call("exec_monitor", serde_json::json!({ "id": id })).unwrap();
+    assert!(settled.contains("settled"), "{settled}");
+}
+
+#[test]
+fn detached_exec_cancel_by_id_settles_cancelled() {
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    let executable_text = executable.to_str().expect("test executable is UTF-8");
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: Vec::new(),
+                judge: None,
+            },
+            Source::Project,
+        ),
+    );
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let arguments = serde_json::json!({
+        "argv": [executable_text, "--ignored", "--exact",
+            "exec_contract_fixture_emits_until_killed", "--nocapture"],
+        "background": true
+    });
+    let (tool, call) = tools.prepare("exec", &arguments.to_string()).unwrap();
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("the fixture must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(started) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("exec launch must complete");
+    };
+    let id = started
+        .model_text()
+        .split_whitespace()
+        .last()
+        .unwrap()
+        .to_owned();
+    let (tool, call) = tools
+        .prepare("exec_cancel", &serde_json::json!({"id": id}).to_string())
+        .expect("model can cancel by ID");
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("session-owned cancellation must be authorized");
+    };
+    let ego_core::mcp::ToolExecution::Complete(cancelled) =
+        block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+    else {
+        panic!("cancel must complete");
+    };
+    assert!(
+        cancelled.model_text().contains("cancelled")
+            || cancelled.model_text().contains("cancellation requested"),
+        "{}",
+        cancelled.model_text()
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let (tool, call) = tools
+            .prepare("exec_status", &serde_json::json!({"id": id}).to_string())
+            .unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("status must be authorized");
+        };
+        let ego_core::mcp::ToolExecution::Complete(status) =
+            block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap()
+        else {
+            panic!("status must complete");
+        };
+        if status.model_text().contains("cancelled") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "cancellation did not settle: {status:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn environment_policy_materializes_names_without_values_in_identity() {
+    let unique_absent = format!("EGO_CONTRACT_SECRET_{}", std::process::id());
+    let allow = EnvPolicy::allow_only(["PATH", unique_absent.as_str()]).unwrap();
+    let allow_identity = format!("{allow:?}");
+    assert!(allow_identity.contains("PATH"));
+    assert!(allow_identity.contains(&unique_absent));
+    if let Ok(path) = std::env::var("PATH") {
+        assert!(!allow_identity.contains(&path));
+    }
+
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let inherited = block_on(run.ports.process().execute(&fixture_arg_spec_with_env(
+        "exec_contract_fixture_reports_environment_presence_without_values",
+        [OsString::from("PATH")],
+        None,
+        cwd(),
+        EnvPolicy::Inherited,
+    )))
+    .unwrap();
+    assert!(format!("{inherited:?}").contains("PATH=present"));
+
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec_with_env(
+        "exec_contract_fixture_reports_environment_presence_without_values",
+        [
+            OsString::from("PATH"),
+            OsString::from(unique_absent.clone()),
+        ],
+        None,
+        cwd(),
+        allow,
+    )))
+    .unwrap();
+    let debug = format!("{out:?}");
+    assert!(debug.contains("PATH=present"));
+    assert!(debug.contains(&format!("{unique_absent}=absent")));
+
+    let deny_path = EnvPolicy::inherited_except(["PATH"]).unwrap();
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec_with_env(
+        "exec_contract_fixture_reports_environment_presence_without_values",
+        [OsString::from("PATH")],
+        None,
+        cwd(),
+        deny_path,
+    )))
+    .unwrap();
+    assert!(format!("{out:?}").contains("PATH=absent"));
+}
+
+#[test]
+fn child_stdin_is_a_closed_pipe_and_reaches_eof() {
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec(
+        "exec_contract_fixture_consumes_stdin_to_eof",
+        [],
+        None,
+        cwd(),
+    )))
+    .unwrap();
+    assert!(format!("{out:?}").contains("stdin-eof:0"));
+}
+
+/// Catches: an early stdin close discards a valid handler verdict, or hides its
+/// unsuccessful exit. The payload exceeds the pipe capacity without a reader.
+#[cfg(unix)]
+#[test]
+fn handler_early_stdin_close_preserves_verdict_and_exit_status() {
+    use ego_core::hook::EffectScope;
+
+    let input = vec![b'x'; 4 * 1024 * 1024];
+    let verdict = r#"{"verdict":"achieved","reason":"verified artifact"}"#;
+    for code in [0, 7] {
+        let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+        let script = format!("exec 0<&-; printf '%s' '{verdict}'; exit {code}");
+        let spec = SpawnSpec::new(
+            ["/bin/sh", "-c", &script].map(OsString::from).to_vec(),
+            Some(cwd()),
+            Some(Duration::from_secs(5)),
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let result = block_on(run.ports.process().execute_handler(
+            &spec,
+            &input,
+            EffectScope::new(Duration::from_secs(5)),
+        ));
+        let output = match result {
+            Ok(output) if code == 0 => output,
+            Err(ProcessError::Exit {
+                code: actual,
+                result,
+            }) if code == 7 => {
+                assert_eq!(actual, Some(code));
+                *result
+            }
+            other => panic!("handler exit {code} lost its result: {other:?}"),
+        };
+        let stdout = output
+            .content
+            .iter()
+            .find(|block| {
+                matches!(
+                    block.provenance,
+                    ToolOutputProvenance::Process {
+                        stream: StreamProvenance::Stdout,
+                        ..
+                    }
+                )
+            })
+            .expect("handler stdout");
+        assert_eq!(stdout.text, verdict, "handler exit {code}");
+    }
+}
+
+/// Catches: treating closed stdin as completion bypasses the handler's deadline
+/// or cancellation while the child is still running.
+#[cfg(unix)]
+#[test]
+fn handler_closed_stdin_still_obeys_scope_stops() {
+    use ego_core::hook::EffectScope;
+
+    let input = vec![b'x'; 4 * 1024 * 1024];
+    for cancelled in [false, true] {
+        let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+        let spec = SpawnSpec::new(
+            ["/bin/sh", "-c", "exec 0<&-; printf not-finished; sleep 30"]
+                .map(OsString::from)
+                .to_vec(),
+            Some(cwd()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap();
+        let scope = EffectScope::new(if cancelled {
+            Duration::from_secs(5)
+        } else {
+            Duration::from_millis(250)
+        });
+        let cancellation = cancelled.then(|| {
+            let token = scope.cancel_token();
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(250));
+                token.cancel(CancelCause::User);
+            })
+        });
+        let result = block_on(run.ports.process().execute_handler(&spec, &input, scope));
+        if let Some(cancellation) = cancellation {
+            cancellation.join().unwrap();
+        }
+        assert!(
+            matches!(&result, Err(ProcessError::Cancelled)) && cancelled
+                || matches!(&result, Err(ProcessError::Timeout { .. })) && !cancelled,
+            "cancelled={cancelled}: {result:?}"
+        );
+    }
+}
+
+/// Catches: a file opened by the host reaches its child. Launcher-owned
+/// descriptors are outside this contract (CLI.md section 3), not leaked files.
+#[cfg(unix)]
+#[test]
+fn child_does_not_inherit_open_descriptors_at_or_above_three() {
+    use std::os::fd::AsRawFd;
+
+    let open_files = (0..16)
+        .map(|_| tempfile::NamedTempFile::new().unwrap())
+        .collect::<Vec<_>>();
+    assert!(open_files.iter().all(|file| file.as_raw_fd() >= 3));
+
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let out = block_on(
+        run.ports.process().execute(&fixture_arg_spec(
+            "exec_contract_fixture_rejects_inherited_fds",
+            open_files
+                .iter()
+                .map(|file| file.path().as_os_str().to_owned()),
+            None,
+            cwd(),
+        )),
+    )
+    .unwrap();
+    assert!(format!("{out:?}").contains("fd-clean"));
+}
+
+/// Catches: narrowing the descriptor oracle hides real inheritance, including
+/// descriptors above the old scan's arbitrary upper bound of 64.
+#[cfg(unix)]
+#[test]
+fn inherited_fd_oracle_rejects_owned_files_at_low_and_high_descriptors() {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    for fd in [3, 63, 127] {
+        let script = format!("exec {fd}<\"$1\"; shift; exec \"$@\"");
+        let output = Command::new("/bin/bash")
+            .args(["-c", &script, "fd-control"])
+            .arg(file.path())
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "exec_contract_fixture_rejects_inherited_fds",
+                "--nocapture",
+                "--",
+            ])
+            .arg(file.path())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(29), "fd {fd}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("inherited owned file on descriptor {fd}")),
+            "fd {fd}: {output:?}"
+        );
+    }
+}
+
+/// Catches: a real inherited host socket is silently classified as clean by
+/// the owned-descriptor oracle's regular-file-only filter.
+#[cfg(unix)]
+#[test]
+fn inherited_fd_oracle_rejects_owned_socket_instead_of_silently_skipping_it() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    for fd in [3, 63, 127] {
+        let script =
+            format!("exec 64</dev/null; exec {fd}<>/dev/tcp/127.0.0.1/{port}; exec \"$@\"");
+        let output = Command::new("/bin/bash")
+            .args(["-c", &script, "socket-control"])
+            .arg(std::env::current_exe().unwrap())
+            .args([
+                "--ignored",
+                "--exact",
+                "exec_contract_fixture_rejects_inherited_fds",
+                "--nocapture",
+                "--",
+            ])
+            .arg(format!("/dev/fd/{fd}"))
+            .output()
+            .unwrap();
+        assert_eq!(
+            output.status.code(),
+            Some(29),
+            "owned socket at fd {fd} was not rejected: {output:?}"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_helper_receives_an_eof_pipe_and_refuses_inherited_fd_above_stderr() {
+    // Keep these Linux-specific assertions next to the helper contract.  A
+    // successful test on another platform would not prove the Landlock
+    // re-exec path, while this pair proves both sides of the helper's input
+    // boundary: stdin is deliberately EOF and ambient descriptors are never
+    // passed to the exact target argv.
+    child_stdin_is_a_closed_pipe_and_reaches_eof();
+    child_does_not_inherit_open_descriptors_at_or_above_three();
+}
+
+#[test]
+fn real_process_output_keeps_stream_provenance_and_full_evidence_reference() {
+    let workspace = cwd();
+    let run = open_run(Confinement::Off, false, workspace, 1024 * 1024, 1024).unwrap();
+    let out = block_on(run.ports.process().execute(&fixture_arg_spec(
+        "exec_contract_fixture_echoes_argument",
+        [OsString::from("stdout evidence")],
+        None,
+        cwd(),
+    )))
+    .unwrap();
+
+    assert_two_process_streams_with_full_output(&out);
+}
+
+#[test]
+fn concurrent_stdout_and_stderr_draining_preserves_both_streams() {
+    let workspace = cwd();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        workspace.clone(),
+        1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    let out = block_on(run.ports.process().execute(&fixture_spec(
+        "exec_contract_fixture_emits_both_streams",
+        &[],
+        None,
+        workspace,
+    )))
+    .unwrap();
+
+    assert_two_process_streams_with_full_output(&out);
+}
+
+#[test]
+fn binary_process_output_uses_explicit_base64_without_replacement_characters() {
+    let workspace = cwd();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        workspace.clone(),
+        1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    let out = block_on(run.ports.process().execute(&fixture_spec(
+        "exec_contract_fixture_emits_binary_streams",
+        &[],
+        None,
+        workspace,
+    )))
+    .unwrap();
+    let wire = serde_json::to_value(&out).expect("binary result serialises");
+    for block in &out.content {
+        assert!(!block.text.contains('\u{fffd}'));
+        let expected_bytes: &[u8] = match &block.provenance {
+            ToolOutputProvenance::Process {
+                stream: StreamProvenance::Stdout,
+                ..
+            } => &[0xff, 0xfe, 0x00, b'o', b'u', b't'],
+            ToolOutputProvenance::Process {
+                stream: StreamProvenance::Stderr,
+                ..
+            } => &[0x80, 0x81, 0x00, b'e', b'r', b'r'],
+            other => panic!("binary fixture returned unexpected provenance: {other:?}"),
+        };
+        let encoded = block
+            .text
+            .strip_prefix("[base64]\n")
+            .expect("binary process text is explicitly labelled");
+        let decoded = decode_standard_base64(encoded);
+        assert!(
+            decoded
+                .windows(expected_bytes.len())
+                .any(|window| window == expected_bytes),
+            "decoded stream does not retain the fixture bytes: {decoded:?}"
+        );
+    }
+    assert!(
+        out.model_text().contains("[base64]\n"),
+        "binary process model text must label its base64 payload"
+    );
+    assert!(wire.to_string().contains("base64"));
+}
+
+#[test]
+fn finite_large_output_succeeds_with_head_tail_preview_and_reference() {
+    let workspace = cwd();
+    let run = open_run(Confinement::Off, false, workspace.clone(), 128 * 1024, 64).unwrap();
+    let out = block_on(run.ports.process().execute(&fixture_spec(
+        "exec_contract_fixture_emits_both_streams",
+        &[],
+        None,
+        workspace,
+    )))
+    .unwrap();
+
+    let debug = format!("{out:?}");
+    assert!(debug.contains("truncated"));
+    let bounded_streams = out
+        .content
+        .iter()
+        .filter(|block| matches!(&block.provenance, ToolOutputProvenance::Process { .. }))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bounded_streams.len(),
+        2,
+        "stdout and stderr each retain evidence"
+    );
+    for block in bounded_streams {
+        assert!(block.is_truncated());
+        assert!(block.preview_is_head_and_tail());
+        let reference = block
+            .evidence_reference()
+            .expect("complete stream evidence");
+        let stored = read_evidence_pages(&run.evidence, reference);
+        assert_eq!(stored.len() as u64, reference.bytes);
+        assert!(
+            reference.bytes > 64,
+            "preview must not be the stored evidence"
+        );
+        let ToolOutputProvenance::Process { omitted_bytes, .. } = block.provenance() else {
+            panic!("stream evidence must retain process provenance");
+        };
+        assert!(
+            *omitted_bytes > 0,
+            "large output must report omitted preview bytes"
+        );
+    }
+}
+
+fn assert_committed_stream_result(run: &Run, result: &ego_core::permit::ToolResult) {
+    assert_eq!(
+        result.content.len(),
+        2,
+        "stdout and stderr both drain before status"
+    );
+    for block in &result.content {
+        let reference = block
+            .evidence_reference()
+            .expect("every process stream has complete evidence");
+        let bytes = read_evidence_pages(&run.evidence, reference);
+        assert_eq!(bytes.len() as u64, reference.bytes);
+        assert!(matches!(
+            &block.provenance,
+            ToolOutputProvenance::Process { .. }
+        ));
+    }
+}
+
+#[test]
+fn hard_evidence_cap_fails_and_cleans_up_infinite_output() {
+    let dir = tempfile::tempdir().expect("process fixture directory");
+    let pid_path = dir.path().join("evidence-descendant.pid");
+    let workspace = cwd();
+    let run = open_run(Confinement::Off, false, workspace, 4096, 64).unwrap();
+    let err = execute(
+        &run,
+        fixture_spec(
+            "exec_contract_fixture_holds_a_descendant",
+            &[pid_path.as_path()],
+            None,
+            cwd(),
+        ),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, ProcessError::EvidenceLimit { .. }));
+    let pid = std::fs::read_to_string(pid_path).expect("fixture wrote descendant pid");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while descendant_is_alive(pid.trim()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !descendant_is_alive(pid.trim()),
+        "evidence cap left descendant alive"
+    );
+}
+
+#[test]
+fn hard_evidence_cap_is_distinct_from_preview_truncation() {
+    let workspace = cwd();
+    let run = open_run(Confinement::Off, false, workspace, 4096, 64).unwrap();
+    let err = execute(
+        &run,
+        fixture_arg_spec("exec_contract_fixture_emits_until_killed", [], None, cwd()),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, ProcessError::EvidenceLimit { .. }));
+}
+
+#[test]
+fn nonzero_exit_is_a_typed_process_failure() {
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let err = execute(
+        &run,
+        fixture_arg_spec("exec_contract_fixture_exits_nonzero", [], None, cwd()),
+    )
+    .unwrap_err();
+    let ProcessError::Exit {
+        code: Some(17),
+        result,
+    } = err
+    else {
+        panic!("non-zero process must carry typed completed evidence");
+    };
+    assert_committed_stream_result(&run, &result);
+}
+
+#[test]
+fn nonzero_exit_drains_both_streams_before_carrying_failed_result() {
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let err = block_on(run.ports.process().execute(&fixture_arg_spec(
+        "exec_contract_fixture_emits_both_streams_and_exits_nonzero",
+        [],
+        None,
+        cwd(),
+    )))
+    .unwrap_err();
+    let ProcessError::Exit {
+        code: Some(17),
+        result,
+    } = err
+    else {
+        panic!("non-zero process must carry both drained streams");
+    };
+    assert_committed_stream_result(&run, &result);
+}
+
+#[cfg(unix)]
+#[test]
+fn signal_termination_is_a_typed_process_failure() {
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let err = execute(
+        &run,
+        fixture_arg_spec(
+            "exec_contract_fixture_terminates_by_signal",
+            [],
+            None,
+            cwd(),
+        ),
+    )
+    .unwrap_err();
+    let ProcessError::Signal {
+        signal: Some(15),
+        result,
+    } = err
+    else {
+        panic!("signal termination must carry typed completed evidence");
+    };
+    assert_committed_stream_result(&run, &result);
+}
+
+#[cfg(unix)]
+#[test]
+fn signal_termination_drains_both_streams_before_carrying_failed_result() {
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let err = block_on(run.ports.process().execute(&fixture_arg_spec(
+        "exec_contract_fixture_emits_both_streams_and_signals",
+        [],
+        None,
+        cwd(),
+    )))
+    .unwrap_err();
+    let ProcessError::Signal {
+        signal: Some(15),
+        result,
+    } = err
+    else {
+        panic!("signal termination must carry both drained streams");
+    };
+    assert_committed_stream_result(&run, &result);
+}
+
+#[test]
+fn missing_executable_is_a_launch_failure_not_a_capability_refusal() {
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let executable = std::env::temp_dir().join(format!(
+        "ego-exec-contract-does-not-exist-{}",
+        std::process::id()
+    ));
+    let err = execute(
+        &run,
+        SpawnSpec::new(
+            vec![executable.as_os_str().to_os_string()],
+            Some(cwd()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap(),
+    )
+    .unwrap_err();
+    assert!(matches!(err, ProcessError::Launch { .. }));
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn linux_target_argv_must_name_an_exact_executable_file() {
+    let workspace_dir = tempfile::tempdir().expect("workspace fixture directory");
+    let root = CanonPath::new(std::fs::canonicalize(workspace_dir.path()).unwrap());
+    let Some(run) = open_confined_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) else {
+        return;
+    };
+
+    let fixture_dir = tempfile::tempdir_in(workspace_dir.path()).expect("target fixture directory");
+    let non_executable = fixture_dir.path().join("not-executable");
+    std::fs::write(&non_executable, b"not a program").expect("target fixture");
+    let directory = fixture_dir.path().join("directory-target");
+    std::fs::create_dir(&directory).expect("target directory fixture");
+
+    for target in [non_executable, directory] {
+        let spec = SpawnSpec::new(
+            vec![target.as_os_str().to_os_string()],
+            Some(root.clone()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("argv is valid before launch");
+        let error = match execute(&run, spec) {
+            Ok(()) => panic!("a non-file target must not launch"),
+            Err(error) => error,
+        };
+        assert!(matches!(error, ProcessError::Launch { .. }));
+    }
+}
+
+#[test]
+fn filesystem_confinement_matrix_is_enforced_by_real_processes() {
+    let workspace_dir = tempfile::tempdir().expect("workspace fixture directory");
+    let outside = tempfile::tempdir().expect("outside fixture directory");
+    let root = CanonPath::new(std::fs::canonicalize(workspace_dir.path()).unwrap());
+    let inside = workspace_dir.path().join("inside");
+    let outside_target = outside.path().join("outside");
+
+    if let Some(run) = open_confined_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) {
+        execute(&run, mutation_spec("create", &[&inside], root.clone()))
+            .expect("workspace allows inside write");
+        assert!(inside.exists());
+        assert!(
+            execute(
+                &run,
+                mutation_spec("create", &[&outside_target], root.clone())
+            )
+            .is_err()
+        );
+        assert!(!outside_target.exists());
+    }
+
+    if let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024) {
+        let ro_inside = workspace_dir.path().join("ro-inside");
+        let ro_outside = outside.path().join("ro-outside");
+        assert!(execute(&run, mutation_spec("create", &[&ro_inside], root.clone())).is_err());
+        assert!(!ro_inside.exists());
+        assert!(execute(&run, mutation_spec("create", &[&ro_outside], root.clone())).is_err());
+        assert!(!ro_outside.exists());
+    }
+
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    execute(
+        &run,
+        mutation_spec("create", &[&outside_target], root.clone()),
+    )
+    .expect("off allows outside write");
+    assert!(outside_target.exists());
+}
+
+#[test]
+fn filesystem_read_matrix_covers_inside_and_outside_for_each_level() {
+    let workspace_dir = tempfile::tempdir().expect("workspace fixture directory");
+    let outside = tempfile::tempdir().expect("outside fixture directory");
+    let root = CanonPath::new(std::fs::canonicalize(workspace_dir.path()).unwrap());
+    let inside = workspace_dir.path().join("inside-read");
+    let outside_target = outside.path().join("outside-read");
+    std::fs::write(&inside, b"inside").unwrap();
+    std::fs::write(&outside_target, b"outside").unwrap();
+
+    let read_root = root.clone();
+    let read = move |run: &Run, target: &std::path::Path| {
+        #[cfg(windows)]
+        let spec = fixture_spec(
+            "exec_contract_fixture_reads",
+            &[target],
+            None,
+            read_root.clone(),
+        );
+        #[cfg(not(windows))]
+        let spec = SpawnSpec::new(
+            vec![
+                OsString::from("/bin/cat"),
+                target.as_os_str().to_os_string(),
+            ],
+            Some(read_root.clone()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("cat read specification is valid");
+        execute(run, spec)
+    };
+
+    if let Some(run) = open_confined_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) {
+        read(&run, &inside).expect("workspace allows an inside read");
+        assert!(read(&run, &outside_target).is_err());
+    }
+
+    if let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024) {
+        read(&run, &inside).expect("ro allows an inside read");
+        assert!(read(&run, &outside_target).is_err());
+    }
+
+    let off_run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    read(&off_run, &inside).expect("off allows an inside read");
+    read(&off_run, &outside_target).expect("off allows an outside read");
+}
+
+#[test]
+fn workspace_confinement_covers_required_mutations_inside_and_outside() {
+    let workspace = tempfile::tempdir().expect("workspace fixture directory");
+    let outside = tempfile::tempdir().expect("outside fixture directory");
+    let root = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+    let Some(run) = open_confined_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) else {
+        return;
+    };
+
+    let inside_create = workspace.path().join("create");
+    execute(
+        &run,
+        mutation_spec("create", &[&inside_create], root.clone()),
+    )
+    .expect("create inside workspace");
+
+    let inside_overwrite_source = workspace.path().join("overwrite-source");
+    let inside_overwrite = workspace.path().join("overwrite-destination");
+    std::fs::write(&inside_overwrite_source, "after").unwrap();
+    std::fs::write(&inside_overwrite, "before").unwrap();
+    execute(
+        &run,
+        mutation_spec(
+            "overwrite",
+            &[&inside_overwrite_source, &inside_overwrite],
+            root.clone(),
+        ),
+    )
+    .expect("overwrite inside workspace");
+    assert_eq!(std::fs::read_to_string(&inside_overwrite).unwrap(), "after");
+
+    let inside_truncate = workspace.path().join("truncate");
+    std::fs::write(&inside_truncate, "before").unwrap();
+    execute(
+        &run,
+        mutation_spec("truncate", &[&inside_truncate], root.clone()),
+    )
+    .expect("truncate inside workspace");
+    assert!(std::fs::read(&inside_truncate).unwrap().is_empty());
+
+    let inside_remove = workspace.path().join("remove");
+    std::fs::write(&inside_remove, "remove").unwrap();
+    execute(
+        &run,
+        mutation_spec("remove", &[&inside_remove], root.clone()),
+    )
+    .expect("remove inside workspace");
+    assert!(!inside_remove.exists());
+
+    let inside_rename_source = workspace.path().join("rename-source");
+    let inside_rename_destination = workspace.path().join("rename-destination");
+    std::fs::write(&inside_rename_source, "rename").unwrap();
+    execute(
+        &run,
+        mutation_spec(
+            "rename",
+            &[&inside_rename_source, &inside_rename_destination],
+            root.clone(),
+        ),
+    )
+    .expect("rename inside workspace");
+    assert!(!inside_rename_source.exists());
+    assert!(inside_rename_destination.exists());
+
+    let inside_link_source = workspace.path().join("link-source");
+    let inside_link_destination = workspace.path().join("link-destination");
+    std::fs::write(&inside_link_source, "link").unwrap();
+    execute(
+        &run,
+        mutation_spec(
+            "link",
+            &[&inside_link_source, &inside_link_destination],
+            root.clone(),
+        ),
+    )
+    .expect("link inside workspace");
+    assert!(inside_link_destination.exists());
+
+    let outside_create = outside.path().join("create");
+    let outside_truncate = outside.path().join("truncate");
+    let outside_remove = outside.path().join("remove");
+    let outside_rename_source = outside.path().join("rename-source");
+    let outside_rename_destination = outside.path().join("rename-destination");
+    let outside_link_source = outside.path().join("link-source");
+    let outside_link_destination = outside.path().join("link-destination");
+    std::fs::write(&outside_remove, "remove").unwrap();
+    std::fs::write(&outside_truncate, "truncate").unwrap();
+    std::fs::write(&outside_rename_source, "rename").unwrap();
+    std::fs::write(&outside_link_source, "link").unwrap();
+    let denied = |spawn: SpawnSpec| execute(&run, spawn).is_err();
+    assert!(denied(mutation_spec(
+        "create",
+        &[&outside_create],
+        root.clone()
+    )));
+    assert!(denied(mutation_spec(
+        "truncate",
+        &[&outside_truncate],
+        root.clone()
+    )));
+    assert!(denied(mutation_spec(
+        "remove",
+        &[&outside_remove],
+        root.clone()
+    )));
+    assert!(denied(mutation_spec(
+        "rename",
+        &[&outside_rename_source, &outside_rename_destination],
+        root.clone(),
+    )));
+    assert!(denied(mutation_spec(
+        "link",
+        &[&outside_link_source, &outside_link_destination],
+        root.clone(),
+    )));
+    assert!(!outside_create.exists());
+    assert_eq!(
+        std::fs::read_to_string(&outside_truncate).unwrap(),
+        "truncate"
+    );
+    assert!(outside_remove.exists());
+    assert!(outside_rename_source.exists());
+    assert!(!outside_rename_destination.exists());
+    assert!(!outside_link_destination.exists());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_landlock_rights_probe_repeats_the_full_mutation_matrix() {
+    // Keep the ABI-sensitive gate explicit: the shared matrix is the paired
+    // behavioural proof for create, overwrite/truncate, remove, rename and
+    // link. A kernel that cannot demonstrate all required rights must be
+    // declared with `EGO_TEST_CONFINEMENT_BACKEND_ABSENT`; otherwise the
+    // refusal fails this test rather than passing it.
+    workspace_confinement_covers_required_mutations_inside_and_outside();
+}
+
+#[test]
+fn read_only_confinement_denies_every_required_mutation_inside_the_root() {
+    let workspace = tempfile::tempdir().expect("workspace fixture directory");
+    let root = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+    let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 1024)
+    else {
+        return;
+    };
+
+    let create = workspace.path().join("ro-create");
+    assert!(execute(&run, mutation_spec("create", &[&create], root.clone())).is_err());
+    assert!(!create.exists());
+
+    let overwrite_source = workspace.path().join("ro-overwrite-source");
+    let overwrite = workspace.path().join("ro-overwrite");
+    std::fs::write(&overwrite_source, "after").unwrap();
+    std::fs::write(&overwrite, "before").unwrap();
+    assert!(
+        execute(
+            &run,
+            mutation_spec("overwrite", &[&overwrite_source, &overwrite], root.clone())
+        )
+        .is_err()
+    );
+    assert_eq!(std::fs::read_to_string(&overwrite).unwrap(), "before");
+
+    let truncate = workspace.path().join("ro-truncate");
+    std::fs::write(&truncate, "before").unwrap();
+    assert!(execute(&run, mutation_spec("truncate", &[&truncate], root.clone())).is_err());
+    assert_eq!(std::fs::read_to_string(&truncate).unwrap(), "before");
+
+    let remove = workspace.path().join("ro-remove");
+    std::fs::write(&remove, "remove").unwrap();
+    assert!(execute(&run, mutation_spec("remove", &[&remove], root.clone())).is_err());
+    assert!(remove.exists());
+
+    let rename_source = workspace.path().join("ro-rename-source");
+    let rename_destination = workspace.path().join("ro-rename-destination");
+    std::fs::write(&rename_source, "rename").unwrap();
+    assert!(
+        execute(
+            &run,
+            mutation_spec(
+                "rename",
+                &[&rename_source, &rename_destination],
+                root.clone()
+            ),
+        )
+        .is_err()
+    );
+    assert!(rename_source.exists());
+    assert!(!rename_destination.exists());
+
+    let link_source = workspace.path().join("ro-link-source");
+    let link_destination = workspace.path().join("ro-link-destination");
+    std::fs::write(&link_source, "link").unwrap();
+    assert!(
+        execute(
+            &run,
+            mutation_spec("link", &[&link_source, &link_destination], root),
+        )
+        .is_err()
+    );
+    assert!(!link_destination.exists());
+}
+
+#[test]
+fn off_confinement_allows_inside_and_outside_mutations() {
+    let workspace = tempfile::tempdir().expect("workspace fixture directory");
+    let outside = tempfile::tempdir().expect("outside fixture directory");
+    let root = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let inside = workspace.path().join("off-inside");
+    let outside_target = outside.path().join("off-outside");
+
+    execute(&run, mutation_spec("create", &[&inside], root.clone())).unwrap();
+    execute(&run, mutation_spec("create", &[&outside_target], root)).unwrap();
+    assert!(inside.exists());
+    assert!(outside_target.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_workspace_confinement_is_demonstrated_across_workspace_and_private_scratch() {
+    let workspace = tempfile::tempdir().expect("workspace fixture directory");
+    let outside = tempfile::tempdir().expect("outside fixture directory");
+    let root = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+    let run = open_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    )
+    .expect("the default sandbox must be demonstrable wherever sandbox-exec is installed");
+
+    // The private scratch root belongs to the backend, so no test can name it.
+    // WRITE_SCOPED is exactly its proof: the bit is set only after the paired
+    // mutation suite created, overwrote, truncated, removed, renamed and
+    // linked inside *both* writable roots, scratch included, and was refused
+    // outside them.
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)),
+        "workspace confinement must measure both scoped reads and scoped writes: {:?}",
+        run.observation.capabilities()
+    );
+
+    let inside = workspace.path().join("workspace-create");
+    execute(&run, mutation_spec("create", &[&inside], root.clone()))
+        .expect("workspace confinement allows a mutation inside the workspace");
+    assert!(inside.exists());
+
+    let outside_target = outside.path().join("outside-create");
+    assert!(execute(&run, mutation_spec("create", &[&outside_target], root)).is_err());
+    assert!(!outside_target.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_seatbelt_profile_path_fixture_is_data_not_profile_injection() {
+    let parent = tempfile::tempdir().expect("profile fixture directory");
+    let hostile = parent.path().join(r#"quote");(deny file-read*)"#);
+    std::fs::create_dir(&hostile).expect("hostile path fixture");
+    let root = CanonPath::new(std::fs::canonicalize(&hostile).unwrap());
+    let Some(run) = open_confined_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) else {
+        return;
+    };
+    let inside = hostile.join("inside");
+    let outside = parent.path().join("outside");
+
+    execute(&run, mutation_spec("create", &[&inside], root.clone()))
+        .expect("escaped path remains an allowed root");
+    assert!(inside.exists());
+    assert!(execute(&run, mutation_spec("create", &[&outside], root)).is_err());
+    assert!(!outside.exists());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_seatbelt_refuses_an_unrepresentable_profile_root() {
+    let parent = tempfile::tempdir().expect("profile fixture directory");
+    let control_path = parent.path().join("line\nbreak");
+    std::fs::create_dir(&control_path).expect("control-byte path fixture");
+    let root = CanonPath::new(std::fs::canonicalize(control_path).unwrap());
+
+    match open_run(Confinement::Workspace, false, root, 1024 * 1024, 1024) {
+        Err(ProcessError::Backend(reason)) => {
+            assert!(!reason.is_empty(), "backend refusal must carry evidence");
+        }
+        Err(ProcessError::MissingCapabilities(missing)) => assert_eq!(
+            missing.required(),
+            ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED)
+        ),
+        Ok(_) => panic!("Seatbelt accepted a profile root it cannot represent safely"),
+        Err(err) => panic!("unrepresentable profile root failed unclearly: {err:?}"),
+    }
+}
+
+// Catches: Landlock drops configured exec roots or admits them with write authority.
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_configured_exec_root_runs_real_binary_without_widening_writes() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let tools = tempfile::tempdir().expect("external tools");
+    let outside = tempfile::tempdir().expect("unrelated directory");
+    let workspace = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+    let tools = std::fs::canonicalize(tools.path()).expect("canonical tools");
+    let program = tools.join("cp");
+    std::fs::copy("/bin/cp", &program).expect("record installed executable");
+    let source = tools.join("source");
+    std::fs::write(&source, b"original").expect("source");
+    let inside = workspace.join("copied");
+    let copy = |target: &std::path::Path| {
+        SpawnSpec::new(
+            vec![
+                program.as_os_str().to_owned(),
+                source.as_os_str().to_owned(),
+                target.as_os_str().to_owned(),
+            ],
+            Some(CanonPath::new(workspace.clone())),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .expect("copy spec")
+    };
+    let policy = run_confinement(Confinement::Workspace, false, CanonPath::new(&workspace));
+    let unlisted = open_policy(policy.clone(), 1024 * 1024, 1024).expect("unlisted run");
+    execute(&unlisted, copy(&inside)).expect_err("unlisted tool must not execute");
+    assert!(!inside.exists(), "unlisted tool copied a file");
+    let admitted = open_policy(
+        policy.with_exec_paths(vec![CanonPath::new(&tools)]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("admitted run");
+    execute(&admitted, copy(&inside)).expect("admitted tool copies into workspace");
+    assert_eq!(
+        std::fs::read(&inside).expect("copied contents"),
+        b"original"
+    );
+    for target in [tools.join("existing"), outside.path().join("existing")] {
+        std::fs::write(&target, b"preserve").expect("existing outside file");
+        execute(&admitted, copy(&target)).expect_err("exec roots must not widen writes");
+        assert_eq!(
+            std::fs::read(&target).expect("preserved contents"),
+            b"preserve"
+        );
+    }
+}
+
+/// An executable `tool.sh` in `dir`.
+#[cfg(target_os = "macos")]
+fn write_script(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let script = dir.join("tool.sh");
+    std::fs::write(&script, format!("#!/bin/sh\n{body}\n")).expect("script");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    script
+}
+
+/// A directory outside every default exec root holding one executable script.
+#[cfg(target_os = "macos")]
+fn script_dir(body: &str) -> (tempfile::TempDir, CanonPath, std::path::PathBuf) {
+    let dir = tempfile::tempdir().expect("script directory");
+    let root = std::fs::canonicalize(dir.path()).expect("canonical script directory");
+    let script = write_script(&root, body);
+    (dir, CanonPath::new(root), script)
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_policy(workspace: &std::path::Path, exec_paths: Vec<CanonPath>) -> RunConfinement {
+    let workspace = CanonPath::new(std::fs::canonicalize(workspace).expect("canonical workspace"));
+    run_confinement(Confinement::Workspace, false, workspace).with_exec_paths(exec_paths)
+}
+
+#[cfg(target_os = "macos")]
+fn script_spec(
+    script: &std::path::Path,
+    args: &[&std::path::Path],
+    workspace: &std::path::Path,
+) -> SpawnSpec {
+    let mut argv = vec![script.as_os_str().to_owned()];
+    argv.extend(args.iter().map(|arg| arg.as_os_str().to_owned()));
+    let workspace = CanonPath::new(std::fs::canonicalize(workspace).expect("canonical workspace"));
+    SpawnSpec::new(argv, Some(workspace), None, EnvPolicy::Inherited).expect("script spec")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_let_a_confined_child_run_a_program_outside_the_workspace() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_keep, tools, script) = script_dir("echo ran");
+    let spec = script_spec(&script, &[], workspace.path());
+
+    // Standalone stays as it is today: no exec path, no exec.
+    let standalone = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("standalone workspace run");
+    assert!(
+        execute(&standalone, spec.clone()).is_err(),
+        "unlisted script ran"
+    );
+
+    let profiled = open_policy(
+        workspace_policy(workspace.path(), vec![tools]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("profiled workspace run");
+    execute(&profiled, spec).expect("a script under an exec path runs");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_do_not_widen_writes_for_the_programs_they_admit() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outside = tempfile::tempdir().expect("outside directory");
+    let (_keep, tools, script) = script_dir(r#": > "$1""#);
+    let run = open_policy(
+        workspace_policy(workspace.path(), vec![tools.clone()]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("profiled workspace run");
+
+    let inside = workspace.path().join("inside");
+    execute(&run, script_spec(&script, &[&inside], workspace.path()))
+        .expect("the admitted script writes inside the workspace");
+    assert!(inside.exists(), "control write never happened");
+
+    for target in [
+        outside.path().join("outside"),
+        tools.as_path().join("planted"),
+    ] {
+        assert!(
+            execute(&run, script_spec(&script, &[&target], workspace.path())).is_err(),
+            "write to {} was allowed",
+            target.display()
+        );
+        assert!(!target.exists(), "{} was created", target.display());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_admit_only_the_roots_they_name() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let (_listed_keep, listed, listed_script) = script_dir("echo ran");
+    let (_other_keep, _other, other_script) = script_dir("echo ran");
+    let run = open_policy(
+        workspace_policy(workspace.path(), vec![listed]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("profiled workspace run");
+
+    execute(&run, script_spec(&listed_script, &[], workspace.path())).expect("listed root runs");
+    assert!(
+        execute(&run, script_spec(&other_script, &[], workspace.path())).is_err(),
+        "a sibling root outside the list ran"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_expose_the_metadata_of_their_ancestors_and_nothing_more() {
+    // Node's realpath, bash's command lookup and `mkdir -p` lstat every
+    // ancestor of a path they use; without that a tool under an exec path
+    // starts and then dies with `Operation not permitted` on `/Users`.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let outer = tempfile::tempdir().expect("outer directory");
+    let outer_path = std::fs::canonicalize(outer.path()).expect("canonical outer");
+    let tools = outer_path.join("tools");
+    std::fs::create_dir(&tools).expect("tools directory");
+    let secret = outer_path.join("secret");
+    std::fs::write(&secret, b"secret").expect("secret");
+    let script = write_script(
+        &tools,
+        r#"case "$1" in stat) /usr/bin/stat "$2";; ls) /bin/ls "$2";; cat) /bin/cat "$2";; esac"#,
+    );
+    let run = open_policy(
+        workspace_policy(workspace.path(), vec![CanonPath::new(tools)]),
+        1024 * 1024,
+        1024,
+    )
+    .expect("profiled workspace run");
+    let call = |verb: &str, target: &std::path::Path| {
+        execute(
+            &run,
+            script_spec(
+                &script,
+                &[std::path::Path::new(verb), target],
+                workspace.path(),
+            ),
+        )
+    };
+
+    call("stat", &outer_path).expect("an ancestor of an exec path can be stat'ed");
+    assert!(
+        call("ls", &outer_path).is_err(),
+        "ancestor contents were listable"
+    );
+    assert!(
+        call("cat", &secret).is_err(),
+        "a file beside the exec path was readable"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_workspace_ancestor_metadata_allows_standalone_stat_and_mkdir() {
+    // node's `realpathSync(cwd)` is how a Node tool finds its project: it lstats
+    // every ancestor of the workspace.
+    // The workspace sits in its own parent, which no exec path shares.
+    let outer = tempfile::tempdir().expect("outer directory");
+    let ancestor = std::fs::canonicalize(outer.path()).expect("canonical outer");
+    let workspace = ancestor.join("ws");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let (_keep, tools, script) = script_dir(r#"/usr/bin/stat "$1""#);
+    let spec = script_spec(&script, &[&ancestor], &workspace);
+
+    let profiled = open_policy(workspace_policy(&workspace, vec![tools]), 1024 * 1024, 1024)
+        .expect("profiled workspace run");
+    execute(&profiled, spec.clone()).expect("the workspace's parent can be stat'ed");
+
+    // Catches: standalone workspace confinement refuses ancestor lstat.
+    // Use a system binary so exec paths cannot supply the missing grant.
+    let standalone = open_policy(workspace_policy(&workspace, Vec::new()), 1024 * 1024, 1024)
+        .expect("standalone workspace run");
+    let bare = SpawnSpec::new(
+        vec!["/usr/bin/stat".into(), ancestor.clone().into_os_string()],
+        spec.cwd().cloned(),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("spec");
+    execute(&standalone, bare).expect("standalone workspace ancestors can be stat'ed");
+    let nested = workspace.join("a/b");
+    let mkdir = SpawnSpec::new(
+        vec![
+            "/bin/mkdir".into(),
+            "-p".into(),
+            nested.clone().into_os_string(),
+        ],
+        spec.cwd().cloned(),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("mkdir spec");
+    execute(&standalone, mkdir).expect("mkdir -p can walk workspace ancestors");
+    assert!(
+        nested.is_dir(),
+        "mkdir -p did not create the nested directory"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_workspace_ancestor_metadata_does_not_allow_content_or_outside_writes() {
+    // Catches: ancestor metadata permission widens into listing, reads or writes.
+    let outer = tempfile::tempdir().expect("outer directory");
+    let ancestor = std::fs::canonicalize(outer.path()).expect("canonical outer");
+    let workspace = ancestor.join("ws");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let sibling = ancestor.join("secret");
+    std::fs::write(&sibling, b"secret").expect("sibling fixture");
+    let outside_write = ancestor.join("outside-write");
+    let run = open_policy(workspace_policy(&workspace, Vec::new()), 1024 * 1024, 1024)
+        .expect("standalone workspace run");
+    let call = |program: &str, path: &std::path::Path| {
+        execute(
+            &run,
+            SpawnSpec::new(
+                vec![program.into(), path.as_os_str().to_owned()],
+                Some(CanonPath::new(workspace.clone())),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .expect("spec"),
+        )
+    };
+    call("/usr/bin/stat", &ancestor).expect("metadata grant is active");
+    call("/bin/cat", &workspace.join("../secret")).expect_err("sibling content must be denied");
+    call("/bin/ls", &ancestor).expect_err("ancestor listing must be denied");
+    call("/usr/bin/touch", &outside_write).expect_err("outside write must be denied");
+    assert!(!outside_write.exists(), "outside file was created");
+    assert_eq!(std::fs::read(&sibling).expect("read sibling"), b"secret");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_an_exec_path_the_backend_cannot_read_refuses_the_run_instead_of_being_dropped() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    let missing = CanonPath::new(workspace.path().join("no-such-tools"));
+    match open_policy(
+        workspace_policy(workspace.path(), vec![missing]),
+        1024 * 1024,
+        1024,
+    ) {
+        Err(ProcessError::MissingCapabilities(_) | ProcessError::Backend(_)) => {}
+        Ok(_) => panic!("a run opened with an exec path it cannot honour"),
+        Err(error) => panic!("unclear refusal: {error:?}"),
+    }
+}
+
+/// Whether the sandbox kept a child from starting, and what it reported.
+///
+/// `sandbox-exec` reports a refused exec of the target as EX_OSERR (71). A
+/// timeout means the program started and kept running, so it was not blocked.
+#[cfg(target_os = "macos")]
+fn sandbox_blocked(run: &Run, spec: SpawnSpec) -> (bool, String) {
+    const SANDBOX_EXEC_REFUSED: i32 = 71;
+    match block_on(run.ports.process().execute(&spec)) {
+        Ok(_) => (false, "exit 0".into()),
+        Err(ProcessError::Exit { code, result }) => (
+            code == Some(SANDBOX_EXEC_REFUSED),
+            format!("exit {code:?}: {:?}", result.content),
+        ),
+        Err(ProcessError::Timeout { .. }) => (false, "timed out after starting".into()),
+        Err(error) => (true, error.to_string()),
+    }
+}
+
+/// An operator tool that reads a repository index (`EGO_ACCEPT_INDEX_TOOL`,
+/// run with the whitespace-separated `EGO_ACCEPT_INDEX_ARGS`) must exit 0
+/// inside ego where it exits 0 outside, in the repository that holds the index
+/// (`EGO_ACCEPT_INDEX_REPOSITORY`). Run by hand, like the test below.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "acceptance: needs an index tool and an indexed repository on this machine"]
+fn macos_index_tool_exits_as_outside_ego_in_an_indexed_workspace() {
+    let tool = std::fs::canonicalize(
+        std::env::var_os("EGO_ACCEPT_INDEX_TOOL").expect("EGO_ACCEPT_INDEX_TOOL"),
+    )
+    .expect("index tool");
+    let args = std::env::var("EGO_ACCEPT_INDEX_ARGS").expect("EGO_ACCEPT_INDEX_ARGS");
+    let args = args.split_whitespace().collect::<Vec<_>>();
+    // A worktree resolves its index outside its own directory, which a
+    // workspace run cannot reach; name the checkout that holds the index.
+    let repository = std::fs::canonicalize(
+        std::env::var_os("EGO_ACCEPT_INDEX_REPOSITORY").expect("EGO_ACCEPT_INDEX_REPOSITORY"),
+    )
+    .expect("indexed repository");
+    let outside = Command::new(&tool)
+        .args(&args)
+        .current_dir(&repository)
+        .output()
+        .expect("unsandboxed index tool");
+    assert_eq!(
+        outside.status.code(),
+        Some(0),
+        "no usable index outside ego"
+    );
+
+    let policy = RunConfinement::new(Confinement::Workspace, true, CanonPath::new(&repository))
+        .expect("policy")
+        .with_exec_paths(vec![CanonPath::new(tool.clone())]);
+    let run = open_policy(policy, 1024 * 1024, 1024).expect("profiled run");
+    let spec = SpawnSpec::new(
+        std::iter::once(tool.into_os_string())
+            .chain(args.iter().map(OsString::from))
+            .collect(),
+        Some(CanonPath::new(&repository)),
+        Some(Duration::from_secs(30)),
+        EnvPolicy::Inherited,
+    )
+    .expect("spec");
+    let (blocked, note) = sandbox_blocked(&run, spec);
+    assert!(
+        !blocked && note == "exit 0",
+        "index tool inside ego: {note}"
+    );
+}
+
+/// Acceptance on an operator machine: the operator's tools run under
+/// `workspace` with profile exec paths, offline so a script cannot reach the
+/// TUIC socket, from a scratch workspace so nothing real is written.
+/// `EGO_ACCEPT_COMMANDS` names the tools as `;`-separated commands whose first
+/// word is an absolute program path; each must exit as it does outside ego.
+/// `EGO_ACCEPT_EXEC_PATHS` adds `:`-separated exec paths, and the optional
+/// `EGO_ACCEPT_SCRIPTS` names a directory whose executable `*.sh` scripts must
+/// answer `--help` without a sandbox refusal.
+/// Run by hand: `cargo nextest run -p ego-tools --test exec_contract --run-ignored only`.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "acceptance: needs the operator toolchain installed on this machine"]
+fn macos_operator_tools_run_under_workspace_with_profile_exec_paths() {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let canon = |path: &std::path::Path| {
+        std::fs::canonicalize(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
+    };
+    let commands = std::env::var("EGO_ACCEPT_COMMANDS").expect("EGO_ACCEPT_COMMANDS");
+    let mut named: Vec<(String, Vec<OsString>)> = commands
+        .split(';')
+        .map(str::trim)
+        .filter(|command| !command.is_empty())
+        .map(|command| {
+            let mut words = command.split_whitespace();
+            let program = canon(std::path::Path::new(words.next().expect("program")));
+            let argv = std::iter::once(program.into_os_string())
+                .chain(words.map(OsString::from))
+                .collect();
+            (command.to_owned(), argv)
+        })
+        .collect();
+    let scripts = std::env::var_os("EGO_ACCEPT_SCRIPTS").map(|dir| canon(dir.as_ref()));
+    let exec_paths = [
+        canon(std::path::Path::new("/opt/homebrew")),
+        // The PATH directories themselves: bash finds the named tools there.
+        canon(std::path::Path::new("/usr/local/bin")),
+        canon(&home.join(".local/bin")),
+        // git, and so any tool that asks git for its root, dies with
+        // `unable to access ~/.gitconfig` when the file is unreadable; an exec
+        // path is also a read root.
+        canon(&home.join(".gitconfig")),
+    ]
+    .into_iter()
+    .chain(
+        std::env::var("EGO_ACCEPT_EXEC_PATHS")
+            .unwrap_or_default()
+            .split(':')
+            .filter(|path| !path.is_empty())
+            .map(|path| canon(std::path::Path::new(path))),
+    )
+    .chain(named.iter().map(|(_, argv)| canon(argv[0].as_ref())))
+    .chain(scripts.clone())
+    .map(CanonPath::new)
+    .collect::<Vec<_>>();
+
+    let workspace = tempfile::tempdir().expect("workspace");
+    // A tool that wants a git root finds the workspace itself, so the answer
+    // does not depend on a `.git` above it, which would be a read-root question.
+    assert!(
+        Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(workspace.path())
+            .status()
+            .expect("git init")
+            .success()
+    );
+    let canonical_workspace = CanonPath::new(canon(workspace.path()));
+    let policy = RunConfinement::new(Confinement::Workspace, true, canonical_workspace)
+        .expect("policy")
+        .with_exec_paths(exec_paths);
+    let run = open_policy(policy, 1024 * 1024, 1024).expect("profiled offline workspace run");
+
+    named.push((
+        "git rev-parse".into(),
+        vec![
+            "/opt/homebrew/bin/git".into(),
+            "rev-parse".into(),
+            "--show-toplevel".into(),
+        ],
+    ));
+    let compared = named.len();
+    let mut cases = named;
+    cases.push((
+        "jq --version".into(),
+        vec!["/opt/homebrew/bin/jq".into(), "--version".into()],
+    ));
+    let mut pending = scripts.iter().cloned().collect::<Vec<_>>();
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .expect("scripts directory")
+            .flatten()
+        {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "sh")
+                && !path.to_string_lossy().contains("/tests/")
+                // Sourced libraries are not programs, outside ego either.
+                && path.metadata().is_ok_and(|meta| {
+                    std::os::unix::fs::PermissionsExt::mode(&meta.permissions()) & 0o111 != 0
+                })
+            {
+                let root = scripts.as_ref().expect("a scanned directory has a root");
+                let label = path.strip_prefix(root).unwrap().display().to_string();
+                cases.push((
+                    format!("{label} --help"),
+                    vec![path.into(), "--help".into()],
+                ));
+            }
+        }
+    }
+
+    // The named tools must also exit exactly as they do outside ego.
+    let mut diverged = Vec::new();
+    for (label, argv) in cases.iter().take(compared) {
+        let outside = Command::new(&argv[0])
+            .args(&argv[1..])
+            .current_dir(workspace.path())
+            .output()
+            .expect("unsandboxed run")
+            .status
+            .code();
+        let spec = SpawnSpec::new(
+            argv.clone(),
+            Some(CanonPath::new(canon(workspace.path()))),
+            Some(Duration::from_secs(20)),
+            EnvPolicy::Inherited,
+        )
+        .expect("spec");
+        let (_, note) = sandbox_blocked(&run, spec);
+        let inside = note
+            .strip_prefix("exit ")
+            .map(|rest| rest.split(':').next().unwrap_or("").to_owned());
+        let expected = match outside {
+            Some(0) => "0".to_owned(),
+            other => format!("{other:?}"),
+        };
+        if inside.as_deref() != Some(expected.as_str()) {
+            eprintln!("DIVERGED {label}: {note}");
+            diverged.push(label.clone());
+        }
+    }
+    assert!(
+        diverged.is_empty(),
+        "differs from outside ego: {diverged:?}"
+    );
+
+    let blocked = cases
+        .into_iter()
+        .filter_map(|(label, argv)| {
+            let spec = SpawnSpec::new(
+                argv,
+                Some(CanonPath::new(canon(workspace.path()))),
+                Some(Duration::from_secs(20)),
+                EnvPolicy::Inherited,
+            )
+            .expect("spec");
+            let (blocked, note) = sandbox_blocked(&run, spec);
+            eprintln!("{label}: {note}");
+            blocked.then_some(label)
+        })
+        .collect::<Vec<_>>();
+    assert!(blocked.is_empty(), "blocked by the sandbox: {blocked:?}");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_measured_refusal_cites_the_probe_transcript_stored_in_its_session() {
+    // Seatbelt claims offline only when all four paired network probes pass,
+    // so this is the one request that may be measured in full and still
+    // refused. Whichever way it lands, the run has to be able to say what it
+    // measured rather than leave an absent bit as the only account.
+    let attempt = attempt_run(Confinement::Off, true, cwd(), 1024 * 1024, 1024);
+    let missing = match &attempt.outcome {
+        Err(ProcessError::MissingCapabilities(missing)) => missing,
+        Err(error) => panic!("offline failed without a precise capability refusal: {error}"),
+        Ok(_) => {
+            // Nothing was refused, so there is no refusal to make account for.
+            // Said out loud: a silent return reads the same as having asserted.
+            eprintln!("note: offline was granted here, so this test had no refusal to check");
+            return;
+        }
+    };
+    let reference = missing
+        .probe_evidence()
+        .expect("a refusal that follows a measurement carries its transcript");
+    let transcript = String::from_utf8(read_evidence_pages(&attempt.evidence, reference))
+        .expect("the probe transcript is UTF-8 JSON Lines");
+    assert!(
+        missing.to_string().contains(reference.id.as_str()),
+        "the refusal must cite the transcript by name: {missing}"
+    );
+
+    let records = transcript
+        .lines()
+        .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("transcript record"))
+        .collect::<Vec<_>>();
+    assert!(!records.is_empty());
+    for record in &records {
+        assert!(record["suite"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(record["root"].as_str().is_some_and(|s| !s.is_empty()));
+        assert!(record["argv"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(record["outcome"].as_str().is_some_and(|s| !s.is_empty()));
+    }
+    assert!(
+        records.iter().any(|record| record["suite"]
+            .as_str()
+            .is_some_and(|suite| suite.starts_with("offline."))),
+        "an offline refusal must name the network suites it ran: {transcript}"
+    );
+}
+
+#[test]
+fn observation_reports_capabilities_and_audit_identity_without_granting_them() {
+    let root = cwd();
+    let run = open_run(Confinement::Off, false, root, 1024 * 1024, 1024).unwrap();
+    assert!(!run.observation.backend().name().is_empty());
+    assert!(!run.observation.backend().revision().is_empty());
+    assert_eq!(run.observation.policy_digest().as_str().len(), 64);
+    assert_eq!(
+        run.observation.capabilities(),
+        ExecCaps::empty(),
+        "sandbox off must not claim confinement or offline capabilities"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn observe_reports_the_same_offline_capability_used_for_run_admission() {
+    // Catches: offline admission ignores the shared probe observation.
+    let fixture = config_fixture(Confinement::Off, true, cwd(), 1024 * 1024, 1024);
+    let (observation, _) = block_on(RunEffectPorts::observe(&fixture.config))
+        .expect("observation must not apply the run requirements");
+    match block_on(RunEffectPorts::for_run(fixture.config)) {
+        Ok((_, admitted, _)) => {
+            assert_eq!(admitted, observation);
+            assert!(observation.capabilities().contains(ExecCaps::NO_IP_NETWORK));
+        }
+        Err(ProcessError::MissingCapabilities(missing)) => {
+            assert_eq!(missing.available(), observation.capabilities());
+            assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+        }
+        Err(error) => panic!("offline failed without a typed capability refusal: {error}"),
+    }
+}
+
+#[test]
+fn observation_and_effect_construction_retain_one_measured_policy_fact() {
+    let fixture = config_fixture(Confinement::Off, false, cwd(), 1024 * 1024, 1024);
+    let (admitted, _probe_evidence) = block_on(RunEffectPorts::observe(&fixture.config))
+        .expect("the off policy must be observable");
+    let (_ports, constructed, _) = block_on(RunEffectPorts::for_run(fixture.config))
+        .expect("the same admitted off policy must construct effects");
+    assert_eq!(
+        admitted, constructed,
+        "effects drifted from the admitted observation"
+    );
+}
+
+#[test]
+fn admitted_observation_drift_is_refused_before_effect_construction() {
+    let cases = ["backend", "revision", "capabilities", "policy digest"];
+
+    for changed in cases {
+        let fixture = config_fixture(Confinement::Off, false, cwd(), 1024 * 1024, 1024);
+        let (observed, _) = block_on(RunEffectPorts::observe(&fixture.config))
+            .expect("the off policy must be observable");
+        let admitted = match changed {
+            "backend" => ExecObservation::new(
+                BackendIdentity::new(
+                    format!("{}-changed", observed.backend().name()),
+                    observed.backend().revision(),
+                ),
+                observed.capabilities(),
+                observed.policy_digest().clone(),
+            ),
+            "revision" => ExecObservation::new(
+                BackendIdentity::new(
+                    observed.backend().name(),
+                    format!("{}-changed", observed.backend().revision()),
+                ),
+                observed.capabilities(),
+                observed.policy_digest().clone(),
+            ),
+            "capabilities" => {
+                let capabilities = if observed.capabilities() == ExecCaps::empty() {
+                    ExecCaps::READ_SCOPED
+                } else {
+                    ExecCaps::empty()
+                };
+                ExecObservation::new(
+                    observed.backend().clone(),
+                    capabilities,
+                    observed.policy_digest().clone(),
+                )
+            }
+            "policy digest" => {
+                let digest = if observed.policy_digest().as_str() == "0".repeat(64) {
+                    "f".repeat(64)
+                } else {
+                    "0".repeat(64)
+                };
+                ExecObservation::new(
+                    observed.backend().clone(),
+                    observed.capabilities(),
+                    PolicyDigest::try_from(digest).expect("changed digest is a SHA-256 value"),
+                )
+            }
+            _ => unreachable!("all drift dimensions are covered"),
+        };
+        let config = fixture.config.with_admitted_observation(admitted.clone());
+        let error = match block_on(RunEffectPorts::for_run(config)) {
+            Ok(_) => panic!("{changed} drift was admitted and constructed effects"),
+            Err(error) => error,
+        };
+        match error {
+            ProcessError::ConfinementChanged {
+                admitted: actual_admitted,
+                observed: actual_observed,
+            } => {
+                assert_eq!(
+                    *actual_admitted, admitted,
+                    "admitted {changed} fact changed"
+                );
+                assert_eq!(
+                    *actual_observed, observed,
+                    "observed {changed} fact changed"
+                );
+            }
+            other => panic!("{changed} drift returned the wrong refusal: {other:?}"),
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn observation_persists_supported_measurement_transcript_in_the_session_store() {
+    let workspace = cwd();
+    let Some(_) = open_confined_run(
+        Confinement::Workspace,
+        false,
+        workspace.clone(),
+        1024 * 1024,
+        1024,
+    ) else {
+        return;
+    };
+    let fixture = config_fixture(Confinement::Workspace, false, workspace, 1024 * 1024, 1024);
+    let (observation, probe_evidence) =
+        block_on(RunEffectPorts::observe(&fixture.config)).expect("workspace observation");
+    assert!(
+        observation
+            .capabilities()
+            .contains(required_caps(Confinement::Workspace, false)),
+        "a supported observation must satisfy its policy requirements"
+    );
+    let reference = probe_evidence.expect("supported measurement must commit its transcript");
+    let live = read_evidence_pages(&fixture.evidence, &reference);
+    assert!(
+        !live.is_empty(),
+        "the committed transcript must not be empty"
+    );
+
+    let reopened = SessionEvidenceStore::open(
+        fixture.evidence_root.path(),
+        fixture.session,
+        fixture.evidence.hard_cap(),
+    )
+    .expect("session evidence store reopens");
+    assert_eq!(
+        read_evidence_pages(&reopened, &reference),
+        live,
+        "the observation transcript must survive reopening its session store"
+    );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn observation_persists_workspace_measurement_in_a_fresh_subprocess() {
+    let output = Command::new(std::env::current_exe().expect("current test executable"))
+        .args([
+            "--ignored",
+            "--exact",
+            "--nocapture",
+            "workspace_observation_child",
+        ])
+        .env("EGO_WORKSPACE_OBSERVATION_CHILD", "1")
+        .output()
+        .expect("workspace observation child starts");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    print!("workspace observation child stdout:\n{stdout}");
+    eprint!("workspace observation child stderr:\n{stderr}");
+    assert!(output.status.success(), "child failed: {stderr}");
+    let record: serde_json::Value = stdout
+        .lines()
+        .find_map(|line| serde_json::from_str(line).ok())
+        .expect("child emits a JSON observation record");
+    assert_eq!(record["status"], "observed");
+    assert_eq!(record["confinement"], "workspace");
+    let reference: EvidenceRef = serde_json::from_value(record["probe_reference"].clone())
+        .expect("child emits the EvidenceRef string accepted by serde");
+    let transcript_bytes = record["probe_bytes_len"]
+        .as_u64()
+        .expect("child emits the exact transcript byte count");
+    assert_eq!(reference.bytes, transcript_bytes);
+    assert!(transcript_bytes > 0);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "fresh subprocess entry point for workspace observation proof"]
+fn workspace_observation_child() {
+    if std::env::var_os("EGO_WORKSPACE_OBSERVATION_CHILD").is_none() {
+        return;
+    }
+    let workspace = tempfile::tempdir().expect("writable workspace");
+    let canonical = std::fs::canonicalize(workspace.path()).expect("canonical workspace");
+    let fixture = config_fixture(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(canonical),
+        1024 * 1024,
+        1024,
+    );
+    let result = block_on(RunEffectPorts::observe(&fixture.config));
+    let (observation, reference, bytes, error) = match result {
+        Ok((observation, reference)) => {
+            let bytes = reference
+                .as_ref()
+                .map(|reference| read_evidence_pages(&fixture.evidence, reference));
+            (Some(observation), reference, bytes, None)
+        }
+        Err(error) => (None, None, None, Some(error.to_string())),
+    };
+    println!(
+        "{}",
+        serde_json::json!({
+            "status": if error.is_some() { "error" } else { "observed" },
+            "confinement": "workspace",
+            "observation": observation,
+            "probe_reference": reference,
+            "probe_bytes": bytes.as_ref().map(|bytes| String::from_utf8_lossy(bytes)),
+            "probe_bytes_len": bytes.as_ref().map(Vec::len),
+            "error": error,
+        })
+    );
+    let observation = observation.expect("workspace observation was unavailable");
+    let reference = reference.expect("workspace observation probe reference");
+    let bytes = bytes.expect("workspace probe transcript");
+    assert!(
+        observation
+            .capabilities()
+            .contains(required_caps(Confinement::Workspace, false)),
+        "workspace observation lacks required capabilities: {observation:?}"
+    );
+    assert!(!bytes.is_empty(), "workspace probe transcript is empty");
+    let _ = reference;
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_backend_workspace_rights_and_exact_argv_are_fail_closed() {
+    let root = cwd();
+    let Some(run) = open_confined_run(Confinement::Workspace, false, root, 1024 * 1024, 1024)
+    else {
+        return;
+    };
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::READ_SCOPED)
+    );
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::WRITE_SCOPED)
+    );
+    assert!(
+        !run.observation
+            .capabilities()
+            .contains(ExecCaps::NO_IP_NETWORK)
+    );
+
+    // The helper path is an implementation detail, but the target remains a
+    // public exact-argv contract: a confined launch must execute the same
+    // executable and arguments, not a helper substitute. The target is an
+    // installed utility because a confined child may execute only beneath the
+    // runtime roots and the workspace, and this test binary lives in the
+    // target directory, outside both (the same rule as the mutation matrix).
+    let echo = std::fs::canonicalize("/bin/echo").expect("an installed echo utility");
+    let spec = SpawnSpec::new(
+        vec![echo.into_os_string(), OsString::from("linux exact target")],
+        Some(cwd()),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("argv is valid before launch");
+    let out = block_on(run.ports.process().execute(&spec))
+        .expect("a complete Landlock probe must execute its exact target argv");
+    assert!(format!("{out:?}").contains("linux exact target"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_landlock_workspace_requires_refer_truncate_and_known_rights() {
+    // Refer is exercised by hard-link creation and Truncate by both the
+    // OpenOptions path and overwrite.  The complete paired matrix is the
+    // public behavioural proof for these ABI rights; no private Landlock
+    // AccessFs builder is imported here.
+    workspace_confinement_covers_required_mutations_inside_and_outside();
+
+    let root = cwd();
+    let Some(run) = open_confined_run(Confinement::Workspace, false, root, 1024 * 1024, 1024)
+    else {
+        return;
+    };
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::WRITE_SCOPED)
+    );
+    assert!(
+        run.observation
+            .capabilities()
+            .contains(ExecCaps::READ_SCOPED)
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_bwrap_offline_runs_all_filesystem_levels_when_namespace_controls_work() {
+    // Catches: Linux still refuses offline despite a working namespace backend,
+    // or the selected wrapper cannot run the exact admitted target.
+    let available = std::process::Command::new("/usr/bin/bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-net",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "/usr/bin/true",
+        ])
+        .status()
+        .is_ok_and(|status| status.success());
+    for level in [Confinement::Off, Confinement::Ro, Confinement::Workspace] {
+        match open_run(level, true, cwd(), 1024 * 1024, 1024) {
+            Ok(run) => {
+                assert_eq!(run.observation.backend().name(), "bwrap");
+                assert!(
+                    run.observation
+                        .capabilities()
+                        .contains(ExecCaps::NO_IP_NETWORK)
+                );
+                let spec = SpawnSpec::new(
+                    vec!["/bin/echo".into(), "offline exact target".into()],
+                    Some(cwd()),
+                    None,
+                    EnvPolicy::Inherited,
+                )
+                .expect("valid target");
+                let output =
+                    block_on(run.ports.process().execute(&spec)).expect("offline target must run");
+                assert!(format!("{output:?}").contains("offline exact target"));
+            }
+            Err(ProcessError::MissingCapabilities(missing))
+                if !available || local_non_loopback().is_none() =>
+            {
+                assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+            }
+            Err(error) => panic!("working bwrap must demonstrate {level} offline: {error}"),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_failed_bwrap_controls_fall_back_to_landlock_without_claiming_capabilities() {
+    // Catches: a bwrap launch or failed positive control is treated as proof.
+    let workspace = tempfile::tempdir().expect("workspace");
+    let path = CanonPath::new(std::fs::canonicalize(workspace.path()).unwrap());
+    let fixture = config_fixture(Confinement::Workspace, false, path, 1024 * 1024, 1024);
+    // The workspace disappears after policy resolution, before measurement.
+    workspace.close().expect("remove workspace");
+    let (observation, _) =
+        block_on(RunEffectPorts::observe(&fixture.config)).expect("observe fallback");
+    assert_eq!(observation.backend().name(), "landlock");
+    assert_eq!(observation.capabilities(), ExecCaps::empty());
+    assert!(matches!(
+        block_on(RunEffectPorts::for_run(fixture.config)),
+        Err(ProcessError::MissingCapabilities(_))
+    ));
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[test]
+fn null_backend_refuses_confinement_but_off_online_executes() {
+    let root = cwd();
+    let missing = match open_run(
+        Confinement::Workspace,
+        false,
+        root.clone(),
+        1024 * 1024,
+        1024,
+    ) {
+        Err(ProcessError::MissingCapabilities(missing)) => missing,
+        Err(err) => panic!("workspace failed without a precise capability refusal: {err:?}"),
+        Ok(_) => panic!("null backend claimed workspace confinement"),
+    };
+    assert!(
+        missing
+            .missing()
+            .contains(ExecCaps::READ_SCOPED.union(ExecCaps::WRITE_SCOPED))
+    );
+    let missing = match open_run(Confinement::Off, true, root.clone(), 1024 * 1024, 1024) {
+        Err(ProcessError::MissingCapabilities(missing)) => missing,
+        Err(err) => panic!("offline failed without a precise capability refusal: {err:?}"),
+        Ok(_) => panic!("null backend claimed offline confinement"),
+    };
+    assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+    let run = open_run(Confinement::Off, false, root, 1024 * 1024, 1024).unwrap();
+    execute(
+        &run,
+        fixture_arg_spec(
+            "exec_contract_fixture_echoes_argument",
+            [OsString::from("windows exact argv")],
+            None,
+            cwd(),
+        ),
+    )
+    .expect("off-only backend still executes exact argv");
+}
+
+#[test]
+fn cancellation_uses_the_caller_token_and_returns_cancelled() {
+    let root = cwd();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        root.clone(),
+        64 * 1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    let cancel = run.cancel.clone();
+    let handle = std::thread::spawn(move || {
+        execute(
+            &run,
+            fixture_arg_spec("exec_contract_fixture_emits_until_killed", [], None, cwd()),
+        )
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    cancel.cancel(CancelCause::User);
+    let result = handle.join().expect("executor thread");
+    assert!(matches!(result, Err(ProcessError::Cancelled)));
+}
+
+#[test]
+fn cancellation_kills_a_descendant_process_group_not_only_the_direct_child() {
+    let dir = tempfile::tempdir().expect("process fixture directory");
+    let pid_path = dir.path().join("cancel-descendant.pid");
+    let root = cwd();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        root.clone(),
+        64 * 1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    let cancel = run.cancel.clone();
+    let child_pid_path = pid_path.clone();
+    let handle = std::thread::spawn(move || {
+        execute(
+            &run,
+            fixture_spec(
+                "exec_contract_fixture_holds_a_descendant",
+                &[child_pid_path.as_path()],
+                None,
+                cwd(),
+            ),
+        )
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !pid_path.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        pid_path.exists(),
+        "descendant fixture never reached its pid handoff"
+    );
+    cancel.cancel(CancelCause::User);
+    let result = handle.join().expect("executor thread");
+    assert!(matches!(result, Err(ProcessError::Cancelled)));
+
+    let pid = std::fs::read_to_string(pid_path).expect("fixture wrote descendant pid");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while descendant_is_alive(pid.trim()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !descendant_is_alive(pid.trim()),
+        "descendant process survived cancellation cleanup"
+    );
+}
+
+#[test]
+fn timeout_kills_a_descendant_process_group_not_only_the_direct_child() {
+    let dir = tempfile::tempdir().expect("process fixture directory");
+    let pid_path = dir.path().join("descendant.pid");
+    let root = cwd();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        root.clone(),
+        64 * 1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    let process = fixture_spec(
+        "exec_contract_fixture_holds_a_descendant",
+        &[pid_path.as_path()],
+        Some(Duration::from_secs(2)),
+        root,
+    );
+    let err = execute(&run, process).unwrap_err();
+
+    assert!(matches!(err, ProcessError::Timeout { .. }));
+    let pid = std::fs::read_to_string(pid_path).expect("fixture wrote descendant pid");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while descendant_is_alive(pid.trim()) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(
+        !descendant_is_alive(pid.trim()),
+        "descendant process survived timeout cleanup"
+    );
+}
+
+// Catches: killpg at call end silently removes a nohup child, and the model
+// never learns the supported detached mode (exec background=true).
+#[cfg(unix)]
+#[test]
+fn exec_nohup_child_stopped_at_call_end_names_background_mode() {
+    let root = cwd();
+    let run = open_run(
+        Confinement::Off,
+        false,
+        root.clone(),
+        64 * 1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    let spec = SpawnSpec::new(
+        [
+            "/bin/sh",
+            "-c",
+            "nohup sleep 30 >/dev/null 2>&1 & echo started",
+        ]
+        .map(OsString::from)
+        .to_vec(),
+        Some(root),
+        Some(Duration::from_secs(20)),
+        EnvPolicy::Inherited,
+    )
+    .unwrap();
+    let result = block_on(run.ports.process().execute(&spec)).expect("exec settles");
+    let text = result
+        .content
+        .iter()
+        .map(|block| block.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(text.contains("started"), "{text}");
+    assert!(
+        text.contains("nohup") && text.contains("background=true"),
+        "the stopped child was not reported: {text}"
+    );
+}
+
+#[cfg(unix)]
+fn descendant_is_alive(pid: &str) -> bool {
+    Command::new("/bin/kill")
+        .args(["-0", pid])
+        .status()
+        .expect("kill utility")
+        .success()
+}
+
+#[cfg(windows)]
+fn descendant_is_alive(pid: &str) -> bool {
+    let filter = format!("PID eq {pid}");
+    let output = Command::new("tasklist")
+        .args(["/FI", filter.as_str(), "/NH"])
+        .output()
+        .expect("tasklist utility");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.split_whitespace().any(|field| field == pid))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn local_non_loopback() -> Option<std::net::IpAddr> {
+    let socket = UdpSocket::bind("0.0.0.0:0").expect("local UDP socket");
+    socket.connect("192.0.2.1:9").ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+/// Whether a paired control on a non-loopback address can be established here
+/// at all — which is the precondition the offline measurement actually has.
+///
+/// Having an address is not the same as being able to pair on it. macOS gates
+/// local-network traffic behind a per-application permission, and a process
+/// without it sees `connect` report success while the packets never arrive; a
+/// VPN default route can put a tunnel address in the same state. Either way the
+/// probe cannot demonstrate the guarantee and refuses it, which is correct. The
+/// test has to ask the same question the probe does, rather than asking the
+/// weaker one and then reading a refusal as proof.
+fn non_loopback_control_pairs(ip: std::net::IpAddr) -> bool {
+    use std::io::{Read as _, Write as _};
+
+    let Ok(listener) = TcpListener::bind((ip, 0)) else {
+        return false;
+    };
+    let (Ok(endpoint), Ok(())) = (listener.local_addr(), listener.set_nonblocking(true)) else {
+        return false;
+    };
+    let Ok(mut client) = TcpStream::connect_timeout(&endpoint, Duration::from_millis(250)) else {
+        return false;
+    };
+    let timeout = Some(Duration::from_millis(250));
+    if client.set_read_timeout(timeout).is_err() || client.write_all(b"pair").is_err() {
+        return false;
+    }
+    let deadline = std::time::Instant::now() + Duration::from_millis(250);
+    loop {
+        match listener.accept() {
+            Ok((mut accepted, _)) => {
+                let mut received = [0; 4];
+                return accepted.set_read_timeout(timeout).is_ok()
+                    && accepted.read_exact(&mut received).is_ok()
+                    && received == *b"pair"
+                    && accepted.write_all(&received).is_ok()
+                    && client.read_exact(&mut received).is_ok()
+                    && received == *b"pair";
+            }
+            Err(error)
+                if error.kind() == std::io::ErrorKind::WouldBlock
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(_) => return false,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn non_loopback_udp_control_pairs(ip: std::net::IpAddr) -> bool {
+    let bind = if ip.is_ipv4() { "0.0.0.0:0" } else { "[::]:0" };
+    let Ok(receiver) = UdpSocket::bind((ip, 0)) else {
+        return false;
+    };
+    let (Ok(endpoint), Ok(sender)) = (receiver.local_addr(), UdpSocket::bind(bind)) else {
+        return false;
+    };
+    let timeout = Some(Duration::from_millis(250));
+    if receiver.set_read_timeout(timeout).is_err()
+        || sender.set_read_timeout(timeout).is_err()
+        || sender.send_to(b"pair", endpoint).ok() != Some(4)
+    {
+        return false;
+    }
+    let mut received = [0_u8; 4];
+    let Ok((length, peer)) = receiver.recv_from(&mut received) else {
+        return false;
+    };
+    length == received.len()
+        && received == *b"pair"
+        && receiver.send_to(&received, peer).ok() == Some(received.len())
+        && sender.recv_from(&mut received).is_ok_and(|(length, peer)| {
+            length == received.len() && peer == endpoint && received == *b"pair"
+        })
+}
+
+fn pairable_non_loopback() -> Option<std::net::IpAddr> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        nix::ifaddrs::getifaddrs()
+            .ok()?
+            .filter_map(|interface| {
+                let address = interface.address?.as_sockaddr_in()?.ip();
+                (!address.is_loopback() && !address.is_unspecified()).then_some(address.into())
+            })
+            .find(|&ip| {
+                let tcp = non_loopback_control_pairs(ip);
+                let udp = non_loopback_udp_control_pairs(ip);
+                if !tcp || !udp {
+                    eprintln!(
+                        "note: independent non-loopback controls at {ip}: tcp={tcp}, udp={udp}"
+                    );
+                }
+                tcp && udp
+            })
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        local_non_loopback().filter(|ip| non_loopback_control_pairs(*ip))
+    }
+}
+
+enum NetworkControl {
+    Tcp(TcpListener),
+    Udp(UdpSocket),
+}
+
+fn tcp_control(ip: std::net::IpAddr) -> (String, NetworkControl) {
+    let listener = TcpListener::bind((ip, 0)).expect("tcp control listener");
+    let endpoint = listener.local_addr().unwrap().to_string();
+    (endpoint, NetworkControl::Tcp(listener))
+}
+
+fn udp_control(ip: std::net::IpAddr) -> (String, NetworkControl) {
+    let socket = UdpSocket::bind((ip, 0)).expect("udp control listener");
+    let endpoint = socket.local_addr().unwrap().to_string();
+    (endpoint, NetworkControl::Udp(socket))
+}
+
+#[cfg(target_os = "macos")]
+fn open_offline_control_run(
+    workspace: CanonPath,
+    nonloopback: Option<std::net::IpAddr>,
+) -> Option<Run> {
+    let attempt = attempt_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
+    if let Err(ProcessError::MissingCapabilities(missing)) = &attempt.outcome {
+        assert_eq!(missing.required(), ExecCaps::NO_IP_NETWORK);
+        assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+        if std::env::var_os(BACKEND_ABSENT).is_some() {
+            return None;
+        }
+        let Some(nonloopback) = nonloopback else {
+            // Non-loopback coverage is unavailable, but the caller must still
+            // run every loopback baseline and check any admitted offline child.
+            return None;
+        };
+        let reference = missing
+            .probe_evidence()
+            .expect("measured refusal has evidence");
+        let bytes = read_evidence_pages(&attempt.evidence, reference);
+        let transcript = std::str::from_utf8(&bytes).expect("probe transcript is UTF-8");
+        let records: Vec<serde_json::Value> = transcript
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("probe record is JSON"))
+            .collect();
+        // The early host check is not a lease on network availability. Identity
+        // acquisition can take time. Re-establish this existing prerequisite
+        // at refusal, without accepting a failed confined half as host evidence.
+        let receiver_failure = records
+            .iter()
+            .find_map(|record| {
+                record["suite"]
+                    .as_str()
+                    .filter(|suite| suite.ends_with("-nonloopback.control.receiver"))
+            })
+            .unwrap_or_else(|| {
+                panic!("a failed baseline receiver names its protocol: {transcript}")
+            });
+        let control = receiver_failure
+            .strip_suffix(".receiver")
+            .expect("receiver suite suffix");
+        let confined = control
+            .strip_suffix(".control")
+            .expect("control suite suffix");
+        let control_ran = records
+            .iter()
+            .any(|record| record["suite"] == control && record["outcome"] == "ok");
+        let confined_ran = records.iter().any(|record| record["suite"] == confined);
+        assert!(
+            control_ran && !confined_ran,
+            "offline failed without an unpaired host control: {transcript}"
+        );
+        let independent_control_pairs = if receiver_failure.starts_with("offline.tcp-") {
+            non_loopback_control_pairs(nonloopback)
+        } else if receiver_failure.starts_with("offline.udp-") {
+            non_loopback_udp_control_pairs(nonloopback)
+        } else {
+            panic!("unknown receiver suite: {receiver_failure}");
+        };
+        assert!(
+            !independent_control_pairs,
+            "independent host control still works; confinement must be demonstrated: {transcript}"
+        );
+        eprintln!(
+            "note: non-loopback pairing became unavailable during measurement; verified precise refusal against a fresh independent control"
+        );
+        return None;
+    }
+    Some(
+        attempt
+            .into_run()
+            .unwrap_or_else(|error| panic!("offline run failed: {error}")),
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
+    assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls();
+}
+
+// Catches: sender exit is mistaken for TCP delivery, or exit 101 after a
+// missing ACK is mistaken for denial despite an accepted host connection.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn paired_tcp_control(
+    listener: &TcpListener,
+    sentinel: Option<&str>,
+    run: &Run,
+    spec: SpawnSpec,
+) -> (Result<(), ProcessError>, std::io::Result<()>) {
+    use std::io::{Read as _, Write as _};
+
+    listener
+        .set_nonblocking(true)
+        .expect("nonblocking TCP receiver");
+    std::thread::scope(|scope| {
+        let (finished, child_finished) = std::sync::mpsc::channel();
+        let receiver = scope.spawn(move || {
+            // The dispatcher waits up to 30s for its ACK. Its SpawnSpec gets
+            // 65s (> accept budget + dispatcher ACK budget). Denied observation
+            // covers that child lifetime plus settlement and a 100ms grace.
+            let deadline =
+                Instant::now() + Duration::from_secs(if sentinel.is_some() { 30 } else { 75 });
+            let mut post_exit = None;
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, peer)) => {
+                        let Some(sentinel) = sentinel else {
+                            return Err(std::io::Error::other(format!(
+                                "offline TCP accepted connection from {peer} (ACK withheld)"
+                            )));
+                        };
+                        stream.set_nonblocking(false)?;
+                        let remaining = deadline.saturating_duration_since(Instant::now());
+                        stream.set_read_timeout(Some(remaining))?;
+                        let mut received = vec![0_u8; sentinel.len()];
+                        stream.read_exact(&mut received)?;
+                        if received != sentinel.as_bytes() {
+                            return Err(std::io::Error::other("TCP sentinel mismatch"));
+                        }
+                        stream.set_write_timeout(Some(
+                            deadline.saturating_duration_since(Instant::now()),
+                        ))?;
+                        stream.write_all(&received)?;
+                        return Ok(());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
+                let now = Instant::now();
+                if sentinel.is_none() {
+                    if post_exit.is_none()
+                        && !matches!(
+                            child_finished.try_recv(),
+                            Err(std::sync::mpsc::TryRecvError::Empty)
+                        )
+                    {
+                        post_exit = Some(now + Duration::from_millis(100));
+                    }
+                    if post_exit.is_some_and(|end| now >= end) {
+                        return Ok(());
+                    }
+                }
+                if now >= deadline {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "TCP receiver deadline before control completed",
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let child = execute(run, spec);
+        let _ = finished.send(());
+        // Join before asserting either verdict, including child failures.
+        let received = receiver.join().expect("TCP receiver thread panicked");
+        (child, received)
+    })
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn tcp_control_does_not_mistake_missing_ack_exit_for_denial() {
+    // Catches: an unconfined child connects, gets no ACK and exits 101, which
+    // must fail the receiver verdict rather than masquerade as offline denial.
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let endpoint = listener.local_addr().unwrap();
+    let workspace = cwd();
+    let baseline = open_run(
+        Confinement::Off,
+        false,
+        workspace.clone(),
+        1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    let spec = fixture_arg_spec(
+        "__ego_internal_network_probe_v1",
+        [
+            "tcp".into(),
+            endpoint.to_string().into(),
+            format!("{endpoint}:offline").into(),
+        ],
+        Some(Duration::from_secs(65)),
+        workspace,
+    );
+    let (child, receiver) = paired_tcp_control(&listener, None, &baseline, spec);
+    assert!(
+        matches!(
+            child,
+            Err(ProcessError::Exit {
+                code: Some(101),
+                ..
+            })
+        ),
+        "connected child without ACK must fail: {child:?}"
+    );
+    let error = receiver.expect_err("accepted connection must not count as denial");
+    assert!(error.to_string().contains("accepted connection"), "{error}");
+}
+
+fn assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls() {
+    let root = cwd();
+    let mut endpoints = vec![
+        ("tcp", tcp_control("127.0.0.1".parse().unwrap())),
+        ("udp", udp_control("127.0.0.1".parse().unwrap())),
+    ];
+    let nonloopback = pairable_non_loopback();
+    #[cfg(target_os = "macos")]
+    let nonloopback = nonloopback.or_else(|| {
+        eprintln!("note: initial non-loopback control unavailable; re-pairing a fresh control");
+        pairable_non_loopback()
+    });
+    if let Some(nonloopback) = nonloopback {
+        endpoints.extend([
+            ("tcp", tcp_control(nonloopback)),
+            ("udp", udp_control(nonloopback)),
+        ]);
+    } else {
+        #[cfg(target_os = "macos")]
+        eprintln!(
+            "not-verifiable: no pairable non-loopback control after a fresh measurement; \
+             non-loopback offline coverage is unavailable; checking loopback controls"
+        );
+        #[cfg(not(target_os = "macos"))]
+        {
+            // A missing host prerequisite must cause a precise refusal.
+            eprintln!(
+                "note: no pairable non-loopback address on this host; asserting the refusal is \
+                 precise rather than the guarantee is demonstrated"
+            );
+            let missing = match open_run(Confinement::Off, true, root, 1024 * 1024, 1024) {
+                Err(ProcessError::MissingCapabilities(missing)) => missing,
+                Err(err) => panic!("offline failed without precise capability refusal: {err:?}"),
+                Ok(_) => panic!("offline proceeded without a non-loopback probe prerequisite"),
+            };
+            assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+            return;
+        }
+    }
+
+    for (protocol, (endpoint, control)) in endpoints {
+        let workspace = root.clone();
+        let baseline = open_run(
+            Confinement::Off,
+            false,
+            workspace.clone(),
+            1024 * 1024,
+            1024,
+        )
+        .unwrap();
+        let network_spec = fixture_arg_spec(
+            "exec_contract_fixture_connects",
+            [OsString::from(protocol), OsString::from(&endpoint)],
+            None,
+            workspace.clone(),
+        );
+        let address_class = if endpoint.starts_with("127.") {
+            "loopback"
+        } else {
+            "non-loopback"
+        };
+        let context = format!("{protocol} {address_class} {endpoint}");
+        eprintln!("note: paired network control {context}");
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let network_spec = if protocol == "tcp" {
+            fixture_arg_spec(
+                "__ego_internal_network_probe_v1",
+                [
+                    "tcp".into(),
+                    endpoint.clone().into(),
+                    format!("{endpoint}:positive").into(),
+                ],
+                Some(Duration::from_secs(65)),
+                workspace.clone(),
+            )
+        } else {
+            network_spec
+        };
+        match &control {
+            NetworkControl::Tcp(listener) => {
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                {
+                    let sentinel = format!("{endpoint}:positive");
+                    let (child, receiver) = paired_tcp_control(
+                        listener,
+                        Some(&sentinel),
+                        &baseline,
+                        network_spec.clone(),
+                    );
+                    assert!(
+                        child.is_ok() && receiver.is_ok(),
+                        "positive {context}: child={child:?}; receiver={receiver:?}"
+                    );
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                {
+                    execute(&baseline, network_spec.clone()).expect("paired TCP control must work");
+                    listener
+                        .set_nonblocking(true)
+                        .expect("nonblocking receiver");
+                    listener
+                        .accept()
+                        .expect("positive TCP control reached the host");
+                }
+            }
+            NetworkControl::Udp(socket) => {
+                execute(&baseline, network_spec.clone())
+                    .unwrap_or_else(|error| panic!("positive {context}: {error:?}"));
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(250)))
+                    .unwrap();
+                let mut bytes = [0_u8; 16];
+                let (length, _) = socket
+                    .recv_from(&mut bytes)
+                    .unwrap_or_else(|error| panic!("positive {context} receiver: {error:?}"));
+                assert_eq!(&bytes[..length], b"probe", "positive {context}");
+            }
+        }
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        let network_spec = if protocol == "tcp" {
+            fixture_arg_spec(
+                "__ego_internal_network_probe_v1",
+                [
+                    "tcp".into(),
+                    endpoint.clone().into(),
+                    format!("{endpoint}:offline").into(),
+                ],
+                Some(Duration::from_secs(65)),
+                workspace.clone(),
+            )
+        } else {
+            network_spec
+        };
+
+        // Check every admitted offline child. macOS accepts a precise refusal
+        // only when independent non-loopback coverage is unavailable.
+        #[cfg(target_os = "macos")]
+        let offline = open_offline_control_run(workspace, nonloopback);
+        #[cfg(target_os = "linux")]
+        let offline = match open_run(Confinement::Off, true, workspace, 1024 * 1024, 1024) {
+            Ok(run) => Some(run),
+            Err(ProcessError::MissingCapabilities(missing)) => {
+                assert_eq!(missing.required(), ExecCaps::NO_IP_NETWORK);
+                assert!(missing.missing().contains(ExecCaps::NO_IP_NETWORK));
+                None
+            }
+            Err(error) => panic!("offline failed without a precise capability refusal: {error}"),
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let offline = open_confined_run(Confinement::Off, true, workspace, 1024 * 1024, 1024);
+        if let Some(offline) = offline {
+            match &control {
+                NetworkControl::Tcp(listener) => {
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
+                    let (result, receiver) =
+                        paired_tcp_control(listener, None, &offline, network_spec);
+                    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+                    let (result, receiver) = {
+                        let result = execute(&offline, network_spec);
+                        let receiver = match listener.accept() {
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(()),
+                            Err(error) => Err(error),
+                            Ok(_) => Err(std::io::Error::other("offline TCP reached host")),
+                        };
+                        (result, receiver)
+                    };
+                    assert!(
+                        matches!(
+                            result,
+                            Err(ProcessError::Exit {
+                                code: Some(101),
+                                ..
+                            })
+                        ),
+                        "offline {context} child must report denial: {result:?}; receiver={receiver:?}"
+                    );
+                    assert!(
+                        receiver.is_ok(),
+                        "offline {context}: child={result:?}; receiver={receiver:?}"
+                    );
+                }
+                NetworkControl::Udp(socket) => {
+                    let result = execute(&offline, network_spec);
+                    // Catches: a send accepted in an isolated namespace is
+                    // mistaken for delivery, or an unconfined send is admitted.
+                    assert!(
+                        matches!(
+                            result,
+                            Ok(())
+                                | Err(ProcessError::Exit {
+                                    code: Some(101),
+                                    ..
+                                })
+                        ),
+                        "UDP child did not complete its bounded attempt: {result:?}"
+                    );
+                    socket
+                        .set_read_timeout(Some(Duration::from_millis(100)))
+                        .unwrap();
+                    assert!(
+                        socket
+                            .recv_from(&mut [0_u8; 16])
+                            .is_err_and(|error| matches!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                            )),
+                        "offline UDP reached the host receiver"
+                    );
+                }
+            }
+        } else if cfg!(not(any(target_os = "linux", target_os = "macos"))) {
+            return;
+        }
+        match control {
+            NetworkControl::Tcp(listener) => drop(listener),
+            NetworkControl::Udp(socket) => drop(socket),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_seatbelt_offline_controls_cover_tcp_udp_and_both_address_classes() {
+    // Catches: an admitted offline child reaches a live loopback endpoint,
+    // including when independent non-loopback coverage is unavailable.
+    // The same paired controls are intentionally run under the Seatbelt-only
+    // target gate. A missing profile compiler/backend must return a precise
+    // capability refusal; it may not silently run the child unconfined.
+    assert_offline_requires_tcp_and_udp_loopback_and_nonloopback_controls();
+}
+
+// Catches: granting metadata only to the immediate workspace parent, or only in workspace mode.
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_standalone_nested_workspace_stats_every_ancestor_even_read_only() {
+    let outer = tempfile::tempdir().expect("outer directory");
+    let workspace = outer.path().join("parent with spaces/child/workspace");
+    std::fs::create_dir_all(&workspace).expect("nested workspace");
+    let workspace = std::fs::canonicalize(workspace).expect("canonical workspace");
+    let mut argv = vec![OsString::from("/usr/bin/stat")];
+    argv.extend(
+        workspace
+            .ancestors()
+            .map(|path| path.as_os_str().to_owned()),
+    );
+    for level in [Confinement::Workspace, Confinement::Ro] {
+        let run = open_policy(
+            run_confinement(level, false, CanonPath::new(workspace.clone())),
+            1024 * 1024,
+            1024,
+        )
+        .expect("standalone run");
+        execute(
+            &run,
+            SpawnSpec::new(
+                argv.clone(),
+                Some(CanonPath::new(workspace.clone())),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .expect("stat spec"),
+        )
+        .expect("every workspace ancestor must be statable");
+        if level == Confinement::Ro {
+            let forbidden = workspace.join("read-only-write");
+            execute(
+                &run,
+                SpawnSpec::new(
+                    vec!["/usr/bin/touch".into(), forbidden.clone().into_os_string()],
+                    Some(CanonPath::new(workspace.clone())),
+                    None,
+                    EnvPolicy::Inherited,
+                )
+                .expect("touch spec"),
+            )
+            .expect_err("metadata permission must not grant read-only writes");
+            assert!(!forbidden.exists(), "read-only workspace was modified");
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn homebrew_spec(program: &str, args: &[OsString], workspace: &std::path::Path) -> SpawnSpec {
+    let path = std::path::Path::new("/opt/homebrew/bin").join(program);
+    let canonical = std::fs::canonicalize(&path).expect("native acceptance requires Homebrew tool");
+    assert!(canonical.starts_with("/opt/homebrew/Cellar"));
+    // Use the installed symlink, not just the canonical binary: both paths must work.
+    let mut argv = vec![path.into_os_string()];
+    argv.extend_from_slice(args);
+    SpawnSpec::new(
+        argv,
+        Some(CanonPath::new(std::fs::canonicalize(workspace).unwrap())),
+        None,
+        EnvPolicy::Inherited,
+    )
+    .expect("Homebrew spec")
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_python_catches_homebrew_prefix_missing_from_runtime_roots() {
+    let workspace = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    execute(
+        &run,
+        homebrew_spec("python3", &["--version".into()], workspace.path()),
+    )
+    .expect("standalone Homebrew Python runs");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_git_catches_cellar_symlink_target_not_admitted() {
+    let workspace = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    execute(
+        &run,
+        homebrew_spec("git", &["--version".into()], workspace.path()),
+    )
+    .expect("standalone Homebrew Git runs through its Cellar symlink");
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_exec_paths_default_python_catches_runtime_root_widening_writes() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let run = open_policy(
+        workspace_policy(workspace.path(), Vec::new()),
+        1024 * 1024,
+        1024,
+    )
+    .expect("default standalone workspace confinement");
+    let write = |target: &std::path::Path| {
+        execute(
+            &run,
+            homebrew_spec(
+                "python3",
+                &[
+                    "-c".into(),
+                    "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('written')".into(),
+                    target.as_os_str().to_owned(),
+                ],
+                workspace.path(),
+            ),
+        )
+    };
+    let inside = workspace.path().join("inside");
+    write(&inside).expect("control write inside workspace");
+    assert_eq!(std::fs::read_to_string(&inside).unwrap(), "written");
+    let target = outside.path().join("outside");
+    assert!(
+        write(&target).is_err(),
+        "Homebrew child wrote outside confinement"
+    );
+    assert!(!target.exists());
+}
+
+// Catches raw inherited credentials reaching model-visible output and durable evidence.
+#[test]
+fn known_secret_env_printed_by_child_is_masked_before_evidence_and_context() {
+    const TOKEN: &str = "ego-known-credential-274-unique";
+    if std::env::var("EGO_MASKING_CHILD_CASE").as_deref() != Ok("1") {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "known_secret_env_printed_by_child_is_masked_before_evidence_and_context",
+            ])
+            .env("EGO_MASKING_CHILD_CASE", "1")
+            .env("EGO_TEST_API_TOKEN", TOKEN)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let run = open_run(Confinement::Off, false, cwd(), 1024 * 1024, 1024).unwrap();
+    let result = block_on(run.ports.process().execute(&fixture_arg_spec(
+        "exec_contract_fixture_prints_secret_environment",
+        [],
+        None,
+        cwd(),
+    )))
+    .unwrap();
+    let visible = result.model_text();
+    assert!(visible.contains("[REDACTED]"));
+    assert!(!visible.contains(TOKEN));
+    for block in &result.content {
+        let persisted = read_evidence_pages(&run.evidence, block.evidence_reference().unwrap());
+        assert!(
+            !persisted
+                .windows(TOKEN.len())
+                .any(|bytes| bytes == TOKEN.as_bytes())
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn exec_contract_fixture_prints_secret_environment() {
+    let token = std::env::var("EGO_TEST_API_TOKEN").unwrap();
+    print!("{token}");
+    eprint!("{token}");
+}
+
+// Catches: the selected environment policy is lost between config resolution,
+// builtin preparation and the actual child process.
+#[test]
+fn configured_exec_environment_reaches_real_builtin_children() {
+    use ego_core::config::{ConfigLayer, Trust, resolve};
+    let root = cwd();
+    let executable = std::env::current_exe().unwrap();
+    const KEY_ENV: &str = "EGO_EXEC_CONTRACT_SIGV4_SECRET";
+    // Isolate the test credential from siblings in the test runner.
+    if std::env::var_os(KEY_ENV).is_none() {
+        let output = std::process::Command::new(&executable)
+            .args([
+                "--exact",
+                "configured_exec_environment_reaches_real_builtin_children",
+            ])
+            .env(
+                KEY_ENV,
+                r#"{"Version":1,"AccessKeyId":"fixture","SecretAccessKey":"fixture-only"}"#,
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        return;
+    }
+    let executable_text = executable.to_str().unwrap();
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule(executable_text)],
+                deny: vec![],
+                judge: None,
+            },
+            Source::User,
+        ),
+    );
+    let fs = OsFs;
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let connection = format!(
+        "[connections.fixture]\nname='Fixture'\nvendor='bedrock-runtime-sigv4'\naccess='key'\nkey_env='{KEY_ENV}'\n"
+    );
+    let absent = format!("{KEY_ENV}=absent");
+    let present = format!("{KEY_ENV}=present");
+    let allow_credentials = format!("[exec]\nenv='allowlist'\nenv_allowlist=['PATH','{KEY_ENV}']");
+    let configured_allowlist = format!("{connection}{allow_credentials}");
+    for (config, variable, expected) in [
+        ("", "PATH", "PATH=present"),
+        ("[exec]\nenv='core'", "PATH", "PATH=present"),
+        (
+            "[exec]\nenv='allowlist'\nenv_allowlist=[]",
+            "PATH",
+            "PATH=absent",
+        ),
+        (
+            "[exec]\nenv='allowlist'\nenv_allowlist=['PATH']",
+            "PATH",
+            "PATH=present",
+        ),
+        ("", KEY_ENV, present.as_str()),
+        (&connection, KEY_ENV, absent.as_str()),
+        (&configured_allowlist, KEY_ENV, absent.as_str()),
+        (&configured_allowlist, "PATH", "PATH=present"),
+    ] {
+        let effective = resolve(
+            &[ConfigLayer::parse(Source::User, config).unwrap()],
+            Trust::Untrusted,
+            None,
+        )
+        .unwrap();
+        let registry =
+            ego_tools::tools::builtins_with_environment(effective.exec_policy().unwrap());
+        let tools = TurnTools::new(
+            &registry,
+            ToolEffectPorts::new(
+                &fs,
+                run.ports.process(),
+                &run.evidence,
+                run.ports.resolver_handle(),
+                run.ports.one_hop_handle(),
+                run.ports.duplex_handle(),
+            ),
+            root.clone(),
+        );
+        let params = serde_json::json!({
+            "argv": [executable_text, "--ignored", "--exact",
+                "exec_contract_fixture_reports_environment_presence_without_values",
+                "--nocapture", "--", variable],
+            "timeout_ms": 10000
+        });
+        let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+        let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+            panic!("fixture command must be authorized");
+        };
+        let output = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
+        assert!(
+            format!("{output:?}").contains(expected),
+            "{config}: {output:?}"
+        );
+    }
+}
+
+// Catches: credential-shaped argv data is mistaken for a file access before spawning.
+#[cfg(unix)]
+#[test]
+fn credential_path_arguments_are_data_until_the_child_opens_them() {
+    let root = cwd();
+    for level in [
+        Confinement::Off,
+        Confinement::Ro,
+        Confinement::Workspace,
+        Confinement::Adaptive,
+    ] {
+        if level == Confinement::Adaptive && !cfg!(target_os = "macos") {
+            continue;
+        }
+        let confinement = ego_tools::exec::admit_confinement(level, false, root.clone()).unwrap();
+        let run = open_policy(confinement, 1024 * 1024, 1024).unwrap();
+        let policy = ego_core::permit::PolicyEngine::new(
+            root.clone(),
+            Mode::Yolo,
+            Ruleset::from_layer(
+                PermCfg {
+                    allow: vec![exact_executable_rule("/usr/bin/printf")],
+                    deny: vec![],
+                    judge: None,
+                },
+                Source::User,
+            )
+            .with_credential_defaults(),
+        );
+        let fs = OsFs;
+        let registry = builtins();
+        let tools = TurnTools::new(
+            &registry,
+            ToolEffectPorts::new(
+                &fs,
+                run.ports.process(),
+                &run.evidence,
+                run.ports.resolver_handle(),
+                run.ports.one_hop_handle(),
+                run.ports.duplex_handle(),
+            ),
+            root.clone(),
+        );
+        for argument in [
+            "fixtures/.ssh/synthetic".to_owned(),
+            root.as_path()
+                .join("fixtures/.aws/credentials")
+                .display()
+                .to_string(),
+            "fixtures/.env.synthetic".to_owned(),
+        ] {
+            let params = serde_json::json!({
+                "argv": ["/usr/bin/printf", "%s", argument],
+                "timeout_ms": 10000
+            });
+            let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+            let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+                panic!("printing fixture path data must be authorized");
+            };
+            let output = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
+            assert!(format!("{output:?}").contains(&argument), "{output:?}");
+        }
+    }
+}
+
+// Catches: sandbox off is documented as unconfined but exec still blocks credential reads.
+#[cfg(unix)]
+#[test]
+fn sandbox_off_can_open_a_synthetic_credential_file() {
+    let tree = tempfile::tempdir().unwrap();
+    let root = CanonPath::new(tree.path().canonicalize().unwrap());
+    let credential = root.as_path().join(".ssh/synthetic");
+    std::fs::create_dir(credential.parent().unwrap()).unwrap();
+    std::fs::write(&credential, "synthetic-off-contract").unwrap();
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 1024).unwrap();
+    let policy = ego_core::permit::PolicyEngine::new(
+        root.clone(),
+        Mode::Yolo,
+        Ruleset::from_layer(
+            PermCfg {
+                allow: vec![exact_executable_rule("/bin/cat")],
+                deny: vec![],
+                judge: None,
+            },
+            Source::User,
+        )
+        .with_credential_defaults(),
+    );
+    let fs = OsFs;
+    let registry = builtins();
+    let tools = TurnTools::new(
+        &registry,
+        ToolEffectPorts::new(
+            &fs,
+            run.ports.process(),
+            &run.evidence,
+            run.ports.resolver_handle(),
+            run.ports.one_hop_handle(),
+            run.ports.duplex_handle(),
+        ),
+        root,
+    );
+    let params = serde_json::json!({"argv": ["/bin/cat", credential], "timeout_ms": 10000});
+    let (tool, call) = tools.prepare("exec", &params.to_string()).unwrap();
+    let Classification::Settled(Ok(authorized)) = tools.authorize(&policy, call) else {
+        panic!("explicit unconfined fixture read must be authorized");
+    };
+    let output = block_on(tools.execute(&policy, tool.as_ref(), authorized, None)).unwrap();
+    assert!(
+        format!("{output:?}").contains("synthetic-off-contract"),
+        "{output:?}"
+    );
+}
+
+// Catches: a future Linux backend selector treats bwrap's read-only bind as
+// no-execute authority and silently reuses the first run's backend after a read grant.
+#[cfg(target_os = "linux")]
+#[test]
+fn bwrap_read_only_bind_still_executes_a_file_in_the_read_root() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let root = tempfile::tempdir().unwrap();
+    let script = root.path().join("read-root-executable");
+    std::fs::write(&script, "#!/bin/sh\nprintf READ_ROOT_EXECUTED").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let result = Command::new("/usr/bin/bwrap")
+        .args([
+            "--die-with-parent",
+            "--unshare-user",
+            "--unshare-pid",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+        ])
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stdout, b"READ_ROOT_EXECUTED");
+}
+
+// Catches: roots reach permission policy but are ignored by the real exec sandbox,
+// or a single-file read root grants its sibling or write access.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn perimeter_roots_reach_real_children_without_widening_single_file_access() {
+    use ego_core::permit::RootAccess;
+    let tree = tempfile::tempdir().unwrap();
+    let base = tree.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    let home = base.join("home");
+    let writable = home.join("Gits");
+    let allowlist = home.join("instructions");
+    for dir in [&workspace, &writable, &allowlist] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let file = allowlist.join("allowed.md");
+    let sibling = allowlist.join("private.md");
+    let credential = home.join(".ssh/synthetic");
+    std::fs::create_dir_all(credential.parent().unwrap()).unwrap();
+    std::fs::write(&credential, "synthetic secret").unwrap();
+    let credential_alias = workspace.join("credential-alias");
+    std::os::unix::fs::symlink(&credential, &credential_alias).unwrap();
+    std::fs::write(&file, "allowed").unwrap();
+    std::fs::write(&sibling, "private").unwrap();
+    let alias = home.join("instructions-link");
+    std::os::unix::fs::symlink(&file, &alias).unwrap();
+    let roots = ego_core::permit::admit_roots(
+        &[
+            ego_core::permit::RootCfg {
+                consent: None,
+                path: writable.clone(),
+                access: RootAccess::ReadWrite,
+            },
+            ego_core::permit::RootCfg {
+                consent: None,
+                path: alias,
+                access: RootAccess::Read,
+            },
+        ],
+        &CanonPath::new(&home),
+        &OsFs,
+    )
+    .unwrap();
+    let cwd = CanonPath::new(&workspace);
+    let read = |path: &std::path::Path| {
+        SpawnSpec::new(
+            vec!["/bin/cat".into(), path.as_os_str().to_owned()],
+            Some(cwd.clone()),
+            None,
+            EnvPolicy::Inherited,
+        )
+        .unwrap()
+    };
+    for level in [Confinement::Workspace, Confinement::Ro] {
+        let policy = run_confinement(level, false, cwd.clone()).with_roots(roots.clone());
+        let run = open_policy(policy, 1024 * 1024, 1024).expect("real perimeter backend");
+        execute(&run, read(&file)).expect("single file read allowed");
+        for protected in [&credential, &credential_alias] {
+            // Catches: outside credential reads or aliases bypass admitted-root confinement.
+            assert!(execute(&run, read(protected)).is_err(), "{protected:?}");
+            let internal_read = SpawnSpec::new(
+                vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    format!("exec /bin/cat '{}'", protected.display()).into(),
+                ],
+                Some(cwd.clone()),
+                None,
+                EnvPolicy::Inherited,
+            )
+            .unwrap();
+            assert!(
+                execute(&run, internal_read).is_err(),
+                "script opened {protected:?}"
+            );
+        }
+        assert!(
+            execute(&run, read(&sibling)).is_err(),
+            "single file must not expose sibling"
+        );
+        let source = workspace.join("overwrite-source");
+        std::fs::write(&source, "changed").unwrap();
+        assert!(
+            execute(
+                &run,
+                mutation_spec("overwrite", &[&source, &file], cwd.clone())
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "allowed");
+        let target = writable.join(if level == Confinement::Workspace {
+            "rw-create"
+        } else {
+            "ro-create"
+        });
+        let outcome = execute(&run, mutation_spec("create", &[&target], cwd.clone()));
+        assert_eq!(
+            outcome.is_ok(),
+            level == Confinement::Workspace,
+            "{outcome:?}"
+        );
+        assert_eq!(target.exists(), level == Confinement::Workspace);
+    }
+}
+
+// Catches: a tree preset publishes unproven capabilities when TMPDIR is inside its RW root.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn perimeter_probe_temp_overlap_is_a_named_startup_refusal() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let workspace = tempfile::tempdir().unwrap();
+    let tmp = std::env::temp_dir().canonicalize().unwrap();
+    let policy = run_confinement(
+        Confinement::Workspace,
+        false,
+        CanonPath::new(workspace.path().canonicalize().unwrap()),
+    )
+    .with_roots(vec![ProfileRoot::new(
+        CanonPath::new(tmp),
+        RootAccess::ReadWrite,
+    )]);
+    let attempt = attempt_policy(policy, 1024 * 1024, 1024);
+    let error = match attempt.outcome {
+        Err(error) => error,
+        Ok(_) => panic!("overlapping probe scope was admitted"),
+    };
+    assert!(
+        error.to_string().contains("perimeter-probe-temp-overlap"),
+        "{error}"
+    );
+}
+
+// Catches: promotion respawns the command, drops turn-owned evidence, or loses session cancellation.
+#[cfg(unix)]
+#[test]
+fn detached_foreground_promotion_keeps_one_child_and_session_evidence() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = CanonPath::new(std::fs::canonicalize(directory.path()).unwrap());
+    let run = open_run(Confinement::Off, false, root.clone(), 1024 * 1024, 64).unwrap();
+    let foreground = run.ports.with_session_processes(&run.ports);
+    let process = foreground.process_handle();
+    let spec = SpawnSpec::new(
+        vec!["/bin/sh".into(), "-c".into(), "printf x >> launches; printf READY > ready; printf original-output; while [ ! -f release ]; do sleep 0.05; done".into()],
+        Some(root), Some(Duration::from_secs(10)), EnvPolicy::default(),
+    ).unwrap();
+    let spec = process.observe(&spec).unwrap();
+    let worker_process = Arc::clone(&process);
+    let worker = std::thread::spawn(move || block_on(worker_process.execute(&spec)));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !directory.path().join("ready").exists() {
+        assert!(Instant::now() < deadline, "child did not start");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let id = process
+        .foreground_exec()
+        .expect("running foreground identity");
+    process.detach_foreground(id).unwrap();
+    let handle = worker.join().unwrap().unwrap();
+    assert!(handle.model_text().contains(&id.to_string()));
+    drop(process);
+    drop(foreground);
+    run.cancel.cancel(CancelCause::User);
+    assert!(
+        run.ports
+            .process()
+            .background_status(id)
+            .unwrap()
+            .outcome
+            .is_none()
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("launches")).unwrap(),
+        b"x",
+        "promotion spawned a second child"
+    );
+    std::fs::write(directory.path().join("release"), "go").unwrap();
+    let snapshot = loop {
+        let snapshot = run.ports.process().background_status(id).unwrap();
+        if snapshot.outcome.is_some() {
+            break snapshot;
+        }
+        assert!(Instant::now() < deadline, "promoted child did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let ego_core::permit::DetachedExecOutcome::Exited { code, result } = snapshot.outcome.unwrap()
+    else {
+        panic!("foreground cancellation killed the promoted child");
+    };
+    assert_eq!(code, 0);
+    assert!(result.model_text().contains("original-output"));
+    for block in result.content {
+        if let Some(reference) = block.full_output {
+            assert!(
+                block_on(run.evidence.read_page(
+                    &ego_core::store::evidence::EvidenceRead::new(reference, 0).unwrap()
+                ))
+                .is_ok(),
+                "original session evidence was lost"
+            );
+        }
+    }
+}
+
+// Catches: foreground promotion selects an unconfined session backend instead of its original sandbox.
+#[cfg(unix)]
+#[test]
+fn detached_foreground_promotion_preserves_the_read_only_sandbox() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = CanonPath::new(std::fs::canonicalize(directory.path()).unwrap());
+    let Some(run) = open_confined_run(Confinement::Ro, false, root.clone(), 1024 * 1024, 64) else {
+        return;
+    };
+    let foreground = run.ports.with_session_processes(&run.ports);
+    let process = foreground.process_handle();
+    let spec = SpawnSpec::new(
+        vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            "while [ ! -f release ]; do sleep 0.05; done; printf forbidden > forbidden".into(),
+        ],
+        Some(root),
+        Some(Duration::from_secs(10)),
+        EnvPolicy::default(),
+    )
+    .unwrap();
+    let spec = process.observe(&spec).unwrap();
+    let worker_process = Arc::clone(&process);
+    let worker = std::thread::spawn(move || block_on(worker_process.execute(&spec)));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let id = loop {
+        if let Some(id) = process.foreground_exec() {
+            break id;
+        }
+        assert!(Instant::now() < deadline, "foreground was not registered");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    process.detach_foreground(id).unwrap();
+    assert!(
+        worker
+            .join()
+            .unwrap()
+            .unwrap()
+            .model_text()
+            .contains(&id.to_string())
+    );
+    std::fs::write(directory.path().join("release"), "go").unwrap();
+    let outcome = loop {
+        if let Some(outcome) = run.ports.process().background_status(id).unwrap().outcome {
+            break outcome;
+        }
+        assert!(Instant::now() < deadline, "sandboxed child did not settle");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        matches!(outcome, ego_core::permit::DetachedExecOutcome::Exited { code, .. } if code != 0),
+        "sandbox refused outcome: {outcome:?}"
+    );
+    assert!(
+        !directory.path().join("forbidden").exists(),
+        "promotion bypassed the original read-only sandbox"
+    );
+}
+
+// Catches: an out-of-perimeter MCP image becomes an opaque protocol/config error.
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_mcp_executable_outside_perimeter_reports_denied_path() {
+    use futures::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    let outer = tempfile::tempdir().unwrap();
+    let base = outer.path().canonicalize().unwrap();
+    let workspace = base.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let executable = base.join("mcp-server");
+    // A copied Apple platform binary is killed by code-signing enforcement;
+    // use an actual executable script with the installed system interpreter.
+    std::fs::write(&executable, "#!/bin/sh\nexec /bin/cat\n").unwrap();
+    std::fs::set_permissions(
+        &executable,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let alias = base.join("mcp-alias");
+    std::os::unix::fs::symlink(&executable, &alias).unwrap();
+    let run = open_policy(workspace_policy(&workspace, vec![]), 1024 * 1024, 1024).unwrap();
+    let spec = |path: &std::path::Path| {
+        SpawnSpec::new(
+            vec![path.as_os_str().to_owned()],
+            Some(CanonPath::new(&workspace)),
+            Some(Duration::from_secs(5)),
+            EnvPolicy::Inherited,
+        )
+        .unwrap()
+    };
+    for path in [&executable, &alias] {
+        let error = match block_on(run.ports.duplex().spawn(spec(path))) {
+            Err(error) => error,
+            Ok(child) => {
+                block_on(child.interrupt());
+                panic!("MCP executable outside the perimeter was not refused before spawn");
+            }
+        };
+        let message = error.to_string();
+        assert!(message.contains("sandbox"), "{message}");
+        assert!(message.contains(executable.to_str().unwrap()), "{message}");
+        assert!(message.contains("exec_paths"), "{message}");
+    }
+    let missing = base.join("missing");
+    let error = block_on(run.ports.duplex().spawn(spec(&missing)))
+        .err()
+        .expect("missing binary");
+    assert!(error.to_string().contains("program not found"), "{error}");
+    let admitted = open_policy(
+        workspace_policy(&workspace, vec![CanonPath::new(&executable)]),
+        1024 * 1024,
+        1024,
+    )
+    .unwrap();
+    block_on(async {
+        let mut child = admitted
+            .ports
+            .duplex()
+            .spawn(spec(&alias))
+            .await
+            .expect("explicit exec path");
+        child.write_all(b"ADMITTED\n").await.unwrap();
+        child.flush().await.unwrap();
+        let mut bytes = [0; 9];
+        let read = child.read_exact(&mut bytes).await;
+        let settled = child.interrupt().await;
+        read.unwrap_or_else(|error| panic!("admitted child read failed: {error}; {settled:?}"));
+        assert_eq!(&bytes, b"ADMITTED\n");
+    });
+}
+
+// Catches: read-root MCP denial recommends exec_paths, which cannot override the root.
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_mcp_read_root_denial_names_effective_remedy() {
+    use ego_core::permit::{ProfileRoot, RootAccess};
+    let workspace = cwd();
+    let (_keep, tools, executable) = script_dir("exec /bin/cat");
+    for level in [Confinement::Workspace, Confinement::Adaptive] {
+        for exec_paths in [vec![], vec![CanonPath::new(&executable)]] {
+            let policy = ego_tools::exec::admit_confinement(level, false, workspace.clone())
+                .unwrap()
+                .with_roots(vec![ProfileRoot::new(tools.clone(), RootAccess::Read)])
+                .with_exec_paths(exec_paths);
+            let run = open_policy(policy, 1024 * 1024, 1024).unwrap();
+            let error = match block_on(run.ports.duplex().spawn(script_spec(
+                &executable,
+                &[],
+                workspace.as_path(),
+            ))) {
+                Err(error) => error,
+                Ok(child) => {
+                    block_on(child.interrupt());
+                    panic!("read-only root did not refuse MCP execution under {level:?}");
+                }
+            };
+            let message = error.to_string();
+            assert!(message.contains(executable.to_str().unwrap()), "{message}");
+            assert!(
+                message.contains(tools.as_path().to_str().unwrap()),
+                "{message}"
+            );
+            assert!(message.contains("read-only root"), "{message}");
+            assert!(message.contains("change or remove"), "{message}");
+            assert!(!message.contains("exec_paths"), "{message}");
+        }
+    }
+}
+
+// Catches: the workspace profile hides PATH candidates instead of denying their execution.
+#[cfg(target_os = "macos")]
+#[test]
+fn workspace_path_lookup_finds_tools_without_granting_execution() {
+    const CHILD: &str = "EGO_627_LOOKUP_CHILD";
+    if let Some(root) = std::env::var_os(CHILD) {
+        let root = std::path::PathBuf::from(root);
+        let workspace = root.join("workspace");
+        let executable = root.join("tools/ego627-tool");
+        // Preserve the complete inherited PATH rather than asserting against
+        // the tool's intentionally truncated presentation of long output.
+        let run =
+            open_policy(workspace_policy(&workspace, vec![]), 1024 * 1024, 64 * 1024).unwrap();
+        let spec = |script: &str| {
+            SpawnSpec::new(
+                vec!["/bin/bash".into(), "-c".into(), script.into()],
+                Some(CanonPath::new(&workspace)),
+                Some(Duration::from_secs(5)),
+                EnvPolicy::Inherited,
+            )
+            .unwrap()
+        };
+        let found = block_on(run.ports.process().execute(&spec("command -v ego627-tool")))
+            .expect("PATH lookup");
+        assert!(format!("{found:?}").contains(executable.to_str().unwrap()));
+        let alias = block_on(
+            run.ports
+                .process()
+                .execute(&spec("command -v ego627-alias")),
+        )
+        .expect("symlink PATH lookup");
+        assert!(format!("{alias:?}").contains(root.join("tools/ego627-alias").to_str().unwrap()));
+        let environment =
+            block_on(run.ports.process().execute(&spec("printf '%s' \"$PATH\""))).unwrap();
+        assert_eq!(environment.content[0].text, std::env::var("PATH").unwrap());
+        let denied = execute(&run, spec("ego627-tool UNEXPECTED-EXEC")).unwrap_err();
+        let message = format!("{denied:?}");
+        assert!(
+            message.contains("permitted") || message.contains("denied"),
+            "{message}"
+        );
+        assert!(!message.contains("command not found"), "{message}");
+        assert!(execute(&run, spec("cat \"$EGO_627_LOOKUP_CHILD/tools/private\"")).is_err());
+        return;
+    }
+    let outer = tempfile::tempdir().unwrap();
+    let root = outer.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("workspace")).unwrap();
+    std::fs::create_dir(root.join("tools")).unwrap();
+    std::fs::copy("/bin/echo", root.join("tools/ego627-tool")).unwrap();
+    std::fs::create_dir(root.join("version-current")).unwrap();
+    std::fs::copy("/bin/echo", root.join("version-current/alias-target")).unwrap();
+    std::os::unix::fs::symlink("version-current", root.join("version-old")).unwrap();
+    std::os::unix::fs::symlink(
+        root.join("version-old/alias-target"),
+        root.join("tools/ego627-alias"),
+    )
+    .unwrap();
+    std::fs::write(root.join("tools/private"), "PRIVATE-CONTENT").unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(root.join("tools"))
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "workspace_path_lookup_finds_tools_without_granting_execution",
+            "--nocapture",
+        ])
+        .env(CHILD, &root)
+        .env("PATH", path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

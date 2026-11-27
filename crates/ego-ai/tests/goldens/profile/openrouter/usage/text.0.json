@@ -1,0 +1,25 @@
+{
+  "choices": [],
+  "created": 1787000000,
+  "id": "gen-golden-text",
+  "model": "z-ai/glm-4.7",
+  "object": "chat.completion.chunk",
+  "provider": "Z.AI",
+  "usage": {
+    "completion_tokens": 250,
+    "completion_tokens_details": {
+      "reasoning_tokens": 180
+    },
+    "cost": 0.00585,
+    "cost_details": {
+      "upstream_inference_cost": 0
+    },
+    "prompt_tokens": 1000,
+    "prompt_tokens_details": {
+      "audio_tokens": 0,
+      "cache_write_tokens": 100,
+      "cached_tokens": 400
+    },
+    "total_tokens": 1250
+  }
+}

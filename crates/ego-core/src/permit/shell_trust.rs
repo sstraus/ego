@@ -11,6 +11,10 @@ fn trusted_path(path: &Path) -> bool {
             "/bin",
             "/usr/bin",
             "/usr/sbin",
+            // Ubuntu 26.04 links `ls`, `wc` and friends from /usr/bin to the
+            // root-owned multicall binaries that its package installs here.
+            "/usr/lib/cargo/bin/coreutils",
+            "/usr/lib/cargo/bin/findutils",
             "/opt/homebrew/bin",
             "/opt/homebrew/opt",
             "/opt/homebrew/Cellar",
@@ -24,6 +28,19 @@ fn trusted_path(path: &Path) -> bool {
 
 /// Require host-observed executables before shell syntax can establish read-only authority.
 pub fn trusted_read_only(spec: &SpawnSpec) -> bool {
+    proven_read_only(spec, false)
+}
+
+/// [`trusted_read_only`] for a run whose sandbox refuses credential and control
+/// files at the operating system: content readers (`cat`, `head`, `wc`,
+/// `grep`...) and repository inspection (`git status|log|diff|show|config --get`)
+/// qualify too, so a read-only question is not asked. The caller owns the
+/// guarantee that the sandbox is in force.
+pub fn sandboxed_read_only(spec: &SpawnSpec) -> bool {
+    proven_read_only(spec, true)
+}
+
+fn proven_read_only(spec: &SpawnSpec, sandboxed: bool) -> bool {
     let Some(identity) = spec.identity().filter(|identity| identity.complete()) else {
         return false;
     };
@@ -43,7 +60,11 @@ pub fn trusted_read_only(spec: &SpawnSpec) -> bool {
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())
         .collect();
-    let observation = super::observe(&argv);
+    let observation = if sandboxed {
+        super::observe_sandboxed(&argv)
+    } else {
+        super::observe(&argv)
+    };
     if !observation.complete || !observation.read_only {
         return false;
     }
@@ -56,11 +77,12 @@ pub fn trusted_read_only(spec: &SpawnSpec) -> bool {
             Some("cat" | "head" | "tail" | "wc" | "sed" | "rg" | "grep")
         )
     };
-    if argv.first().is_some_and(|program| reads_content(program))
-        || observation
-            .programs
-            .iter()
-            .any(|program| reads_content(program))
+    if !sandboxed
+        && (argv.first().is_some_and(|program| reads_content(program))
+            || observation
+                .programs
+                .iter()
+                .any(|program| reads_content(program)))
     {
         return false;
     }
@@ -99,10 +121,13 @@ fn trusted_inner(program: &str, spec: &SpawnSpec, identity: &ExecutionIdentity) 
         return false;
     };
     for root in std::env::split_paths(&value) {
-        // An earlier workspace, relative, empty or untrusted root invalidates
-        // the proof even when capture found no executable there at that instant.
+        // Capture resolved the first executable. The process adapter repeats
+        // that resolution before spawn, including earlier untrusted roots.
         if !trusted_path(&root) {
-            return false;
+            if !root.is_absolute() {
+                return false;
+            }
+            continue;
         }
         if let Some(file) = identity
             .files
@@ -113,4 +138,22 @@ fn trusted_inner(program: &str, spec: &SpawnSpec, identity: &ExecutionIdentity) 
         }
     }
     false
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::trusted_path;
+    use std::path::Path;
+
+    // Catches: a distribution whose system tools resolve to packaged multicall
+    // binaries outside /usr/bin loses read-only approval for `ls`.
+    #[test]
+    fn packaged_system_multicall_binaries_are_trusted_and_lookalikes_are_not() {
+        assert!(trusted_path(Path::new("/usr/lib/cargo/bin/coreutils/ls")));
+        assert!(trusted_path(Path::new("/usr/lib/cargo/bin/findutils/find")));
+        assert!(!trusted_path(Path::new("/usr/lib/cargo/bin/coreutilsx/ls")));
+        assert!(!trusted_path(Path::new(
+            "/usr/lib/cargo/bin/coreutils/../x"
+        )));
+    }
 }

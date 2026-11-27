@@ -40,3 +40,17 @@ tracing = "0.1.44"
 [lints]
 workspace = true
 
+[dev-dependencies]
+# The official ACP HTTP adapter uses this maintained WebSocket implementation;
+# the test client needs request-header access to exercise bearer authentication.
+async-tungstenite = { version = "=0.34.1", default-features = false, features = ["tokio-rustls-webpki-roots"] }
+# The `initialize` test drives the real SDK router over a pair of in-memory
+# line channels, which is the only way to ask what the router actually answers.
+uuid = "1.24.1"
+# `sync` for `Notify`: the admission tests in `prompt.rs` need a turn that is
+# still running when the next request arrives, which means the test host must
+# park until the test releases it. `time` so that a request which is *never*
+# answered fails the test with what its silence meant, rather than hanging the
+# suite — which is precisely how the admission defect presents.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-util = { version = "0.7", features = ["compat"] }

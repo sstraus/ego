@@ -1,0 +1,57 @@
+{
+  "recorded_at": "2026-11-14",
+  "recorded_with": "ego 0.4.11 run --proxy (local recording proxy), anthropic/claude-haiku-5-5, OAuth login, 'Reply OK only.'",
+  "redaction": "names, method, path, status and value shape classes only; no header values, no body",
+  "request": {
+    "method": "POST",
+    "url": "https://api.anthropic.com/v1/messages",
+    "header_names": [
+      "accept",
+      "anthropic-beta",
+      "anthropic-version",
+      "authorization",
+      "content-length",
+      "content-type",
+      "user-agent",
+      "x-app"
+    ]
+  },
+  "status": 200,
+  "response_header_names": [
+    "anthropic-organization-id",
+    "anthropic-ratelimit-unified-7d-reset",
+    "anthropic-ratelimit-unified-7d-status",
+    "anthropic-ratelimit-unified-7d-utilization",
+    "anthropic-ratelimit-unified-fallback-percentage",
+    "anthropic-ratelimit-unified-overage-disabled-reason",
+    "anthropic-ratelimit-unified-overage-status",
+    "anthropic-ratelimit-unified-representative-claim",
+    "anthropic-ratelimit-unified-reset",
+    "anthropic-ratelimit-unified-status",
+    "anthropic-workspace-id",
+    "cache-control",
+    "cf-cache-status",
+    "cf-ray",
+    "content-security-policy",
+    "content-type",
+    "date",
+    "request-id",
+    "server",
+    "server-timing",
+    "strict-transport-security",
+    "traceresponse",
+    "vary",
+    "x-robots-tag"
+  ],
+  "quota_header_shapes": {
+    "anthropic-ratelimit-unified-7d-reset": "unix_seconds",
+    "anthropic-ratelimit-unified-7d-status": "lowercase_token",
+    "anthropic-ratelimit-unified-7d-utilization": "decimal_0_1",
+    "anthropic-ratelimit-unified-fallback-percentage": "decimal_0_1",
+    "anthropic-ratelimit-unified-overage-disabled-reason": "lowercase_token",
+    "anthropic-ratelimit-unified-overage-status": "lowercase_token",
+    "anthropic-ratelimit-unified-representative-claim": "lowercase_token",
+    "anthropic-ratelimit-unified-reset": "unix_seconds",
+    "anthropic-ratelimit-unified-status": "lowercase_token"
+  }
+}

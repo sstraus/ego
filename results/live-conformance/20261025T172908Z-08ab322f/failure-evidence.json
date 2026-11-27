@@ -1,0 +1,227 @@
+{
+  "session": "284db06f-2027-4ac3-9a92-7ac497992374",
+  "events": [
+    {
+      "seq": 13,
+      "event": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a17422-5a66-76d9-9142-c5f790abec3b",
+          "attempt": "01a17422-5a66-76d9-9142-c5f8b5cb9984"
+        },
+        "outcome": {
+          "stop": "toolUse",
+          "delivery": "possibly_sent",
+          "usage": {
+            "reported": {
+              "uncached_input_tokens": 3,
+              "cache_read_tokens": 0,
+              "cache_write_tokens": 4216,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 24,
+              "reasoning_tokens": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 24,
+      "event": {
+        "kind": "Error",
+        "message": "HTTP connection failed (openrouter.ai): error sending request: client error (Connect): Network is down (os error 50)",
+        "error_kind": "transient"
+      }
+    },
+    {
+      "seq": 26,
+      "event": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a17422-d596-73e8-8854-6724c68ad9c6",
+          "attempt": "01a17422-d596-73e8-8854-672503e62d1d"
+        },
+        "outcome": {
+          "stop": "error",
+          "delivery": "definitely_unsent",
+          "usage": "missing"
+        }
+      }
+    },
+    {
+      "seq": 32,
+      "event": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a17422-d596-73e8-8854-6724c68ad9c6",
+          "attempt": "01a17422-d59c-735a-bff9-f804e48689a2"
+        },
+        "outcome": {
+          "stop": "toolUse",
+          "delivery": "possibly_sent",
+          "usage": {
+            "reported": {
+              "uncached_input_tokens": 3,
+              "cache_read_tokens": 4216,
+              "cache_write_tokens": 223,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 24,
+              "reasoning_tokens": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 45,
+      "event": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a17422-ec96-7620-8002-8b95dc126ae6",
+          "attempt": "01a17422-ec96-7620-8002-8b96fe27182e"
+        },
+        "outcome": {
+          "stop": "toolUse",
+          "delivery": "possibly_sent",
+          "usage": {
+            "reported": {
+              "uncached_input_tokens": 3,
+              "cache_read_tokens": 4216,
+              "cache_write_tokens": 628,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 24,
+              "reasoning_tokens": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 64,
+      "event": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a17422-f2fe-77d5-8031-0172c01046fc",
+          "attempt": "01a17422-f2fe-77d5-8031-01735cd73f62"
+        },
+        "outcome": {
+          "stop": "stop",
+          "delivery": "possibly_sent",
+          "usage": {
+            "reported": {
+              "uncached_input_tokens": 3,
+              "cache_read_tokens": 4844,
+              "cache_write_tokens": 223,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 10,
+              "reasoning_tokens": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 67,
+      "event": {
+        "kind": "TurnCompleted",
+        "ok": true,
+        "exit_reason": "Completed"
+      }
+    },
+    {
+      "seq": 78,
+      "event": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a17423-2adf-76dc-a33d-c5a2f4672f90",
+          "attempt": "01a17423-2adf-76dc-a33d-c5a3158cf7d8"
+        },
+        "outcome": {
+          "stop": "toolUse",
+          "delivery": "possibly_sent",
+          "usage": {
+            "reported": {
+              "uncached_input_tokens": 3,
+              "cache_read_tokens": 5067,
+              "cache_write_tokens": 235,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 35,
+              "reasoning_tokens": 9
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 91,
+      "event": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a17423-ac13-768d-9360-407ae36519ff",
+          "attempt": "01a17423-ac13-768d-9360-407bcc5b244d"
+        },
+        "outcome": {
+          "stop": "toolUse",
+          "delivery": "possibly_sent",
+          "usage": {
+            "reported": {
+              "uncached_input_tokens": 3,
+              "cache_read_tokens": 5302,
+              "cache_write_tokens": 223,
+              "cache_write_extended_tokens": 0,
+              "output_tokens": 24,
+              "reasoning_tokens": 0
+            }
+          }
+        }
+      }
+    },
+    {
+      "seq": 102,
+      "event": {
+        "kind": "Error",
+        "message": "HTTP call timed out (openrouter.ai)",
+        "error_kind": "transient"
+      }
+    },
+    {
+      "seq": 104,
+      "event": {
+        "kind": "AttemptSettled",
+        "attempt": {
+          "generation": "01a17423-b7c8-7155-9e49-88652665878f",
+          "attempt": "01a17423-b7c8-7155-9e49-886682f8c015"
+        },
+        "outcome": {
+          "stop": "error",
+          "delivery": "possibly_sent",
+          "usage": "missing"
+        }
+      }
+    },
+    {
+      "seq": 105,
+      "event": {
+        "kind": "TurnCompleted",
+        "ok": false,
+        "exit_reason": {
+          "Cancelled": "Timeout"
+        }
+      }
+    }
+  ],
+  "invocation": [
+    {
+      "model": "openrouter/openai/gpt-6-luna",
+      "workspace": "/Users/stefano.straus/Gits/.tmp/ego-419-b7/matrix/20261025T172908Z-08ab322f/011-cache",
+      "start_unix": 1792949812.126796,
+      "elapsed_seconds": 50.41233329195529,
+      "exit": 124,
+      "reason": "process_failed",
+      "stderr_path": "/Users/stefano.straus/Gits/.tmp/ego-419-b7/matrix/20261025T172908Z-08ab322f/011-cache/stderr-c6136b5842494398be80d37f95bcb4a5.txt",
+      "new_sessions": [
+        "284db06f-2027-4ac3-9a92-7ac497992374"
+      ]
+    }
+  ]
+}

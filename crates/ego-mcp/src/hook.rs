@@ -48,26 +48,40 @@ impl<'a> McpHookPort<'a> {
         } = request.handler()
         else {
             return Err(self.failure(
+                &request,
                 HookFailureKind::HandlerFailed,
                 "the MCP hook port received a non-MCP handler".to_owned(),
             ));
         };
-        let hook = HookEventV1::from_runtime(&request)
-            .map_err(|error| self.failure(HookFailureKind::MalformedResult, error.to_string()))?;
+        let hook = HookEventV1::from_runtime(&request).map_err(|error| {
+            self.failure(
+                &request,
+                HookFailureKind::MalformedResult,
+                error.to_string(),
+            )
+        })?;
         let wire_input = json!({ "hook": hook, "input": input });
         let prepared = self
             .capture
             .prepare_hook_call(server, tool, wire_input)
-            .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+            .map_err(|error| {
+                self.failure(&request, HookFailureKind::HandlerFailed, error.to_string())
+            })?;
         let (prepared, effects) = match self.policy.classify(prepared) {
             Classification::Settled(Ok(authorized)) => self.effects.clone().bind(authorized),
             Classification::Settled(Err(denial)) => {
-                return Err(self.failure(HookFailureKind::EffectDenied, denial.to_string()));
+                return Err(self.failure(
+                    &request,
+                    HookFailureKind::EffectDenied,
+                    denial.to_string(),
+                ));
             }
             Classification::Ask(pending) => {
-                return Err(
-                    self.failure(HookFailureKind::EffectDenied, pending.request().to_string())
-                );
+                return Err(self.failure(
+                    &request,
+                    HookFailureKind::EffectDenied,
+                    pending.request().to_string(),
+                ));
             }
         };
         let settlement = McpHookAdapter::new(
@@ -78,7 +92,9 @@ impl<'a> McpHookPort<'a> {
         )
         .invoke(request.clone())
         .await
-        .map_err(|error| self.failure(HookFailureKind::HandlerFailed, error.to_string()))?;
+        .map_err(|error| {
+            self.failure(&request, HookFailureKind::HandlerFailed, error.to_string())
+        })?;
         if let Some(failure) = settlement.failure() {
             let kind = match failure {
                 McpHookFailure::Malformed => HookFailureKind::MalformedResult,
@@ -90,7 +106,11 @@ impl<'a> McpHookPort<'a> {
                 }
                 McpHookFailure::HandlerFailed => HookFailureKind::HandlerFailed,
             };
-            return Err(Box::new(HookFailure::new(kind, None)));
+            let cause = settlement
+                .feedback()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("MCP hook failed: {failure:?}"));
+            return Err(self.failure(&request, kind, cause));
         }
         let feedback = settlement
             .feedback()
@@ -108,16 +128,29 @@ impl<'a> McpHookPort<'a> {
         let mut outcome = HookOutcome::new(settlement.decision(), feedback);
         if let Some(context) = &settlement.context {
             let text = context.text_for(request.lifecycle()).map_err(|error| {
-                self.failure(HookFailureKind::MalformedResult, error.to_string())
+                self.failure(
+                    &request,
+                    HookFailureKind::MalformedResult,
+                    error.to_string(),
+                )
             })?;
             outcome = outcome.with_additional_context(text);
         }
         Ok(outcome)
     }
 
-    fn failure(&self, kind: HookFailureKind, message: String) -> Box<HookFailure> {
-        drop(message);
-        Box::new(HookFailure::new(kind, None))
+    fn failure(
+        &self,
+        request: &HookInvocationRequest,
+        kind: HookFailureKind,
+        message: String,
+    ) -> Box<HookFailure> {
+        let feedback = self
+            .effects
+            .store_hook_feedback(message.as_bytes())
+            .ok()
+            .and_then(|reference| HookFeedback::bounded(request.hook(), reference, &message).ok());
+        Box::new(HookFailure::new(kind, feedback))
     }
 }
 
@@ -345,9 +378,10 @@ impl<'a> McpHookAdapter<'a> {
             Ok(execution) => execution,
             Err(error) => {
                 let (failure, delivery) = map_tool_failure(&error);
-                return Ok(McpHookSettlement::failed(
-                    generation, wire_input, failure, delivery,
-                ));
+                let mut settlement =
+                    McpHookSettlement::failed(generation, wire_input, failure, delivery);
+                settlement.feedback = Some(error.to_string());
+                return Ok(settlement);
             }
         };
         let Some(structured) = execution.result().structured_content.as_ref() else {

@@ -1,7 +1,8 @@
 //! `PublicEvent`: the privacy-filtered, compatibility-governed projection of
 //! the internal event log.
 //!
-//! A new internal event never becomes public automatically.
+//! See `ARCHITECTURE.md` §1 (four serialisations, one semantic model) and
+//! `CLI.md` §4.2. A new internal event never becomes public automatically.
 
 mod child;
 pub mod transcript;
@@ -14,12 +15,14 @@ use crate::cost::{CostDelta, Money, RateSource};
 use crate::event::domain::{
     DomainEvent, EventKind, ExitReason, FallbackDecision, OccupancyProvenance,
 };
-use crate::event::id::{ItemId, SessionId, TurnId};
+use crate::event::id::{ItemId, Seq, SessionId, TurnId};
 use crate::generator::types::ErrorKind;
 use crate::question::{QuestionMode, QuestionOption, QuestionRequest, QuestionTarget};
 use crate::state::Usage;
 
-/// The current `PublicEvent` schema version, carried in `SessionStarted`'s `v` field.
+/// The current `PublicEvent` schema version, carried in `SessionStarted`'s
+/// `v` field. `CLI.md` §4.2: "the schema is versioned in the header and
+/// published".
 ///
 /// **Incremented when the shape moves, not when the branch merges.** This
 /// went 5 → 6 for two changes that ship together: `UsageUpdated`'s
@@ -49,7 +52,9 @@ use crate::state::Usage;
 // Version 17 adds the durable cost anomaly notice.
 // Version 18 adds the closed pricing-source cause to cost anomalies.
 // Version 19 adds typed child lifecycle identity and outcome.
-pub const PUBLIC_EVENT_VERSION: u32 = 19;
+// Version 20 adds the headless compaction lineage event.
+// Version 21 adds worklist suspension causes and host-owned seed history.
+pub const PUBLIC_EVENT_VERSION: u32 = 21;
 
 /// Shared warning text for terminal and ACP projections of the same notice.
 pub fn cost_anomaly_message(
@@ -125,13 +130,18 @@ pub enum InstructionSource {
     Ambient,
     /// Named outright, with `--instructions FILE`.
     Explicit,
+    /// The opt-in workspace memory file under `$EGO_HOME/memory/`.
+    Memory,
 }
 
 /// One instruction file a run loaded, described but **never quoted**.
 ///
-/// Record instruction path, digest and scope, not its text. Public events
-/// may be archived by CI; a descriptor establishes which file contributed
-/// without republishing workspace content.
+/// `docs/internals/08-codex-critique.md` I2 asks for each path, digest and scope to be
+/// recorded in the public start event, and asks for the *text* to stay out of
+/// it. Those are one requirement, not two: the stream this rides is what a CI
+/// job archives, and an `AGENTS.md` is one symlink away from being something
+/// else — which is why `config::Refusal::Symlink` exists at all. A descriptor
+/// proves which file contributed; it does not republish it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstructionDescriptor {
     /// Where the file was found.
@@ -139,8 +149,10 @@ pub struct InstructionDescriptor {
     /// Lowercase hex SHA-256 of the bytes as read — the digest
     /// `config::load` already computed, carried rather than recomputed.
     ///
-    /// Digest the file, not framed prompt text. Prompt framing can change
-    /// without any repository content change.
+    /// It describes the file, not the prompt: the assembler frames what it
+    /// sends, so a digest over the framed text would change with the framing
+    /// and prove nothing about the repository. See
+    /// `docs/internals/decisions/2026-08-21-a-binary-that-produces-the-exit-code.md` §4.
     pub sha256: String,
     /// How many bytes that digest covers.
     pub bytes: u64,
@@ -151,7 +163,7 @@ pub struct InstructionDescriptor {
     pub source: InstructionSource,
 }
 
-/// Public event projection is explicit, not automatic.
+/// The item kinds carried by `item.*` events, per `CLI.md` §4.2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ItemKind {
@@ -199,18 +211,23 @@ pub enum MeteringKind {
 
 /// What the configured ceiling actually does to a generation.
 ///
-/// Distinguish no ceiling from a configured monetary ceiling that cannot
-/// constrain this row's charges. Both differ from an effective limit.
+/// Three values and not an `Option<Money>`, because a flag that *appears* to
+/// bind and does not is a false statement, and the two ways it fails to bind
+/// are different: nobody set one, or one was set against a row no monetary
+/// ceiling can reach. See `2026-08-21-a-run-with-no-ceiling.md` §10.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "effect", rename_all = "snake_case")]
 pub enum CeilingEffect {
-    /// No configured ceiling means no binding limit and no rate lookup.
+    /// No ceiling was configured, so nothing binds and no rates were looked
+    /// up. The ordinary case: ego imposes no ceiling of its own (§4).
     None,
     /// A ceiling is in force at `limit`.
     Binds {
         limit: Money,
-        /// The higher requested figure before an administrator's clamp. Report both so the flag
-        /// does not appear to bind at the wrong limit.
+        /// The higher figure that was asked for, when an administrator's
+        /// non-relaxable ceiling reduced it. §4 requires the clamp be
+        /// **stated, not silent** — otherwise the flag reads as binding at a
+        /// figure it does not.
         #[serde(skip_serializing_if = "Option::is_none")]
         clamped_from: Option<Money>,
     },
@@ -222,12 +239,37 @@ pub enum CeilingEffect {
     },
 }
 
-/// Usage preserves unknown and reported states. Session start, turn start, and metering
-/// selection are harness facts without reducer events; the harness constructs those public
-/// variants directly. Other public variants project domain events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillSafetyStatus {
+    Validated,
+    Warning,
+    Blocked,
+}
+
+/// The privacy-filtered, versioned JSONL wire event — `CLI.md` §4.2's
+/// three-level envelope: `session.started` / `turn.started|completed` /
+/// `item.started|delta|completed`.
+///
+/// `SessionStarted`, `TurnStarted` and `MeteringSelected` have no
+/// `DomainEvent` counterpart: nothing in `EventKind` (ARCH §1's exhaustive
+/// internal set) marks the start of a session or a turn, or the choice of a
+/// metering, because none of those is a fact the *reducer* establishes —
+/// they are facts the harness that drives a session already knows, before
+/// any domain event exists. So the harness constructs those three variants
+/// directly; `project_public` below only ever returns the others, which do
+/// each originate from a `DomainEvent`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PublicEvent {
+    /// Transient local policy diagnostic, separate from every conversation item.
+    FilterNotice { turn: TurnId, text: String },
+    SkillSafety {
+        turn: TurnId,
+        status: SkillSafetyStatus,
+        location: String,
+        reason: String,
+    },
     /// Admitted child activity, alongside the existing parent item projection.
     /// Carries exact native identities and a closed outcome, never task or blob content.
     ChildLifecycle {
@@ -248,7 +290,8 @@ pub enum PublicEvent {
         /// Schema version. Always `PUBLIC_EVENT_VERSION`.
         v: u32,
         session: SessionId,
-        /// Detect optional features by field name and presence, not version parsing.
+        /// Feature detection by name, never version parsing (`CLI.md`
+        /// §4.2).
         capabilities: Vec<String>,
         /// MCP server load errors. Present only when non-empty — a CI gate
         /// is a presence check, not a length check.
@@ -264,6 +307,13 @@ pub enum PublicEvent {
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         instructions: Vec<InstructionDescriptor>,
     },
+    /// The actual profile of an admitted generation. A foreground child's
+    /// profile carries its parent task item; the parent's profile has no item.
+    GenerationProfileSelected {
+        turn: TurnId,
+        item: Option<ItemId>,
+        profile: crate::model_catalogue::ExecutionProfile,
+    },
     /// Transient child activity on the existing parent publication stream.
     /// Keyed by the parent task item, never a child transcript or usage delta.
     /// `output_tokens` is the child's provider-reported cumulative output.
@@ -272,6 +322,14 @@ pub enum PublicEvent {
         item: ItemId,
         activity: String,
         output_tokens: u64,
+    },
+    /// A headless run compacted `source` at `source_seq` and continues in
+    /// `target`, whose own `SessionStarted` follows. The lineage is the same
+    /// one the target session file records.
+    SessionCompacted {
+        source: SessionId,
+        source_seq: Seq,
+        target: SessionId,
     },
     /// A turn began.
     TurnStarted { turn: TurnId },
@@ -325,6 +383,9 @@ pub enum PublicEvent {
         recovery_remaining_ms: Option<u64>,
         delay_ms: u64,
         kind: ErrorKind,
+        /// The provider itself reported the failure (a capacity refusal),
+        /// so the wait follows the capacity schedule, not connection backoff.
+        capacity: bool,
         cause: String,
     },
     /// A previously announced provider wait ended and its next request is dispatching.
@@ -362,12 +423,16 @@ pub enum PublicEvent {
         turn: TurnId,
         item: ItemId,
         kind: ItemKind,
-        /// Completion facts are derived from durable session state.
+        /// One outcome field, never a second status field beside it
+        /// (`ARCHITECTURE.md` §1: "single `ok` field for outcomes").
         ok: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         text: Option<String>,
     },
-    /// A turn finished.
+    /// A turn finished. Every `TurnCompleted` carries its own outcome; the
+    /// *last* one in the stream is, by construction, the terminal event —
+    /// no separate "final result" mechanism is needed (`CLI.md` §4.2: "no
+    /// `--output-last-message` temp-file dance").
     ///
     /// Deliberately no usage field: turn completion is a turn *outcome*,
     /// while usage is observed at a *generation* boundary — a fallback
@@ -537,7 +602,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // surface — costing a `PUBLIC_EVENT_VERSION` bump — to tell nobody
         // anything they cannot already read. It is exported, because an audit
         // that cannot see a deliberate hold reads it as a crash.
-        EventKind::ProtocolFilterVariablesSaved { .. }
+        EventKind::WorklistContinuation { .. }
+        | EventKind::ProtocolFilterVariablesSaved { .. }
         | EventKind::PinsChanged { .. }
         | EventKind::ContextRequested { .. }
         | EventKind::ContextCooldown { .. }
@@ -555,8 +621,10 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         | EventKind::GoalSet { .. }
         | EventKind::GoalTransitioned { .. } => None,
         EventKind::DetachedExecStarted { .. }
+        | EventKind::DetachedExecOutput { .. }
         | EventKind::DetachedExecSettled { .. }
-        | EventKind::HostContextAppended { .. } => None,
+        | EventKind::HostContextAppended { .. }
+        | EventKind::McpTaskResultDelivered { .. } => None,
         EventKind::CompactionSeeded { checkpoint, .. } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
@@ -571,12 +639,16 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: true,
             text: Some(text.clone()),
         }),
+        // New turns publish this `ItemDelta` live from the turn loop.
+        // TODO(2027-03-01): remove legacy AssistantDelta replay support (story 842).
         EventKind::AssistantDelta { text } => Some(PublicEvent::ItemDelta {
             turn,
             item: item?,
             kind: ItemKind::AgentMessage,
             text: text.clone(),
         }),
+        // Live hosts already saw the item's chunks; the completion follows.
+        EventKind::AssistantMessageStarted => None,
         EventKind::AssistantMessage { text } => Some(PublicEvent::ItemCompleted {
             turn,
             item: item?,
@@ -596,7 +668,8 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // adding a second identity to a versioned schema would be a
         // compatibility-governed change with no consumer asking for it.
         EventKind::ToolCallStarted { name, args, .. }
-        | EventKind::ContextCommandStarted { name, args } => Some(PublicEvent::ItemStarted {
+        | EventKind::ContextCommandStarted { name, args }
+        | EventKind::BatchMemberStarted { name, args, .. } => Some(PublicEvent::ItemStarted {
             turn,
             item: item?,
             kind: ItemKind::Tool,
@@ -665,12 +738,23 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
         // whose only reader is unbuilt is a field nothing can be wrong about,
         // so it arrives with its reader.
         //
-        // This projection adds no authority field without a consumer contract.
-        // Changing it would affect every ACP host and JSONL reader.
+        // `2026-08-21-a-permit-nobody-can-widen.md` §7 expected the opposite
+        // and priced a `PUBLIC_EVENT_VERSION` bump for it. What was wrong was
+        // the assumed consumer, not the projection rule: 5→6 is paid by every
+        // ACP host and every `--output jsonl` reader, for a field none of them
+        // asks for.
         //
-        // Denial authority reaches completion consumers through `RunTermination`,
-        // not this live event projection. The operator can then identify which
-        // configuration axis can lift the refusal.
+        // **`CLI.md` §4.1 does publish an authority, and that is the same rule
+        // rather than an exception to it.** `Report.denied_by` reaches a
+        // consumer through `RunTermination`, not through this projection —
+        // `--output json` publishes to a `NullSink` and produces no events at
+        // all — and it has a reader that §4.4 names: exit 3 offers three
+        // opt-ins that act on different axes, and which one applies is the
+        // authority. So the field arrived on the surface that asks for it and
+        // not on the one that does not. Do not read this comment as "the
+        // authority is never published"; read it as "this projection adds
+        // nothing a consumer has not asked for". See
+        // `2026-08-21-an-exit-code-that-names-who-refused.md`.
         //
         // **Not withheld for privacy, and the difference matters to whoever
         // reads this next.** `Source` is a six-value layer name
@@ -720,9 +804,13 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             candidate: candidate.clone(),
             decision: decision.clone(),
         }),
-        // `window` reaches usage consumers through reduced state supplied beside
-        // the event. Duplicating it here would add another versioned surface for
-        // the same fact without a published reader.
+        // `window` is deliberately not projected. It reaches consumers through
+        // the reduction a sink is handed beside the event
+        // (`docs/internals/decisions/2026-08-21-what-a-sink-is-handed.md`), which is
+        // where the only reader of it — the ACP `UsageUpdate` denominator —
+        // already looks. Carrying it here as well would put the same fact on
+        // two versioned surfaces that could then disagree, and would cost a
+        // `PUBLIC_EVENT_VERSION` bump for a field no published consumer reads.
         EventKind::ContextWindowUpdated {
             used_tokens,
             provenance,
@@ -737,9 +825,13 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             ok: *ok,
             exit_reason: *exit_reason,
         }),
-        // Never public, and this is a privacy decision rather than a tidiness one. The
-        // blob is provider-private and opaque — ego does not know what is encoded in it,
-        // which is precisely why it cannot publish it.
+        // Never public, and this is a privacy decision rather than a
+        // tidiness one. The blob is provider-private and opaque — ego does
+        // not know what is encoded in it, which is precisely why it cannot
+        // publish it. A consumer that needs to know the model reasoned has
+        // the reasoning item and its deltas; nothing downstream can act on
+        // the continuation token, and `CLI.md` §4.2's rule is that a new
+        // internal event never becomes public automatically.
         EventKind::ReasoningState { .. } | EventKind::ProviderContent { .. } => None,
         EventKind::PromptQueued { .. }
         | EventKind::PromptDeliveryExpedited { .. }
@@ -791,19 +883,36 @@ pub fn project_public(ev: &DomainEvent) -> Option<PublicEvent> {
             kind: *kind,
         }),
 
-        // The attempt lifecycle is internal, and stays internal. A client
-        // consumes the *effect* — usage, cost, occupancy — not the harness's
-        // bookkeeping about which journey to the wire produced it, and
-        // `AttemptRef` is an identity core mints for its own accounting.
+        // The attempt identity stays internal. A client consumes the actual
+        // execution profile and the effects — usage, cost, occupancy — not
+        // the harness's bookkeeping about which journey to the wire produced
+        // them. `AttemptRef` is an identity core mints for its own accounting.
         // A correction is not a public event either: it does not add a
         // figure, it revises one, and what a client should see afterwards is
         // the corrected cumulative total, which the next `UsageUpdated` or
         // `ContextWindowUpdated` already carries.
-        EventKind::GenerationStarted { .. }
+        EventKind::TaskProfileSelected { profile } => {
+            Some(PublicEvent::GenerationProfileSelected {
+                turn,
+                item,
+                profile: profile.clone(),
+            })
+        }
+        EventKind::GenerationStarted {
+            profile: Some(profile),
+            ..
+        } => Some(PublicEvent::GenerationProfileSelected {
+            turn,
+            item: None,
+            profile: profile.clone(),
+        }),
+        EventKind::GenerationStarted { profile: None, .. }
+        | EventKind::CheckpointContinued
         | EventKind::AttemptSettled { .. }
         | EventKind::UsageCorrected { .. }
         | EventKind::ProviderLimitsObserved { .. }
         | EventKind::SessionSelectionsSelected { .. }
+        | EventKind::SandboxOwnerGranted { .. }
         | EventKind::SessionRootGranted { .. }
         | EventKind::PermanentRootGrantPending { .. }
         | EventKind::PermanentRootGranted { .. }

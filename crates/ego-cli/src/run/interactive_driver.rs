@@ -9,8 +9,10 @@ mod native_events;
 
 /// The currency a session settles in.
 ///
-/// Use a shared currency value rather than invent an unsupported `--currency` flag.
-/// Supplied rate quotes carry their own currency.
+/// One constant and not a flag, because `--currency` is not in `CLI.md` §3 and
+/// a currency nobody can state is worse than a stated one: every quote this
+/// build can produce is either zero (a local daemon) or supplied alongside its
+/// own currency.
 pub(super) const SETTLEMENT: &str = "USD";
 
 /// The active session's asynchronous authority for one staged model switch.
@@ -40,29 +42,21 @@ impl<'s> RunModelSwitchOwner<'s> {
         }
     }
 
-    /// Gate, publish, and install a picker request at the real run owner.
-    pub async fn apply(
+    pub(super) fn selection_snapshot(
         &self,
-        request: ModelSwitchRequest,
-    ) -> Result<Option<UserConfigPublication>, RunModelSwitchError> {
-        let target = request.target();
-        let thinking = request.thinking();
-        let current = self
-            .selection
-            .snapshot()
-            .map_err(|error| RunModelSwitchError::Selection(error.to_string()))?;
-        if current.identity == target
-            && current.thinking == thinking
-            && current.explicit_thinking == Some(thinking)
-        {
-            return Ok(None);
-        }
+    ) -> Result<model::GenerationSelectionSnapshot, impl std::fmt::Display> {
+        self.selection.snapshot()
+    }
 
+    pub(super) async fn before_switch(
+        &self,
+        target: &ModelRef,
+    ) -> Result<(RequestId, Option<EventId>), RunModelSwitchError> {
         let request_id = RequestId::from_uuid(uuid::Uuid::now_v7());
         let pre = model_switch_occurrence(
             HookLifecycle::PreModelSwitch,
             request_id,
-            &target,
+            target,
             HookCausality::request(request_id, self.turn, self.parent),
         )?;
         let pre = self
@@ -70,10 +64,113 @@ impl<'s> RunModelSwitchOwner<'s> {
             .dispatch(Producer::Main, pre)
             .await
             .map_err(|error| RunModelSwitchError::PreDispatch(error.to_string()))?;
+        if self.hooks.hook_state().cancel_token().is_cancelled() {
+            return Err(RunModelSwitchError::PreDispatch(
+                "run cancelled during pre-model-switch hook".to_owned(),
+            ));
+        }
         if pre.is_blocked() {
             return Err(RunModelSwitchError::PreBlocked);
         }
+        Ok((request_id, pre.closure_event()))
+    }
 
+    /// Gate, publish, and install a picker request at the real run owner.
+    pub async fn apply(
+        &self,
+        request: ModelSwitchRequest,
+        effective: &Effective,
+    ) -> Result<Option<UserConfigPublication>, RunModelSwitchError> {
+        let target = request.target();
+        let thinking = request.thinking();
+        let current = self
+            .selection
+            .snapshot()
+            .map_err(|error| RunModelSwitchError::Selection(error.to_string()))?;
+        let route = |model: &ModelRef| {
+            model
+                .0
+                .split_once('/')
+                .map_or_else(|| model.0.clone(), |(provider, _)| provider.to_owned())
+        };
+        let target_route = route(&target);
+        let instance_ref = |route: &str| {
+            effective
+                .providers
+                .instances
+                .iter()
+                .find(|(id, _)| id.as_str() == route)
+                .map(|(_, instance)| instance.value.credential_ref.as_ref().map(|id| id.as_str()))
+        };
+        let pinned = self
+            .selection
+            .connection()
+            .or(effective.connection.as_deref())
+            .or_else(|| instance_ref(&route(&current.identity)).flatten());
+        if pinned.is_some_and(|id| {
+            route(&current.identity) != target_route
+                || request
+                    .connection()
+                    .is_some_and(|requested| requested != id)
+        }) {
+            return Err(RunModelSwitchError::Account(
+                "this session is bound to its saved account; open a new session to switch accounts or providers".into(),
+            ));
+        }
+        if request.connection().is_none() {
+            self.selection
+                .connection_for_route(
+                    &target_route,
+                    instance_ref(&target_route),
+                    effective.connection.as_deref(),
+                    &effective.connections,
+                )
+                .map_err(RunModelSwitchError::Account)?;
+        }
+        if request.connection().is_none()
+            && current.identity == target
+            && current.thinking == thinking
+            && current.explicit_thinking == Some(thinking)
+        {
+            return Ok(None);
+        }
+
+        let (request_id, closure) = self.before_switch(&target).await?;
+
+        let account = match request.connection() {
+            Some(id) => {
+                if instance_ref(&target_route).is_some()
+                    || !model::rows(&effective.auth).is_ok_and(|rows| {
+                        rows.iter().any(|row| {
+                            row.id() == target_route && row.credential.environment_var().is_some()
+                        })
+                    })
+                {
+                    return Err(RunModelSwitchError::Account(
+                        "the selected provider does not accept a live saved API-key account".into(),
+                    ));
+                }
+                let home = crate::config::ego_home().ok_or_else(|| {
+                    RunModelSwitchError::Account(
+                        "the user configuration directory is unavailable".into(),
+                    )
+                })?;
+                let found = crate::auth::saved_key_accounts_at(&home)
+                    .map_err(|_| {
+                        RunModelSwitchError::Account("could not read saved accounts".into())
+                    })?
+                    .into_iter()
+                    .find(|account| account.id == id && account.route == target_route);
+                Some(found.ok_or_else(|| {
+                    RunModelSwitchError::Account(
+                        "the selected saved API-key account is no longer available; reopen /model"
+                            .into(),
+                    )
+                })?)
+            }
+            None => None,
+        };
+        let requested_id = account.as_ref().map(|account| account.id.clone());
         let publication = if request.is_persistent() {
             let result = self
                 .config_store
@@ -87,28 +184,33 @@ impl<'s> RunModelSwitchOwner<'s> {
             None
         };
         let journal = self.hooks.hook_state().journal();
-        if let Err(message) = self
-            .selection
-            .install_with_commit(target.clone(), thinking, || {
-                let selections = journal
-                    .inspect(|state| {
-                        state
-                            .session_selections
-                            .clone()
-                            .unwrap_or_else(RunSelections::empty)
-                    })
-                    .map_err(|error| error.to_string())?
-                    .with_model_and_thinking(target.clone(), thinking);
-                journal
-                    .append(
-                        self.turn,
-                        None,
-                        pre.closure_event(),
-                        EventKind::SessionSelectionsSelected { selections },
-                    )
-                    .map(|_| ())
-                    .map_err(|error| error.to_string())
-            })
+        if let Err(message) =
+            self.selection
+                .install_with_commit(target.clone(), thinking, account, || {
+                    let selections = journal
+                        .inspect(|state| {
+                            state
+                                .session_selections
+                                .clone()
+                                .unwrap_or_else(RunSelections::empty)
+                        })
+                        .map_err(|error| error.to_string())?
+                        .with_model_and_thinking(target.clone(), thinking);
+                    let selections = if let Some(id) = requested_id {
+                        selections.with_connection(Some(id))
+                    } else {
+                        selections
+                    };
+                    journal
+                        .append(
+                            self.turn,
+                            None,
+                            closure,
+                            EventKind::SessionSelectionsSelected { selections },
+                        )
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                })
         {
             return Err(RunModelSwitchError::Install {
                 message,
@@ -120,19 +222,15 @@ impl<'s> RunModelSwitchOwner<'s> {
             HookLifecycle::PostModelSwitch,
             request_id,
             &target,
-            HookCausality::request(request_id, self.turn, pre.closure_event()),
+            HookCausality::request(request_id, self.turn, closure),
         )?;
-        let post = self
-            .hooks
+        self.hooks
             .dispatch(Producer::Main, post)
             .await
             .map_err(|error| RunModelSwitchError::PostDispatch {
                 message: error.to_string(),
                 publication: publication.clone(),
             })?;
-        if post.is_observer_failure() {
-            return Err(RunModelSwitchError::PostObserver { publication });
-        }
         Ok(publication)
     }
 }
@@ -154,6 +252,7 @@ pub(super) fn model_switch_occurrence(
 #[derive(Debug)]
 pub enum RunModelSwitchError {
     Selection(String),
+    Account(String),
     Occurrence(String),
     PreDispatch(String),
     PreBlocked,
@@ -166,18 +265,16 @@ pub enum RunModelSwitchError {
         message: String,
         publication: Option<UserConfigPublication>,
     },
-    PostObserver {
-        publication: Option<UserConfigPublication>,
-    },
 }
 
 impl RunModelSwitchError {
     pub fn publication(&self) -> Option<&UserConfigPublication> {
         match self {
-            Self::Install { publication, .. }
-            | Self::PostDispatch { publication, .. }
-            | Self::PostObserver { publication } => publication.as_ref(),
+            Self::Install { publication, .. } | Self::PostDispatch { publication, .. } => {
+                publication.as_ref()
+            }
             Self::Selection(_)
+            | Self::Account(_)
             | Self::Occurrence(_)
             | Self::PreDispatch(_)
             | Self::PreBlocked
@@ -195,6 +292,7 @@ impl std::fmt::Display for RunModelSwitchError {
                     "the active model selection could not be read: {message}"
                 )
             }
+            Self::Account(message) => formatter.write_str(message),
             Self::Occurrence(message) => {
                 write!(
                     formatter,
@@ -220,9 +318,6 @@ impl std::fmt::Display for RunModelSwitchError {
                     "the post-model-switch observer failed: {message}"
                 )
             }
-            Self::PostObserver { .. } => {
-                formatter.write_str("a post-model-switch observer failed after commit")
-            }
         }
     }
 }
@@ -232,7 +327,7 @@ impl std::error::Error for RunModelSwitchError {}
 pub(super) enum ResumePlan {
     Model {
         answer: QuestionAnswer,
-        continuation: QuestionContinuation,
+        continuation: Box<QuestionContinuation>,
         request_event: EventId,
     },
     Foreign {
@@ -296,7 +391,7 @@ pub(super) fn plan_resume_answer(
                 .map_err(|error| usage(error.to_string()))?;
             Ok(ResumePlan::Model {
                 answer,
-                continuation,
+                continuation: Box::new(continuation),
                 request_event: pending.request_event(),
             })
         }
@@ -322,7 +417,7 @@ pub fn apply_resume_answers_once(
             answer,
             continuation,
             request_event,
-        } => apply_model_resume_once(opened, answer, continuation, request_event),
+        } => apply_model_resume_once(opened, answer, *continuation, request_event),
         ResumePlan::Foreign { .. } => Err(RunTermination::UsageError {
             message: QuestionError::ForeignContinuationRequired.to_string(),
         }),
@@ -401,7 +496,26 @@ pub struct Ended {
     /// One canonical, sanitized projection of MCP startup failures.
     pub mcp_errors: Vec<String>,
     /// Interactive selection that must re-enter admission at its recorded root.
-    pub selected_session: Option<ego_core::store::session_store::SessionMeta>,
+    pub selected_session: Option<SessionReadmission>,
+}
+
+/// Session selection and its optional same-turn root continuation travel together.
+/// An ordinary picker selection or root revocation never resumes a turn.
+pub enum SessionReadmission {
+    Resume {
+        meta: Box<ego_core::store::session_store::SessionMeta>,
+        root_resume: Option<TurnId>,
+    },
+    SwitchProvider(Box<ProviderSwitch>),
+}
+
+impl From<ego_core::store::session_store::SessionMeta> for SessionReadmission {
+    fn from(meta: ego_core::store::session_store::SessionMeta) -> Self {
+        Self::Resume {
+            meta: Box::new(meta),
+            root_resume: None,
+        }
+    }
 }
 
 impl Ended {
@@ -449,8 +563,10 @@ pub(super) async fn run_process(
     config::capture_profile(&mut args);
     let output = args.output;
     let quiet = args.quiet;
-    // Probe terminal capabilities only for terminal rendering. Machine-readable output must
-    // never acquire escape sequences.
+    // The one place the terminal is asked what it is. §4.5's "stdout is
+    // protocol-clean" is why the machine-readable modes are not asked at all
+    // rather than asked and ignored: there is no environment in which a JSON
+    // document acquires an escape sequence.
     let environment = Environment::read();
     let capabilities = match output {
         Output::Text => Capabilities::of(&Terminal {
@@ -464,14 +580,17 @@ pub(super) async fn run_process(
         quiet,
         capabilities,
         workspace(args.directory.as_ref()).ok().as_deref(),
-    );
+    )
+    .with_attention_ledger(crate::mcp_attention::AttentionLedger::in_home(
+        crate::config::ego_home(),
+    ));
     let jsonl_sink = JsonlSink::new(out);
     let sink: &dyn EventSink = match output {
         Output::Text => &text_sink,
         Output::Jsonl => &jsonl_sink,
-        // JSON completion publishes once at settlement. Use a sink that writes nothing during
-        // the run, not a collector nobody consumes.
-        Output::Json => &ego_core::sink::NullSink,
+        // §4.1 keeps stdout for the final document. Transient filter
+        // diagnostics still reach stderr without collecting model events.
+        Output::Json => &crate::output::JsonDiagnosticSink,
     };
 
     let announce = Announce::new(out, capabilities, quiet);
@@ -482,7 +601,7 @@ pub(super) async fn run_process(
         seat: None,
     };
 
-    let ended = run_with_registry(
+    let ended = run_with_registry_output(
         args,
         |_| {
             announce.opening(opening_prompt.as_deref());
@@ -491,6 +610,7 @@ pub(super) async fn run_process(
         cancel,
         evidence,
         preflight,
+        Some(out),
     )
     .await;
 
@@ -525,8 +645,10 @@ pub(super) async fn interactive_process(
             message: "profile 'ci' is available only through 'ego run' or 'ego resume'".to_owned(),
         });
     }
-    // Interactive conversations have no single completion document. Refuse incompatible
-    // machine-output flags rather than producing an unconsumable stream.
+    // A machine-readable stream has no reader here. `--output json` is a
+    // single document at completion and a conversation has no completion, so
+    // the flag is refused by name rather than quietly producing a stream
+    // nobody can consume — `CLI.md` §4.5.
     if args.output != Output::Text {
         return Ended::refused(RunTermination::UsageError {
             message: format!(
@@ -552,9 +674,13 @@ pub(super) async fn interactive_process(
                 .columns
                 .is_some_and(|width| width >= crate::render::startup_logo::WIDTH)
         {
-            out.write(crate::render::startup_logo::render(capabilities.depth));
+            out.write(&crate::render::startup_logo::render(capabilities.depth));
         }
-        out.note(&format!("ego {}", env!("CARGO_PKG_VERSION")));
+        if args.plain {
+            out.note(&crate::build_info::identity());
+        } else {
+            out.startup_block(&crate::build_info::identity());
+        }
     }
     let keyboard = match config::keyboard_preferences(args.vim) {
         Ok(preferences) => preferences,
@@ -575,7 +701,7 @@ pub(super) async fn interactive_process(
     let services = InteractiveServices { evidence };
 
     if let Some(surface) = surface {
-        let output = Arc::new(InteractiveOutput::new(surface));
+        let output = Arc::new(InteractiveOutput::with_capabilities(surface, capabilities));
         let ended = interactive_through(
             args,
             cancel,
@@ -623,7 +749,10 @@ pub(super) async fn interactive_through(
         quiet,
         capabilities,
         workspace(args.directory.as_ref()).ok().as_deref(),
-    );
+    )
+    .with_attention_ledger(crate::mcp_attention::AttentionLedger::in_home(
+        crate::config::ego_home(),
+    ));
     let announce = Announce::new(output, capabilities, quiet);
     let signalling = Signalling {
         inner: &text_sink,
@@ -643,29 +772,32 @@ pub(super) async fn interactive_through(
     };
     // Choose before admission so project files and guarded adapters bind to the recorded root.
     if human && matches!(args.session, crate::cli::SessionChoice::Resume(None)) {
-        let metas = (|| {
+        let source = (|| {
             let root = workspace(args.directory.as_ref())?;
-            let store = session::jsonl(
+            let store = Arc::new(session::jsonl(
                 rooted_path(&root, session::store_root(args.session_dir.as_ref())?),
                 root.clone(),
-            );
-            crate::catalogue::saved_sessions(&store, output)
-                .map_err(|error| UsageError(error.to_string()))
+            ));
+            Ok::<_, UsageError>(crate::catalogue::ResumePicker::new(store, root, None))
         })();
-        let metas = match metas {
-            Ok(metas) => metas,
+        let source = match source {
+            Ok(source) => source,
             Err(error) => return Ended::refused(RunTermination::UsageError { message: error.0 }),
         };
-        let Some(id) = interactive_seat.pick_session(metas.clone()) else {
-            return Ended::refused(RunTermination::Done);
-        };
-        let Some(meta) = metas.into_iter().find(|meta| meta.id == id) else {
-            return Ended::refused(RunTermination::Done);
+        let meta = match interactive_seat.pick_session(source) {
+            crate::catalogue::SessionPick::Selected(meta) => *meta,
+            crate::catalogue::SessionPick::Cancelled | crate::catalogue::SessionPick::Quit => {
+                return Ended::refused(RunTermination::Done);
+            }
         };
         if let Err(error) = select_recorded_session(&mut args, &meta) {
             return Ended::refused(RunTermination::UsageError { message: error.0 });
         }
     }
+    let mut root_resume = None;
+    let root_transition = RootTransitionSlot::default();
+    let mut seed_opening_prompt = true;
+    let mut pending_switch: Option<(Box<ProviderSwitch>, Args)> = None;
     let ended = loop {
         text_sink.set_workspace(workspace(args.directory.as_ref()).ok().as_deref());
         let status = InteractiveStatus {
@@ -676,7 +808,8 @@ pub(super) async fn interactive_through(
             picker: None,
             model_config_store: None,
         };
-        let mut ended = match execute(
+        let mut activated = false;
+        let mut ended = match super::execution::execute_with_admission(
             args.clone(),
             |_| &signalling as &dyn EventSink,
             cancel.clone(),
@@ -685,6 +818,9 @@ pub(super) async fn interactive_through(
                 driver: Driver::Interactive {
                     seat: Arc::clone(&interactive_seat),
                     between: &between,
+                    resume_after_root: root_resume.take(),
+                    root_transition: Arc::clone(&root_transition),
+                    seed_opening_prompt,
                 },
                 elicitor: Some(Arc::clone(&elicitor)),
                 status: Some(status),
@@ -692,25 +828,99 @@ pub(super) async fn interactive_through(
                 text_output: Some(output),
                 evidence: Arc::clone(&services.evidence),
             },
+            pending_switch
+                .as_ref()
+                .map(|(change, _)| (change.as_ref(), &mut activated)),
         )
         .await
         {
             Ok(ended) => ended,
-            Err(refusal) => Ended::refused(refusal),
+            Err(refusal) => {
+                if !activated
+                    && !cancel.is_cancelled()
+                    && let Some((change, source_args)) = pending_switch.take()
+                {
+                    let reason = match &refusal {
+                        RunTermination::UsageError { message }
+                        | RunTermination::Failed { message }
+                        | RunTermination::Guard { message }
+                        | RunTermination::Provider { message } => message.as_str(),
+                        other => other.exit_reason(),
+                    };
+                    output.note(&format!(
+                        "the provider switch could not start: {reason}; returning to original session {}",
+                        change.source
+                    ));
+                    seat.action_registry().release_skill_view();
+                    args = source_args;
+                    continue;
+                }
+                Ended::refused(refusal)
+            }
         };
-        let Some(meta) = ended.selected_session.take() else {
+        let Some(selected) = ended.selected_session.take() else {
             break ended;
         };
-        if let Err(error) = select_recorded_session(&mut args, &meta) {
-            break Ended::refused(RunTermination::UsageError { message: error.0 });
-        }
+        seed_opening_prompt = false;
+        pending_switch = None;
         seat.action_registry().release_skill_view();
-        if !interactive_seat.activate_session(meta.id) {
-            break Ended::refused(RunTermination::UsageError {
-                message: "the terminal could not activate the selected session".to_owned(),
-            });
+        match selected {
+            SessionReadmission::SwitchProvider(change) => {
+                let mut recovery = args.clone();
+                recovery.session = if change.source == change.id {
+                    SessionChoice::Id(change.source.to_string())
+                } else {
+                    SessionChoice::Resume(Some(crate::cli::ResumeTarget::Id(
+                        change.source.to_string(),
+                    )))
+                };
+                recovery.accept_authority_delta = false;
+                if let Some(selections) = ended.state.session_selections.as_ref() {
+                    recovery.model = selections.model().map(|model| model.0.clone());
+                    recovery.thinking = selections.thinking();
+                    recovery.connection = selections.connection().map(str::to_owned);
+                    recovery.account = None;
+                }
+                if change.fork.is_some() {
+                    args.tools = None;
+                }
+                args.session = SessionChoice::Id(change.id.to_string());
+                args.model = Some(change.request.target().0);
+                args.thinking = Some(change.request.thinking());
+                args.connection = change.destination.connection.clone();
+                args.account = None;
+                pending_switch = Some((change, recovery));
+            }
+            SessionReadmission::Resume {
+                meta,
+                root_resume: resume,
+            } => {
+                root_resume = resume;
+                if matches!(
+                    ended.state.lineage,
+                    Some(ego_core::session::SessionLineage::Fork { neutral: true, .. })
+                ) {
+                    args.model = None;
+                    args.thinking = None;
+                    args.connection = None;
+                    args.account = None;
+                    args.tools = None;
+                } else if meta.id != ended.session {
+                    prepare_picked_session(&mut args, &meta, &ended.state);
+                }
+                if let Err(error) = select_recorded_session(&mut args, &meta) {
+                    break Ended::refused(RunTermination::UsageError { message: error.0 });
+                }
+                // Picker targets already passed terminal activation in the source epoch.
+                if meta.id == ended.session && !interactive_seat.activate_session(meta.id) {
+                    break Ended::refused(RunTermination::UsageError {
+                        message: "the terminal could not activate the selected session".into(),
+                    });
+                }
+                output.note(&format!("resumed session {}", meta.id));
+            }
         }
-        output.note(&format!("resumed session {}", meta.id));
+        args.accept_authority_delta = false;
     };
     text_sink.finish();
     let counts = seat.exit_counts();
@@ -726,6 +936,22 @@ pub(super) async fn interactive_through(
     ended
 }
 
+/// A seat picker selects the target's tools, not an argv override from the source.
+/// Same-workspace switches retain the active model, as they did within an epoch.
+fn prepare_picked_session(
+    args: &mut Args,
+    meta: &ego_core::store::session_store::SessionMeta,
+    source: &SessionState,
+) {
+    if workspace(args.directory.as_ref()).is_ok_and(|root| root == meta.workspace_root)
+        && let Some(selections) = &source.session_selections
+    {
+        args.model = selections.model().map(|model| model.0.clone());
+        args.thinking = selections.thinking();
+    }
+    args.tools = None;
+}
+
 /// Keep the store location stable while normal admission resolves the selected project.
 fn select_recorded_session(
     args: &mut Args,
@@ -737,7 +963,8 @@ fn select_recorded_session(
         session::store_root(args.session_dir.as_ref())?,
     ));
     args.directory = Some(meta.workspace_root.clone());
-    args.session = crate::cli::SessionChoice::Resume(Some(meta.id.to_string()));
+    args.session =
+        crate::cli::SessionChoice::Resume(Some(crate::cli::ResumeTarget::Id(meta.id.to_string())));
     Ok(())
 }
 
@@ -774,8 +1001,10 @@ pub(super) struct Announce<'a> {
 /// How long a run has to take before finishing it is worth a desktop
 /// notification.
 ///
-/// Completion notifications are for unattended work. Suppress them for short runs or
-/// quiet presentation.
+/// A notification for a run the operator watched finish is an interruption
+/// reporting something they already know. A minute is the point past which
+/// they have plausibly looked at something else — and `-q`, which `CLI.md` §1.3
+/// calls quiet progress, suppresses it at any duration.
 pub(super) const NOTIFY_AFTER: Duration = Duration::from_secs(60);
 
 impl<'a> Announce<'a> {
@@ -816,7 +1045,7 @@ impl<'a> Announce<'a> {
     pub(super) fn preamble(&self, prompt: Option<&str>) -> String {
         [
             self.osc.title(&title(prompt)),
-            self.osc.state(State::Busy),
+            // Busy belongs to TurnStarted, not to opening a session that may not run a turn.
             // Indeterminate rather than a percentage: the number of turns is
             // not known in advance, and a bar that advances on a guess is a lie
             // with a progress bar's authority. `--budget` would make a fraction
@@ -836,13 +1065,18 @@ impl<'a> Announce<'a> {
     /// reads it.
     pub(super) fn signal(&self, event: &PublicEvent, state: &SessionState) -> String {
         use ego_core::public::ItemKind as Kind;
-        let provider_notice = self.provider_notices.observe(event);
+        let failure = self.provider_notices.failure(event);
+        let provider_notice = failure
+            .as_ref()
+            .and_then(crate::output::TurnFailure::provider_notice);
         let rich = self
             .native_events
             .lock()
             .expect("native event lock")
             .observe(self.osc, event);
         let coarse = match event {
+            // Resumed and automatic turns need not publish a new user message.
+            PublicEvent::TurnStarted { .. } => self.osc.state(State::Busy),
             PublicEvent::ProviderRetry {
                 attempt, delay_ms, ..
             } => {
@@ -871,17 +1105,32 @@ impl<'a> Announce<'a> {
             // raised before a judge or a stored rule may settle it, and the
             // terminal owner announces the wait when it puts the question.
             PublicEvent::TurnCompleted { .. } => {
+                // A model turn can end before ego's own work does. The journal,
+                // not the child display or OS descendants, owns this lifetime.
+                let refusal = failure
+                    .as_ref()
+                    .and_then(crate::output::TurnFailure::refusal);
+                let activity = match (native_activity(state, false), &refusal) {
+                    (State::Idle, Some(_)) => State::Error,
+                    (activity, _) => activity,
+                };
+                // Every refusal resends its message: the host clears it when the
+                // next turn starts, so a repeat after a retry needs it again.
+                let message = refusal
+                    .as_deref()
+                    .map(|message| self.osc.error(message))
+                    .unwrap_or_default();
                 if let Some(notice) = provider_notice {
                     [
                         self.clear_recovery(),
                         self.osc.progress(Progress::Failed),
                         self.osc.notify(crate::DISPLAY_NAME, &notice),
                         // The turn failed, but no question owns the composer.
-                        self.osc.state(State::Idle),
+                        self.osc.state(activity),
                     ]
                     .concat()
                 } else {
-                    [self.clear_recovery(), self.osc.state(State::Idle)].concat()
+                    [self.clear_recovery(), message, self.osc.state(activity)].concat()
                 }
             }
             _ => String::new(),
@@ -898,29 +1147,15 @@ impl<'a> Announce<'a> {
         }
     }
 
-    /// Title, intent and busy, in the order TUIC's tab should learn them.
+    /// Announce the session title and reset progress for a new user message.
     ///
-    /// The title is the session's own once it has one (a resumed session
-    /// does), and the prompt until then. The intent carries a fixed trailing
-    /// `(εgo)` because TUIC splits the payload at the *last* `(`: a prompt
-    /// that ends in a call such as `foo(bar)` would otherwise lose its tail to
-    /// the title field.
+    /// Intent belongs to the assistant's declared work, not the prompt. A
+    /// synthetic prompt intent would replace its contextual host title on
+    /// every turn, including automatic peer-mail messages.
     fn turn_started(&self, prompt: &str, session_title: Option<&str>) -> String {
         let label = excerpt(session_title.or(Some(prompt)), TITLE_CELLS)
             .unwrap_or_else(|| crate::DISPLAY_NAME.to_string());
-        let intent = match excerpt(Some(prompt), INTENT_CELLS) {
-            Some(text) => self
-                .osc
-                .intent(&format!("{text} ({})", crate::DISPLAY_NAME)),
-            None => String::new(),
-        };
-        [
-            self.osc.title(&label),
-            intent,
-            self.osc.progress(Progress::Cleared),
-            self.osc.state(State::Busy),
-        ]
-        .concat()
+        [self.osc.title(&label), self.osc.progress(Progress::Cleared)].concat()
     }
 
     pub(super) fn postamble(&self, termination: &RunTermination, elapsed: Duration) -> String {
@@ -991,7 +1226,6 @@ pub(super) fn title(prompt: Option<&str>) -> String {
 }
 
 const TITLE_CELLS: usize = 48;
-const INTENT_CELLS: usize = 80;
 
 /// The first line of `text`, cut to `cells`; `None` when there is nothing to
 /// show.
@@ -1006,6 +1240,36 @@ fn excerpt(text: Option<&str>, cells: usize) -> Option<String> {
     Some(short.text().trim_end().to_string())
 }
 
+/// Shared host activity for the event and terminal presentation owners.
+pub(crate) fn native_activity(state: &SessionState, turn_running: bool) -> State {
+    if turn_running || owned_work_running(state) {
+        State::Busy
+    } else {
+        State::Idle
+    }
+}
+
+/// A child remains owned until journal collection, which wakes the driver.
+fn owned_work_running(state: &SessionState) -> bool {
+    use ego_core::state::SubagentEvent;
+    if state.detached_execs.values().any(Option::is_none) {
+        return true;
+    }
+    let mut settled = std::collections::HashSet::new();
+    for event in state.subagents.iter().rev() {
+        match event {
+            SubagentEvent::Settled { invocation, .. } => {
+                settled.insert(*invocation);
+            }
+            SubagentEvent::Spawned { invocation, .. } if !settled.contains(invocation) => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Publishes to the sink it wraps, then tells the host what the event means
 /// for the pane. The events are the same ones the sink already receives, so a
 /// permission wait and its answer are observed rather than re-detected.
@@ -1016,6 +1280,19 @@ pub(super) struct Signalling<'a> {
 }
 
 impl EventSink for Signalling<'_> {
+    fn wants_exec_progress(&self) -> bool {
+        self.inner.wants_exec_progress()
+    }
+
+    fn exec_progress(
+        &self,
+        item: ego_core::event::id::ItemId,
+        elapsed: std::time::Duration,
+        output: &[u8],
+    ) {
+        self.inner.exec_progress(item, elapsed, output);
+    }
+
     fn cache_observed(
         &self,
         prefix: &ego_core::generator::attempt::CachePrefix,
@@ -1026,7 +1303,8 @@ impl EventSink for Signalling<'_> {
 
     fn publish(&self, event: &PublicEvent, state: &SessionState) {
         if let Some(seat) = self.seat {
-            seat.observe_native_turn(event);
+            seat.observe_native_turn(event, state);
+            seat.observe_prompt_cache(state);
         }
         // Ingress acknowledgements cover acceptance/retraction. Consumption
         // and turn settlement happen here, before the next generation ends.
@@ -1066,12 +1344,24 @@ impl EventSink for Signalling<'_> {
 /// resolution done twice with two chances to disagree. `destination` is
 /// therefore called once, at the point the answer exists. A caller that does
 /// not care ignores the argument: `|_| sink`.
+#[cfg(test)]
 pub(super) async fn run_with_registry<S: EventSink>(
     args: Args,
     destination: impl FnOnce(&ModelCapabilities) -> S,
     cancel: CancelToken,
     evidence: Arc<EvidenceAdmissionService>,
     preflight: Option<ExecutionPreflight>,
+) -> Ended {
+    run_with_registry_output(args, destination, cancel, evidence, preflight, None).await
+}
+
+async fn run_with_registry_output<S: EventSink>(
+    args: Args,
+    destination: impl FnOnce(&ModelCapabilities) -> S,
+    cancel: CancelToken,
+    evidence: Arc<EvidenceAdmissionService>,
+    preflight: Option<ExecutionPreflight>,
+    output: Option<&dyn TextOutput>,
 ) -> Ended {
     match execute(
         args,
@@ -1083,7 +1373,7 @@ pub(super) async fn run_with_registry<S: EventSink>(
             elicitor: None,
             status: None,
             diagnostics: &Stderr,
-            text_output: None,
+            text_output: output,
             evidence,
         },
     )
@@ -1105,3 +1395,55 @@ mod image_symptoms;
 #[cfg(all(test, unix))]
 #[path = "../../tests/live_surface_pty/modal_finish.rs"]
 pub(super) mod modal_finish;
+
+#[cfg(test)]
+mod picker_selection_tests {
+    use super::*;
+    use ego_core::event::time::Timestamp;
+
+    // Catches: source --tools overrides a picked target, or same-root switching loses the active model.
+    #[test]
+    fn picker_discards_source_tools_and_preserves_workspace_specific_model_precedence() {
+        let source_root = tempfile::tempdir().unwrap();
+        let target_root = tempfile::tempdir().unwrap();
+        let invocation = crate::cli::parse(
+            ["ego", "--model", "ollama/source", "--tools", "read"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+        )
+        .unwrap();
+        let crate::cli::Invocation::Interactive(mut args) = invocation else {
+            panic!("expected interactive invocation");
+        };
+        args.directory = Some(source_root.path().to_path_buf());
+        let mut meta = ego_core::store::session_store::SessionMeta {
+            profiles: Default::default(),
+            id: SessionId::new(),
+            workspace_root: target_root.path().to_path_buf(),
+            model: Some("ollama/target".to_owned()),
+            created: Timestamp::from_millis(1000),
+            updated: Timestamp::from_millis(1000),
+            title: None,
+            summary: None,
+            summary_failures: 0,
+            lineage: None,
+        };
+        let mut state = SessionState::default();
+        state.session_selections = Some(
+            RunSelections::empty()
+                .with_model_and_thinking(ModelRef("ollama/active".to_owned()), ThinkingLevel::Off)
+                .with_tools(Some(vec!["read".to_owned()])),
+        );
+        prepare_picked_session(&mut args, &meta, &state);
+        assert_eq!(args.tools, None);
+        assert_eq!(args.model.as_deref(), Some("ollama/source"));
+
+        meta.workspace_root = source_root.path().canonicalize().unwrap();
+        args.tools = Some(vec!["read".to_owned()]);
+        prepare_picked_session(&mut args, &meta, &state);
+        assert_eq!(args.tools, None);
+        assert_eq!(args.model.as_deref(), Some("ollama/active"));
+        assert_eq!(args.thinking, Some(ThinkingLevel::Off));
+    }
+}

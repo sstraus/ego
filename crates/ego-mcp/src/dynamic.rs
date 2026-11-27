@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use ego_core::generator::attempt::DeliveryCertainty;
 use ego_core::generator::types::ToolDescriptor as GeneratorToolDescriptor;
 use ego_core::hook::EffectScope;
 use ego_core::mcp::{McpAdmissionFingerprint, McpOperationKind, McpSubject, ToolExecution};
@@ -553,7 +554,7 @@ impl McpCapturedTool {
     }
 
     fn operation(&self, params: &Value) -> Result<McpOperation, ToolError> {
-        validate(&self.outer.validator, params, "MCP tool parameters").map_err(tool_params)?;
+        validate(&self.outer.validator, params, &self.descriptor.name).map_err(tool_params)?;
         let outer = ForeignToolId::new(&self.server, &self.descriptor.name)
             .map_err(|error| ToolError::InvalidParams(error.to_string()))?;
         let mut invocations = vec![(outer, digest_json(params).map_err(tool_params)?)];
@@ -575,12 +576,13 @@ impl McpCapturedTool {
                 .cloned()
                 .unwrap_or_else(|| json!({}));
             let inner = collapsed.inner.get(name).ok_or_else(|| {
-                ToolError::InvalidParams(
-                    "collapsed inner tool is absent from the captured admission".to_owned(),
-                )
+                ToolError::InvalidParams(format!(
+                    "collapsed inner tool `{name}` has no admitted schema; call \
+                     {GET_TOOL_SCHEMA} with tool_name `{name}` (or {SEARCH_TOOLS}) first, then \
+                     retry {CALL_TOOL}"
+                ))
             })?;
-            validate(&inner.validator, &arguments, "collapsed inner arguments")
-                .map_err(tool_params)?;
+            validate(&inner.validator, &arguments, name).map_err(tool_params)?;
             let inner_id = ForeignToolId::new(&self.server, name)
                 .map_err(|error| ToolError::InvalidParams(error.to_string()))?;
             invocations.push((inner_id, digest_json(&arguments).map_err(tool_params)?));
@@ -618,13 +620,65 @@ impl Tool for McpCapturedTool {
     where
         'io: 'a,
     {
-        self.factory.execute(
+        let label = self.failure_label(&call);
+        let execution = self.factory.execute(
             Arc::clone(&self.server_admission),
             call,
             io,
             Arc::clone(&self.generation),
+        );
+        Box::pin(async move {
+            execution
+                .await
+                .map_err(|error| explain_failure(&label, error))
+        })
+    }
+}
+
+impl McpCapturedTool {
+    /// The operation the model asked for: the inner tool of a collapsed
+    /// dispatch, else this tool, with its server.
+    fn failure_label(&self, call: &PreparedCall) -> String {
+        let inner = self
+            .collapsed
+            .as_ref()
+            .and_then(|_| call.mcp_envelope())
+            .and_then(|envelope| serde_json::from_slice::<Value>(envelope.parameters()).ok())
+            .and_then(|params| params["tool_name"].as_str().map(str::to_owned));
+        format!(
+            "MCP tool `{}` on server `{}`",
+            inner.as_deref().unwrap_or(&self.descriptor.name),
+            self.server
         )
     }
+}
+
+/// Frame a failed MCP call for the model: the operation, the cause as the
+/// transport or server reported it, and what the delivery state allows. The
+/// delivery sentences claim only what the state proves.
+fn explain_failure(label: &str, error: ToolError) -> ToolError {
+    let ToolError::Foreign { message, delivery } = error else {
+        return error;
+    };
+    let next = match delivery {
+        DeliveryCertainty::DefinitelyUnsent => {
+            "The request was not sent, so the tool did not run. \
+             Call it again only after the cause above is resolved."
+        }
+        DeliveryCertainty::DefinitelySent => {
+            "The server received the call and answered with the error above. \
+             Change the call or resolve the cause above before calling again."
+        }
+        DeliveryCertainty::PossiblySent => {
+            "The server may have run the tool before the failure, so its effect is unknown. \
+             Do not repeat a call that changes state until another source confirms the result. \
+             If the cause is transient, a call that only reads can be repeated once."
+        }
+    };
+    ToolError::foreign(
+        format!("{label} failed: {}. {next}", message.trim_end_matches('.')),
+        delivery,
+    )
 }
 
 fn compile_schema(schema: &Value, subject: &str) -> Result<Validator, McpError> {
@@ -632,7 +686,10 @@ fn compile_schema(schema: &Value, subject: &str) -> Result<Validator, McpError> 
         .map_err(|error| invalid(format!("invalid {subject} schema: {error}")))
 }
 
-fn validate(validator: &Validator, value: &Value, subject: &str) -> Result<(), McpError> {
+/// Check the model's arguments for `tool` before any dispatch. The refusal is
+/// model-facing: it names the tool and the failing fields, states that the
+/// server was not called, and gives the only repair that can succeed.
+fn validate(validator: &Validator, value: &Value, tool: &str) -> Result<(), McpError> {
     let reasons = validator
         .iter_errors(value)
         .map(|error| format!("{}: {error}", error.instance_path()))
@@ -641,7 +698,9 @@ fn validate(validator: &Validator, value: &Value, subject: &str) -> Result<(), M
         Ok(())
     } else {
         Err(invalid(format!(
-            "invalid {subject}: {}",
+            "invalid arguments for MCP tool `{tool}`: {}. The MCP server was not called. \
+             Retrying with the same arguments fails again; correct the named fields to match \
+             the tool schema, then call the tool again.",
             reasons.join("; ")
         )))
     }
@@ -666,4 +725,32 @@ fn invalid(message: impl Into<String>) -> McpError {
 
 fn protocol(message: impl Into<String>) -> McpError {
     McpError::new(McpFailure::Protocol, message)
+}
+
+#[cfg(test)]
+mod failure_text_tests {
+    use super::*;
+
+    // Catches: the model sees a false no-effect claim or an unsafe replay hint.
+    #[test]
+    fn indeterminate_deadline_is_not_reported_as_unsent_to_the_model() {
+        let error = explain_failure(
+            "MCP tool `update_marker` on server `runtime-deadline`",
+            ToolError::foreign(
+                "MCP request deadline elapsed",
+                DeliveryCertainty::PossiblySent,
+            ),
+        );
+        let ToolError::Foreign { message, delivery } = error else {
+            panic!("missing model-facing failure")
+        };
+        assert_eq!(delivery, DeliveryCertainty::PossiblySent);
+        assert!(message.contains("deadline elapsed"), "{message}");
+        assert!(message.contains("its effect is unknown"), "{message}");
+        assert!(
+            message.contains("Do not repeat a call that changes state"),
+            "{message}"
+        );
+        assert!(!message.contains("the tool did not run"), "{message}");
+    }
 }

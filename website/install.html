@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Install εgo</title>
+  <meta name="description" content="Install εgo with Homebrew, a verified direct download or from source, then make one model provider usable.">
+  <meta name="theme-color" content="#f5f7f8" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#0d1014" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <script src="main.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<nav class="nav" aria-label="Main">
+  <div class="wrap">
+    <a class="mark" href="./" aria-label="εgo home"><span>ε</span>go</a>
+    <ul>
+      <li class="optional"><a href="./#earn">Control</a></li>
+      <li class="optional"><a href="./#tokens">Tokens</a></li>
+      <li class="optional"><a href="./#sessions">Sessions</a></li>
+      <li class="optional"><a href="./#scripts">Scripts</a></li>
+      <li class="optional"><a href="./#hosts">Hosts</a></li>
+      <li><a href="docs/">Docs</a></li>
+      <li><a href="install.html" aria-current="page">Install</a></li>
+      <li><a href="https://github.com/sstraus/ego">GitHub</a></li>
+    </ul>
+  </div>
+</nav>
+
+<main id="main" class="doc">
+  <div class="wrap">
+    <h1>Install εgo</h1>
+    <p class="lede">One executable. No installer writes configuration; <code>~/.ego</code> appears only when εgo first needs to store something.</p>
+
+    <h2>Homebrew</h2>
+    <p>macOS and Linux. Shell completions for Bash, Zsh and Fish are installed too.</p>
+    <div class="actions">
+      <span class="oneliner"><code>brew install sstraus/tap/ego</code><button class="copy" type="button" data-copy="brew install sstraus/tap/ego">Copy</button></span>
+    </div>
+
+    <h2>Direct download</h2>
+    <p>Each release provides a plain executable and its SHA-256 file. Verify before you install.</p>
+    <table>
+      <thead><tr><th>Platform</th><th>Asset</th></tr></thead>
+      <tbody>
+        <tr><td>macOS, Apple silicon</td><td><code>ego-macos-arm64</code></td></tr>
+        <tr><td>macOS, Intel</td><td><code>ego-macos-x64</code></td></tr>
+        <tr><td>Linux x86_64 (glibc 2.35+)</td><td><code>ego-linux-x64</code></td></tr>
+        <tr><td>Linux ARM64 (glibc 2.35+)</td><td><code>ego-linux-arm64</code></td></tr>
+        <tr><td>Windows x86_64</td><td><code>ego-windows-x64.exe</code></td></tr>
+      </tbody>
+    </table>
+<pre><code>asset=ego-macos-arm64
+base=https://github.com/sstraus/ego/releases/latest/download
+curl -fLO "$base/$asset"
+curl -fLO "$base/$asset.sha256"
+shasum -a 256 -c "$asset.sha256"
+install -m 755 "$asset" "$HOME/.local/bin/ego"</code></pre>
+    <p>On Linux use <code>sha256sum -c</code>. On Windows compare with <code>Get-FileHash -Algorithm SHA256</code> and rename the file to <code>ego.exe</code> in a folder on <code>PATH</code>. Windows runs without workspace, read-only and offline confinement for now; εgo refuses those options there rather than ignoring them.</p>
+
+    <h2>From source</h2>
+    <p>Rust 1.95 or newer.</p>
+<pre><code>git clone https://github.com/sstraus/ego
+cd ego
+cargo install --locked --path crates/ego-cli</code></pre>
+
+    <h2>First run</h2>
+    <ol>
+      <li>Make one provider usable: export its API key, run <code>ego auth login PROVIDER</code> for a subscription, or start a local Ollama.</li>
+      <li>Run <code>ego setup</code> to see which providers are ready and save a default model.</li>
+      <li>Run <code>ego</code> inside a repository and ask it something about the code.</li>
+    </ol>
+<pre><code>ollama pull qwen3
+ego -m ollama/qwen3 --sandbox workspace</code></pre>
+    <p>Next: <a href="docs/guides/permissions.html">permissions and confinement</a>, <a href="docs/guides/providers.html">providers and login</a>, or the full <a href="docs/">user guide</a>.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>εgo is open source under Apache-2.0.</span>
+    <ul>
+      <li><a href="docs/">Documentation</a></li>
+      <li><a href="docs/changelog.html">Changelog</a></li>
+      <li><a href="https://github.com/sstraus/ego/releases">Releases</a></li>
+      <li><a href="https://github.com/sstraus/ego">Source</a></li>
+    </ul>
+  </div>
+</footer>
+</body>
+</html>
